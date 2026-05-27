@@ -1,0 +1,11 @@
+{
+  "name": "npm-no-lock-simple-math",
+  "version": "1.0.0",
+  "description": "npm fixture with manifest only (no lock, no node_modules)",
+  "main": "src/index.js",
+  "private": true,
+  "dependencies": {
+    "lodash": "^4.17.21",
+    "chalk": "^4.1.2"
+  }
+}

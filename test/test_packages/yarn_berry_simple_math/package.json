@@ -1,0 +1,12 @@
+{
+  "name": "yarn-berry-simple-math",
+  "version": "1.0.0",
+  "description": "Yarn berry (v2/v3) fixture",
+  "main": "src/index.js",
+  "private": true,
+  "packageManager": "yarn@3.6.4",
+  "dependencies": {
+    "lodash": "4.17.21",
+    "axios": "1.6.5"
+  }
+}

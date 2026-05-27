@@ -1,0 +1,2 @@
+[console_scripts]
+simple-math = simple_math.operations:add
