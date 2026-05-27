@@ -11,6 +11,45 @@ sandbox, no virtualenv.
 
 ## Install
 
+### One-liner (Linux / macOS)
+
+```sh
+curl -fsSL https://github.com/ossprey/ossprey-cli/releases/latest/download/install.sh | sudo sh
+```
+
+The script detects your OS/arch, downloads the matching binary, verifies its
+sha256, and installs it to `/usr/local/bin/ossprey`.
+
+Override the defaults with env vars:
+
+```sh
+# Pin a specific version
+curl -fsSL https://github.com/ossprey/ossprey-cli/releases/latest/download/install.sh \
+  | OSSPREY_VERSION=v0.1.0 sudo -E sh
+
+# Install to a user-writable dir (no sudo)
+curl -fsSL https://github.com/ossprey/ossprey-cli/releases/latest/download/install.sh \
+  | OSSPREY_INSTALL_DIR=$HOME/.local/bin sh
+```
+
+### Manual download
+
+Grab the binary direct from the
+[releases page](https://github.com/ossprey/ossprey-cli/releases/latest):
+
+| Asset                              | Platform              |
+|------------------------------------|-----------------------|
+| `ossprey-linux-amd64`              | Linux x86_64          |
+| `ossprey-linux-arm64`              | Linux arm64           |
+| `ossprey-darwin-amd64`             | macOS Intel           |
+| `ossprey-darwin-arm64`             | macOS Apple Silicon   |
+| `ossprey-windows-amd64.exe`        | Windows x86_64        |
+| `ossprey-windows-arm64.exe`        | Windows arm64         |
+
+`chmod +x` and drop it on your `PATH`. Each asset ships with a `.sha256`
+sidecar for verification. Pin a specific tag by replacing `latest/download`
+with `download/<tag>` in the URL.
+
 ### From source
 
 ```sh

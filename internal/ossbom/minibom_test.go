@@ -119,9 +119,9 @@ func TestApplyAPIResponse(t *testing.T) {
 			wantVulns: 1,
 		},
 		{
-			name:      "malformed JSON",
-			raw:       `{`,
-			wantErr:   true,
+			name:    "malformed JSON",
+			raw:     `{`,
+			wantErr: true,
 		},
 	}
 

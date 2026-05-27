@@ -20,7 +20,9 @@ type PackageJSONCataloger struct {
 	root string
 }
 
-func NewPackageJSONCataloger(root string) *PackageJSONCataloger { return &PackageJSONCataloger{root: root} }
+func NewPackageJSONCataloger(root string) *PackageJSONCataloger {
+	return &PackageJSONCataloger{root: root}
+}
 
 func (c *PackageJSONCataloger) Name() string { return "ossprey-packagejson-cataloger" }
 
