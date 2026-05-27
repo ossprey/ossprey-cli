@@ -2,9 +2,9 @@ package catalog
 
 import (
 	"context"
-	"fmt"
+	"errors"
+	"io/fs"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -26,27 +26,8 @@ func NewPyProjectCataloger(root string) *PyProjectCataloger { return &PyProjectC
 func (c *PyProjectCataloger) Name() string { return "ossprey-pyproject-cataloger" }
 
 func (c *PyProjectCataloger) Catalog(_ context.Context, resolver file.Resolver) ([]pkg.Package, []artifact.Relationship, error) {
-	locs, err := resolver.FilesByGlob("**/pyproject.toml")
-	if err != nil {
-		return nil, nil, fmt.Errorf("pyproject cataloger: glob: %w", err)
-	}
-	seen := map[string]struct{}{}
-	var out []pkg.Package
-	for _, loc := range locs {
-		pkgs, err := parsePyProjectFile(filepath.Join(c.root, loc.RealPath), loc)
-		if err != nil || len(pkgs) == 0 {
-			continue
-		}
-		for _, p := range pkgs {
-			key := p.Name + "@" + p.Version
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
-			out = append(out, p)
-		}
-	}
-	return out, nil, nil
+	out, err := catalogByGlob(resolver, c.root, "**/pyproject.toml", "pyproject", parsePyProjectFile)
+	return out, nil, err
 }
 
 type pyproject struct {
@@ -68,18 +49,18 @@ var pep508 = regexp.MustCompile(`^([A-Za-z0-9_.\-]+)(?:\[[^\]]+\])?\s*(?:==\s*([
 func parsePyProjectFile(path string, loc file.Location) ([]pkg.Package, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, err
 	}
 	var pp pyproject
-	if _, err := toml.Decode(string(data), &pp); err != nil {
+	if err := toml.Unmarshal(data, &pp); err != nil {
 		return nil, err
 	}
 
 	rootName := normalizeName(pp.Project.Name)
-	seen := map[string]struct{}{}
+	seen := make(map[string]struct{})
 	var out []pkg.Package
 	add := func(name, version string) {
 		name = normalizeName(name)
@@ -169,7 +150,7 @@ func hasPEP621Project(path string) bool {
 		return false
 	}
 	var pp pyproject
-	if _, err := toml.Decode(string(data), &pp); err != nil {
+	if err := toml.Unmarshal(data, &pp); err != nil {
 		return false
 	}
 	return pp.Project.Name != "" || len(pp.Project.Dependencies) > 0

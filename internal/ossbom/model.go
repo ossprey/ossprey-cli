@@ -9,6 +9,9 @@ const (
 	formatTag      = "OSSBOM"
 	specVersion    = "1.0"
 	creatorDefault = "ossprey-cli-v2"
+
+	defaultVulnType      = "Malware"
+	defaultVulnReference = "Unknown"
 )
 
 type Environment struct {
@@ -39,13 +42,20 @@ type Vulnerability struct {
 	Reference   string `json:"reference"`
 }
 
+// NewMalwareVulnerability returns a Vulnerability with sensible defaults
+// (type=Malware, reference=Unknown). Use when constructing locally; the
+// API path leaves these to the server.
+func NewMalwareVulnerability(id, purl, description string) Vulnerability {
+	return Vulnerability{
+		ID:          id,
+		Purl:        purl,
+		Type:        defaultVulnType,
+		Description: description,
+		Reference:   defaultVulnReference,
+	}
+}
+
 func (s *SBOM) AddVulnerability(v Vulnerability) {
-	if v.Type == "" {
-		v.Type = "Malware"
-	}
-	if v.Reference == "" {
-		v.Reference = "Unknown"
-	}
 	s.Vulnerabilities = append(s.Vulnerabilities, v)
 }
 
@@ -77,19 +87,6 @@ func New(env Environment) *SBOM {
 
 // AddComponent merges into the SBOM, deduping on PURL-ish key (type/name@version).
 func (s *SBOM) AddComponent(c Component) {
-	if c.Source == nil {
-		c.Source = []string{}
-	}
-	if c.Env == nil {
-		c.Env = []string{}
-	}
-	if c.Location == nil {
-		c.Location = []string{}
-	}
-	if c.Metadata == nil {
-		c.Metadata = map[string]any{}
-	}
-
 	key := c.Type + "/" + c.Name + "@" + c.Version
 	if idx, ok := s.dedupe[key]; ok {
 		s.Components[idx].Source = mergeUnique(s.Components[idx].Source, c.Source)
@@ -101,11 +98,15 @@ func (s *SBOM) AddComponent(c Component) {
 }
 
 func mergeUnique(a, b []string) []string {
-	seen := map[string]struct{}{}
+	seen := make(map[string]struct{}, len(a)+len(b))
+	out := make([]string, 0, len(a)+len(b))
 	for _, v := range a {
+		if _, ok := seen[v]; ok {
+			continue
+		}
 		seen[v] = struct{}{}
+		out = append(out, v)
 	}
-	out := append([]string{}, a...)
 	for _, v := range b {
 		if _, ok := seen[v]; ok {
 			continue

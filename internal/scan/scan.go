@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/ossprey/ossprey-cli/internal/catalog"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
@@ -31,8 +32,11 @@ func Run(ctx context.Context, opts Options) (*ossbom.SBOM, error) {
 		return nil, fmt.Errorf("catalog: %w", err)
 	}
 
-	host, _ := os.Hostname()
-	abs, _ := filepath.Abs(opts.Path)
+	abs, err := filepath.Abs(opts.Path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve scan path: %w", err)
+	}
+	host, _ := os.Hostname() // best-effort; empty hostname is acceptable
 
 	sbom := ossbom.New(ossbom.Environment{
 		Path:        abs,
@@ -59,11 +63,12 @@ func InjectTestVulnerability(sbom *ossbom.SBOM) error {
 		return ErrNoComponents
 	}
 	c := sbom.Components[0]
-	sbom.AddVulnerability(ossbom.Vulnerability{
-		ID:          "TEST-2024-0001",
-		Purl:        fmt.Sprintf("pkg:%s/%s@%s", c.Type, c.Name, c.Version),
-		Description: "This is a test vulnerability added in dry-run-malicious mode",
-	})
+	purl := fmt.Sprintf("pkg:%s/%s@%s", c.Type, c.Name, c.Version)
+	sbom.AddVulnerability(ossbom.NewMalwareVulnerability(
+		"TEST-2024-0001",
+		purl,
+		"This is a test vulnerability added in dry-run-malicious mode",
+	))
 	return nil
 }
 
@@ -84,24 +89,10 @@ func MalwareReports(sbom *ossbom.SBOM) ([]string, bool) {
 
 // splitPurl extracts (name, version) from a PURL string like "pkg:pypi/foo@1.2.3".
 func splitPurl(purl string) (string, string) {
-	s := purl
-	if len(s) > 4 && s[:4] == "pkg:" {
-		s = s[4:]
+	s := strings.TrimPrefix(purl, "pkg:")
+	if _, after, ok := strings.Cut(s, "/"); ok {
+		s = after
 	}
-	if i := indexOf(s, '/'); i >= 0 {
-		s = s[i+1:]
-	}
-	if i := indexOf(s, '@'); i >= 0 {
-		return s[:i], s[i+1:]
-	}
-	return s, ""
-}
-
-func indexOf(s string, c byte) int {
-	for i := 0; i < len(s); i++ {
-		if s[i] == c {
-			return i
-		}
-	}
-	return -1
+	name, version, _ := strings.Cut(s, "@")
+	return name, version
 }

@@ -80,10 +80,7 @@ func newScanCmd() *cobra.Command {
 			default:
 				key := apiKey
 				if key == "" {
-					key = os.Getenv("OSSPREY_API_KEY")
-				}
-				if key == "" {
-					key = os.Getenv("API_KEY")
+					key = client.APIKeyFromEnv()
 				}
 				c, err := client.New(apiURL, key)
 				if err != nil {

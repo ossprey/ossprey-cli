@@ -2,11 +2,8 @@ package catalog
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"os/exec"
 	"path/filepath"
-	"strings"
 
 	"github.com/anchore/syft/syft/artifact"
 	"github.com/anchore/syft/syft/file"
@@ -29,57 +26,22 @@ func NewSetupPyCataloger(root string) *SetupPyCataloger { return &SetupPyCatalog
 
 func (c *SetupPyCataloger) Name() string { return "ossprey-setuppy-cataloger" }
 
-func (c *SetupPyCataloger) Catalog(_ context.Context, resolver file.Resolver) ([]pkg.Package, []artifact.Relationship, error) {
-	locs, err := resolver.FilesByGlob("**/setup.py")
-	if err != nil {
-		return nil, nil, fmt.Errorf("setup.py cataloger: glob: %w", err)
-	}
-
+func (c *SetupPyCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]pkg.Package, []artifact.Relationship, error) {
 	uv, err := exec.LookPath("uv")
 	if err != nil {
 		return nil, nil, nil // no uv on PATH — silently skip
 	}
-
-	seen := map[string]struct{}{}
-	var out []pkg.Package
-	for _, loc := range locs {
-		root := filepath.Join(c.root, filepath.Dir(loc.RealPath))
+	parse := func(absPath string, loc file.Location) ([]pkg.Package, error) {
+		dir := filepath.Dir(absPath)
 		// Skip if pyproject.toml in same dir AND has [project] table — UVCataloger
 		// already covered it. We only run when the pyproject path failed (no
 		// [project]) or pyproject is absent.
-		if hasPEP621Project(filepath.Join(root, "pyproject.toml")) {
-			continue
+		if hasPEP621Project(filepath.Join(dir, "pyproject.toml")) {
+			return nil, nil
 		}
-		pkgs, err := runUVCompileSetup(uv, root, loc)
-		if err != nil || len(pkgs) == 0 {
-			continue
-		}
-		for _, p := range pkgs {
-			key := p.Name + "@" + p.Version
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
-			out = append(out, p)
-		}
+		args := []string{"pip", "compile", "--universal", "--no-progress", absPath}
+		return runUV(ctx, uv, dir, args, loc)
 	}
-	return out, nil, nil
-}
-
-func runUVCompileSetup(uv, root string, loc file.Location) ([]pkg.Package, error) {
-	cmd := exec.Command(uv,
-		"pip", "compile",
-		"--universal",
-		"--no-progress",
-		filepath.Join(root, "setup.py"),
-	)
-	stdout, err := cmd.Output()
-	if err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
-			return nil, fmt.Errorf("uv compile setup.py %s: %s", root, strings.TrimSpace(string(ee.Stderr)))
-		}
-		return nil, fmt.Errorf("uv compile setup.py %s: %w", root, err)
-	}
-	return parseUVOutput(stdout, loc), nil
+	out, err := catalogByGlob(resolver, c.root, "**/setup.py", "setup.py", parse)
+	return out, nil, err
 }

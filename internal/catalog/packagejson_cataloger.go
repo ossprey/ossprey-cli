@@ -3,9 +3,9 @@ package catalog
 import (
 	"context"
 	"encoding/json"
-	"fmt"
+	"errors"
+	"io/fs"
 	"os"
-	"path/filepath"
 
 	"github.com/anchore/syft/syft/artifact"
 	"github.com/anchore/syft/syft/file"
@@ -25,27 +25,8 @@ func NewPackageJSONCataloger(root string) *PackageJSONCataloger { return &Packag
 func (c *PackageJSONCataloger) Name() string { return "ossprey-packagejson-cataloger" }
 
 func (c *PackageJSONCataloger) Catalog(_ context.Context, resolver file.Resolver) ([]pkg.Package, []artifact.Relationship, error) {
-	locs, err := resolver.FilesByGlob("**/package.json")
-	if err != nil {
-		return nil, nil, fmt.Errorf("packagejson cataloger: glob: %w", err)
-	}
-	seen := map[string]struct{}{}
-	var out []pkg.Package
-	for _, loc := range locs {
-		pkgs, err := parsePackageJSONFile(filepath.Join(c.root, loc.RealPath), loc)
-		if err != nil || len(pkgs) == 0 {
-			continue
-		}
-		for _, p := range pkgs {
-			key := p.Name + "@" + p.Version
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
-			out = append(out, p)
-		}
-	}
-	return out, nil, nil
+	out, err := catalogByGlob(resolver, c.root, "**/package.json", "packagejson", parsePackageJSONFile)
+	return out, nil, err
 }
 
 type packageJSON struct {
@@ -58,7 +39,7 @@ type packageJSON struct {
 func parsePackageJSONFile(path string, loc file.Location) ([]pkg.Package, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, err
@@ -68,11 +49,10 @@ func parsePackageJSONFile(path string, loc file.Location) ([]pkg.Package, error)
 		return nil, err
 	}
 
-	rootName := pj.Name
-	seen := map[string]struct{}{}
+	seen := make(map[string]struct{})
 	var out []pkg.Package
 	add := func(name, raw string) {
-		if name == "" || name == rootName {
+		if name == "" || name == pj.Name {
 			return
 		}
 		version := stripVersionOp(raw)

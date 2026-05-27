@@ -1,6 +1,8 @@
 package catalog
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -14,11 +16,6 @@ import (
 	"github.com/anchore/syft/syft/file"
 	"github.com/anchore/syft/syft/pkg"
 )
-
-func fileExists(p string) bool {
-	_, err := os.Stat(p)
-	return err == nil
-}
 
 // ErrUVNotAvailable signals the `uv` binary is missing.
 var ErrUVNotAvailable = errors.New("uv binary not found on PATH")
@@ -36,77 +33,61 @@ func NewUVCataloger(root string) *UVCataloger { return &UVCataloger{root: root} 
 
 func (c *UVCataloger) Name() string { return "ossprey-uv-cataloger" }
 
-func (c *UVCataloger) Catalog(_ context.Context, resolver file.Resolver) ([]pkg.Package, []artifact.Relationship, error) {
-	locs, err := resolver.FilesByGlob("**/pyproject.toml")
-	if err != nil {
-		return nil, nil, fmt.Errorf("uv cataloger: find pyproject.toml: %w", err)
-	}
-
+func (c *UVCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]pkg.Package, []artifact.Relationship, error) {
 	uv, err := exec.LookPath("uv")
 	if err != nil {
 		return nil, nil, nil // no uv on PATH — silently skip
 	}
-
-	seen := map[string]struct{}{}
-	var out []pkg.Package
-	for _, loc := range locs {
-		root := filepath.Join(c.root, filepath.Dir(loc.RealPath))
-		pkgs, err := runUV(uv, root, loc)
-		if err != nil || len(pkgs) == 0 {
-			continue
-		}
-		for _, p := range pkgs {
-			key := p.Name + "@" + p.Version
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
-			out = append(out, p)
-		}
+	parse := func(absPath string, loc file.Location) ([]pkg.Package, error) {
+		dir := filepath.Dir(absPath)
+		args := uvArgsForPyProject(dir)
+		return runUV(ctx, uv, dir, args, loc)
 	}
-	return out, nil, nil
+	out, err := catalogByGlob(resolver, c.root, "**/pyproject.toml", "uv", parse)
+	return out, nil, err
 }
 
-func runUV(uv, root string, loc file.Location) ([]pkg.Package, error) {
-	pyproject := filepath.Join(root, "pyproject.toml")
-
-	var cmd *exec.Cmd
-	if fileExists(filepath.Join(root, "uv.lock")) {
-		cmd = exec.Command(uv,
+// uvArgsForPyProject picks the right uv invocation for a project dir.
+// Prefers uv.lock (faster, deterministic), falls back to pip compile.
+func uvArgsForPyProject(dir string) []string {
+	if _, err := os.Stat(filepath.Join(dir, "uv.lock")); err == nil {
+		return []string{
 			"export",
-			"--directory", root,
+			"--directory", dir,
 			"--format", "requirements.txt",
 			"--no-header",
 			"--no-hashes",
 			"--no-emit-project",
 			"--no-progress",
-		)
-	} else {
-		cmd = exec.Command(uv,
-			"pip", "compile",
-			"--universal",
-			"--no-progress",
-			pyproject,
-		)
+		}
 	}
+	return []string{
+		"pip", "compile",
+		"--universal",
+		"--no-progress",
+		filepath.Join(dir, "pyproject.toml"),
+	}
+}
 
+func runUV(ctx context.Context, uv, dir string, args []string, loc file.Location) ([]pkg.Package, error) {
+	cmd := exec.CommandContext(ctx, uv, args...)
 	stdout, err := cmd.Output()
 	if err != nil {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
-			return nil, fmt.Errorf("uv resolve %s: %s", root, strings.TrimSpace(string(ee.Stderr)))
+			return nil, fmt.Errorf("uv %s: %s", dir, strings.TrimSpace(string(ee.Stderr)))
 		}
-		return nil, fmt.Errorf("uv resolve %s: %w", root, err)
+		return nil, fmt.Errorf("uv %s: %w", dir, err)
 	}
-
 	return parseUVOutput(stdout, loc), nil
 }
 
 func parseUVOutput(out []byte, loc file.Location) []pkg.Package {
-	seen := map[string]struct{}{}
+	seen := make(map[string]struct{})
 	var pkgs []pkg.Package
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
+	scan := bufio.NewScanner(bytes.NewReader(out))
+	for scan.Scan() {
+		line := strings.TrimSpace(scan.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}

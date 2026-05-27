@@ -9,10 +9,28 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"time"
 
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
 )
+
+// maxPollAttempts caps the number of status polls before giving up.
+const maxPollAttempts = 20
+
+// defaultBaseURL is used when New is called without an explicit URL.
+const defaultBaseURL = "https://api.ossprey.com"
+
+// APIKeyFromEnv returns the first non-empty value of OSSPREY_API_KEY then
+// API_KEY. Returns "" if neither is set.
+func APIKeyFromEnv() string {
+	for _, v := range []string{"OSSPREY_API_KEY", "API_KEY"} {
+		if k := os.Getenv(v); k != "" {
+			return k
+		}
+	}
+	return ""
+}
 
 // Client speaks to the Ossprey scans API. Mirrors ossprey/ossprey.py from v1.
 type Client struct {
@@ -32,7 +50,7 @@ func New(baseURL, apiKey string) (*Client, error) {
 		return nil, errors.New("API key is required")
 	}
 	if baseURL == "" {
-		baseURL = "https://api.ossprey.com"
+		baseURL = defaultBaseURL
 	}
 	return &Client{
 		BaseURL:     baseURL,
@@ -122,7 +140,7 @@ func (c *Client) waitForCompletion(ctx context.Context, sbomID, scanID string) (
 		backoff = defaultPollBackoff
 	}
 
-	for i := 1; i < 20; i++ {
+	for i := 1; i < maxPollAttempts; i++ {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()

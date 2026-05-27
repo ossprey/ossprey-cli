@@ -2,6 +2,7 @@ package scan
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -149,7 +150,7 @@ func TestInjectTestVulnerability(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			s := tt.sbom()
 			err := InjectTestVulnerability(s)
-			if err != tt.wantErr {
+			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("err: got %v, want %v", err, tt.wantErr)
 			}
 			if tt.wantErr != nil {
