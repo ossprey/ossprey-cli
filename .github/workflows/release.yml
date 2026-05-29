@@ -3,6 +3,11 @@ name: Release
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Force release version (e.g. v0.2.0). Empty = auto-bump from conventional commits."
+        required: false
 
 permissions:
   contents: write
@@ -16,19 +21,44 @@ jobs:
     name: Bump tag
     runs-on: ubuntu-latest
     outputs:
-      new_tag: ${{ steps.bump.outputs.new_tag }}
-      new_version: ${{ steps.bump.outputs.new_version }}
+      new_tag: ${{ steps.out.outputs.new_tag }}
+      new_version: ${{ steps.out.outputs.new_version }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
       - id: bump
+        if: github.event_name != 'workflow_dispatch' || inputs.version == ''
         uses: mathieudutour/github-tag-action@v6.2
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           default_bump: false
           tag_prefix: v
+
+      - id: manual
+        if: github.event_name == 'workflow_dispatch' && inputs.version != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          tag="${VERSION#v}"
+          tag="v${tag}"
+          if git rev-parse "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "tag ${tag} already exists" >&2
+            exit 1
+          fi
+          git tag "${tag}" "${GITHUB_SHA}"
+          git push origin "${tag}"
+          echo "new_tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "new_version=${tag#v}" >> "$GITHUB_OUTPUT"
+
+      - id: out
+        run: |
+          tag="${{ steps.manual.outputs.new_tag || steps.bump.outputs.new_tag }}"
+          ver="${{ steps.manual.outputs.new_version || steps.bump.outputs.new_version }}"
+          echo "new_tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "new_version=${ver}" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
