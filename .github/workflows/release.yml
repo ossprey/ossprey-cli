@@ -6,38 +6,34 @@ on:
 
 permissions:
   contents: write
-  pull-requests: write
-  id-token: write
 
 concurrency:
   group: release
   cancel-in-progress: false
 
 jobs:
-  release-please:
-    name: release-please
+  tag:
+    name: Bump tag
     runs-on: ubuntu-latest
     outputs:
-      release_created: ${{ steps.rp.outputs.release_created }}
-      tag_name: ${{ steps.rp.outputs.tag_name }}
+      new_tag: ${{ steps.bump.outputs.new_tag }}
+      new_version: ${{ steps.bump.outputs.new_version }}
     steps:
-      - name: Create GitHub App Token
-        uses: actions/create-github-app-token@v1
-        id: app-token
+      - uses: actions/checkout@v4
         with:
-          app-id: ${{ secrets.APP_ID }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          fetch-depth: 0
 
-      - uses: googleapis/release-please-action@v4
-        id: rp
+      - id: bump
+        uses: mathieudutour/github-tag-action@v6.2
         with:
-          release-type: go
-          token: ${{ steps.app-token.outputs.token }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          default_bump: false
+          tag_prefix: v
 
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
-    needs: release-please
-    if: needs.release-please.outputs.release_created == 'true'
+    needs: tag
+    if: needs.tag.outputs.new_tag != ''
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -47,7 +43,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.release-please.outputs.tag_name }}
+          ref: ${{ needs.tag.outputs.new_tag }}
 
       - uses: actions/setup-go@v5
         with:
@@ -59,35 +55,44 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
-          VERSION: ${{ needs.release-please.outputs.tag_name }}
+          VERSION: ${{ needs.tag.outputs.new_version }}
         run: |
           mkdir -p dist
           ext=""
           [ "$GOOS" = "windows" ] && ext=".exe"
           out="dist/ossprey-${GOOS}-${GOARCH}${ext}"
           go build -trimpath \
-            -ldflags="-s -w -X main.version=${VERSION#v}" \
+            -ldflags="-s -w -X main.version=${VERSION}" \
             -o "$out" ./cmd/ossprey
           (cd dist && sha256sum "$(basename "$out")" > "$(basename "$out").sha256")
 
-      - name: Upload to release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release upload "${{ needs.release-please.outputs.tag_name }}" dist/* --clobber
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          retention-days: 1
 
-  installer:
-    name: Upload install.sh
-    needs: release-please
-    if: needs.release-please.outputs.release_created == 'true'
+  release:
+    name: Publish release
+    needs: [tag, build]
+    if: needs.tag.outputs.new_tag != ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.release-please.outputs.tag_name }}
+          ref: ${{ needs.tag.outputs.new_tag }}
 
-      - name: Upload install.sh
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: bin-*
+          merge-multiple: true
+
+      - name: Publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload "${{ needs.release-please.outputs.tag_name }}" install.sh --clobber
+          gh release create "${{ needs.tag.outputs.new_tag }}" \
+            --title "${{ needs.tag.outputs.new_tag }}" \
+            --generate-notes \
+            dist/* install.sh
