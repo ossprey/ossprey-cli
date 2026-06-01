@@ -43,13 +43,23 @@ func Run(ctx context.Context, opts Options) (*ossbom.SBOM, error) {
 		return nil, errors.New("no packages to check")
 	}
 
-	host, _ := os.Hostname() // best-effort; empty hostname is acceptable
-	sbom := ossbom.New(ossbom.Environment{MachineName: host})
-
 	for _, s := range opts.Specs {
 		if err := s.validate(); err != nil {
 			return nil, err
 		}
+	}
+
+	host, _ := os.Hostname() // best-effort; empty hostname is acceptable
+	// Project names the scan in the dashboard. Without it the UI falls back to
+	// the machine name (the host), so a package check would surface as the host
+	// rather than the package(s) being checked.
+	sbom := ossbom.New(ossbom.Environment{
+		MachineName: host,
+		Project:     scanName(opts.Specs),
+	})
+	sbom.Name = scanName(opts.Specs)
+
+	for _, s := range opts.Specs {
 		sbom.AddComponent(ossbom.Component{
 			Name:    s.Name,
 			Version: s.Version,
@@ -72,6 +82,22 @@ func Run(ctx context.Context, opts Options) (*ossbom.SBOM, error) {
 	}
 
 	return sbom, nil
+}
+
+// scanName builds a human-readable label for the scan from the checked
+// packages: "name@version" for a single spec, comma-joined for several. Used as
+// both the SBOM name and env.Project so the dashboard shows the package(s)
+// instead of falling back to the host machine name.
+func scanName(specs []Spec) string {
+	parts := make([]string, 0, len(specs))
+	for _, s := range specs {
+		if s.Version == "" {
+			parts = append(parts, s.Name)
+			continue
+		}
+		parts = append(parts, s.Name+"@"+s.Version)
+	}
+	return strings.Join(parts, ", ")
 }
 
 func (s Spec) validate() error {

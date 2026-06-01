@@ -38,10 +38,16 @@ func Run(ctx context.Context, opts Options) (*ossbom.SBOM, error) {
 	}
 	host, _ := os.Hostname() // best-effort; empty hostname is acceptable
 
+	// Project names the scan in the dashboard. Without it the UI falls back to
+	// the machine name (the host); use the scanned directory's base name so the
+	// scan surfaces as the project rather than the host.
+	project := filepath.Base(abs)
 	sbom := ossbom.New(ossbom.Environment{
 		Path:        abs,
 		MachineName: host,
+		Project:     project,
 	})
+	sbom.Name = project
 
 	for _, p := range pkgs {
 		sbom.AddComponent(ossbom.Component{

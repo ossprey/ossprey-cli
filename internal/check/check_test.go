@@ -85,6 +85,43 @@ func TestRun_DryRunSafe(t *testing.T) {
 	}
 }
 
+func TestRun_SetsScanName(t *testing.T) {
+	tests := []struct {
+		name  string
+		specs []Spec
+		want  string
+	}{
+		{
+			name:  "single spec",
+			specs: []Spec{{Ecosystem: "pypi", Name: "requests", Version: "2.31.0"}},
+			want:  "requests@2.31.0",
+		},
+		{
+			name: "multiple specs",
+			specs: []Spec{
+				{Ecosystem: "npm", Name: "lodash", Version: "4.17.21"},
+				{Ecosystem: "pypi", Name: "flask", Version: "3.0.0"},
+			},
+			want: "lodash@4.17.21, flask@3.0.0",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sbom, err := Run(context.Background(), Options{Specs: tt.specs, DryRunSafe: true})
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if sbom.Name != tt.want {
+				t.Errorf("sbom.Name = %q, want %q", sbom.Name, tt.want)
+			}
+			// env.Project drives the dashboard scan name; must not be the host.
+			if sbom.Env.Project != tt.want {
+				t.Errorf("env.Project = %q, want %q", sbom.Env.Project, tt.want)
+			}
+		})
+	}
+}
+
 func TestRun_Errors(t *testing.T) {
 	tests := []struct {
 		name string
