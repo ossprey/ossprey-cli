@@ -82,6 +82,15 @@ func TestRun_Fixtures(t *testing.T) {
 				t.Errorf("component count: got %d, want >= %d", got, tt.minComponents)
 			}
 
+			// Project/Name drive the dashboard scan label; must be the scanned
+			// directory's base name, not the host machine name.
+			if sbom.Env.Project != tt.fixture {
+				t.Errorf("env.Project: got %q, want %q", sbom.Env.Project, tt.fixture)
+			}
+			if sbom.Name != tt.fixture {
+				t.Errorf("sbom.Name: got %q, want %q", sbom.Name, tt.fixture)
+			}
+
 			names := componentNames(sbom)
 			seen := make(map[string]bool, len(names))
 			for _, n := range names {
