@@ -1,0 +1,364 @@
+package catalog
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/anchore/syft/syft/file"
+	"github.com/anchore/syft/syft/pkg"
+)
+
+// pkgKey collapses a package to "name@version" for set comparisons.
+func pkgKey(p pkg.Package) string { return p.Name + "@" + p.Version }
+
+func keySet(pkgs []pkg.Package) map[string]bool {
+	out := make(map[string]bool, len(pkgs))
+	for _, p := range pkgs {
+		out[pkgKey(p)] = true
+	}
+	return out
+}
+
+func writeFile(t *testing.T, dir, name, body string) string {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+	return path
+}
+
+func TestParsePackageJSONFile(t *testing.T) {
+	dir := t.TempDir()
+	body := `{
+		"name": "myapp",
+		"dependencies": {"lodash": "^4.17.21", "react": "18.2.0"},
+		"devDependencies": {"jest": ">=29.0.0", "react": "18.2.0"},
+		"peerDependencies": {"myapp": "1.0.0"}
+	}`
+	path := writeFile(t, dir, "package.json", body)
+
+	got, err := parsePackageJSONFile(path, file.NewLocation("package.json"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	keys := keySet(got)
+
+	// version operators stripped, all dep groups merged
+	for _, want := range []string{"lodash@4.17.21", "react@18.2.0", "jest@29.0.0"} {
+		if !keys[want] {
+			t.Errorf("missing dependency %q; got %v", want, keys)
+		}
+	}
+	// root project name (myapp) skipped even when self-referenced
+	if keys["myapp@1.0.0"] {
+		t.Error("root project name should be skipped")
+	}
+	// react appears in both deps + devDeps but deduped
+	if len(got) != 3 {
+		t.Errorf("got %d packages, want 3 (deduped): %v", len(got), keys)
+	}
+	for _, p := range got {
+		if p.Type != pkg.NpmPkg {
+			t.Errorf("%s: type = %v, want NpmPkg", p.Name, p.Type)
+		}
+	}
+}
+
+func TestParsePackageJSONFile_Missing(t *testing.T) {
+	got, err := parsePackageJSONFile(filepath.Join(t.TempDir(), "nope.json"), file.NewLocation("nope.json"))
+	if err != nil {
+		t.Fatalf("missing file should be silent, got: %v", err)
+	}
+	if got != nil {
+		t.Errorf("got %v, want nil", got)
+	}
+}
+
+func TestParsePackageJSONFile_BadJSON(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFile(t, dir, "package.json", `{not json`)
+	if _, err := parsePackageJSONFile(path, file.NewLocation("package.json")); err == nil {
+		t.Error("expected error on invalid JSON")
+	}
+}
+
+func TestParsePyProjectFile_PEP621(t *testing.T) {
+	dir := t.TempDir()
+	body := `
+[project]
+name = "myapp"
+dependencies = ["requests==2.31.0", "flask>=3.0", "rich[jupyter]==13.0.0"]
+
+[project.optional-dependencies]
+test = ["pytest==8.0.0"]
+`
+	path := writeFile(t, dir, "pyproject.toml", body)
+
+	got, err := parsePyProjectFile(path, file.NewLocation("pyproject.toml"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	keys := keySet(got)
+
+	// pinned versions captured, unpinned (>=) recorded with empty version,
+	// extras marker stripped from name, optional groups included
+	for _, want := range []string{"requests@2.31.0", "flask@", "rich@13.0.0", "pytest@8.0.0"} {
+		if !keys[want] {
+			t.Errorf("missing %q; got %v", want, keys)
+		}
+	}
+	for _, p := range got {
+		if p.Type != pkg.PythonPkg {
+			t.Errorf("%s: type = %v, want PythonPkg", p.Name, p.Type)
+		}
+	}
+}
+
+func TestParsePyProjectFile_Poetry(t *testing.T) {
+	dir := t.TempDir()
+	body := `
+[tool.poetry]
+name = "myapp"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+requests = "^2.31.0"
+django = {version = ">=4.2", extras = ["bcrypt"]}
+
+[tool.poetry.dev-dependencies]
+black = "23.0.0"
+`
+	path := writeFile(t, dir, "pyproject.toml", body)
+
+	got, err := parsePyProjectFile(path, file.NewLocation("pyproject.toml"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	keys := keySet(got)
+
+	if !keys["requests@2.31.0"] {
+		t.Errorf("missing requests@2.31.0; got %v", keys)
+	}
+	if !keys["django@4.2"] {
+		t.Errorf("missing django@4.2 (table form); got %v", keys)
+	}
+	if !keys["black@23.0.0"] {
+		t.Errorf("missing dev-dependency black; got %v", keys)
+	}
+	// python constraint must never become a package
+	if _, ok := keys["python@3.11"]; ok {
+		t.Error("python should be excluded from poetry deps")
+	}
+}
+
+func TestParsePEP508(t *testing.T) {
+	tests := []struct {
+		in       string
+		wantName string
+		wantVer  string
+	}{
+		{"requests==2.31.0", "requests", "2.31.0"},
+		{"flask>=3.0", "flask", ""},
+		{"rich[jupyter]==13.0.0", "rich", "13.0.0"},
+		{"numpy", "numpy", ""},
+		{"", "", ""},
+		{"# comment", "", ""},
+	}
+	for _, tt := range tests {
+		n, v := parsePEP508(tt.in)
+		if n != tt.wantName || v != tt.wantVer {
+			t.Errorf("parsePEP508(%q) = (%q,%q), want (%q,%q)", tt.in, n, v, tt.wantName, tt.wantVer)
+		}
+	}
+}
+
+func TestPoetryVersion(t *testing.T) {
+	tests := []struct {
+		name string
+		in   any
+		want string
+	}{
+		{"string caret", "^2.31.0", "2.31.0"},
+		{"string exact", "2.31.0", "2.31.0"},
+		{"table with version", map[string]any{"version": ">=4.2"}, "4.2"},
+		{"table without version", map[string]any{"extras": []any{"x"}}, ""},
+		{"unsupported type", 42, ""},
+	}
+	for _, tt := range tests {
+		if got := poetryVersion(tt.in); got != tt.want {
+			t.Errorf("%s: poetryVersion(%v) = %q, want %q", tt.name, tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestStripVersionOp(t *testing.T) {
+	tests := map[string]string{
+		"^4.17.21": "4.17.21",
+		"~1.2.3":   "1.2.3",
+		">=2.0":    "2.0",
+		"<=2.0":    "2.0",
+		">1.0":     "1.0",
+		"<1.0":     "1.0",
+		"==3.0":    "3.0",
+		"!=1.0":    "1.0",
+		"1.2.3":    "1.2.3",
+		"  ^1.0 ":  "1.0",
+	}
+	for in, want := range tests {
+		if got := stripVersionOp(in); got != want {
+			t.Errorf("stripVersionOp(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestNormalizeName(t *testing.T) {
+	tests := map[string]string{
+		"Requests": "requests",
+		"  Flask ": "flask",
+		"NumPy":    "numpy",
+	}
+	for in, want := range tests {
+		if got := normalizeName(in); got != want {
+			t.Errorf("normalizeName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestHasPEP621Project(t *testing.T) {
+	dir := t.TempDir()
+
+	withProject := writeFile(t, dir, "with.toml", "[project]\nname = \"x\"\n")
+	if !hasPEP621Project(withProject) {
+		t.Error("file with [project].name should report true")
+	}
+
+	withDeps := writeFile(t, dir, "deps.toml", "[project]\ndependencies = [\"requests\"]\n")
+	if !hasPEP621Project(withDeps) {
+		t.Error("file with [project].dependencies should report true")
+	}
+
+	noProject := writeFile(t, dir, "ruff.toml", "[tool.ruff]\nline-length = 100\n")
+	if hasPEP621Project(noProject) {
+		t.Error("file without [project] should report false")
+	}
+
+	if hasPEP621Project(filepath.Join(dir, "nope.toml")) {
+		t.Error("missing file should report false")
+	}
+
+	bad := writeFile(t, dir, "bad.toml", "not = = valid")
+	if hasPEP621Project(bad) {
+		t.Error("unparseable file should report false")
+	}
+}
+
+func TestParseUVOutput(t *testing.T) {
+	out := []byte(`# this file was autogenerated
+Requests==2.31.0
+flask==3.0.0 ; python_version >= "3.8"
+
+# comment line
+requests==2.31.0
+not-a-pinned-line
+django>=4.0
+`)
+	got := parseUVOutput(out, file.NewLocation("pyproject.toml"))
+	keys := keySet(got)
+
+	// names lowercased, markers after ';' ignored
+	if !keys["requests@2.31.0"] {
+		t.Errorf("missing requests@2.31.0 (lowercased); got %v", keys)
+	}
+	if !keys["flask@3.0.0"] {
+		t.Errorf("missing flask@3.0.0; got %v", keys)
+	}
+	// duplicate Requests/requests collapsed; unpinned/garbage lines dropped
+	if len(got) != 2 {
+		t.Errorf("got %d packages, want 2: %v", len(got), keys)
+	}
+	for _, p := range got {
+		if p.Type != pkg.PythonPkg {
+			t.Errorf("%s: type = %v, want PythonPkg", p.Name, p.Type)
+		}
+	}
+}
+
+func TestUVArgsForPyProject(t *testing.T) {
+	// no uv.lock -> pip compile against pyproject.toml
+	noLock := t.TempDir()
+	args := uvArgsForPyProject(noLock)
+	if len(args) < 2 || args[0] != "pip" || args[1] != "compile" {
+		t.Errorf("without uv.lock want `pip compile ...`, got %v", args)
+	}
+
+	// uv.lock present -> export
+	withLock := t.TempDir()
+	writeFile(t, withLock, "uv.lock", "version = 1\n")
+	args = uvArgsForPyProject(withLock)
+	if len(args) == 0 || args[0] != "export" {
+		t.Errorf("with uv.lock want `export ...`, got %v", args)
+	}
+}
+
+func TestOssbomType(t *testing.T) {
+	tests := []struct {
+		in   pkg.Type
+		want string
+	}{
+		{pkg.PythonPkg, "pypi"},
+		{pkg.NpmPkg, "npm"},
+		{pkg.RustPkg, ""},
+	}
+	for _, tt := range tests {
+		if got := ossbomType(tt.in); got != tt.want {
+			t.Errorf("ossbomType(%v) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestIsOspreyCataloger(t *testing.T) {
+	for _, name := range []string{
+		"ossprey-uv-cataloger",
+		"ossprey-setuppy-cataloger",
+		"ossprey-pyproject-cataloger",
+		"ossprey-packagejson-cataloger",
+	} {
+		if !isOspreyCataloger(name) {
+			t.Errorf("%q should be reported as an ossprey cataloger", name)
+		}
+	}
+	if isOspreyCataloger("python-package-cataloger") {
+		t.Error("syft cataloger misreported as ossprey cataloger")
+	}
+}
+
+func TestIsRootManifestPackage(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{"package.json", true},
+		{"sub/dir/pyproject.toml", true},
+		{"poetry.lock", false},
+		{"requirements.txt", false},
+	}
+	for _, tt := range tests {
+		p := pkg.Package{Locations: file.NewLocationSet(file.NewLocation(tt.path))}
+		if got := isRootManifestPackage(p); got != tt.want {
+			t.Errorf("isRootManifestPackage(%q) = %v, want %v", tt.path, got, tt.want)
+		}
+	}
+}
+
+func TestLocations(t *testing.T) {
+	p := pkg.Package{Locations: file.NewLocationSet(
+		file.NewLocation("a/pyproject.toml"),
+		file.NewLocation("b/uv.lock"),
+	)}
+	got := locations(p)
+	if len(got) != 2 {
+		t.Fatalf("got %d locations, want 2: %v", len(got), got)
+	}
+}
