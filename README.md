@@ -109,6 +109,62 @@ The API key is read from, in order:
 `--local`, `--dry-run-safe` and `--dry-run-malicious` don't talk to the API
 and don't need a key.
 
+## `check` — scan named packages
+
+Scan one or more packages by name without a project on disk:
+
+```
+ossprey check --eco-system <pypi|npm> <name[@version]>...
+```
+
+```sh
+ossprey check -e pypi requests@2.31.0
+ossprey check -e npm lodash@4.17.21 react@18.2.0
+```
+
+When a version is omitted, the latest published version is resolved from the
+registry (PyPI / npm) and checked. Both `name@version` and pip's
+`name==version` forms are accepted.
+
+| Flag | Description |
+|------|-------------|
+| `-e, --eco-system <pypi\|npm>` | Package ecosystem (required). |
+| `--url <url>` | Override the Ossprey API URL. |
+| `--api-key <key>` | API key (or env var). |
+
+Exit codes match `scan`: `1` on a malware verdict or error, `0` otherwise.
+
+## Package-manager forwarder
+
+Wrap an install so packages are checked **before** they hit your machine. If
+any are flagged, the install is blocked (exit `1`) and the real package manager
+is never invoked; otherwise the command is forwarded unchanged.
+
+```sh
+ossprey npm install foo@1.2.3
+ossprey yarn add foo@1.2.3
+ossprey pip install foo==1.2.3
+ossprey poetry add foo
+ossprey uv pip install foo==1.2.3
+```
+
+Supported managers: `npm`, `yarn`, `pip`, `poetry`, `uv`. Non-install
+subcommands (`npm run`, `pip list`, …) are forwarded straight through with no
+check.
+
+**Scope:** only the packages named on the command line are checked — transitive
+dependencies are **not** resolved here. Run `ossprey scan` after install for
+full-tree coverage. Tokens with no parseable package name (`pip install -r
+requirements.txt`, VCS/URL installs) are forwarded unchecked with a warning. If
+the registry can't be reached to resolve an unpinned version, that package is
+skipped (fail-open) so a registry outage never blocks development.
+
+Configuration comes from the environment (flag parsing is disabled so every
+argument reaches the real manager):
+
+- `OSSPREY_API_KEY` — API key
+- `OSSPREY_API_URL` — override the API URL (default `https://api.ossprey.com`)
+
 ## Supported ecosystems
 
 Python and JavaScript, via syft's static catalogers.
