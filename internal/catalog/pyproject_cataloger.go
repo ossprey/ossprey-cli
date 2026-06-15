@@ -67,6 +67,7 @@ func parsePyProjectFile(path string, loc file.Location) ([]pkg.Package, error) {
 		if name == "" || name == rootName {
 			return
 		}
+		version = pinVersion(version)
 		key := name + "@" + version
 		if _, ok := seen[key]; ok {
 			return
@@ -135,6 +136,20 @@ func stripVersionOp(s string) string {
 		}
 	}
 	return s
+}
+
+// pinVersion keeps a version only when it looks like a concrete release
+// (contains a dot, e.g. "8.1.7" or "4.2"). A bare major like "8" — what a
+// range/caret constraint such as "^8", ">=8" or poetry "8" collapses to once
+// the operator is stripped — is NOT a real registry release. Pinning it
+// produces purls like pkg:pypi/click@8 that 404 on the registry and surface as
+// spurious NOT_FOUND. Treat those as unpinned ("") so registry resolution and
+// the versionless merge fold them into the real package instead.
+func pinVersion(v string) string {
+	if !strings.Contains(v, ".") {
+		return ""
+	}
+	return v
 }
 
 func normalizeName(s string) string {

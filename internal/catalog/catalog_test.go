@@ -213,6 +213,67 @@ func TestStripVersionOp(t *testing.T) {
 	}
 }
 
+func TestPinVersion(t *testing.T) {
+	tests := map[string]string{
+		// major-only constraints collapse to a bare major -> not a real
+		// release, drop to versionless (the click@8 / rich@13 bug).
+		"8":    "",
+		"13":   "",
+		"2024": "",
+		"":     "",
+		// concrete releases (have a dot) are kept.
+		"8.1.7":  "8.1.7",
+		"4.2":    "4.2",
+		"13.0.0": "13.0.0",
+	}
+	for in, want := range tests {
+		if got := pinVersion(in); got != want {
+			t.Errorf("pinVersion(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// Reproduces the QA bug seen in SBOM
+// d7915d1fad17135784bdfb8c6223d0c605c32b9fbe1b1c48c6252fda9db3deee: a poetry
+// manifest pinning only a major version (click = "^8", rich = ">=13") produced
+// pkg:pypi/click@8 / pkg:pypi/rich@13, which 404 as NOT_FOUND. They must be
+// emitted versionless so they resolve / fold into the unpinned sibling.
+func TestParsePyProjectFile_MajorOnlyConstraintIsUnpinned(t *testing.T) {
+	dir := t.TempDir()
+	body := `
+[tool.poetry]
+name = "myapp"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+click = "^8"
+rich = ">=13"
+requests = "^2.31.0"
+`
+	path := writeFile(t, dir, "pyproject.toml", body)
+
+	got, err := parsePyProjectFile(path, file.NewLocation("pyproject.toml"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	keys := keySet(got)
+
+	// major-only constraints -> versionless (no spurious @8 / @13)
+	if !keys["click@"] {
+		t.Errorf("click should be versionless; got %v", keys)
+	}
+	if !keys["rich@"] {
+		t.Errorf("rich should be versionless; got %v", keys)
+	}
+	if keys["click@8"] || keys["rich@13"] {
+		t.Errorf("major-only pin leaked a bogus version: %v", keys)
+	}
+	// a full version behind a caret is still a real release -> kept
+	if !keys["requests@2.31.0"] {
+		t.Errorf("requests@2.31.0 should be kept; got %v", keys)
+	}
+}
+
 func TestNormalizeName(t *testing.T) {
 	tests := map[string]string{
 		"Requests": "requests",
