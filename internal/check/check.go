@@ -10,21 +10,29 @@ import (
 	"os"
 	"strings"
 
+	"github.com/ossprey/ossprey-cli/internal/gitenv"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
 	"github.com/ossprey/ossprey-cli/internal/scan"
 	"github.com/ossprey/ossprey-cli/internal/submit"
 )
 
 // Spec identifies one package to check. Ecosystem is the OSSBOM component type
-// ("pypi" or "npm"). Version may be empty; callers resolve a concrete version
-// (e.g. via internal/registry) before calling Run.
+// ("pypi", "npm" or "github"). Namespace is the PURL namespace — the repo owner
+// for github specs, empty otherwise. Version may be empty for pypi/npm; callers
+// resolve a concrete version (e.g. via internal/registry) before calling Run.
 type Spec struct {
 	Ecosystem string
+	Namespace string // github repo owner; empty for pypi/npm
 	Name      string
 	Version   string
 }
 
-func (s Spec) String() string { return fmt.Sprintf("%s/%s@%s", s.Ecosystem, s.Name, s.Version) }
+func (s Spec) String() string {
+	if s.Namespace != "" {
+		return fmt.Sprintf("%s/%s/%s@%s", s.Ecosystem, s.Namespace, s.Name, s.Version)
+	}
+	return fmt.Sprintf("%s/%s@%s", s.Ecosystem, s.Name, s.Version)
+}
 
 // Options configures a check run.
 type Options struct {
@@ -53,18 +61,30 @@ func Run(ctx context.Context, opts Options) (*ossbom.SBOM, error) {
 	// Project names the scan in the dashboard. Without it the UI falls back to
 	// the machine name (the host), so a package check would surface as the host
 	// rather than the package(s) being checked.
-	sbom := ossbom.New(ossbom.Environment{
+	env := ossbom.Environment{
 		MachineName: host,
 		Project:     scanName(opts.Specs),
-	})
+	}
+	// A single github repo check is a "scan the repo itself" submission: set the
+	// owner/repo/ref on the environment so the dashboard titles it
+	// "org/repo@ref" and links to the source rather than showing a hash.
+	if len(opts.Specs) == 1 && opts.Specs[0].Ecosystem == "github" {
+		s := opts.Specs[0]
+		env.GithubOrg = s.Namespace
+		env.GithubRepo = s.Name
+		env.Branch = s.Version
+		env.ProductEnv = gitenv.Detect(".").ProductEnv
+	}
+	sbom := ossbom.New(env)
 	sbom.Name = scanName(opts.Specs)
 
 	for _, s := range opts.Specs {
 		sbom.AddComponent(ossbom.Component{
-			Name:    s.Name,
-			Version: s.Version,
-			Type:    s.Ecosystem,
-			Source:  []string{"check"},
+			Name:      s.Name,
+			Namespace: s.Namespace,
+			Version:   s.Version,
+			Type:      s.Ecosystem,
+			Source:    []string{sourceFor(s.Ecosystem)},
 		})
 	}
 
@@ -85,27 +105,48 @@ func Run(ctx context.Context, opts Options) (*ossbom.SBOM, error) {
 }
 
 // scanName builds a human-readable label for the scan from the checked
-// packages: "name@version" for a single spec, comma-joined for several. Used as
-// both the SBOM name and env.Project so the dashboard shows the package(s)
-// instead of falling back to the host machine name.
+// packages: "[namespace/]name@version" for a single spec, comma-joined for
+// several. Used as both the SBOM name and env.Project so the dashboard shows the
+// package(s) instead of falling back to the host machine name.
 func scanName(specs []Spec) string {
 	parts := make([]string, 0, len(specs))
 	for _, s := range specs {
-		if s.Version == "" {
-			parts = append(parts, s.Name)
-			continue
-		}
-		parts = append(parts, s.Name+"@"+s.Version)
+		parts = append(parts, specLabel(s))
 	}
 	return strings.Join(parts, ", ")
 }
 
+// specLabel renders one spec as "owner/name@version" (github) or "name@version",
+// dropping the "@version" when unpinned.
+func specLabel(s Spec) string {
+	name := s.Name
+	if s.Namespace != "" {
+		name = s.Namespace + "/" + name
+	}
+	if s.Version == "" {
+		return name
+	}
+	return name + "@" + s.Version
+}
+
+// sourceFor labels where a component came from. github repos are tagged
+// "github" (matching the python client); everything else came via `check`.
+func sourceFor(ecosystem string) string {
+	if ecosystem == "github" {
+		return "github"
+	}
+	return "check"
+}
+
 func (s Spec) validate() error {
 	if normalizeEcosystem(s.Ecosystem) == "" {
-		return fmt.Errorf("unsupported ecosystem %q (want pypi or npm)", s.Ecosystem)
+		return fmt.Errorf("unsupported ecosystem %q (want pypi, npm or github)", s.Ecosystem)
 	}
 	if s.Name == "" {
 		return errors.New("package name is required")
+	}
+	if s.Ecosystem == "github" && s.Namespace == "" {
+		return fmt.Errorf("github package %q is missing an owner (want owner/repo)", s.Name)
 	}
 	if s.Version == "" {
 		return fmt.Errorf("package %q is missing a version", s.Name)
@@ -121,6 +162,8 @@ func normalizeEcosystem(eco string) string {
 		return "pypi"
 	case "npm", "node", "javascript", "js", "yarn":
 		return "npm"
+	case "github", "gh", "git":
+		return "github"
 	default:
 		return ""
 	}
@@ -136,6 +179,14 @@ func ParseSpec(ecosystem, token string) (Spec, error) {
 		return Spec{}, fmt.Errorf("unsupported ecosystem %q (want pypi or npm)", ecosystem)
 	}
 
+	if eco == "github" {
+		owner, repo, ref, err := splitGitHub(token)
+		if err != nil {
+			return Spec{}, err
+		}
+		return Spec{Ecosystem: eco, Namespace: owner, Name: repo, Version: ref}, nil
+	}
+
 	var name, version string
 	switch eco {
 	case "npm":
@@ -147,6 +198,41 @@ func ParseSpec(ecosystem, token string) (Spec, error) {
 		return Spec{}, fmt.Errorf("cannot parse package token %q", token)
 	}
 	return Spec{Ecosystem: eco, Name: name, Version: version}, nil
+}
+
+// splitGitHub parses a github repo token into (owner, repo, ref). Accepted forms:
+//   - "owner/repo"                     -> ref defaults to "HEAD"
+//   - "owner/repo@v1.2.3"              -> ref = v1.2.3 (branch / tag / commit)
+//   - "https://github.com/owner/repo"  -> any github URL (https or ssh), ref HEAD
+//   - "git@github.com:owner/repo.git"
+//
+// A trailing "@ref" is honored on the shorthand form only; URLs use HEAD.
+func splitGitHub(token string) (owner, repo, ref string, err error) {
+	token = strings.TrimSpace(token)
+	ref = "HEAD"
+
+	if strings.Contains(token, "github.com") {
+		o, r, ok := gitenv.ParseRemoteURL(token)
+		if !ok {
+			return "", "", "", fmt.Errorf("cannot parse github url %q", token)
+		}
+		return o, r, ref, nil
+	}
+
+	// shorthand "owner/repo[@ref]"
+	path := token
+	if at := strings.LastIndex(token, "@"); at > 0 {
+		if r := token[at+1:]; r != "" {
+			ref = r
+		}
+		path = token[:at]
+	}
+	path = strings.TrimSuffix(strings.Trim(path, "/"), ".git")
+	o, r, ok := strings.Cut(path, "/")
+	if !ok || o == "" || r == "" || strings.Contains(r, "/") {
+		return "", "", "", fmt.Errorf("cannot parse github repo %q (want owner/repo)", token)
+	}
+	return o, r, ref, nil
 }
 
 // splitNpm parses "name@version" / "@scope/name@version" / "name". The version

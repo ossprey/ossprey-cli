@@ -49,6 +49,9 @@ func (s *SBOM) ToMiniBOM() MiniBOM {
 }
 
 func componentPurl(c Component) string {
+	if c.Namespace != "" {
+		return "pkg:" + c.Type + "/" + c.Namespace + "/" + c.Name + "@" + c.Version
+	}
 	return "pkg:" + c.Type + "/" + c.Name + "@" + c.Version
 }
 

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/ossprey/ossprey-cli/internal/catalog"
+	"github.com/ossprey/ossprey-cli/internal/gitenv"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
 )
 
@@ -42,11 +43,21 @@ func Run(ctx context.Context, opts Options) (*ossbom.SBOM, error) {
 	// the machine name (the host); use the scanned directory's base name so the
 	// scan surfaces as the project rather than the host.
 	project := filepath.Base(abs)
-	sbom := ossbom.New(ossbom.Environment{
+	env := ossbom.Environment{
 		Path:        abs,
 		MachineName: host,
 		Project:     project,
-	})
+	}
+	// When the scanned tree is a GitHub checkout, attribute the scan to its
+	// owner/repo/branch so the dashboard titles it "org/repo@branch" and links
+	// back to the source instead of showing the bare repo name (or a hash).
+	if gh := gitenv.Detect(abs); gh.OK() {
+		env.GithubOrg = gh.Org
+		env.GithubRepo = gh.Repo
+		env.Branch = gh.Branch
+		env.ProductEnv = gh.ProductEnv
+	}
+	sbom := ossbom.New(env)
 	sbom.Name = project
 
 	for _, p := range pkgs {

@@ -25,13 +25,17 @@ type Environment struct {
 }
 
 type Component struct {
-	Name     string         `json:"name"`
-	Version  string         `json:"version"`
-	Type     string         `json:"type"`
-	Source   []string       `json:"source"`
-	Env      []string       `json:"env"`
-	Location []string       `json:"location"`
-	Metadata map[string]any `json:"metadata"`
+	Name string `json:"name"`
+	// Namespace is the PURL namespace segment — for github components it is the
+	// repo owner (org/user), so the purl becomes pkg:github/<owner>/<name>@<ref>.
+	// Empty for ecosystems that don't use it (pypi, npm).
+	Namespace string         `json:"namespace,omitempty"`
+	Version   string         `json:"version"`
+	Type      string         `json:"type"`
+	Source    []string       `json:"source"`
+	Env       []string       `json:"env"`
+	Location  []string       `json:"location"`
+	Metadata  map[string]any `json:"metadata"`
 }
 
 type Vulnerability struct {
@@ -85,9 +89,10 @@ func New(env Environment) *SBOM {
 	}
 }
 
-// AddComponent merges into the SBOM, deduping on PURL-ish key (type/name@version).
+// AddComponent merges into the SBOM, deduping on PURL-ish key
+// (type/namespace/name@version).
 func (s *SBOM) AddComponent(c Component) {
-	key := c.Type + "/" + c.Name + "@" + c.Version
+	key := c.Type + "/" + c.Namespace + "/" + c.Name + "@" + c.Version
 	if idx, ok := s.dedupe[key]; ok {
 		s.Components[idx].Source = mergeUnique(s.Components[idx].Source, c.Source)
 		s.Components[idx].Location = mergeUnique(s.Components[idx].Location, c.Location)

@@ -42,6 +42,16 @@ func TestToMiniBOM(t *testing.T) {
 			wantPurl: []string{"pkg:pypi/aaa@1.0", "pkg:pypi/zlib@1.0"},
 		},
 		{
+			name: "github component keeps namespace in purl",
+			build: func() *SBOM {
+				s := New(Environment{})
+				s.AddComponent(Component{Namespace: "Xpra-org", Name: "xpra", Version: "HEAD", Type: "github"})
+				return s
+			},
+			wantLen:  1,
+			wantPurl: []string{"pkg:github/Xpra-org/xpra@HEAD"},
+		},
+		{
 			name: "dedupes by purl key on AddComponent",
 			build: func() *SBOM {
 				s := New(Environment{})
