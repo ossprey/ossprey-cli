@@ -142,8 +142,8 @@ func newCheckCmd() *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:   "check --eco-system <pypi|npm> <name[@version]>...",
-		Short: "Check named packages for malware without a project directory",
+		Use:   "check --eco-system <pypi|npm|github> <name[@version] | owner/repo[@ref]>...",
+		Short: "Check named packages (or a github repo) for malware without a project directory",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if ecosystem == "" {
@@ -195,7 +195,7 @@ func newCheckCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVarP(&ecosystem, "eco-system", "e", "", "package ecosystem: pypi or npm (required)")
+	cmd.Flags().StringVarP(&ecosystem, "eco-system", "e", "", "package ecosystem: pypi, npm or github (required)")
 	cmd.Flags().StringVar(&apiURL, "url", defaultAPIURL, "Ossprey API URL")
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "Ossprey API key (or OSSPREY_API_KEY / API_KEY env var)")
 	cmd.Flags().BoolVar(&dryRunSafe, "dry-run-safe", false, "skip API submission; emit empty vulnerability list")

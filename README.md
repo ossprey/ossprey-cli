@@ -98,6 +98,17 @@ ossprey scan [path] [flags]
 | `--api-key <key>` | Provide the API key on the command line instead of an env var. |
 | `--version` | Print the CLI version. |
 
+### GitHub attribution
+
+When the scanned path is a GitHub checkout, the CLI records the repo's
+`github_org`, `github_repo` and `branch` on the scan so the dashboard titles it
+`org/repo@branch` and links back to the source (instead of showing just the
+directory name or a scan-id hash). Coordinates come from CI environment
+variables (`GITHUB_REPOSITORY`, `GITHUB_REF_NAME` — set by GitHub Actions and
+Codespaces) when present, falling back to the local `git remote get-url origin`
+for developer-machine scans. Non-GitHub or non-git directories scan exactly as
+before.
+
 ### Authentication
 
 The API key is read from, in order:
@@ -109,26 +120,36 @@ The API key is read from, in order:
 `--local`, `--dry-run-safe` and `--dry-run-malicious` don't talk to the API
 and don't need a key.
 
-## `check` — scan named packages
+## `check` — scan named packages or a github repo
 
 Scan one or more packages by name without a project on disk:
 
 ```
-ossprey check --eco-system <pypi|npm> <name[@version]>...
+ossprey check --eco-system <pypi|npm|github> <name[@version] | owner/repo[@ref]>...
 ```
 
 ```sh
 ossprey check -e pypi requests@2.31.0
 ossprey check -e npm lodash@4.17.21 react@18.2.0
+ossprey check -e github Xpra-org/xpra              # scans the repo source itself
+ossprey check -e github https://github.com/psf/requests@v2.31.0
 ```
 
-When a version is omitted, the latest published version is resolved from the
-registry (PyPI / npm) and checked. Both `name@version` and pip's
+For `pypi`/`npm`, when a version is omitted the latest published version is
+resolved from the registry and checked. Both `name@version` and pip's
 `name==version` forms are accepted.
+
+For `github`, the repo *itself* is submitted as a `github` component
+(`pkg:github/<owner>/<repo>@<ref>`) — the Ossprey backend fetches the repo
+source and scans its own code. The ref defaults to `HEAD`; pass `owner/repo@ref`
+to pin a branch, tag, or commit. `owner/repo` shorthand and full github URLs
+(https or ssh) are both accepted. A single github check sets the scan's
+`github_org`/`github_repo`/`branch` so the dashboard titles it `owner/repo@ref`
+and links back to the repo.
 
 | Flag | Description |
 |------|-------------|
-| `-e, --eco-system <pypi\|npm>` | Package ecosystem (required). |
+| `-e, --eco-system <pypi\|npm\|github>` | Package ecosystem (required). |
 | `--url <url>` | Override the Ossprey API URL. |
 | `--api-key <key>` | API key (or env var). |
 
