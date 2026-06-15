@@ -88,7 +88,7 @@ func Catalog(ctx context.Context, path string) ([]Package, error) {
 			if !isOspreyCataloger && isRootManifestPackage(p) {
 				continue
 			}
-			key := t + "@" + p.Name + "@" + p.Version
+			key := dedupKey(t, p.Name, p.Version)
 			if _, ok := seen[key]; ok {
 				continue
 			}
@@ -103,7 +103,75 @@ func Catalog(ctx context.Context, path string) ([]Package, error) {
 		}
 	}
 
-	return out, nil
+	return mergeVersionless(out), nil
+}
+
+// mergeVersionless collapses a package emitted both with and without a version.
+// The direct-deps catalogers (pyproject/package.json) can only report a name
+// when the version is unpinned (e.g. "click" from `dependencies = ["click"]`),
+// while the uv cataloger resolves the same dep to a concrete version
+// ("click@8.4.1"). Those are the same package — the versionless entry is just a
+// lower-fidelity view. Drop versionless entries when a versioned sibling of the
+// same (type, name) exists, folding their Source/Locations into the siblings so
+// no attribution is lost. Entries with no versioned sibling are kept as-is.
+func mergeVersionless(pkgs []Package) []Package {
+	gkey := func(p Package) string { return p.Type + "@" + normalizeName(p.Name) }
+
+	hasVersioned := map[string]bool{}
+	for _, p := range pkgs {
+		if p.Version != "" {
+			hasVersioned[gkey(p)] = true
+		}
+	}
+
+	// Keep versioned entries and versionless ones with no versioned sibling;
+	// remember where each versioned group landed so we can fold sources into it.
+	var out []Package
+	groupIdx := map[string][]int{}
+	for _, p := range pkgs {
+		if p.Version == "" && hasVersioned[gkey(p)] {
+			continue // folded below
+		}
+		if p.Version != "" {
+			groupIdx[gkey(p)] = append(groupIdx[gkey(p)], len(out))
+		}
+		out = append(out, p)
+	}
+
+	for _, p := range pkgs {
+		if p.Version == "" && hasVersioned[gkey(p)] {
+			for _, i := range groupIdx[gkey(p)] {
+				out[i].Source = mergeUnique(out[i].Source, p.Source)
+				out[i].Locations = mergeUnique(out[i].Locations, p.Locations)
+			}
+		}
+	}
+	return out
+}
+
+// mergeUnique returns a ∪ b preserving order, dropping duplicates and empties.
+func mergeUnique(a, b []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(a)+len(b))
+	for _, v := range append(append([]string{}, a...), b...) {
+		if v == "" {
+			continue
+		}
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	return out
+}
+
+// dedupKey collapses a package to its dedup identity: (type, name, version).
+// Name is normalized so the same package surfaced by two catalogers with
+// different casing (syft emits the canonical name, e.g. "PyYAML"; our custom
+// catalogers lowercase) maps to one key instead of two.
+func dedupKey(t, name, version string) string {
+	return t + "@" + normalizeName(name) + "@" + version
 }
 
 // isOspreyCataloger identifies our own custom catalogers by name. Used to

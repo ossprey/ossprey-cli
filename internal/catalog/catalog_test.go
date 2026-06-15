@@ -318,6 +318,75 @@ func TestOssbomType(t *testing.T) {
 	}
 }
 
+func TestDedupKey(t *testing.T) {
+	// Same package, different name casing from two catalogers -> one key.
+	syft := dedupKey("pypi", "PyYAML", "6.0")
+	ours := dedupKey("pypi", "pyyaml", "6.0")
+	if syft != ours {
+		t.Errorf("case-mismatched names not collapsed: %q vs %q", syft, ours)
+	}
+
+	// Different version -> distinct keys.
+	if dedupKey("pypi", "requests", "2.31.0") == dedupKey("pypi", "requests", "2.30.0") {
+		t.Error("different versions should not collapse")
+	}
+
+	// Same name+version across ecosystems stays distinct.
+	if dedupKey("pypi", "left-pad", "1.0.0") == dedupKey("npm", "left-pad", "1.0.0") {
+		t.Error("different types should not collapse")
+	}
+}
+
+func TestMergeVersionless(t *testing.T) {
+	// click + requests each emitted versionless (pyproject) AND versioned (uv).
+	in := []Package{
+		{Name: "click", Version: "", Type: "pypi", Source: []string{"ossprey-pyproject-cataloger"}, Locations: []string{"pyproject.toml"}},
+		{Name: "click", Version: "8.4.1", Type: "pypi", Source: []string{"ossprey-uv-cataloger"}, Locations: []string{"uv.lock"}},
+		{Name: "requests", Version: "2.31.0", Type: "pypi", Source: []string{"ossprey-uv-cataloger"}},
+		{Name: "requests", Version: "", Type: "pypi", Source: []string{"ossprey-pyproject-cataloger"}},
+		// versionless with no versioned sibling stays.
+		{Name: "lonely", Version: "", Type: "pypi", Source: []string{"ossprey-pyproject-cataloger"}},
+	}
+
+	out := mergeVersionless(in)
+
+	byName := map[string]Package{}
+	for _, p := range out {
+		if _, dup := byName[p.Name]; dup {
+			t.Errorf("duplicate entry for %q", p.Name)
+		}
+		byName[p.Name] = p
+	}
+
+	if len(out) != 3 {
+		t.Fatalf("got %d packages, want 3: %v", len(out), out)
+	}
+	if byName["click"].Version != "8.4.1" {
+		t.Errorf("click version = %q, want 8.4.1", byName["click"].Version)
+	}
+	// versionless source folded into the versioned entry.
+	if got := byName["click"].Source; len(got) != 2 {
+		t.Errorf("click sources = %v, want both catalogers merged", got)
+	}
+	if _, ok := byName["lonely"]; !ok {
+		t.Error("versionless package with no versioned sibling should be kept")
+	}
+}
+
+func TestMergeVersionless_CaseInsensitive(t *testing.T) {
+	in := []Package{
+		{Name: "PyYAML", Version: "6.0", Type: "pypi", Source: []string{"python-package-cataloger"}},
+		{Name: "pyyaml", Version: "", Type: "pypi", Source: []string{"ossprey-pyproject-cataloger"}},
+	}
+	out := mergeVersionless(in)
+	if len(out) != 1 {
+		t.Fatalf("got %d, want 1 (case-insensitive merge): %v", len(out), out)
+	}
+	if len(out[0].Source) != 2 {
+		t.Errorf("sources = %v, want both merged", out[0].Source)
+	}
+}
+
 func TestIsOspreyCataloger(t *testing.T) {
 	for _, name := range []string{
 		"ossprey-uv-cataloger",
