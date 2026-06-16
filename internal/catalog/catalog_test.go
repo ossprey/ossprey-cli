@@ -66,6 +66,34 @@ func TestParsePackageJSONFile(t *testing.T) {
 	}
 }
 
+// Reproduces the npm 405: bootstrap pinned with a multi-bound range
+// ">=3.4.1 <4.0.0" produced pkg:npm/bootstrap@3.4.1 <4.0.0, which the npm
+// registry rejects with 405. The range must resolve to its in-range lower
+// bound (3.4.1) — never to the bare range and never drifting to the latest
+// (5.x) the backend would otherwise pull.
+func TestParsePackageJSONFile_RangeFloorPinned(t *testing.T) {
+	dir := t.TempDir()
+	body := `{
+		"name": "myapp",
+		"dependencies": {"bootstrap": ">=3.4.1 <4.0.0", "lodash": "^4.17.21"}
+	}`
+	path := writeFile(t, dir, "package.json", body)
+
+	got, err := parsePackageJSONFile(path, file.NewLocation("package.json"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	keys := keySet(got)
+
+	if !keys["bootstrap@3.4.1"] {
+		t.Errorf("bootstrap should pin to range floor 3.4.1; got %v", keys)
+	}
+	// a clean caret release is still pinned
+	if !keys["lodash@4.17.21"] {
+		t.Errorf("lodash@4.17.21 should be kept; got %v", keys)
+	}
+}
+
 func TestParsePackageJSONFile_Missing(t *testing.T) {
 	got, err := parsePackageJSONFile(filepath.Join(t.TempDir(), "nope.json"), file.NewLocation("nope.json"))
 	if err != nil {
@@ -102,9 +130,9 @@ test = ["pytest==8.0.0"]
 	}
 	keys := keySet(got)
 
-	// pinned versions captured, unpinned (>=) recorded with empty version,
+	// pinned versions captured, lower-bound (>=) resolved to its floor,
 	// extras marker stripped from name, optional groups included
-	for _, want := range []string{"requests@2.31.0", "flask@", "rich@13.0.0", "pytest@8.0.0"} {
+	for _, want := range []string{"requests@2.31.0", "flask@3.0", "rich@13.0.0", "pytest@8.0.0"} {
 		if !keys[want] {
 			t.Errorf("missing %q; got %v", want, keys)
 		}
@@ -160,8 +188,10 @@ func TestParsePEP508(t *testing.T) {
 		wantVer  string
 	}{
 		{"requests==2.31.0", "requests", "2.31.0"},
-		{"flask>=3.0", "flask", ""},
+		{"flask>=3.0", "flask", "3.0"},
+		{"django>=4.0,<5.0", "django", "4.0"},
 		{"rich[jupyter]==13.0.0", "rich", "13.0.0"},
+		{`uvicorn>=0.30 ; python_version >= "3.8"`, "uvicorn", "0.30"},
 		{"numpy", "numpy", ""},
 		{"", "", ""},
 		{"# comment", "", ""},
@@ -182,6 +212,7 @@ func TestPoetryVersion(t *testing.T) {
 	}{
 		{"string caret", "^2.31.0", "2.31.0"},
 		{"string exact", "2.31.0", "2.31.0"},
+		{"string range", ">=1.0,<2.0", "1.0"},
 		{"table with version", map[string]any{"version": ">=4.2"}, "4.2"},
 		{"table without version", map[string]any{"extras": []any{"x"}}, ""},
 		{"unsupported type", 42, ""},
@@ -193,22 +224,35 @@ func TestPoetryVersion(t *testing.T) {
 	}
 }
 
-func TestStripVersionOp(t *testing.T) {
+func TestFloorVersion(t *testing.T) {
 	tests := map[string]string{
+		// single-operator constraints resolve to their own version
 		"^4.17.21": "4.17.21",
 		"~1.2.3":   "1.2.3",
 		">=2.0":    "2.0",
-		"<=2.0":    "2.0",
-		">1.0":     "1.0",
-		"<1.0":     "1.0",
 		"==3.0":    "3.0",
-		"!=1.0":    "1.0",
+		"~=1.4.2":  "1.4.2",
 		"1.2.3":    "1.2.3",
 		"  ^1.0 ":  "1.0",
+		// multi-bound ranges resolve to the LOWER bound, never the upper
+		">=3.4.1 <4.0.0": "3.4.1",
+		">=1.0,<2.0":     "1.0",
+		"1.2.3 - 2.3.4":  "1.2.3",
+		// upper-bound-only / exclusions have no floor -> versionless
+		"<4.0.0":  "",
+		"<=2.0":   "",
+		"!=1.0.0": "",
+		// wildcards / unpinnable -> versionless
+		"*":   "",
+		"1.x": "",
+		"":    "",
+		// bare-major lower bound is not a real release -> versionless
+		">=8": "",
+		"^8":  "",
 	}
 	for in, want := range tests {
-		if got := stripVersionOp(in); got != want {
-			t.Errorf("stripVersionOp(%q) = %q, want %q", in, got, want)
+		if got := floorVersion(in); got != want {
+			t.Errorf("floorVersion(%q) = %q, want %q", in, got, want)
 		}
 	}
 }
@@ -221,10 +265,17 @@ func TestPinVersion(t *testing.T) {
 		"13":   "",
 		"2024": "",
 		"":     "",
+		// multi-bound ranges that survive stripVersionOp's single-operator
+		// strip must NOT pin -> these caused the bootstrap@"3.4.1 <4.0.0" 405.
+		"3.4.1 <4.0.0": "",
+		"1.0,<2.0":     "",
+		"1.x":          "",
+		"*":            "",
 		// concrete releases (have a dot) are kept.
-		"8.1.7":  "8.1.7",
-		"4.2":    "4.2",
-		"13.0.0": "13.0.0",
+		"8.1.7":        "8.1.7",
+		"4.2":          "4.2",
+		"13.0.0":       "13.0.0",
+		"1.0.0-beta.1": "1.0.0-beta.1",
 	}
 	for in, want := range tests {
 		if got := pinVersion(in); got != want {
