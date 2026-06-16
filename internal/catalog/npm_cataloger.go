@@ -89,7 +89,7 @@ func runNpmResolve(ctx context.Context, npm, packageJSON string, loc file.Locati
 	// nor fail when HOME is read-only (Lambda).
 	cmd.Env = append(os.Environ(), "npm_config_cache="+filepath.Join(tmp, ".npm-cache"))
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return nil, fmt.Errorf("npm install --package-lock-only: %s", strings.TrimSpace(string(out)))
+		return nil, fmt.Errorf("npm install --package-lock-only: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 
 	lock, err := os.ReadFile(filepath.Join(tmp, "package-lock.json"))
