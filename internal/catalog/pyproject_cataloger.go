@@ -162,7 +162,7 @@ func exactVersion(spec string) string {
 // ("1.0.0-beta.1", "1.0+build"). It deliberately rejects bare majors ("8"),
 // wildcards ("1.x", "*") and multi-constraint ranges ("3.4.1 <4.0.0",
 // "1.0,<2.0") — none of which are real registry releases.
-var concreteRelease = regexp.MustCompile(`^[0-9]+(\.[0-9]+)+([.\-+][0-9A-Za-z.\-+]+)?$`)
+var concreteRelease = regexp.MustCompile(`^[0-9]+(\.[0-9]+)+([A-Za-z][0-9A-Za-z.\-+]*|[.\-+][0-9A-Za-z.\-+]+)?$`)
 
 // pinVersion keeps a version only when it is a single concrete release. A bare
 // major like "8" is NOT a real registry release (it's what "^8"/">=8" collapse
