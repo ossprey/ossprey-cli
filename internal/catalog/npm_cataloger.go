@@ -49,7 +49,7 @@ func (c *NpmResolveCataloger) Catalog(ctx context.Context, resolver file.Resolve
 
 // hasNpmLockfile reports whether dir already ships a lockfile syft can read.
 func hasNpmLockfile(dir string) bool {
-	for _, name := range []string{"package-lock.json", "npm-shrinkwrap.json", "yarn.lock"} {
+	for _, name := range []string{"package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml"} {
 		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
 			return true
 		}
