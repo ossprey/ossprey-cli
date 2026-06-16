@@ -45,8 +45,10 @@ func TestParsePackageJSONFile(t *testing.T) {
 	}
 	keys := keySet(got)
 
-	// version operators stripped, all dep groups merged
-	for _, want := range []string{"lodash@4.17.21", "react@18.2.0", "jest@29.0.0"} {
+	// exact pins kept (react), ranges/carets left versionless (lodash ^,
+	// jest >=) so a resolver/lockfile or the backend fills the real version;
+	// all dep groups merged
+	for _, want := range []string{"lodash@", "react@18.2.0", "jest@"} {
 		if !keys[want] {
 			t.Errorf("missing dependency %q; got %v", want, keys)
 		}
@@ -68,14 +70,14 @@ func TestParsePackageJSONFile(t *testing.T) {
 
 // Reproduces the npm 405: bootstrap pinned with a multi-bound range
 // ">=3.4.1 <4.0.0" produced pkg:npm/bootstrap@3.4.1 <4.0.0, which the npm
-// registry rejects with 405. The range must resolve to its in-range lower
-// bound (3.4.1) — never to the bare range and never drifting to the latest
-// (5.x) the backend would otherwise pull.
-func TestParsePackageJSONFile_RangeFloorPinned(t *testing.T) {
+// registry rejects with 405. A range must be emitted versionless (not a bare
+// range, not a guessed bound) so the npm lockfile cataloger / syft resolves the
+// real installed version and mergeVersionless folds this entry into it.
+func TestParsePackageJSONFile_RangeIsVersionless(t *testing.T) {
 	dir := t.TempDir()
 	body := `{
 		"name": "myapp",
-		"dependencies": {"bootstrap": ">=3.4.1 <4.0.0", "lodash": "^4.17.21"}
+		"dependencies": {"bootstrap": ">=3.4.1 <4.0.0", "left-pad": "1.3.0"}
 	}`
 	path := writeFile(t, dir, "package.json", body)
 
@@ -85,12 +87,12 @@ func TestParsePackageJSONFile_RangeFloorPinned(t *testing.T) {
 	}
 	keys := keySet(got)
 
-	if !keys["bootstrap@3.4.1"] {
-		t.Errorf("bootstrap should pin to range floor 3.4.1; got %v", keys)
+	if !keys["bootstrap@"] {
+		t.Errorf("bootstrap range should be versionless; got %v", keys)
 	}
-	// a clean caret release is still pinned
-	if !keys["lodash@4.17.21"] {
-		t.Errorf("lodash@4.17.21 should be kept; got %v", keys)
+	// an exact pin is the real installed version -> kept
+	if !keys["left-pad@1.3.0"] {
+		t.Errorf("left-pad@1.3.0 (exact) should be kept; got %v", keys)
 	}
 }
 
@@ -130,9 +132,9 @@ test = ["pytest==8.0.0"]
 	}
 	keys := keySet(got)
 
-	// pinned versions captured, lower-bound (>=) resolved to its floor,
+	// exact pins (==) captured, ranges (>=) left versionless,
 	// extras marker stripped from name, optional groups included
-	for _, want := range []string{"requests@2.31.0", "flask@3.0", "rich@13.0.0", "pytest@8.0.0"} {
+	for _, want := range []string{"requests@2.31.0", "flask@", "rich@13.0.0", "pytest@8.0.0"} {
 		if !keys[want] {
 			t.Errorf("missing %q; got %v", want, keys)
 		}
@@ -166,14 +168,15 @@ black = "23.0.0"
 	}
 	keys := keySet(got)
 
-	if !keys["requests@2.31.0"] {
-		t.Errorf("missing requests@2.31.0; got %v", keys)
+	// caret/range constraints left versionless; only the exact pin (black) kept
+	if !keys["requests@"] {
+		t.Errorf("requests (^) should be versionless; got %v", keys)
 	}
-	if !keys["django@4.2"] {
-		t.Errorf("missing django@4.2 (table form); got %v", keys)
+	if !keys["django@"] {
+		t.Errorf("django (>= table form) should be versionless; got %v", keys)
 	}
 	if !keys["black@23.0.0"] {
-		t.Errorf("missing dev-dependency black; got %v", keys)
+		t.Errorf("missing dev-dependency black (exact pin); got %v", keys)
 	}
 	// python constraint must never become a package
 	if _, ok := keys["python@3.11"]; ok {
@@ -188,10 +191,11 @@ func TestParsePEP508(t *testing.T) {
 		wantVer  string
 	}{
 		{"requests==2.31.0", "requests", "2.31.0"},
-		{"flask>=3.0", "flask", "3.0"},
-		{"django>=4.0,<5.0", "django", "4.0"},
+		{"flask>=3.0", "flask", ""},
+		{"django>=4.0,<5.0", "django", ""},
 		{"rich[jupyter]==13.0.0", "rich", "13.0.0"},
-		{`uvicorn>=0.30 ; python_version >= "3.8"`, "uvicorn", "0.30"},
+		{`uvicorn>=0.30 ; python_version >= "3.8"`, "uvicorn", ""},
+		{`anyio==4.2.0 ; python_version >= "3.8"`, "anyio", "4.2.0"},
 		{"numpy", "numpy", ""},
 		{"", "", ""},
 		{"# comment", "", ""},
@@ -210,10 +214,12 @@ func TestPoetryVersion(t *testing.T) {
 		in   any
 		want string
 	}{
-		{"string caret", "^2.31.0", "2.31.0"},
+		{"string caret -> versionless", "^2.31.0", ""},
 		{"string exact", "2.31.0", "2.31.0"},
-		{"string range", ">=1.0,<2.0", "1.0"},
-		{"table with version", map[string]any{"version": ">=4.2"}, "4.2"},
+		{"string equality", "==2.31.0", "2.31.0"},
+		{"string range -> versionless", ">=1.0,<2.0", ""},
+		{"table range -> versionless", map[string]any{"version": ">=4.2"}, ""},
+		{"table exact", map[string]any{"version": "4.2.0"}, "4.2.0"},
 		{"table without version", map[string]any{"extras": []any{"x"}}, ""},
 		{"unsupported type", 42, ""},
 	}
@@ -224,35 +230,35 @@ func TestPoetryVersion(t *testing.T) {
 	}
 }
 
-func TestFloorVersion(t *testing.T) {
+func TestExactVersion(t *testing.T) {
 	tests := map[string]string{
-		// single-operator constraints resolve to their own version
-		"^4.17.21": "4.17.21",
-		"~1.2.3":   "1.2.3",
-		">=2.0":    "2.0",
-		"==3.0":    "3.0",
-		"~=1.4.2":  "1.4.2",
-		"1.2.3":    "1.2.3",
-		"  ^1.0 ":  "1.0",
-		// multi-bound ranges resolve to the LOWER bound, never the upper
-		">=3.4.1 <4.0.0": "3.4.1",
-		">=1.0,<2.0":     "1.0",
-		"1.2.3 - 2.3.4":  "1.2.3",
-		// upper-bound-only / exclusions have no floor -> versionless
-		"<4.0.0":  "",
-		"<=2.0":   "",
-		"!=1.0.0": "",
-		// wildcards / unpinnable -> versionless
-		"*":   "",
-		"1.x": "",
-		"":    "",
-		// bare-major lower bound is not a real release -> versionless
-		">=8": "",
-		"^8":  "",
+		// exact pins are kept (bare concrete version or equality operator)
+		"1.2.3":   "1.2.3",
+		"4.17.21": "4.17.21",
+		"==3.0.0": "3.0.0",
+		"=1.2.3":  "1.2.3", // npm loose exact
+		"===1.0":  "1.0",   // PEP 440 arbitrary equality
+		" 1.0.0 ": "1.0.0",
+		// every range/caret/tilde/compatible-release -> versionless
+		"^4.17.21":       "",
+		"~1.2.3":         "",
+		"~=1.4.2":        "",
+		">=2.0":          "",
+		">=3.4.1 <4.0.0": "",
+		">=1.0,<2.0":     "",
+		"<4.0.0":         "",
+		"!=1.0.0":        "",
+		// wildcards / tags / unpinnable -> versionless
+		"*":      "",
+		"1.x":    "",
+		"latest": "",
+		"":       "",
+		// bare major is not a real release even as an exact-looking value
+		"8": "",
 	}
 	for in, want := range tests {
-		if got := floorVersion(in); got != want {
-			t.Errorf("floorVersion(%q) = %q, want %q", in, got, want)
+		if got := exactVersion(in); got != want {
+			t.Errorf("exactVersion(%q) = %q, want %q", in, got, want)
 		}
 	}
 }
@@ -319,9 +325,13 @@ requests = "^2.31.0"
 	if keys["click@8"] || keys["rich@13"] {
 		t.Errorf("major-only pin leaked a bogus version: %v", keys)
 	}
-	// a full version behind a caret is still a real release -> kept
-	if !keys["requests@2.31.0"] {
-		t.Errorf("requests@2.31.0 should be kept; got %v", keys)
+	// a caret constraint is a range, not an exact pin -> versionless (a
+	// resolver/lockfile or the backend supplies the real version)
+	if !keys["requests@"] {
+		t.Errorf("requests (^) should be versionless; got %v", keys)
+	}
+	if keys["requests@2.31.0"] {
+		t.Errorf("caret should not pin a guessed version: %v", keys)
 	}
 }
 
@@ -530,6 +540,26 @@ func TestIsRootManifestPackage(t *testing.T) {
 		if got := isRootManifestPackage(p); got != tt.want {
 			t.Errorf("isRootManifestPackage(%q) = %v, want %v", tt.path, got, tt.want)
 		}
+	}
+}
+
+func TestIsUnpublishedNpmLockEntry(t *testing.T) {
+	// dep with a registry tarball -> published, keep
+	dep := pkg.Package{Metadata: pkg.NpmPackageLockEntry{
+		Resolved: "https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz",
+	}}
+	if isUnpublishedNpmLockEntry(dep) {
+		t.Error("dep with resolved tarball should not be treated as unpublished")
+	}
+	// root project / file: / link: entry -> empty resolved, drop
+	root := pkg.Package{Metadata: pkg.NpmPackageLockEntry{Resolved: ""}}
+	if !isUnpublishedNpmLockEntry(root) {
+		t.Error("lock entry with empty resolved should be unpublished")
+	}
+	// non-lock package (e.g. our package.json cataloger output) -> not applicable
+	other := pkg.Package{Metadata: pkg.NpmPackage{}}
+	if isUnpublishedNpmLockEntry(other) {
+		t.Error("non-lock metadata should never be flagged")
 	}
 }
 

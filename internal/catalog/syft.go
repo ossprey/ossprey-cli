@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/anchore/syft/syft/pkg"
 	"github.com/anchore/syft/syft/pkg/cataloger/javascript"
@@ -62,6 +63,10 @@ func Catalog(ctx context.Context, path string) ([]Package, error) {
 		NewSetupPyCataloger(absRoot),
 		// Custom: direct-deps fallback for pyproject.toml when uv is missing.
 		NewPyProjectCataloger(absRoot),
+		// Custom: resolve npm ranges to concrete versions via `npm install
+		// --package-lock-only` when no lockfile is committed (npm analogue of
+		// uv). The package.json fallback below then folds in versionless.
+		NewNpmResolveCataloger(absRoot),
 		// Custom: direct-deps fallback for package.json (syft only emits the
 		// root project from package.json, not its deps).
 		NewPackageJSONCataloger(absRoot),
@@ -86,6 +91,9 @@ func Catalog(ctx context.Context, path string) ([]Package, error) {
 				continue
 			}
 			if !isOspreyCataloger && isRootManifestPackage(p) {
+				continue
+			}
+			if isUnpublishedNpmLockEntry(p) {
 				continue
 			}
 			key := dedupKey(t, p.Name, p.Version)
@@ -181,6 +189,7 @@ func isOspreyCataloger(name string) bool {
 	case "ossprey-uv-cataloger",
 		"ossprey-setuppy-cataloger",
 		"ossprey-pyproject-cataloger",
+		"ossprey-npm-cataloger",
 		"ossprey-packagejson-cataloger":
 		return true
 	}
@@ -210,6 +219,16 @@ func isRootManifestPackage(p pkg.Package) bool {
 		}
 	}
 	return false
+}
+
+// isUnpublishedNpmLockEntry reports whether p is a package-lock.json entry with
+// no registry tarball ("resolved" is empty): the root project itself, or a
+// file:/link:/workspace: dependency. None are fetchable from the npm registry,
+// so emitting them only yields spurious NOT_FOUND findings (e.g. the root
+// project app@1.0.0 leaking out of syft's lock cataloger).
+func isUnpublishedNpmLockEntry(p pkg.Package) bool {
+	m, ok := p.Metadata.(pkg.NpmPackageLockEntry)
+	return ok && strings.TrimSpace(m.Resolved) == ""
 }
 
 func locations(p pkg.Package) []string {

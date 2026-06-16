@@ -57,7 +57,7 @@ func parsePackageJSONFile(path string, loc file.Location) ([]pkg.Package, error)
 		if name == "" || name == pj.Name {
 			return
 		}
-		version := floorVersion(raw)
+		version := exactVersion(raw)
 		key := name + "@" + version
 		if _, ok := seen[key]; ok {
 			return
