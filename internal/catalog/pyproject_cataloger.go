@@ -44,7 +44,7 @@ type pyproject struct {
 	} `toml:"tool"`
 }
 
-var pep508 = regexp.MustCompile(`^([A-Za-z0-9_.\-]+)(?:\[[^\]]+\])?\s*(?:==\s*([0-9A-Za-z._+!\-]+))?`)
+var pep508 = regexp.MustCompile(`^([A-Za-z0-9_.\-]+)(?:\[[^\]]+\])?\s*(.*)$`)
 
 func parsePyProjectFile(path string, loc file.Location) ([]pkg.Package, error) {
 	data, err := os.ReadFile(path)
@@ -109,47 +109,72 @@ func parsePEP508(spec string) (string, string) {
 	if spec == "" || strings.HasPrefix(spec, "#") {
 		return "", ""
 	}
+	// Drop PEP 508 environment markers ("; python_version >= ...") before
+	// exactVersion runs — the marker carries its own comparators that would
+	// otherwise be mistaken for the dependency's version.
+	if i := strings.IndexByte(spec, ';'); i >= 0 {
+		spec = spec[:i]
+	}
 	m := pep508.FindStringSubmatch(spec)
 	if m == nil {
 		return "", ""
 	}
-	return m[1], m[2]
+	return m[1], exactVersion(m[2])
 }
 
 func poetryVersion(v any) string {
 	switch t := v.(type) {
 	case string:
-		return stripVersionOp(t)
+		return exactVersion(t)
 	case map[string]any:
 		if s, ok := t["version"].(string); ok {
-			return stripVersionOp(s)
+			return exactVersion(s)
 		}
 	}
 	return ""
 }
 
-func stripVersionOp(s string) string {
-	s = strings.TrimSpace(s)
-	for _, prefix := range []string{"^", "~", ">=", "<=", ">", "<", "==", "!="} {
-		if strings.HasPrefix(s, prefix) {
-			return strings.TrimSpace(s[len(prefix):])
+// exactVersion returns the version ONLY when spec pins a single exact release —
+// a bare concrete version ("4.17.21", poetry's default) or an equality
+// constraint ("==1.2.3", npm "=1.2.3", PEP 440 "===1.0"). Every range, caret,
+// tilde, compatible-release, wildcard or tag ("^1.2.3", "~1.2", ">=3 <4", "1.x",
+// "*", "latest") returns "" so the entry stays versionless.
+//
+// A versionless entry folds (via mergeVersionless) into whatever a real
+// resolver — uv, the npm lockfile cataloger, or syft — pins it to, or is
+// resolved to latest by the backend. Guessing a version here (e.g. a range's
+// lower bound) instead yields a concrete value that disagrees with the resolved
+// one; the merge only collapses versionless↔versioned, so the guess survives as
+// a duplicate component on a version the project never installs.
+func exactVersion(spec string) string {
+	s := strings.TrimSpace(spec)
+	for _, op := range []string{"===", "==", "="} {
+		if strings.HasPrefix(s, op) {
+			s = strings.TrimSpace(s[len(op):])
+			break
 		}
 	}
-	return s
+	return pinVersion(s) // "" unless s is itself a single concrete release
 }
 
-// pinVersion keeps a version only when it looks like a concrete release
-// (contains a dot, e.g. "8.1.7" or "4.2"). A bare major like "8" — what a
-// range/caret constraint such as "^8", ">=8" or poetry "8" collapses to once
-// the operator is stripped — is NOT a real registry release. Pinning it
-// produces purls like pkg:pypi/click@8 that 404 on the registry and surface as
-// spurious NOT_FOUND. Treat those as unpinned ("") so registry resolution and
-// the versionless merge fold them into the real package instead.
+// concreteRelease matches a single pinned release: digits with at least one
+// dot ("8.1.7", "4.2"), plus an optional prerelease/build suffix
+// ("1.0.0-beta.1", "1.0+build"). It deliberately rejects bare majors ("8"),
+// wildcards ("1.x", "*") and multi-constraint ranges ("3.4.1 <4.0.0",
+// "1.0,<2.0") — none of which are real registry releases.
+var concreteRelease = regexp.MustCompile(`^[0-9]+(\.[0-9]+)+([A-Za-z][0-9A-Za-z.\-+]*|[.\-+][0-9A-Za-z.\-+]+)?$`)
+
+// pinVersion keeps a version only when it is a single concrete release. A bare
+// major like "8" is NOT a real registry release (it's what "^8"/">=8" collapse
+// to once the operator is stripped) and pinning it produces purls like
+// pkg:pypi/click@8 that 404. Anything that isn't a clean release returns ""
+// (versionless) so registry resolution and the versionless merge fold it into
+// the real package instead.
 func pinVersion(v string) string {
-	if !strings.Contains(v, ".") {
+	if !concreteRelease.MatchString(strings.TrimSpace(v)) {
 		return ""
 	}
-	return v
+	return strings.TrimSpace(v)
 }
 
 func normalizeName(s string) string {
