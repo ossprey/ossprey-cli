@@ -3,6 +3,7 @@ package catalog
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 
 	"github.com/anchore/syft/syft/file"
 	"github.com/anchore/syft/syft/pkg"
@@ -10,6 +11,11 @@ import (
 
 // fileParser converts one matched manifest into syft packages.
 type fileParser func(absPath string, loc file.Location) ([]pkg.Package, error)
+
+// isVendoredPath reports whether p sits inside a vendored dependency tree.
+func isVendoredPath(p string) bool {
+	return strings.Contains(p, "node_modules/")
+}
 
 // catalogByGlob runs parse against every file matching glob under the
 // resolver's root, dedup'd by (name, version). Shared by every ossprey-*
@@ -22,6 +28,10 @@ func catalogByGlob(resolver file.Resolver, root, glob, label string, parse fileP
 	seen := make(map[string]struct{})
 	var out []pkg.Package
 	for _, loc := range locs {
+		// Skip vendored dependencies.
+		if isVendoredPath(loc.RealPath) {
+			continue
+		}
 		pkgs, err := parse(filepath.Join(root, loc.RealPath), loc)
 		if err != nil || len(pkgs) == 0 {
 			continue
