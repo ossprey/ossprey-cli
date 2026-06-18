@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime/debug"
 
 	"github.com/spf13/cobra"
 
@@ -21,6 +22,13 @@ var version = "0.0.0-dev"
 const defaultAPIURL = "https://api.ossprey.com"
 
 func main() {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "ossprey: fatal: %v\n%s\n", r, debug.Stack())
+			os.Exit(2)
+		}
+	}()
+
 	root := &cobra.Command{
 		Use:           "ossprey",
 		Short:         "Ossprey supply-chain scanner",
