@@ -15,7 +15,7 @@ import (
 )
 
 func catalogConcurrency() int {
-	if n, err := strconv.Atoi(os.Getenv("OSSPREY_SCAN_CONCURRENCY")); err == nil && n > 0 {
+	if n, err := strconv.Atoi(strings.TrimSpace(os.Getenv("OSSPREY_SCAN_CONCURRENCY"))); err == nil && n > 0 {
 		return n
 	}
 	return 8
