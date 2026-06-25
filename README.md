@@ -141,7 +141,7 @@ any are flagged, the install is blocked (exit `1`) and the real package manager
 is never invoked; otherwise the command is forwarded unchanged.
 
 ```sh
-ossprey npm install foo@1.2.3
+ossprey npm install foo@1.2.3 bar@2.0.0   # checks each named package
 ossprey yarn add foo@1.2.3
 ossprey pip install foo==1.2.3
 ossprey poetry add foo
@@ -152,12 +152,25 @@ Supported managers: `npm`, `yarn`, `pip`, `poetry`, `uv`. Non-install
 subcommands (`npm run`, `pip list`, …) are forwarded straight through with no
 check.
 
-**Scope:** only the packages named on the command line are checked — transitive
-dependencies are **not** resolved here. Run `ossprey scan` after install for
-full-tree coverage. Tokens with no parseable package name (`pip install -r
-requirements.txt`, VCS/URL installs) are forwarded unchecked with a warning. If
-the registry can't be reached to resolve an unpinned version, that package is
-skipped (fail-open) so a registry outage never blocks development.
+**Two modes, picked automatically:**
+
+- **Named packages** (`ossprey npm install foo bar`, `ossprey pip install
+  foo==1 bar`): every package named on the command line is checked. Multiple
+  packages, flags, flag-values, local paths, archives and VCS/URL targets are
+  all handled — only the real registry packages are checked, the rest are noted
+  and forwarded. Transitive dependencies are **not** resolved here; run `ossprey
+  scan` after install for full-tree coverage.
+- **Manifest install** (bare `ossprey npm install`, `npm ci`, `yarn install`,
+  `poetry install`, `uv sync`, or `pip install -r requirements.txt`): no
+  packages are named, so the manager installs from the project's
+  manifest/lockfile. The forwarder scans the current directory and checks every
+  declared dependency before forwarding — it does **not** fall through
+  unchecked.
+
+If the registry can't be reached to resolve an unpinned named version, that
+package is skipped (fail-open) so a registry outage never blocks development.
+An install whose only targets are local paths or URLs (nothing checkable and no
+manifest to scan) is forwarded with a warning.
 
 Configuration comes from the environment (flag parsing is disabled so every
 argument reaches the real manager):
