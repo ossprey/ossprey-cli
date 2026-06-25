@@ -38,10 +38,17 @@ func (c *UVCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]pk
 	if err != nil {
 		return nil, nil, nil // no uv on PATH — silently skip
 	}
+
+	cache, err := os.MkdirTemp("", "ossprey-uv-cache-")
+	if err != nil {
+		return nil, nil, fmt.Errorf("uv cache: %w", err)
+	}
+	defer os.RemoveAll(cache)
+
 	parse := func(absPath string, loc file.Location) ([]pkg.Package, error) {
 		dir := filepath.Dir(absPath)
 		args := uvArgsForPyProject(dir)
-		return runUV(ctx, uv, dir, args, loc)
+		return runUV(ctx, uv, cache, dir, args, loc)
 	}
 	out, err := catalogByGlob(resolver, c.root, "**/pyproject.toml", "uv", parse)
 	return out, nil, err
@@ -69,8 +76,9 @@ func uvArgsForPyProject(dir string) []string {
 	}
 }
 
-func runUV(ctx context.Context, uv, dir string, args []string, loc file.Location) ([]pkg.Package, error) {
+func runUV(ctx context.Context, uv, cache, dir string, args []string, loc file.Location) ([]pkg.Package, error) {
 	cmd := exec.CommandContext(ctx, uv, args...)
+	cmd.Env = append(os.Environ(), "UV_CACHE_DIR="+cache)
 	stdout, err := cmd.Output()
 	if err != nil {
 		var ee *exec.ExitError

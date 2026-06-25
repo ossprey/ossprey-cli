@@ -36,12 +36,19 @@ func (c *NpmResolveCataloger) Catalog(ctx context.Context, resolver file.Resolve
 	if err != nil {
 		return nil, nil, nil // no npm on PATH — silently skip
 	}
+	// One shared cache for the whole scan
+	cache, err := os.MkdirTemp("", "ossprey-npm-cache-")
+	if err != nil {
+		return nil, nil, fmt.Errorf("npm cache: %w", err)
+	}
+	defer os.RemoveAll(cache)
+
 	parse := func(absPath string, loc file.Location) ([]pkg.Package, error) {
 		dir := filepath.Dir(absPath)
 		if hasNpmLockfile(dir) {
 			return nil, nil // syft's lock cataloger already resolves this project
 		}
-		return runNpmResolve(ctx, npm, absPath, loc)
+		return runNpmResolve(ctx, npm, cache, absPath, loc)
 	}
 	out, err := catalogByGlob(resolver, c.root, "**/package.json", "npm", parse)
 	return out, nil, err
@@ -61,8 +68,9 @@ func hasNpmLockfile(dir string) bool {
 // with `npm install --package-lock-only` (resolution only — no node_modules,
 // no install scripts), and parses the resolved versions. The temp dir keeps the
 // user's working tree clean; --ignore-scripts guarantees we never execute code
-// from the (potentially malicious) dependency tree we are about to scan.
-func runNpmResolve(ctx context.Context, npm, packageJSON string, loc file.Location) ([]pkg.Package, error) {
+// from the (potentially malicious) dependency tree we are about to scan. cache
+// is the scan-wide shared npm cache.
+func runNpmResolve(ctx context.Context, npm, cache, packageJSON string, loc file.Location) ([]pkg.Package, error) {
 	tmp, err := os.MkdirTemp("", "ossprey-npm-")
 	if err != nil {
 		return nil, err
@@ -85,9 +93,7 @@ func runNpmResolve(ctx context.Context, npm, packageJSON string, loc file.Locati
 		"--no-update-notifier",
 	)
 	cmd.Dir = tmp
-	// Keep npm's cache inside the temp dir so we neither touch the user's cache
-	// nor fail when HOME is read-only (Lambda).
-	cmd.Env = append(os.Environ(), "npm_config_cache="+filepath.Join(tmp, ".npm-cache"))
+	cmd.Env = append(os.Environ(), "npm_config_cache="+cache)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("npm install --package-lock-only: %w: %s", err, strings.TrimSpace(string(out)))
 	}
