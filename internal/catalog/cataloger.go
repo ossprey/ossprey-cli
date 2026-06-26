@@ -55,8 +55,16 @@ func catalogByGlob(resolver file.Resolver, root, glob, label string, parse fileP
 		i, loc := i, loc
 		g.Go(func() error {
 			pkgs, err := parse(filepath.Join(root, loc.RealPath), loc)
-			if err != nil || len(pkgs) == 0 {
-				return nil // per-file errors are non-fatal, as before
+			if err != nil {
+				// Non-fatal, but surface it: a swallowed uv/npm failure (e.g.
+				// the host Python is too old to resolve the pins) otherwise
+				// looks identical to "nothing found". Warn to stderr — the SBOM
+				// goes to stdout, so this never corrupts --local output.
+				fmt.Fprintf(os.Stderr, "ossprey: %s cataloger: %v\n", label, err)
+				return nil
+			}
+			if len(pkgs) == 0 {
+				return nil
 			}
 			mu.Lock()
 			results = append(results, result{idx: i, pkgs: pkgs})

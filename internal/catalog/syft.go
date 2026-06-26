@@ -61,6 +61,9 @@ func Catalog(ctx context.Context, path string) ([]Package, error) {
 		// Custom: resolve transitives from setup.py when pyproject is absent
 		// or lacks a [project] table (legacy setuptools projects).
 		NewSetupPyCataloger(absRoot),
+		// Custom: resolve transitives from requirements.txt via uv (syft's
+		// built-in reads the file literally — direct deps only).
+		NewRequirementsCataloger(absRoot),
 		// Custom: direct-deps fallback for pyproject.toml when uv is missing.
 		NewPyProjectCataloger(absRoot),
 		// Custom: resolve npm ranges to concrete versions via `npm install
@@ -188,6 +191,7 @@ func isOspreyCataloger(name string) bool {
 	switch name {
 	case "ossprey-uv-cataloger",
 		"ossprey-setuppy-cataloger",
+		"ossprey-requirements-cataloger",
 		"ossprey-pyproject-cataloger",
 		"ossprey-npm-cataloger",
 		"ossprey-packagejson-cataloger":
