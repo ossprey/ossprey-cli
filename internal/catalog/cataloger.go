@@ -2,12 +2,24 @@ package catalog
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/anchore/syft/syft/file"
 	"github.com/anchore/syft/syft/pkg"
+	"golang.org/x/sync/errgroup"
 )
+
+func catalogConcurrency() int {
+	if n, err := strconv.Atoi(strings.TrimSpace(os.Getenv("OSSPREY_SCAN_CONCURRENCY"))); err == nil && n > 0 {
+		return n
+	}
+	return 8
+}
 
 // fileParser converts one matched manifest into syft packages.
 type fileParser func(absPath string, loc file.Location) ([]pkg.Package, error)
@@ -25,18 +37,40 @@ func catalogByGlob(resolver file.Resolver, root, glob, label string, parse fileP
 	if err != nil {
 		return nil, fmt.Errorf("%s cataloger: glob: %w", label, err)
 	}
-	seen := make(map[string]struct{})
-	var out []pkg.Package
-	for _, loc := range locs {
-		// Skip vendored dependencies.
+
+	type result struct {
+		idx  int
+		pkgs []pkg.Package
+	}
+	var (
+		mu      sync.Mutex
+		results []result
+	)
+	g := new(errgroup.Group)
+	g.SetLimit(catalogConcurrency())
+	for i, loc := range locs {
 		if isVendoredPath(loc.RealPath) {
 			continue
 		}
-		pkgs, err := parse(filepath.Join(root, loc.RealPath), loc)
-		if err != nil || len(pkgs) == 0 {
-			continue
-		}
-		for _, p := range pkgs {
+		i, loc := i, loc
+		g.Go(func() error {
+			pkgs, err := parse(filepath.Join(root, loc.RealPath), loc)
+			if err != nil || len(pkgs) == 0 {
+				return nil // per-file errors are non-fatal, as before
+			}
+			mu.Lock()
+			results = append(results, result{idx: i, pkgs: pkgs})
+			mu.Unlock()
+			return nil
+		})
+	}
+	_ = g.Wait() // workers never return non-nil; Wait is just the barrier
+
+	sort.Slice(results, func(a, b int) bool { return results[a].idx < results[b].idx })
+	seen := make(map[string]struct{})
+	var out []pkg.Package
+	for _, r := range results {
+		for _, p := range r.pkgs {
 			key := p.Name + "@" + p.Version
 			if _, ok := seen[key]; ok {
 				continue
