@@ -1,0 +1,13 @@
+name: PR Lint
+
+on:
+  pull_request:
+    types: [opened, edited, reopened]
+
+jobs:
+  lint-title:
+    runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'self-hosted' }}
+    steps:
+      - uses: ossprey/cicd/pr-lint@main
+        with:
+          pr-title: ${{ github.event.pull_request.title }}
