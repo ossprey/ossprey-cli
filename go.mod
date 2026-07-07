@@ -1,6 +1,6 @@
 module github.com/ossprey/ossprey-cli
 
-go 1.25.8
+go 1.26.4
 
 require (
 	github.com/BurntSushi/toml v1.6.0
@@ -75,7 +75,7 @@ require (
 	github.com/wagoodman/go-progress v0.0.0-20260303201901-10176f79b2c0 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
-	golang.org/x/sys v0.43.0 // indirect
+	golang.org/x/sys v0.44.0 // indirect
 	golang.org/x/term v0.42.0 // indirect
 	golang.org/x/text v0.36.0 // indirect
 	golang.org/x/xerrors v0.0.0-20231012003039-104605ab7028 // indirect
