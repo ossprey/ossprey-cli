@@ -50,13 +50,21 @@ func Run(ctx context.Context, opts Options) (*ossbom.SBOM, error) {
 	sbom.Name = project
 
 	for _, p := range pkgs {
-		sbom.AddComponent(ossbom.Component{
+		c := ossbom.Component{
 			Name:     p.Name,
 			Version:  p.Version,
 			Type:     p.Type,
 			Source:   p.Source,
 			Location: p.Locations,
-		})
+		}
+		// Flag locally-defined packages (uv path/workspace sources, poetry path
+		// deps) so the platform can filter them before scanning (OSS-1389). The
+		// flag rides in metadata because it round-trips through the OSSBOM the
+		// platform parses from `--local` output.
+		if p.Local {
+			c.Metadata = map[string]any{"local": true}
+		}
+		sbom.AddComponent(c)
 	}
 
 	return sbom, nil

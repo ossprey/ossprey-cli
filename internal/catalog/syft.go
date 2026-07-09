@@ -19,6 +19,12 @@ type Package struct {
 	Type      string
 	Source    []string
 	Locations []string
+	// Local marks a package declared as local code (a uv path/workspace source
+	// or a poetry path dependency) rather than a public-registry package. The
+	// platform filters these out before scanning — they are the repo's own code,
+	// never published, so scanning them only yields spurious NOT_FOUND warnings
+	// (OSS-1389).
+	Local bool
 }
 
 // Catalog returns Python + JavaScript packages under path.
@@ -114,7 +120,27 @@ func Catalog(ctx context.Context, path string) ([]Package, error) {
 		}
 	}
 
-	return mergeVersionless(out), nil
+	merged := mergeVersionless(out)
+	markLocalPackages(merged, findLocalPackageNames(resolver, absRoot))
+	return merged, nil
+}
+
+// markLocalPackages sets Local=true on every pypi package whose name matches a
+// locally-declared package (uv path/workspace source or poetry path dep). Names
+// are compared PEP 503-canonically so casing/separator differences between the
+// manifest and the cataloguer output don't matter. No-op when local is empty.
+func markLocalPackages(pkgs []Package, local map[string]struct{}) {
+	if len(local) == 0 {
+		return
+	}
+	for i := range pkgs {
+		if pkgs[i].Type != "pypi" {
+			continue
+		}
+		if _, ok := local[canonicalPackageName(pkgs[i].Name)]; ok {
+			pkgs[i].Local = true
+		}
+	}
 }
 
 // mergeVersionless collapses a package emitted both with and without a version.

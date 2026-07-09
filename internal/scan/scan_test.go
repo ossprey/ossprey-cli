@@ -3,6 +3,7 @@ package scan
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -102,6 +103,48 @@ func TestRun_Fixtures(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestRun_FlagsLocalPackages is the OSS-1389 end-to-end: internal packages
+// wired to local paths in [tool.uv.sources] are catalogued as pypi components
+// and flagged metadata.local=true, while a real registry dep is not.
+func TestRun_FlagsLocalPackages(t *testing.T) {
+	dir := t.TempDir()
+	manifest := `[project]
+name = "app"
+dependencies = ["common", "models", "requests>=2.0"]
+
+[tool.uv.sources]
+common = { path = "../common", editable = true }
+models = { path = "../models", editable = true }
+`
+	if err := os.WriteFile(filepath.Join(dir, "pyproject.toml"), []byte(manifest), 0o644); err != nil {
+		t.Fatalf("write pyproject: %v", err)
+	}
+
+	sbom, err := Run(context.Background(), Options{Path: dir})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	isLocal := func(c ossbom.Component) bool {
+		v, ok := c.Metadata["local"].(bool)
+		return ok && v
+	}
+	local := map[string]bool{}
+	for _, c := range sbom.Components {
+		if isLocal(c) {
+			local[strings.ToLower(c.Name)] = true
+		}
+		if strings.ToLower(c.Name) == "requests" && isLocal(c) {
+			t.Error("requests (registry dep) must not be flagged local")
+		}
+	}
+	for _, want := range []string{"common", "models"} {
+		if !local[want] {
+			t.Errorf("expected %q flagged local; components=%v", want, componentNames(sbom))
+		}
 	}
 }
 
