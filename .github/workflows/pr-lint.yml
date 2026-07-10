@@ -4,6 +4,8 @@ on:
   pull_request:
     types: [opened, edited, reopened]
 
+permissions: {}
+
 jobs:
   lint-title:
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'self-hosted' }}
