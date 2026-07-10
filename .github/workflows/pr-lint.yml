@@ -8,6 +8,13 @@ jobs:
   lint-title:
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'self-hosted' }}
     steps:
-      - uses: ossprey/cicd/pr-lint@main
-        with:
-          pr-title: ${{ github.event.pull_request.title }}
+      - name: Validate PR title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          pattern='^[a-z]+(\([a-z0-9._/-]+\))?!?: .+'
+
+          if [[ ! "$PR_TITLE" =~ $pattern ]]; then
+            echo "::error title=Invalid pull request title::PR titles must follow Conventional Commits, for example 'fix: handle nil value' or 'feat(cli): add json output'."
+            exit 1
+          fi
