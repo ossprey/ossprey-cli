@@ -5,9 +5,28 @@ supply-chain malware platform. It catalogues your project's dependencies into
 an OSSBOM, submits it to the Ossprey API, and fails the build if any of those
 packages are known to contain malware.
 
+> **You need an Ossprey API key to run scans.** Sign up for a free account at
+> [ossprey.com](https://ossprey.com) to get one, then provide it via
+> `OSSPREY_API_KEY` (see [Authentication](#authentication)). The `--local` and
+> `--dry-run-*` modes work without a key.
+
 Today the CLI covers Python and JavaScript projects via static parsing of the
 manifests and lockfiles already in your repo — no package installs, no
 sandbox, no virtualenv.
+
+## Contents
+
+- [Install](#install) — [one-liner](#one-liner-linux--macos) · [manual download](#manual-download) · [from source](#from-source)
+- [Quick start](#quick-start)
+- [Usage](#usage)
+- [Authentication](#authentication)
+- [`check` — scan named packages](#check--scan-named-packages)
+- [Package-manager forwarder](#package-manager-forwarder) — check before install for `npm` / `yarn` / `pip` / `poetry` / `uv`
+- [Supported ecosystems](#supported-ecosystems)
+- [CI usage](#ci-usage)
+- [Output](#output)
+- [Status](#status)
+- [Support](#support)
 
 ## Install
 
