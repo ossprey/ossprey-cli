@@ -15,6 +15,9 @@ import (
 type Options struct {
 	Path    string
 	Verbose bool
+	// SkipVersionLookup disables the registry lookup that resolves unpinned
+	// components to their latest published version, leaving them versionless.
+	SkipVersionLookup bool
 }
 
 // ErrNoComponents is returned by InjectTestVulnerability when nothing was catalogued.
@@ -27,7 +30,9 @@ func Run(ctx context.Context, opts Options) (*ossbom.SBOM, error) {
 		return nil, fmt.Errorf("scan path: %w", err)
 	}
 
-	pkgs, err := catalog.Catalog(ctx, opts.Path)
+	pkgs, err := catalog.Catalog(ctx, opts.Path, catalog.Options{
+		SkipVersionLookup: opts.SkipVersionLookup,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("catalog: %w", err)
 	}

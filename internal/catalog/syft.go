@@ -31,6 +31,15 @@ type Package struct {
 	Local bool
 }
 
+// Options tunes a Catalog run.
+type Options struct {
+	// SkipVersionLookup disables the registry lookup that fills a concrete
+	// version for unpinned components. When set, a component we can't pin from a
+	// manifest/lockfile is left versionless (no network calls) instead of
+	// defaulting to its latest published release.
+	SkipVersionLookup bool
+}
+
 // Catalog returns Python + JavaScript packages under path.
 //
 // Bypasses syft.CreateSBOM (which transitively imports every cataloger Anchore
@@ -41,7 +50,7 @@ type Package struct {
 //
 // All catalogers run unconditionally. Output is deduped by (name, version,
 // type) to absorb overlap between syft + uv + parsers.
-func Catalog(ctx context.Context, path string) ([]Package, error) {
+func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) {
 	absRoot, err := filepath.Abs(path)
 	if err != nil {
 		return nil, fmt.Errorf("resolve path: %w", err)
@@ -126,7 +135,7 @@ func Catalog(ctx context.Context, path string) ([]Package, error) {
 
 	merged := mergeVersionless(out)
 	markLocalPackages(merged, findLocalPackageNames(resolver, absRoot))
-	resolveVersionless(ctx, merged)
+	resolveVersionless(ctx, merged, opts)
 	return merged, nil
 }
 
@@ -151,10 +160,11 @@ var resolveLatestFn = registry.ResolveLatest
 //     component versionless, with a warning to stderr. The SBOM goes to stdout,
 //     so the warning never corrupts `--local` output.
 //
-// Set OSSPREY_RESOLVE_LATEST=0 (or false) to skip resolution entirely for a
-// fully offline catalog.
-func resolveVersionless(ctx context.Context, pkgs []Package) {
-	if !resolveLatestEnabled() {
+// Resolution is skipped entirely — leaving unpinned components versionless —
+// when opts.SkipVersionLookup is set (the `scan --no-version-lookup` flag) or
+// OSSPREY_RESOLVE_LATEST is off, for a fully offline catalog.
+func resolveVersionless(ctx context.Context, pkgs []Package, opts Options) {
+	if opts.SkipVersionLookup || !resolveLatestEnabled() {
 		return
 	}
 	g := new(errgroup.Group)

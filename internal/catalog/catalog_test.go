@@ -544,7 +544,7 @@ func TestResolveVersionless(t *testing.T) {
 		{Name: "mycode", Version: "", Type: "pypi", Local: true}, // local -> skipped
 		{Name: "ghost", Version: "", Type: "pypi"},               // resolver fails -> stays versionless
 	}
-	resolveVersionless(context.Background(), pkgs)
+	resolveVersionless(context.Background(), pkgs, Options{})
 
 	byName := map[string]Package{}
 	for _, p := range pkgs {
@@ -572,22 +572,35 @@ func TestResolveVersionless(t *testing.T) {
 }
 
 func TestResolveVersionless_Disabled(t *testing.T) {
-	t.Setenv("OSSPREY_RESOLVE_LATEST", "0")
-
-	var calls int
-	withResolveLatest(t, func(_ context.Context, _, _ string) (string, error) {
-		calls++
-		return "9.9.9", nil
-	})
-
-	pkgs := []Package{{Name: "lodash", Version: "", Type: "npm"}}
-	resolveVersionless(context.Background(), pkgs)
-
-	if calls != 0 {
-		t.Errorf("resolution should be skipped when disabled; got %d calls", calls)
+	// Both the env var and the SkipVersionLookup flag must leave components
+	// versionless without ever calling the registry.
+	cases := map[string]struct {
+		env  string
+		opts Options
+	}{
+		"env var off":      {env: "0", opts: Options{}},
+		"skip-lookup flag": {env: "", opts: Options{SkipVersionLookup: true}},
 	}
-	if pkgs[0].Version != "" {
-		t.Errorf("version should stay empty when disabled, got %q", pkgs[0].Version)
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("OSSPREY_RESOLVE_LATEST", tc.env)
+
+			var calls int
+			withResolveLatest(t, func(_ context.Context, _, _ string) (string, error) {
+				calls++
+				return "9.9.9", nil
+			})
+
+			pkgs := []Package{{Name: "lodash", Version: "", Type: "npm"}}
+			resolveVersionless(context.Background(), pkgs, tc.opts)
+
+			if calls != 0 {
+				t.Errorf("resolution should be skipped; got %d calls", calls)
+			}
+			if pkgs[0].Version != "" {
+				t.Errorf("version should stay empty, got %q", pkgs[0].Version)
+			}
+		})
 	}
 }
 
