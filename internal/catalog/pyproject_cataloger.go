@@ -141,11 +141,12 @@ func poetryVersion(v any) string {
 // "*", "latest") returns "" so the entry stays versionless.
 //
 // A versionless entry folds (via mergeVersionless) into whatever a real
-// resolver — uv, the npm lockfile cataloger, or syft — pins it to, or is
-// resolved to latest by the backend. Guessing a version here (e.g. a range's
-// lower bound) instead yields a concrete value that disagrees with the resolved
-// one; the merge only collapses versionless↔versioned, so the guess survives as
-// a duplicate component on a version the project never installs.
+// resolver — uv, the npm lockfile cataloger, or syft — pins it to; anything
+// still versionless afterward defaults to the latest published release (see
+// resolveVersionless). Guessing a version here (e.g. a range's lower bound)
+// instead yields a concrete value that disagrees with the resolved one; the
+// merge only collapses versionless↔versioned, so the guess survives as a
+// duplicate component on a version the project never installs.
 func exactVersion(spec string) string {
 	s := strings.TrimSpace(spec)
 	for _, op := range []string{"===", "==", "="} {

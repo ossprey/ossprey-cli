@@ -210,6 +210,15 @@ The CLI never executes your package manager. If your repo has only a manifest
 and no lockfile, expect direct deps only — supply a lockfile for full
 transitive coverage.
 
+When a dependency's version can't be determined — an unpinned range in a
+manifest (`click = "^8"`) with no lockfile or resolver to pin it against — the
+scan defaults that component to the **latest published version** from its
+registry (PyPI / npm): the version a fresh install would pull today. Registry
+lookups fail open, so a component whose version can't be resolved (offline,
+private, or removed package) is left unversioned rather than dropped or failing
+the scan. Set `OSSPREY_RESOLVE_LATEST=0` to skip this resolution for a fully
+offline catalog.
+
 ## CI usage
 
 Typical GitHub Actions step:
