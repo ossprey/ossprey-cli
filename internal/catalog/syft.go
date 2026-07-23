@@ -3,6 +3,7 @@ package catalog
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -11,6 +12,9 @@ import (
 	"github.com/anchore/syft/syft/pkg/cataloger/python"
 	"github.com/anchore/syft/syft/source"
 	"github.com/anchore/syft/syft/source/directorysource"
+	"golang.org/x/sync/errgroup"
+
+	"github.com/ossprey/ossprey-cli/internal/registry"
 )
 
 type Package struct {
@@ -27,6 +31,15 @@ type Package struct {
 	Local bool
 }
 
+// Options tunes a Catalog run.
+type Options struct {
+	// SkipVersionLookup disables the registry lookup that fills a concrete
+	// version for unpinned components. When set, a component we can't pin from a
+	// manifest/lockfile is left versionless (no network calls) instead of
+	// defaulting to its latest published release.
+	SkipVersionLookup bool
+}
+
 // Catalog returns Python + JavaScript packages under path.
 //
 // Bypasses syft.CreateSBOM (which transitively imports every cataloger Anchore
@@ -37,7 +50,7 @@ type Package struct {
 //
 // All catalogers run unconditionally. Output is deduped by (name, version,
 // type) to absorb overlap between syft + uv + parsers.
-func Catalog(ctx context.Context, path string) ([]Package, error) {
+func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) {
 	absRoot, err := filepath.Abs(path)
 	if err != nil {
 		return nil, fmt.Errorf("resolve path: %w", err)
@@ -122,7 +135,74 @@ func Catalog(ctx context.Context, path string) ([]Package, error) {
 
 	merged := mergeVersionless(out)
 	markLocalPackages(merged, findLocalPackageNames(resolver, absRoot))
+	resolveVersionless(ctx, merged, opts)
 	return merged, nil
+}
+
+// resolveLatestFn resolves the latest published version of a package from its
+// upstream registry. Overridable in tests; defaults to registry.ResolveLatest.
+var resolveLatestFn = registry.ResolveLatest
+
+// resolveVersionless fills a concrete version for every component we cataloged
+// without one, defaulting to the latest published release from the package's
+// upstream registry. A component reaches this point versionless only when we
+// could not determine which version the project uses — an unpinned range in a
+// manifest ("click = ^8") with no lockfile or resolver to pin it against. Rather
+// than emit a versionless component (a purl with no version the backend must
+// guess about), we default to the latest release: the version a fresh install
+// would pull today.
+//
+// Fail-open by design — a versionless component must never become a scan
+// failure:
+//   - Local packages (the repo's own path/workspace code) are skipped; they are
+//     never published to a registry.
+//   - A registry lookup that fails (offline, private package, 404) leaves the
+//     component versionless, with a warning to stderr. The SBOM goes to stdout,
+//     so the warning never corrupts `--local` output.
+//
+// Resolution is skipped entirely — leaving unpinned components versionless —
+// when opts.SkipVersionLookup is set (the `scan --no-version-lookup` flag) or
+// OSSPREY_RESOLVE_LATEST is off, for a fully offline catalog.
+func resolveVersionless(ctx context.Context, pkgs []Package, opts Options) {
+	if opts.SkipVersionLookup || !resolveLatestEnabled() {
+		return
+	}
+	g := new(errgroup.Group)
+	g.SetLimit(catalogConcurrency())
+	for i := range pkgs {
+		if pkgs[i].Version != "" || pkgs[i].Local {
+			continue
+		}
+		// registry.ResolveLatest only speaks npm + pypi; skip anything else.
+		if pkgs[i].Type != "npm" && pkgs[i].Type != "pypi" {
+			continue
+		}
+		i := i
+		g.Go(func() error {
+			v, err := resolveLatestFn(ctx, pkgs[i].Type, pkgs[i].Name)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "ossprey: could not resolve latest version of %s/%s (%v); leaving it unversioned\n",
+					pkgs[i].Type, pkgs[i].Name, err)
+				return nil
+			}
+			// Each goroutine writes a distinct index — safe without a lock.
+			pkgs[i].Version = v
+			return nil
+		})
+	}
+	_ = g.Wait() // workers never return non-nil; Wait is just the barrier
+}
+
+// resolveLatestEnabled reports whether versionless components should be resolved
+// to their latest published version. On by default; OSSPREY_RESOLVE_LATEST set
+// to "0", "false", "no" or "off" disables it for an offline catalog.
+func resolveLatestEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("OSSPREY_RESOLVE_LATEST"))) {
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return true
+	}
 }
 
 // markLocalPackages sets Local=true on every pypi package whose name matches a

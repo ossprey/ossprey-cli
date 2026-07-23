@@ -58,6 +58,7 @@ func newScanCmd() *cobra.Command {
 		dryRunMalicious bool
 		apiURL          string
 		apiKey          string
+		noVersionLookup bool
 	)
 
 	cmd := &cobra.Command{
@@ -71,8 +72,9 @@ func newScanCmd() *cobra.Command {
 			}
 
 			sbom, err := scan.Run(cmd.Context(), scan.Options{
-				Path:    path,
-				Verbose: verbose,
+				Path:              path,
+				Verbose:           verbose,
+				SkipVersionLookup: noVersionLookup,
 			})
 			if err != nil {
 				return err
@@ -132,6 +134,7 @@ func newScanCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&local, "local", false, "dump SBOM JSON to stdout and exit (no API submission, no verdict)")
 	cmd.Flags().BoolVar(&dryRunSafe, "dry-run-safe", false, "skip API submission; emit empty vulnerability list")
 	cmd.Flags().BoolVar(&dryRunMalicious, "dry-run-malicious", false, "skip API submission; inject test vulnerability against first component")
+	cmd.Flags().BoolVar(&noVersionLookup, "no-version-lookup", false, "don't query the registry to resolve unpinned dependencies; leave them versionless")
 	cmd.Flags().StringVar(&apiURL, "url", defaultAPIURL, "Ossprey API URL")
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "Ossprey API key (or OSSPREY_API_KEY / API_KEY env var)")
 

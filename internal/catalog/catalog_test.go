@@ -1,8 +1,11 @@
 package catalog
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"github.com/anchore/syft/syft/file"
@@ -506,6 +509,119 @@ func TestMergeVersionless_CaseInsensitive(t *testing.T) {
 	}
 	if len(out[0].Source) != 2 {
 		t.Errorf("sources = %v, want both merged", out[0].Source)
+	}
+}
+
+// withResolveLatest swaps resolveLatestFn for the duration of a test and
+// restores it afterward.
+func withResolveLatest(t *testing.T, fn func(ctx context.Context, ecosystem, name string) (string, error)) {
+	t.Helper()
+	old := resolveLatestFn
+	resolveLatestFn = fn
+	t.Cleanup(func() { resolveLatestFn = old })
+}
+
+func TestResolveVersionless(t *testing.T) {
+	t.Setenv("OSSPREY_RESOLVE_LATEST", "") // default: enabled
+
+	latest := map[string]string{
+		"npm/lodash":    "4.17.21",
+		"pypi/requests": "2.31.0",
+	}
+	var calls atomic.Int64 // resolveVersionless calls the resolver concurrently
+	withResolveLatest(t, func(_ context.Context, eco, name string) (string, error) {
+		calls.Add(1)
+		if v, ok := latest[eco+"/"+name]; ok {
+			return v, nil
+		}
+		return "", fmt.Errorf("no version for %s/%s", eco, name)
+	})
+
+	pkgs := []Package{
+		{Name: "lodash", Version: "", Type: "npm"},               // versionless -> resolved
+		{Name: "requests", Version: "", Type: "pypi"},            // versionless -> resolved
+		{Name: "flask", Version: "3.0.0", Type: "pypi"},          // already pinned -> untouched
+		{Name: "mycode", Version: "", Type: "pypi", Local: true}, // local -> skipped
+		{Name: "ghost", Version: "", Type: "pypi"},               // resolver fails -> stays versionless
+	}
+	resolveVersionless(context.Background(), pkgs, Options{})
+
+	byName := map[string]Package{}
+	for _, p := range pkgs {
+		byName[p.Name] = p
+	}
+	if byName["lodash"].Version != "4.17.21" {
+		t.Errorf("lodash version = %q, want 4.17.21", byName["lodash"].Version)
+	}
+	if byName["requests"].Version != "2.31.0" {
+		t.Errorf("requests version = %q, want 2.31.0", byName["requests"].Version)
+	}
+	if byName["flask"].Version != "3.0.0" {
+		t.Errorf("flask version = %q, want unchanged 3.0.0", byName["flask"].Version)
+	}
+	if byName["mycode"].Version != "" {
+		t.Errorf("local package should be skipped, got version %q", byName["mycode"].Version)
+	}
+	if byName["ghost"].Version != "" {
+		t.Errorf("failed resolution should stay versionless, got %q", byName["ghost"].Version)
+	}
+	// lodash, requests, ghost — flask (pinned) and mycode (local) never call out.
+	if got := calls.Load(); got != 3 {
+		t.Errorf("resolveLatestFn calls = %d, want 3", got)
+	}
+}
+
+func TestResolveVersionless_Disabled(t *testing.T) {
+	// Both the env var and the SkipVersionLookup flag must leave components
+	// versionless without ever calling the registry.
+	cases := map[string]struct {
+		env  string
+		opts Options
+	}{
+		"env var off":      {env: "0", opts: Options{}},
+		"skip-lookup flag": {env: "", opts: Options{SkipVersionLookup: true}},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("OSSPREY_RESOLVE_LATEST", tc.env)
+
+			var calls int
+			withResolveLatest(t, func(_ context.Context, _, _ string) (string, error) {
+				calls++
+				return "9.9.9", nil
+			})
+
+			pkgs := []Package{{Name: "lodash", Version: "", Type: "npm"}}
+			resolveVersionless(context.Background(), pkgs, tc.opts)
+
+			if calls != 0 {
+				t.Errorf("resolution should be skipped; got %d calls", calls)
+			}
+			if pkgs[0].Version != "" {
+				t.Errorf("version should stay empty, got %q", pkgs[0].Version)
+			}
+		})
+	}
+}
+
+func TestResolveLatestEnabled(t *testing.T) {
+	tests := map[string]bool{
+		"":      true,
+		"1":     true,
+		"true":  true,
+		"yes":   true,
+		"0":     false,
+		"false": false,
+		"FALSE": false,
+		"no":    false,
+		"off":   false,
+		" off ": false,
+	}
+	for in, want := range tests {
+		t.Setenv("OSSPREY_RESOLVE_LATEST", in)
+		if got := resolveLatestEnabled(); got != want {
+			t.Errorf("OSSPREY_RESOLVE_LATEST=%q: enabled = %v, want %v", in, got, want)
+		}
 	}
 }
 

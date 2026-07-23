@@ -113,6 +113,7 @@ ossprey scan [path] [flags]
 | `-o, --output <file>` | Write the OSSBOM JSON to `<file>` (in addition to running the scan). |
 | `-v, --verbose` | Verbose logging. |
 | `--local` | Catalogue only. Dump the OSSBOM to stdout and exit — no API submission, no malware verdict. |
+| `--no-version-lookup` | Don't query the registry to resolve unpinned dependencies; leave them versionless. |
 | `--url <url>` | Override the Ossprey API URL (default `https://api.ossprey.com`). |
 | `--api-key <key>` | Provide the API key on the command line instead of an env var. |
 | `--version` | Print the CLI version. |
@@ -209,6 +210,19 @@ Python and JavaScript, via syft's static catalogers.
 The CLI never executes your package manager. If your repo has only a manifest
 and no lockfile, expect direct deps only — supply a lockfile for full
 transitive coverage.
+
+When a dependency's version can't be determined — an unpinned range in a
+manifest (`click = "^8"`) with no lockfile or resolver to pin it against — the
+scan defaults that component to the **latest published version** from its
+registry (PyPI / npm): the version a fresh install would pull today. Registry
+lookups fail open, so a component whose version can't be resolved (offline,
+private, or removed package) is left unversioned rather than dropped or failing
+the scan.
+
+To skip these lookups for a fully offline catalog, pass `--no-version-lookup`
+(or set `OSSPREY_RESOLVE_LATEST=0`, which also covers the package-manager
+forwarders, whose args are passed through untouched). Unpinned components are
+then left versionless.
 
 ## CI usage
 
