@@ -95,6 +95,7 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 	}
 
 	seen := map[string]struct{}{}
+	locks := newNpmLockClassifier(absRoot)
 	var out []Package
 	for _, c := range catalogers {
 		pkgs, _, err := c.Catalog(ctx, resolver)
@@ -115,7 +116,7 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 			if !isOspreyCataloger && isRootManifestPackage(p) {
 				continue
 			}
-			if isUnpublishedNpmLockEntry(p) {
+			if isUnpublishedNpmLockEntry(p, locks) {
 				continue
 			}
 			key := dedupKey(t, p.Name, p.Version)
@@ -331,14 +332,29 @@ func isRootManifestPackage(p pkg.Package) bool {
 	return false
 }
 
-// isUnpublishedNpmLockEntry reports whether p is a package-lock.json entry with
-// no registry tarball ("resolved" is empty): the root project itself, or a
-// file:/link:/workspace: dependency. None are fetchable from the npm registry,
-// so emitting them only yields spurious NOT_FOUND findings (e.g. the root
-// project app@1.0.0 leaking out of syft's lock cataloger).
-func isUnpublishedNpmLockEntry(p pkg.Package) bool {
+// isUnpublishedNpmLockEntry reports whether p is a package-lock.json entry
+// that is not fetchable from the npm registry — the root project itself, or a
+// file:/link:/workspace: dependency — so emitting it would only yield spurious
+// NOT_FOUND findings (e.g. the root project app@1.0.0 leaking out of syft's
+// lock cataloger).
+//
+// An empty "resolved" URL alone is NOT proof of that: npm omits "resolved"
+// for cache-installed deps, and hand-edited or attacker-injected lockfile
+// entries (lockfile injection) routinely lack it, yet `npm install`/`npm ci`
+// still fetch name@version from the registry. Dropping every empty-resolved
+// entry made exactly those packages invisible to the scan (e.g. a compromised
+// @ctrl/tinycolor@4.1.2 pinned in a lockfile with no "resolved" field). For
+// empty-resolved entries the lockfile itself is consulted, where the
+// packages-map key distinguishes registry deps from root/local entries.
+func isUnpublishedNpmLockEntry(p pkg.Package, locks *npmLockClassifier) bool {
 	m, ok := p.Metadata.(pkg.NpmPackageLockEntry)
-	return ok && strings.TrimSpace(m.Resolved) == ""
+	if !ok {
+		return false
+	}
+	if resolved := strings.TrimSpace(m.Resolved); resolved != "" {
+		return isLocalNpmResolved(resolved)
+	}
+	return !locks.isRegistryDep(p)
 }
 
 func locations(p pkg.Package) []string {

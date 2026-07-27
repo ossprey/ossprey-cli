@@ -660,22 +660,136 @@ func TestIsRootManifestPackage(t *testing.T) {
 }
 
 func TestIsUnpublishedNpmLockEntry(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "package-lock.json", `{
+		"name": "app",
+		"version": "1.0.0",
+		"lockfileVersion": 3,
+		"packages": {
+			"": {"name": "app", "version": "1.0.0"},
+			"node_modules/@ctrl/tinycolor": {"version": "4.1.2"},
+			"node_modules/linked": {"resolved": "packages/linked", "link": true},
+			"packages/linked": {"version": "2.0.0"}
+		}
+	}`)
+	locks := newNpmLockClassifier(dir)
+	lockLoc := file.NewLocationSet(file.NewLocation("package-lock.json"))
+
 	// dep with a registry tarball -> published, keep
 	dep := pkg.Package{Metadata: pkg.NpmPackageLockEntry{
 		Resolved: "https://registry.npmjs.org/lodash/-/lodash-4.17.21.tgz",
 	}}
-	if isUnpublishedNpmLockEntry(dep) {
+	if isUnpublishedNpmLockEntry(dep, locks) {
 		t.Error("dep with resolved tarball should not be treated as unpublished")
 	}
-	// root project / file: / link: entry -> empty resolved, drop
-	root := pkg.Package{Metadata: pkg.NpmPackageLockEntry{Resolved: ""}}
-	if !isUnpublishedNpmLockEntry(root) {
-		t.Error("lock entry with empty resolved should be unpublished")
+	// file:-resolved entry -> local code, drop
+	local := pkg.Package{Metadata: pkg.NpmPackageLockEntry{Resolved: "file:../sibling"}}
+	if !isUnpublishedNpmLockEntry(local, locks) {
+		t.Error("file:-resolved entry should be unpublished")
+	}
+	// registry dep whose lock entry omits "resolved" (cache-installed or
+	// injected lockfile) -> npm still installs it from the registry, keep
+	injected := pkg.Package{
+		Name: "@ctrl/tinycolor", Version: "4.1.2",
+		Locations: lockLoc,
+		Metadata:  pkg.NpmPackageLockEntry{Resolved: ""},
+	}
+	if isUnpublishedNpmLockEntry(injected, locks) {
+		t.Error("registry dep without resolved URL should not be treated as unpublished")
+	}
+	// root project entry -> empty resolved and not a registry dep, drop
+	root := pkg.Package{
+		Name: "app", Version: "1.0.0",
+		Locations: lockLoc,
+		Metadata:  pkg.NpmPackageLockEntry{Resolved: ""},
+	}
+	if !isUnpublishedNpmLockEntry(root, locks) {
+		t.Error("root project lock entry should be unpublished")
+	}
+	// workspace member surfaced via its path key -> drop
+	member := pkg.Package{
+		Name: "packages/linked", Version: "2.0.0",
+		Locations: lockLoc,
+		Metadata:  pkg.NpmPackageLockEntry{Resolved: ""},
+	}
+	if !isUnpublishedNpmLockEntry(member, locks) {
+		t.Error("workspace member lock entry should be unpublished")
 	}
 	// non-lock package (e.g. our package.json cataloger output) -> not applicable
 	other := pkg.Package{Metadata: pkg.NpmPackage{}}
-	if isUnpublishedNpmLockEntry(other) {
+	if isUnpublishedNpmLockEntry(other, locks) {
 		t.Error("non-lock metadata should never be flagged")
+	}
+}
+
+func TestNpmLockClassifier_V1Lockfile(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "package-lock.json", `{
+		"name": "app",
+		"version": "1.0.0",
+		"lockfileVersion": 1,
+		"dependencies": {
+			"lodash": {"version": "4.17.21"},
+			"localdep": {"version": "file:../localdep"},
+			"gitdep": {"version": "git+https://example.com/x.git#abc"}
+		}
+	}`)
+	locks := newNpmLockClassifier(dir)
+	lockLoc := file.NewLocationSet(file.NewLocation("package-lock.json"))
+
+	entry := func(name, version string) pkg.Package {
+		return pkg.Package{
+			Name: name, Version: version,
+			Locations: lockLoc,
+			Metadata:  pkg.NpmPackageLockEntry{Resolved: ""},
+		}
+	}
+	if isUnpublishedNpmLockEntry(entry("lodash", "4.17.21"), locks) {
+		t.Error("v1 registry dep without resolved should be kept")
+	}
+	if !isUnpublishedNpmLockEntry(entry("localdep", "file:../localdep"), locks) {
+		t.Error("v1 file: dep should be unpublished")
+	}
+	if !isUnpublishedNpmLockEntry(entry("gitdep", "git+https://example.com/x.git#abc"), locks) {
+		t.Error("v1 git dep should be unpublished")
+	}
+}
+
+// TestCatalog_LockfileWithoutResolvedOrManifest is the end-to-end regression
+// for the missed @ctrl/tinycolor: a package-lock.json sitting in a folder with
+// no package.json, whose entries carry a version but no "resolved" URL. npm
+// would still install these from the registry, so the scan must surface them.
+func TestCatalog_LockfileWithoutResolvedOrManifest(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "package-lock.json", `{
+		"name": "infected-project-lock",
+		"version": "0.0.0",
+		"lockfileVersion": 3,
+		"requires": true,
+		"packages": {
+			"": {"name": "infected-project-lock", "version": "0.0.0"},
+			"node_modules/@ctrl/tinycolor": {"version": "4.1.2"}
+		},
+		"dependencies": {
+			"@ctrl/tinycolor": {"version": "4.1.2"}
+		}
+	}`)
+
+	got, err := Catalog(context.Background(), dir, Options{SkipVersionLookup: true})
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	var found bool
+	for _, p := range got {
+		if p.Name == "infected-project-lock" {
+			t.Errorf("root project leaked into the catalog: %+v", p)
+		}
+		if p.Name == "@ctrl/tinycolor" && p.Version == "4.1.2" && p.Type == "npm" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("@ctrl/tinycolor@4.1.2 missing from catalog; got %+v", got)
 	}
 }
 
