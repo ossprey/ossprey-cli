@@ -33,10 +33,14 @@ func APIKeyFromEnv() string {
 }
 
 // Client speaks to the Ossprey scans API. Mirrors ossprey/ossprey.py from v1.
+// Exactly one of APIKey or BearerToken is set: API keys go to the /public/v1
+// mount as x-api-key, Auth0 JWTs (from `ossprey login`) go to the /dashboard/v1
+// mount as Authorization: Bearer. Both mounts are served by the same backend.
 type Client struct {
-	BaseURL string
-	APIKey  string
-	HTTP    *http.Client
+	BaseURL     string
+	APIKey      string
+	BearerToken string
+	HTTP        *http.Client
 
 	// PollBackoff returns the wait between status polls for the given attempt
 	// (1-indexed). Defaults to attempt*attempt seconds (matches v1). Override
@@ -44,20 +48,52 @@ type Client struct {
 	PollBackoff func(attempt int) time.Duration
 }
 
-// New constructs a Client; baseURL defaults to https://api.ossprey.com.
+// New constructs an API-key Client; baseURL defaults to https://api.ossprey.com.
 func New(baseURL, apiKey string) (*Client, error) {
 	if apiKey == "" {
 		return nil, errors.New("API key is required")
 	}
+	c := newClient(baseURL)
+	c.APIKey = apiKey
+	return c, nil
+}
+
+// NewBearer constructs a Client authenticating with an Auth0 access token.
+func NewBearer(baseURL, token string) (*Client, error) {
+	if token == "" {
+		return nil, errors.New("access token is required")
+	}
+	c := newClient(baseURL)
+	c.BearerToken = token
+	return c, nil
+}
+
+func newClient(baseURL string) *Client {
 	if baseURL == "" {
 		baseURL = defaultBaseURL
 	}
 	return &Client{
 		BaseURL:     baseURL,
-		APIKey:      apiKey,
 		HTTP:        &http.Client{Timeout: 60 * time.Second},
 		PollBackoff: defaultPollBackoff,
-	}, nil
+	}
+}
+
+// mount returns the API route prefix matching the auth method.
+func (c *Client) mount() string {
+	if c.BearerToken != "" {
+		return "/dashboard/v1"
+	}
+	return "/public/v1"
+}
+
+// authenticate sets the auth header matching the client's credential.
+func (c *Client) authenticate(req *http.Request) {
+	if c.BearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.BearerToken)
+		return
+	}
+	req.Header.Set("x-api-key", c.APIKey)
 }
 
 func defaultPollBackoff(attempt int) time.Duration {
@@ -93,7 +129,7 @@ func (c *Client) Validate(ctx context.Context, mb ossbom.MiniBOM) (json.RawMessa
 		return nil, fmt.Errorf("marshal sbom: %w", err)
 	}
 
-	endpoint, err := url.JoinPath(c.BaseURL, "/public/v1/scans")
+	endpoint, err := url.JoinPath(c.BaseURL, c.mount(), "scans")
 	if err != nil {
 		return nil, fmt.Errorf("build url: %w", err)
 	}
@@ -103,7 +139,7 @@ func (c *Client) Validate(ctx context.Context, mb ossbom.MiniBOM) (json.RawMessa
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-api-key", c.APIKey)
+	c.authenticate(req)
 
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
@@ -130,7 +166,7 @@ func (c *Client) Validate(ctx context.Context, mb ossbom.MiniBOM) (json.RawMessa
 }
 
 func (c *Client) waitForCompletion(ctx context.Context, sbomID, scanID string) (json.RawMessage, error) {
-	endpoint, err := url.JoinPath(c.BaseURL, "/public/v1/scans/status")
+	endpoint, err := url.JoinPath(c.BaseURL, c.mount(), "scans/status")
 	if err != nil {
 		return nil, fmt.Errorf("build status url: %w", err)
 	}
@@ -152,7 +188,7 @@ func (c *Client) waitForCompletion(ctx context.Context, sbomID, scanID string) (
 			return nil, err
 		}
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("x-api-key", c.APIKey)
+		c.authenticate(req)
 		q := req.URL.Query()
 		q.Set("sbom_id", sbomID)
 		q.Set("scan_id", scanID)

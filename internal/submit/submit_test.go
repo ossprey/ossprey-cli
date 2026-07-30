@@ -5,8 +5,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/ossprey/ossprey-cli/internal/auth"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
 )
 
@@ -79,13 +82,74 @@ func TestValidate_APIKeyFromEnv(t *testing.T) {
 	}
 }
 
-func TestValidate_MissingKey(t *testing.T) {
-	// no apiKey arg and no env vars -> client.New rejects before any request
+func TestValidate_NoCredentials(t *testing.T) {
+	// no apiKey arg, no env vars and no stored login -> rejected with a hint
+	// before any request. OSSPREY_CONFIG_DIR isolates the test from any real
+	// login on the developer's machine.
 	t.Setenv("OSSPREY_API_KEY", "")
 	t.Setenv("API_KEY", "")
+	t.Setenv("OSSPREY_CONFIG_DIR", t.TempDir())
 
-	if err := Validate(context.Background(), newSBOM(), "https://api.test", ""); err == nil {
-		t.Fatal("expected error when API key is absent")
+	err := Validate(context.Background(), newSBOM(), "https://api.test", "")
+	if err == nil {
+		t.Fatal("expected error when no credentials are available")
+	}
+	if !strings.Contains(err.Error(), "ossprey login") {
+		t.Errorf("error should hint at `ossprey login`: %v", err)
+	}
+}
+
+func TestValidate_StoredLogin(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/dashboard/v1/scans" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer at-stored" {
+			t.Errorf("Authorization: got %q, want Bearer at-stored", got)
+		}
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, `{"vulnerabilities":[]}`)
+	}))
+	defer srv.Close()
+
+	t.Setenv("OSSPREY_API_KEY", "")
+	t.Setenv("API_KEY", "")
+	t.Setenv("OSSPREY_CONFIG_DIR", t.TempDir())
+	if err := auth.Save(&auth.Credentials{
+		AccessToken: "at-stored",
+		ExpiresAt:   time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Validate(context.Background(), newSBOM(), srv.URL, ""); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+}
+
+func TestValidate_APIKeyBeatsStoredLogin(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/public/v1/scans" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		if got := r.Header.Get("x-api-key"); got != "flag-key" {
+			t.Errorf("x-api-key: got %q, want flag-key", got)
+		}
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, `{"vulnerabilities":[]}`)
+	}))
+	defer srv.Close()
+
+	t.Setenv("OSSPREY_CONFIG_DIR", t.TempDir())
+	if err := auth.Save(&auth.Credentials{
+		AccessToken: "at-stored",
+		ExpiresAt:   time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Validate(context.Background(), newSBOM(), srv.URL, "flag-key"); err != nil {
+		t.Fatalf("Validate: %v", err)
 	}
 }
 
