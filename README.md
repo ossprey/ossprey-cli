@@ -152,7 +152,19 @@ and don't need credentials.
 `ossprey login` targets the production Ossprey tenant by default; point it at
 another environment with `--auth0-domain`, `--client-id` and `--audience`
 flags or the matching `OSSPREY_AUTH0_DOMAIN` / `OSSPREY_AUTH0_CLIENT_ID` /
-`OSSPREY_AUTH0_AUDIENCE` env vars.
+`OSSPREY_AUTH0_AUDIENCE` env vars. For the QA environment:
+
+```sh
+ossprey login \
+  --auth0-domain auth.qa.ossprey.com \
+  --client-id oT9sXzeqPTyZnRDzpgQ3YjUfd11Xj0Mh \
+  --audience https://api.qa.ossprey.com
+ossprey scan . --url https://api.qa.ossprey.com
+```
+
+The Auth0 application behind the client ID must be a **Native** app with the
+**Device Code** and **Refresh Token** grants enabled, and the API must have
+**Allow Offline Access** on.
 
 ## `check` — scan named packages
 
