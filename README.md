@@ -254,6 +254,6 @@ for production use; expect additive changes only.
 
 ## Support
 
-- Docs: [docs.ossprey.com](https://docs.ossprey.com)
+- Docs: [CLI Tool guide](https://ossprey.readme.io/docs/cli-tool) · [all docs](https://ossprey.readme.io/docs/welcome-to-ossprey-docs)
 - Issues: [github.com/ossprey/ossprey-cli/issues](https://github.com/ossprey/ossprey-cli/issues)
 - Email: support@ossprey.com
