@@ -5,10 +5,11 @@ supply-chain malware platform. It catalogues your project's dependencies into
 an OSSBOM, submits it to the Ossprey API, and fails the build if any of those
 packages are known to contain malware.
 
-> **You need an Ossprey API key to run scans.** Sign up for a free account at
-> [ossprey.com](https://ossprey.com) to get one, then provide it via
-> `OSSPREY_API_KEY` (see [Authentication](#authentication)). The `--local` and
-> `--dry-run-*` modes work without a key.
+> **You need an Ossprey account to run scans.** Sign up for a free account at
+> [ossprey.com](https://ossprey.com), then either run `ossprey login` to sign
+> in via your browser, or provide an API key via `OSSPREY_API_KEY` (see
+> [Authentication](#authentication)). The `--local` and `--dry-run-*` modes
+> work without credentials.
 
 Today the CLI covers Python and JavaScript projects via static parsing of the
 manifests and lockfiles already in your repo — no package installs, no
@@ -87,7 +88,12 @@ symbols.
 ## Quick start
 
 ```sh
-export OSSPREY_API_KEY=sk_live_...
+# Interactive: log in once via your browser...
+ossprey login
+ossprey scan .
+
+# ...or non-interactive (CI): use an API key
+export OSSPREY_API_KEY=ospy_...
 ossprey scan .
 ```
 
@@ -120,14 +126,50 @@ ossprey scan [path] [flags]
 
 ### Authentication
 
-The API key is read from, in order:
+Two ways to authenticate:
 
-1. `--api-key` flag
-2. `OSSPREY_API_KEY` env var
-3. `API_KEY` env var
+**Browser login (interactive use).** Run `ossprey login` once — it opens your
+browser, you confirm a one-time code, and the CLI stores the resulting Auth0
+tokens locally (`~/.config/ossprey/credentials.json` on Linux, or the
+platform's user config dir; override with `OSSPREY_CONFIG_DIR`). Scans then
+authenticate automatically and tokens refresh silently. `ossprey whoami`
+shows the current login; `ossprey logout` removes it.
+
+**API key (CI / non-interactive use).** Get a key at
+[dashboard.ossprey.com](https://dashboard.ossprey.com) and provide it via
+flag or env var.
+
+Credentials are resolved in order:
+
+1. `--api-key` flag (an explicit per-invocation choice)
+2. the stored `ossprey login` session (JWT)
+3. `OSSPREY_API_KEY` env var
+4. `API_KEY` env var
+
+A logged-in session therefore wins over API keys exported in the shell; drop
+the login with `ossprey logout` (or pass `--api-key`) to force key auth. The
+credential also picks the API surface: JWTs call the `/dashboard/v1` routes,
+API keys the `/public/v1` routes — same endpoints, same behaviour.
 
 `--local`, `--dry-run-safe` and `--dry-run-malicious` don't talk to the API
-and don't need a key.
+and don't need credentials.
+
+`ossprey login` targets the production Ossprey tenant by default; point it at
+another environment with `--auth0-domain`, `--client-id` and `--audience`
+flags or the matching `OSSPREY_AUTH0_DOMAIN` / `OSSPREY_AUTH0_CLIENT_ID` /
+`OSSPREY_AUTH0_AUDIENCE` env vars. For the QA environment:
+
+```sh
+ossprey login \
+  --auth0-domain auth.qa.ossprey.com \
+  --client-id oT9sXzeqPTyZnRDzpgQ3YjUfd11Xj0Mh \
+  --audience https://api.qa.ossprey.com
+ossprey scan . --url https://api.qa.ossprey.com
+```
+
+The Auth0 application behind the client ID must be a **Native** app with the
+**Device Code** and **Refresh Token** grants enabled, and the API must have
+**Allow Offline Access** on.
 
 ## `check` — scan named packages
 

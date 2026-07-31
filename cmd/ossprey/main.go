@@ -39,6 +39,9 @@ func main() {
 
 	root.AddCommand(newScanCmd())
 	root.AddCommand(newCheckCmd())
+	root.AddCommand(newLoginCmd())
+	root.AddCommand(newLogoutCmd())
+	root.AddCommand(newWhoamiCmd())
 	for _, bin := range forward.Managers() {
 		root.AddCommand(newForwardCmd(bin))
 	}
@@ -136,7 +139,7 @@ func newScanCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&dryRunMalicious, "dry-run-malicious", false, "skip API submission; inject test vulnerability against first component")
 	cmd.Flags().BoolVar(&noVersionLookup, "no-version-lookup", false, "don't query the registry to resolve unpinned dependencies; leave them versionless")
 	cmd.Flags().StringVar(&apiURL, "url", defaultAPIURL, "Ossprey API URL")
-	cmd.Flags().StringVar(&apiKey, "api-key", "", "Ossprey API key (or OSSPREY_API_KEY / API_KEY env var)")
+	cmd.Flags().StringVar(&apiKey, "api-key", "", "Ossprey API key (or OSSPREY_API_KEY / API_KEY env var; optional after `ossprey login`)")
 
 	return cmd
 }
@@ -208,7 +211,7 @@ func newCheckCmd() *cobra.Command {
 
 	cmd.Flags().StringVarP(&ecosystem, "eco-system", "e", "", "package ecosystem: pypi or npm (required)")
 	cmd.Flags().StringVar(&apiURL, "url", defaultAPIURL, "Ossprey API URL")
-	cmd.Flags().StringVar(&apiKey, "api-key", "", "Ossprey API key (or OSSPREY_API_KEY / API_KEY env var)")
+	cmd.Flags().StringVar(&apiKey, "api-key", "", "Ossprey API key (or OSSPREY_API_KEY / API_KEY env var; optional after `ossprey login`)")
 	cmd.Flags().BoolVar(&dryRunSafe, "dry-run-safe", false, "skip API submission; emit empty vulnerability list")
 	cmd.Flags().BoolVar(&dryRunMalicious, "dry-run-malicious", false, "skip API submission; inject test vulnerability against first package")
 

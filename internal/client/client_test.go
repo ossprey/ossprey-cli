@@ -46,6 +46,64 @@ func TestNew(t *testing.T) {
 	}
 }
 
+func TestNewBearer(t *testing.T) {
+	if _, err := NewBearer("https://api.test", ""); err == nil {
+		t.Error("expected error for empty token")
+	}
+	c, err := NewBearer("", "tok")
+	if err != nil {
+		t.Fatalf("NewBearer: %v", err)
+	}
+	if c.BaseURL != "https://api.ossprey.com" {
+		t.Errorf("BaseURL: got %q", c.BaseURL)
+	}
+	if c.BearerToken != "tok" {
+		t.Errorf("BearerToken: got %q", c.BearerToken)
+	}
+}
+
+// TestValidate_Bearer checks that a bearer-token client hits the JWT-authorized
+// /dashboard/v1 mount with an Authorization header (and no x-api-key), for both
+// the submit and status-poll requests.
+func TestValidate_Bearer(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer tok" {
+			t.Errorf("Authorization: got %q, want Bearer tok", got)
+		}
+		if got := r.Header.Get("x-api-key"); got != "" {
+			t.Errorf("unexpected x-api-key header: %q", got)
+		}
+		switch r.URL.Path {
+		case "/dashboard/v1/scans":
+			w.WriteHeader(http.StatusAccepted)
+			io.WriteString(w, `{"sbom_id":"sb1","scan_id":"sc1"}`)
+		case "/dashboard/v1/scans/status":
+			w.WriteHeader(http.StatusOK)
+			io.WriteString(w, `{"status":"SUCCEEDED","output":{"vulnerabilities":[]}}`)
+		default:
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := NewBearer(srv.URL, "tok")
+	if err != nil {
+		t.Fatalf("NewBearer: %v", err)
+	}
+	c.HTTP = srv.Client()
+	c.PollBackoff = func(int) time.Duration { return time.Millisecond }
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	raw, err := c.Validate(ctx, ossbom.MiniBOM{})
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if !strings.Contains(string(raw), `"vulnerabilities"`) {
+		t.Errorf("output body missing vulnerabilities key: %s", raw)
+	}
+}
+
 // testClient returns a Client wired to the given httptest.Server, with the
 // polling backoff shortened so the suite runs in milliseconds.
 func testClient(t *testing.T, srv *httptest.Server) *Client {
