@@ -70,9 +70,69 @@ func TestValidate_APIKeyFromEnv(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// empty apiKey arg -> falls back to OSSPREY_API_KEY env var
+	// empty apiKey arg and no stored login -> falls back to OSSPREY_API_KEY
 	t.Setenv("OSSPREY_API_KEY", "env-key")
 	t.Setenv("API_KEY", "")
+	t.Setenv("OSSPREY_CONFIG_DIR", t.TempDir())
+
+	if err := Validate(context.Background(), newSBOM(), srv.URL, ""); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if gotKey != "env-key" {
+		t.Errorf("x-api-key: got %q, want env-key", gotKey)
+	}
+}
+
+func TestValidate_StoredLoginBeatsEnvKey(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/dashboard/v1/scans" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer at-stored" {
+			t.Errorf("Authorization: got %q, want Bearer at-stored", got)
+		}
+		if got := r.Header.Get("x-api-key"); got != "" {
+			t.Errorf("unexpected x-api-key header: %q", got)
+		}
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, `{"vulnerabilities":[]}`)
+	}))
+	defer srv.Close()
+
+	// Both an env API key and a stored login present -> the JWT login wins.
+	t.Setenv("OSSPREY_API_KEY", "env-key")
+	t.Setenv("OSSPREY_CONFIG_DIR", t.TempDir())
+	if err := auth.Save(&auth.Credentials{
+		AccessToken: "at-stored",
+		ExpiresAt:   time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Validate(context.Background(), newSBOM(), srv.URL, ""); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+}
+
+func TestValidate_EnvKeyFallbackWhenLoginBroken(t *testing.T) {
+	var gotKey string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotKey = r.Header.Get("x-api-key")
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, `{"vulnerabilities":[]}`)
+	}))
+	defer srv.Close()
+
+	// Stored login is expired with no refresh token (unrefreshable), but an
+	// env key exists -> fall back to the key instead of failing the scan.
+	t.Setenv("OSSPREY_API_KEY", "env-key")
+	t.Setenv("OSSPREY_CONFIG_DIR", t.TempDir())
+	if err := auth.Save(&auth.Credentials{
+		AccessToken: "at-stale",
+		ExpiresAt:   time.Now().Add(-time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := Validate(context.Background(), newSBOM(), srv.URL, ""); err != nil {
 		t.Fatalf("Validate: %v", err)

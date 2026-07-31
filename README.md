@@ -141,10 +141,15 @@ flag or env var.
 
 Credentials are resolved in order:
 
-1. `--api-key` flag
-2. `OSSPREY_API_KEY` env var
-3. `API_KEY` env var
-4. the stored `ossprey login` session
+1. `--api-key` flag (an explicit per-invocation choice)
+2. the stored `ossprey login` session (JWT)
+3. `OSSPREY_API_KEY` env var
+4. `API_KEY` env var
+
+A logged-in session therefore wins over API keys exported in the shell; drop
+the login with `ossprey logout` (or pass `--api-key`) to force key auth. The
+credential also picks the API surface: JWTs call the `/dashboard/v1` routes,
+API keys the `/public/v1` routes — same endpoints, same behaviour.
 
 `--local`, `--dry-run-safe` and `--dry-run-malicious` don't talk to the API
 and don't need credentials.
