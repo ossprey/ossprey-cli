@@ -22,7 +22,7 @@ import (
 // domain auth.qa.ossprey.com, audience https://api.qa.ossprey.com).
 const (
 	DefaultDomain   = "auth.ossprey.com"
-	DefaultClientID = "2473RGMz3txzQDKkKFk1Aik8gpoka8yG"
+	DefaultClientID = "IosLlMhilXmQDmGcRgDfwfoumgcLFN41"
 	DefaultAudience = "https://api.ossprey.com"
 
 	// scope requests offline_access so Auth0 issues a refresh token and the
