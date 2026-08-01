@@ -26,7 +26,18 @@ type fileParser func(absPath string, loc file.Location) ([]pkg.Package, error)
 
 // isVendoredPath reports whether p sits inside a vendored dependency tree.
 func isVendoredPath(p string) bool {
-	return strings.Contains(p, "node_modules/")
+	return strings.Contains(filepath.ToSlash(p), "node_modules/")
+}
+
+// hostPath maps a resolver location's RealPath to an absolute host path. Syft's
+// directory resolver reports paths relative to the scan root on POSIX but
+// absolute (drive-lettered) on Windows, where joining unconditionally doubles
+// the root and breaks every manifest read.
+func hostPath(root, realPath string) string {
+	if filepath.IsAbs(realPath) {
+		return realPath
+	}
+	return filepath.Join(root, realPath)
 }
 
 // catalogByGlob runs parse against every file matching glob under the
@@ -54,7 +65,7 @@ func catalogByGlob(resolver file.Resolver, root, glob, label string, parse fileP
 		}
 		i, loc := i, loc
 		g.Go(func() error {
-			pkgs, err := parse(filepath.Join(root, loc.RealPath), loc)
+			pkgs, err := parse(hostPath(root, loc.RealPath), loc)
 			if err != nil {
 				// Non-fatal, but surface it: a swallowed uv/npm failure (e.g.
 				// the host Python is too old to resolve the pins) otherwise
