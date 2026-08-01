@@ -39,11 +39,7 @@ func (c *npmLockClassifier) isRegistryDep(p pkg.Package) bool {
 		if filepath.Base(l.RealPath) != "package-lock.json" {
 			continue
 		}
-		abs := l.RealPath
-		if !filepath.IsAbs(abs) {
-			abs = filepath.Join(c.root, abs)
-		}
-		if _, ok := c.registryEntries(abs)[key]; ok {
+		if _, ok := c.registryEntries(hostPath(c.root, l.RealPath))[key]; ok {
 			return true
 		}
 	}

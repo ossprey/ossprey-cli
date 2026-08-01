@@ -2,7 +2,6 @@ package catalog
 
 import (
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -49,7 +48,7 @@ func findLocalPackageNames(resolver file.Resolver, root string) map[string]struc
 		if isVendoredPath(loc.RealPath) {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(root, loc.RealPath))
+		data, err := os.ReadFile(hostPath(root, loc.RealPath))
 		if err != nil {
 			continue
 		}

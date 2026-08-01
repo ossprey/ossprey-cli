@@ -17,7 +17,7 @@ sandbox, no virtualenv.
 
 ## Contents
 
-- [Install](#install) — [one-liner](#one-liner-linux--macos) · [manual download](#manual-download) · [from source](#from-source) · [updating](#updating)
+- [Install](#install) — [Linux / macOS](#one-liner-linux--macos) · [Windows](#one-liner-windows-powershell) · [manual download](#manual-download) · [from source](#from-source) · [updating](#updating)
 - [Quick start](#quick-start)
 - [Usage](#usage)
 - [Authentication](#authentication)
@@ -50,6 +50,37 @@ curl -fsSL https://github.com/ossprey/ossprey-cli/releases/latest/download/insta
 # Install to a user-writable dir (no sudo)
 curl -fsSL https://github.com/ossprey/ossprey-cli/releases/latest/download/install.sh \
   | OSSPREY_INSTALL_DIR=$HOME/.local/bin sh
+```
+
+### One-liner (Windows PowerShell)
+
+Runs natively on Windows — no WSL, no admin rights needed. From any
+PowerShell prompt:
+
+```powershell
+irm https://github.com/ossprey/ossprey-cli/releases/latest/download/install.ps1 | iex
+```
+
+Or from cmd.exe:
+
+```bat
+powershell -ExecutionPolicy Bypass -Command "irm https://github.com/ossprey/ossprey-cli/releases/latest/download/install.ps1 | iex"
+```
+
+The script detects your architecture, downloads the matching `ossprey.exe`,
+verifies its sha256, installs it to `%LOCALAPPDATA%\Programs\ossprey`, and
+adds that directory to your user `PATH` (open a new terminal to pick it up).
+
+Override the defaults with env vars:
+
+```powershell
+# Pin a specific version
+$env:OSSPREY_VERSION = 'v0.1.0'
+irm https://github.com/ossprey/ossprey-cli/releases/latest/download/install.ps1 | iex
+
+# Custom install location
+$env:OSSPREY_INSTALL_DIR = 'C:\tools\ossprey'
+irm https://github.com/ossprey/ossprey-cli/releases/latest/download/install.ps1 | iex
 ```
 
 ### Manual download
@@ -98,8 +129,9 @@ ossprey update --force            # reinstall even if already on the target vers
 
 `update` downloads the release binary matching your OS/architecture, verifies
 its sha256, and atomically replaces the running executable. If the binary
-lives in a root-owned directory (the `/usr/local/bin` default), run
-`sudo ossprey update`.
+lives in a root-owned directory (the `/usr/local/bin` default on Linux/macOS),
+run `sudo ossprey update`; the Windows default (`%LOCALAPPDATA%\Programs\ossprey`)
+is user-writable, so no elevation is needed.
 
 ## Quick start
 
