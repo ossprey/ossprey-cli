@@ -37,7 +37,7 @@ jobs:
       - name: go vet
         run: go vet ./...
 
-  test:
+  test-matrix:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -57,3 +57,19 @@ jobs:
 
       - name: go test -race
         run: go test -race ./...
+
+  # Aggregate gate for branch protection: reports a single "Test" check that
+  # is green only when every matrix leg passed. `if: always()` is required —
+  # a skipped job would satisfy the required check even when the matrix failed.
+  test:
+    name: Test
+    needs: test-matrix
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all matrix jobs to pass
+        env:
+          RESULT: ${{ needs.test-matrix.result }}
+        run: |
+          echo "matrix result: $RESULT"
+          [ "$RESULT" = "success" ]
