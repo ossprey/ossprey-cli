@@ -125,4 +125,4 @@ jobs:
           gh release create "${{ needs.tag.outputs.new_tag }}" \
             --title "${{ needs.tag.outputs.new_tag }}" \
             --generate-notes \
-            dist/* install.sh
+            dist/* install.sh install.ps1

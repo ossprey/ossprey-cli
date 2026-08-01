@@ -24,7 +24,7 @@ os_raw="$(uname -s)"
 case "$os_raw" in
   Linux)   OS=linux ;;
   Darwin)  OS=darwin ;;
-  *)       err "unsupported OS: $os_raw (Windows users: download the .exe from the releases page)" ;;
+  *)       err "unsupported OS: $os_raw (Windows users: use install.ps1 — see the README)" ;;
 esac
 
 # --- detect arch ---
