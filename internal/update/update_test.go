@@ -280,18 +280,42 @@ func TestLatestTagNoRedirect(t *testing.T) {
 	}
 }
 
+// TestAssetName pins the asset naming to what .github/workflows/release.yml
+// publishes: ossprey-<goos>-<goarch>, with .exe appended on Windows only.
+// Every platform the release matrix builds is covered — a rename on either
+// side breaks `ossprey update` for that platform and nothing else.
 func TestAssetName(t *testing.T) {
 	tests := []struct {
 		goos, goarch, want string
 	}{
 		{"linux", "amd64", "ossprey-linux-amd64"},
+		{"linux", "arm64", "ossprey-linux-arm64"},
+		{"darwin", "amd64", "ossprey-darwin-amd64"},
 		{"darwin", "arm64", "ossprey-darwin-arm64"},
 		{"windows", "amd64", "ossprey-windows-amd64.exe"},
+		{"windows", "arm64", "ossprey-windows-arm64.exe"},
 	}
 	for _, tt := range tests {
 		if got := AssetName(tt.goos, tt.goarch); got != tt.want {
 			t.Errorf("AssetName(%s, %s) = %q, want %q", tt.goos, tt.goarch, got, tt.want)
 		}
+	}
+}
+
+// TestAssetNameMatchesHost guards the case that actually matters at runtime:
+// the binary asks for its own platform's asset. runtime.GOOS/GOARCH are fixed
+// at compile time, so a Windows build requests the .exe and a Linux build
+// does not. This assertion is what the windows-latest CI leg verifies.
+func TestAssetNameMatchesHost(t *testing.T) {
+	got := AssetName(runtime.GOOS, runtime.GOARCH)
+	if want := "ossprey-" + runtime.GOOS + "-" + runtime.GOARCH; !strings.HasPrefix(got, want) {
+		t.Errorf("host asset %q does not describe %s/%s", got, runtime.GOOS, runtime.GOARCH)
+	}
+	if runtime.GOOS == "windows" && !strings.HasSuffix(got, ".exe") {
+		t.Errorf("host asset %q is missing the .exe suffix on Windows", got)
+	}
+	if runtime.GOOS != "windows" && strings.HasSuffix(got, ".exe") {
+		t.Errorf("host asset %q has an .exe suffix on %s", got, runtime.GOOS)
 	}
 }
 
