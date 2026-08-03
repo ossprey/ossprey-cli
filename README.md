@@ -17,7 +17,7 @@ sandbox, no virtualenv.
 
 ## Contents
 
-- [Install](#install) — [Linux / macOS](#one-liner-linux--macos) · [Windows](#one-liner-windows-powershell) · [manual download](#manual-download) · [from source](#from-source)
+- [Install](#install) — [Linux / macOS](#one-liner-linux--macos) · [Windows](#one-liner-windows-powershell) · [manual download](#manual-download) · [from source](#from-source) · [updating](#updating)
 - [Quick start](#quick-start)
 - [Usage](#usage)
 - [Authentication](#authentication)
@@ -115,6 +115,23 @@ Requires Go 1.25+.
 The release build (`make build`) ships with `-trimpath -ldflags="-s -w"` for a
 ~16 MB binary. Use `make build-debug` for an unstripped ~21 MB build with
 symbols.
+
+### Updating
+
+Once installed, the CLI can update itself:
+
+```sh
+ossprey update                    # update in place to the latest release
+ossprey update --check            # just report whether an update is available
+ossprey update --version v0.2.0   # install a specific version (up- or downgrade)
+ossprey update --force            # reinstall even if already on the target version
+```
+
+`update` downloads the release binary matching your OS/architecture, verifies
+its sha256, and atomically replaces the running executable. If the binary
+lives in a root-owned directory (the `/usr/local/bin` default on Linux/macOS),
+run `sudo ossprey update`; the Windows default (`%LOCALAPPDATA%\Programs\ossprey`)
+is user-writable, so no elevation is needed.
 
 ## Quick start
 
