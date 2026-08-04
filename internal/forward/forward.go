@@ -15,12 +15,14 @@ import (
 	"os"
 	"os/exec"
 	"slices"
+	"sort"
 	"strings"
 
 	"github.com/ossprey/ossprey-cli/internal/check"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
 	"github.com/ossprey/ossprey-cli/internal/registry"
 	"github.com/ossprey/ossprey-cli/internal/scan"
+	"github.com/ossprey/ossprey-cli/internal/shim"
 	"github.com/ossprey/ossprey-cli/internal/submit"
 )
 
@@ -51,20 +53,27 @@ type Manager struct {
 // `yarn install`, `poetry install`, `uv sync`); the latter trigger a project
 // manifest scan instead of falling through unchecked (OSS-1284).
 var managers = map[string]*Manager{
-	"npm":    {Bin: "npm", Ecosystem: "npm", installAt: verbAt(0, "install", "i", "add", "ci")},
-	"yarn":   {Bin: "yarn", Ecosystem: "npm", installAt: verbAt(0, "add", "install")},
-	"pip":    {Bin: "pip", Ecosystem: "pypi", installAt: verbAt(0, "install")},
-	"poetry": {Bin: "poetry", Ecosystem: "pypi", installAt: verbAt(0, "add", "install")},
+	"npm":  {Bin: "npm", Ecosystem: "npm", installAt: verbAt(0, "install", "i", "add", "ci", "update", "up")},
+	"pnpm": {Bin: "pnpm", Ecosystem: "npm", installAt: verbAt(0, "install", "i", "add", "update", "up")},
+	"yarn": {Bin: "yarn", Ecosystem: "npm", installAt: verbAt(0, "add", "install", "upgrade", "up")},
+	"pip":  {Bin: "pip", Ecosystem: "pypi", installAt: verbAt(0, "install")},
+	// pip3 is the same tool under the name half the world types. It is its own
+	// manager rather than an alias so that the forwarder execs back into `pip3`
+	// — on a machine where only `pip3` exists, execing `pip` would fail.
+	"pip3":   {Bin: "pip3", Ecosystem: "pypi", installAt: verbAt(0, "install")},
+	"poetry": {Bin: "poetry", Ecosystem: "pypi", installAt: verbAt(0, "add", "install", "update", "lock")},
 	// uv: `uv add <pkg>`, `uv sync`, and `uv pip install <pkg>`.
 	"uv": {Bin: "uv", Ecosystem: "pypi", installAt: uvInstallAt},
 }
 
-// Managers returns the names of every supported forwarder, for CLI wiring.
+// Managers returns the names of every supported forwarder, sorted, for CLI
+// wiring (map order would otherwise shuffle `ossprey --help` run to run).
 func Managers() []string {
 	out := make([]string, 0, len(managers))
 	for name := range managers {
 		out = append(out, name)
 	}
+	sort.Strings(out)
 	return out
 }
 
@@ -384,6 +393,14 @@ var valueFlags = map[string]map[string]bool{
 		"-t", "--target", "--prefix", "-e", "--editable", "--optional", "--extra"),
 }
 
+// Aliases share their sibling's flag tables: pip3 is pip, and pnpm's install
+// flags are npm's for every flag that takes a value.
+func init() {
+	valueFlags["pip3"] = valueFlags["pip"]
+	valueFlags["pnpm"] = valueFlags["npm"]
+	requirementFileFlags["pip3"] = requirementFileFlags["pip"]
+}
+
 // requirementFileFlags name the flags whose value is a requirements/constraints
 // file. The packages it lists are NOT checked by the forwarder (use `ossprey
 // scan` for full coverage), so the value is reported as skipped to warn the user.
@@ -394,10 +411,14 @@ var requirementFileFlags = map[string]map[string]bool{
 
 // Exec runs the real package manager, inheriting stdio. The child's exit code
 // is propagated via the returned *exec.ExitError.
+//
+// Resolution goes through shim.LookPathReal, not exec.LookPath: when ossprey is
+// invoked *by* a PATH shim, the plain lookup could find that shim again and
+// fork-bomb the machine.
 func Exec(ctx context.Context, bin string, args []string) error {
-	path, err := exec.LookPath(bin)
+	path, err := shim.LookPathReal(bin)
 	if err != nil {
-		return fmt.Errorf("%s not found on PATH: %w", bin, err)
+		return err
 	}
 	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Stdin = os.Stdin

@@ -11,7 +11,7 @@ import (
 )
 
 func TestLookup(t *testing.T) {
-	for _, bin := range []string{"npm", "yarn", "pip", "poetry", "uv"} {
+	for _, bin := range []string{"npm", "pnpm", "yarn", "pip", "pip3", "poetry", "uv"} {
 		if _, ok := Lookup(bin); !ok {
 			t.Errorf("Lookup(%q): not found", bin)
 		}
@@ -32,7 +32,16 @@ func TestInstallDetection(t *testing.T) {
 		{"npm", []string{"i", "lodash"}, 1, true},
 		{"npm", []string{"add", "lodash"}, 1, true},
 		{"npm", []string{"ci"}, 1, true},
+		{"npm", []string{"update"}, 1, true},
 		{"npm", []string{"run", "build"}, 0, false},
+		{"pnpm", []string{"add", "lodash"}, 1, true},
+		{"pnpm", []string{"install"}, 1, true},
+		{"pnpm", []string{"up", "lodash"}, 1, true},
+		{"pnpm", []string{"run", "build"}, 0, false},
+		{"pip3", []string{"install", "requests"}, 1, true},
+		{"pip3", []string{"list"}, 0, false},
+		{"poetry", []string{"lock"}, 1, true},
+		{"poetry", []string{"run", "pytest"}, 0, false},
 		{"yarn", []string{"add", "react"}, 1, true},
 		{"yarn", []string{"install"}, 1, true}, // bare manifest install
 		{"pip", []string{"install", "requests"}, 1, true},

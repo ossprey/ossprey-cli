@@ -6,9 +6,18 @@
 # Or from cmd.exe:
 #   powershell -ExecutionPolicy Bypass -Command "irm https://github.com/ossprey/ossprey-cli/releases/latest/download/install.ps1 | iex"
 #
+# Flags (when run as a downloaded .ps1 file):
+#   -OverridePackageManagers   Install PATH shims so npm, pnpm, yarn, pip,
+#                              poetry and uv route through ossprey without being
+#                              prefixed. Same as `ossprey shim install`.
+#
 # Env vars:
 #   OSSPREY_VERSION      Tag to install (e.g. v0.1.0). Default: latest.
 #   OSSPREY_INSTALL_DIR  Install location. Default: %LOCALAPPDATA%\Programs\ossprey
+#   OSSPREY_OVERRIDE_PACKAGE_MANAGERS=1   Same as -OverridePackageManagers, and
+#                              the way to ask for shims through `irm ... | iex`.
+
+param([switch]$OverridePackageManagers)
 
 $ErrorActionPreference = 'Stop'
 
@@ -94,6 +103,17 @@ try {
 
     $installedVersion = try { & $dest --version 2>$null } catch { $Bin }
     Log "installed $installedVersion to $dest"
+
+    # --- optional: PATH shims over the package managers ---
+    if ($OverridePackageManagers -or $env:OSSPREY_OVERRIDE_PACKAGE_MANAGERS) {
+        Log 'installing package-manager shims'
+        try {
+            & $dest shim install
+        } catch {
+            Log "shim install failed: $_"
+            Log "ossprey itself is installed — run 'ossprey shim install' to retry"
+        }
+    }
 } finally {
     Remove-Item -Recurse -Force $Tmp -ErrorAction SilentlyContinue
 }
