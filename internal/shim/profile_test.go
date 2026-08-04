@@ -3,6 +3,7 @@ package shim
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -27,8 +28,13 @@ func TestWriteBlockPreservesUserContent(t *testing.T) {
 	if !strings.Contains(body, "/opt/shims") {
 		t.Fatalf("PATH entry missing:\n%s", body)
 	}
-	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 {
-		t.Fatalf("file mode changed to %v (%v); a 600 profile must stay 600", fi.Mode().Perm(), err)
+	// Windows has no POSIX permission bits — Go models only the read-only flag,
+	// so a 0600 file reads back as 0666 there. The guarantee is a POSIX one.
+	if runtime.GOOS != "windows" {
+		fi, err := os.Stat(path)
+		if err != nil || fi.Mode().Perm() != 0o600 {
+			t.Fatalf("file mode changed to %v (%v); a 600 profile must stay 600", fi.Mode().Perm(), err)
+		}
 	}
 
 	if changed, err := WriteBlock(p, "/opt/shims"); err != nil || changed {
