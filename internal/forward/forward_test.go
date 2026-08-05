@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/ossprey/ossprey-cli/internal/check"
@@ -311,6 +312,8 @@ func TestRun_BareInstall_ScansProjectManifest(t *testing.T) {
 	}
 }
 
+// The stub SBOM carries a verdict with zero components, so this also pins that
+// reportAndForward checks for malware before it branches on the component count.
 func TestRun_BareInstall_MalwareInManifestBlocks(t *testing.T) {
 	ex := &stubExec{}
 	swap(t, ex.fn, cleanSBOM)
@@ -542,5 +545,94 @@ func TestRun_ResolveFailsOpen(t *testing.T) {
 	}
 	if !ex.called {
 		t.Error("install should still be forwarded (fail open)")
+	}
+}
+
+// TestPnpmBooleanFlagsAreNotValueFlags guards the asymmetry that hid OSS-1577.
+// pnpm's boolean flags must appear in neither table: listing one makes it consume
+// the following token, swallowing either the verb (pre-verb table) or the package
+// name (post-verb table), and an install then goes through unchecked.
+func TestPnpmBooleanFlagsAreNotValueFlags(t *testing.T) {
+	// Boolean in pnpm. -w/--workspace-root is the one npm disagrees on: npm's -w
+	// (--workspace) takes a value.
+	booleans := []string{
+		"-w", "--workspace-root", "-r", "--recursive", "-D", "--save-dev",
+		"-P", "--save-prod", "-O", "--save-optional", "-E", "--save-exact",
+		"-g", "--global", "--no-save", "--ignore-scripts", "--offline",
+		"--prefer-offline", "--lockfile-only", "--frozen-lockfile", "--force",
+		"--prod", "--dev", "--shamefully-hoist", "--fix-lockfile",
+	}
+	for _, f := range booleans {
+		if valueFlags["pnpm"][f] {
+			t.Errorf("valueFlags[pnpm] lists boolean %q; it would swallow the package name", f)
+		}
+		if globalValueFlags["pnpm"][f] {
+			t.Errorf("globalValueFlags[pnpm] lists boolean %q; it would swallow the verb", f)
+		}
+	}
+}
+
+// TestPnpmValueFlagsAreNotSharedWithNpm keeps the tables distinct. Aliasing them
+// is what introduced OSS-1577, and a shared map means editing one silently edits
+// the other.
+func TestPnpmValueFlagsAreNotSharedWithNpm(t *testing.T) {
+	if len(valueFlags["pnpm"]) == 0 {
+		t.Fatal("valueFlags[pnpm] is empty")
+	}
+	probe := "--ossprey-table-identity-probe"
+	valueFlags["pnpm"][probe] = true
+	defer delete(valueFlags["pnpm"], probe)
+	if valueFlags["npm"][probe] {
+		t.Error("valueFlags[pnpm] and valueFlags[npm] are the same map")
+	}
+}
+
+// TestPnpmWorkspaceRootAddIsChecked is the unit-level companion to the smoke
+// test: the package named after a boolean -w must still be checked.
+func TestPnpmWorkspaceRootAddIsChecked(t *testing.T) {
+	m, _ := Lookup("pnpm")
+	for _, args := range [][]string{
+		{"add", "-w", "lodash"},
+		{"add", "--workspace-root", "lodash"},
+		{"add", "-w", "-D", "lodash"},
+		{"add", "-w", "lodash", "express"},
+	} {
+		start, ok := m.installAt(args)
+		if !ok {
+			t.Errorf("%v: not detected as an install", args)
+			continue
+		}
+		p := ParseSpecs(m, args[start:])
+		var names []string
+		for _, s := range p.Specs {
+			names = append(names, s.Name)
+		}
+		if !slices.Contains(names, "lodash") {
+			t.Errorf("%v: lodash not checked, got specs %v", args, names)
+		}
+	}
+}
+
+// TestPnpmPostVerbFilterValueIsNotAPackage stops --filter's value being resolved
+// and checked as though it were an install target.
+func TestPnpmPostVerbFilterValueIsNotAPackage(t *testing.T) {
+	m, _ := Lookup("pnpm")
+	for _, args := range [][]string{
+		{"add", "--filter", "web", "lodash"},
+		{"add", "-F", "web", "lodash"},
+		{"add", "--filter=web", "lodash"},
+	} {
+		start, _ := m.installAt(args)
+		p := ParseSpecs(m, args[start:])
+		var names []string
+		for _, s := range p.Specs {
+			names = append(names, s.Name)
+		}
+		if slices.Contains(names, "web") {
+			t.Errorf("%v: checked the filter value as a package, got %v", args, names)
+		}
+		if !slices.Contains(names, "lodash") {
+			t.Errorf("%v: lodash not checked, got %v", args, names)
+		}
 	}
 }

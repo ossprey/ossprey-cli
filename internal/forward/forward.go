@@ -277,8 +277,29 @@ func reportAndForward(ctx context.Context, m *Manager, opts Options, sbom *ossbo
 		fmt.Fprintf(os.Stderr, "ossprey: blocked `%s %s`\n", m.Bin, strings.Join(opts.Args, " "))
 		return ErrBlocked
 	}
-	fmt.Fprintln(os.Stderr, "ossprey: no malware found, forwarding to "+m.Bin)
+	// Both messages sit after the malware check, never in front of it: gating the
+	// block on a component count would forward an SBOM that carried a verdict but
+	// no components.
+	if n := len(sbom.Components); n == 0 {
+		// Nothing catalogued means nothing verified, whether the project declares
+		// nothing or every cataloger failed. "No malware found" would read as a
+		// clean bill of health for an install that was never checked.
+		fmt.Fprintf(os.Stderr, "ossprey: found no dependencies to check; forwarding `%s %s` unchecked\n",
+			m.Bin, strings.Join(opts.Args, " "))
+	} else {
+		// The count is load-bearing: "no malware found" alone read the same
+		// whether 40 packages were checked or none were.
+		fmt.Fprintf(os.Stderr, "ossprey: no malware found in %s, forwarding to %s\n",
+			countPackages(n), m.Bin)
+	}
 	return execFn(ctx, m.Bin, opts.Args)
+}
+
+func countPackages(n int) string {
+	if n == 1 {
+		return "1 package"
+	}
+	return fmt.Sprintf("%d packages", n)
 }
 
 // manifestInstall reports whether an install with no explicitly named packages
@@ -435,9 +456,22 @@ func flagSet(flags ...string) map[string]bool {
 // and long forms are listed. Boolean flags (e.g. npm --save-dev) are absent so
 // the package after them is still read. The structural isNonPackageToken check
 // is the backstop for value flags not listed here whose value is a URL or path.
+//
+// Same asymmetry as globalValueFlags, and it bites harder here: omitting a
+// value-taking flag makes its value read as a package, which checks something
+// that isn't being installed (noisy, but safe), while wrongly listing a boolean
+// flag swallows the package name and skips its check entirely (silent, unsafe).
+// Only flags known to take a value belong. Per-manager tables, never shared —
+// pnpm inheriting npm's list is what hid `pnpm add -w <pkg>` (OSS-1577).
 var valueFlags = map[string]map[string]bool{
 	"npm": flagSet("--registry", "--prefix", "-C", "--cache", "--userconfig",
 		"--globalconfig", "--tag", "--otp", "-w", "--workspace", "--omit", "--include"),
+	// pnpm's own, deliberately not npm's: -w is --workspace-root here and takes
+	// no value, and --filter is accepted after the verb as well as before it.
+	"pnpm": flagSet("--filter", "-F", "--filter-prod", "--dir", "-C", "--registry",
+		"--store-dir", "--virtual-store-dir", "--cache-dir", "--loglevel", "--reporter",
+		"--resolution-mode", "--use-node-version", "--package-import-method",
+		"--workspace-concurrency", "--network-concurrency"),
 	"yarn": flagSet("--registry", "--cache-folder", "--modules-folder", "--cwd"),
 	"pip": flagSet("-t", "--target", "-e", "--editable", "-i", "--index-url",
 		"--extra-index-url", "-f", "--find-links", "-c", "--constraint", "--prefix",
@@ -452,9 +486,10 @@ var valueFlags = map[string]map[string]bool{
 		"-t", "--target", "--prefix", "-e", "--editable", "--optional", "--extra"),
 }
 
+// pip3 is pip under another name, so it shares every table. pnpm is not npm and
+// has its own (OSS-1577).
 func init() {
 	valueFlags["pip3"] = valueFlags["pip"]
-	valueFlags["pnpm"] = valueFlags["npm"]
 	requirementFileFlags["pip3"] = requirementFileFlags["pip"]
 	globalValueFlags["pip3"] = globalValueFlags["pip"]
 }
