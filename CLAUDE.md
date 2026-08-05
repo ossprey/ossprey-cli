@@ -29,7 +29,14 @@ Run a single test: `go test ./internal/catalog/ -run TestName -v`.
 Smoke tests live behind the `smoke` build tag: `go test -tags smoke -run TestName -v ./test/smoke/...`.
 
 CI (`.github/workflows/ci.yml`) gates on `gofmt -l` being empty, `go vet`,
-`go test`, and `go test -race`. Keep code gofmt-clean. Requires Go 1.25+.
+`go test`, and `go test -race`, on ubuntu and windows. Keep code gofmt-clean.
+Requires Go 1.25+.
+
+One smoke job also runs in CI: `pnpm-smoke` runs `-run TestPnpm` against a real
+pnpm on both OSes, because that path can only be verified with the real binary
+(pnpm on Windows is a `.cmd`, as are the shims). Tests that need the shim
+directory must ask `ossprey shim dir` rather than assuming `~/.ossprey/shims` —
+Windows resolves it under `%LOCALAPPDATA%`.
 
 ## Architecture
 
