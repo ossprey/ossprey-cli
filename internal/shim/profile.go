@@ -15,11 +15,10 @@ type Profile struct {
 
 func Profiles(home string) []Profile {
 	type candidate struct {
-		rel     string
-		shell   string
-		fish    bool
-		always  bool
-		mkdirAt string
+		rel    string
+		shell  string
+		fish   bool
+		always bool
 	}
 	candidates := []candidate{
 		{rel: ".profile", always: true},
@@ -27,7 +26,7 @@ func Profiles(home string) []Profile {
 		{rel: ".bash_profile"},
 		{rel: ".zshrc", shell: "zsh"},
 		{rel: ".zprofile"},
-		{rel: filepath.Join(".config", "fish", "config.fish"), shell: "fish", fish: true, mkdirAt: filepath.Join(".config", "fish")},
+		{rel: filepath.Join(".config", "fish", "config.fish"), shell: "fish", fish: true},
 	}
 
 	var out []Profile

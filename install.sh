@@ -10,8 +10,8 @@
 #
 # Flags:
 #   --override-package-managers  Install PATH shims so npm, pnpm, yarn, pip,
-#                                poetry and uv route through ossprey without
-#                                being prefixed. Equivalent to running
+#                                pip3, poetry and uv route through ossprey
+#                                without being prefixed. Equivalent to running
 #                                `ossprey shim install` afterwards.
 #
 # Env vars:
@@ -39,8 +39,8 @@ Ossprey CLI installer.
 
 Flags:
   --override-package-managers   Install PATH shims so npm, pnpm, yarn, pip,
-                                poetry and uv route through ossprey without
-                                being prefixed (`ossprey shim install`).
+                                pip3, poetry and uv route through ossprey
+                                without being prefixed (`ossprey shim install`).
   -h, --help                    Show this help.
 
 Env vars:

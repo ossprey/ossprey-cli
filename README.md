@@ -357,10 +357,11 @@ yourself, `--dir` / `$OSSPREY_SHIM_DIR` to relocate them.
   block that uninstall removes cleanly, and uninstall deletes only files ossprey
   generated.
 
-Which profiles get the PATH entry: `~/.profile`, plus `~/.bashrc`, `~/.zshrc`,
-`~/.bash_profile`, `~/.zprofile` and `~/.config/fish/config.fish` where they
-exist or the shell is installed. On Windows the shims are `.cmd` files and the
-directory is prepended to your user PATH.
+Which profiles get the PATH entry: `~/.profile` always; `~/.bashrc`,
+`~/.zshrc` and `~/.config/fish/config.fish` if the file exists or that shell is
+installed; `~/.bash_profile` and `~/.zprofile` only if they already exist. On
+Windows the shims are `.cmd` files and the directory is prepended to your user
+PATH.
 
 In a container image, skip the profile edit and set PATH directly:
 

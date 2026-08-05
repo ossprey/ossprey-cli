@@ -7,7 +7,7 @@
 #   powershell -ExecutionPolicy Bypass -Command "irm https://github.com/ossprey/ossprey-cli/releases/latest/download/install.ps1 | iex"
 #
 # Flags (when run as a downloaded .ps1 file):
-#   -OverridePackageManagers   Install PATH shims so npm, pnpm, yarn, pip,
+#   -OverridePackageManagers   Install PATH shims so npm, pnpm, yarn, pip, pip3,
 #                              poetry and uv route through ossprey without being
 #                              prefixed. Same as `ossprey shim install`.
 #
