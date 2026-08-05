@@ -52,6 +52,44 @@ func TestInstallDetection(t *testing.T) {
 		{"uv", []string{"pip", "install", "httpx"}, 2, true},
 		{"uv", []string{"pip", "list"}, 0, false},
 		{"uv", []string{"sync"}, 1, true}, // lockfile-based manifest install
+
+		// Global flags before the verb. pnpm workspaces put them there as a matter
+		// of course (`pnpm --filter web add x`), and an install that slips through
+		// unrecognised is an install nobody checked.
+		{"pnpm", []string{"--filter", "web", "add", "lodash"}, 3, true},
+		{"pnpm", []string{"--filter=web", "add", "lodash"}, 2, true},
+		{"pnpm", []string{"-F", "web", "add", "lodash"}, 3, true},
+		{"pnpm", []string{"-r", "update"}, 2, true},
+		{"pnpm", []string{"--silent", "install"}, 2, true},
+		{"pnpm", []string{"-C", "packages/web", "install"}, 3, true},
+		{"pnpm", []string{"--filter", "web", "run", "build"}, 0, false},
+		{"npm", []string{"--silent", "install", "lodash"}, 2, true},
+		{"npm", []string{"--prefix", "/tmp/app", "install", "lodash"}, 3, true},
+		{"pip", []string{"--quiet", "install", "requests"}, 2, true},
+		{"poetry", []string{"-C", "sub", "add", "flask"}, 3, true},
+		{"uv", []string{"--directory", "sub", "add", "httpx"}, 3, true},
+		{"uv", []string{"-q", "pip", "install", "httpx"}, 3, true},
+
+		// pnpm's -w (--workspace-root) is boolean, so the verb follows it directly.
+		// npm's -w (--workspace) takes a value. Treating either like the other
+		// would swallow the verb and forward an install unchecked.
+		{"pnpm", []string{"-w", "add", "lodash"}, 2, true},
+		{"pnpm", []string{"--workspace-root", "add", "lodash"}, 2, true},
+		{"npm", []string{"-w", "web", "install", "lodash"}, 3, true},
+
+		// A verb-shaped token that is NOT the verb must not be mistaken for one.
+		{"pnpm", []string{"run", "add"}, 0, false},
+		{"npm", []string{"run", "install"}, 0, false},
+		{"poetry", []string{"run", "install"}, 0, false},
+		{"pnpm", []string{"exec", "install"}, 0, false},
+
+		// Degenerate arg lists must not panic or false-positive.
+		{"pnpm", nil, 0, false},
+		{"pnpm", []string{}, 0, false},
+		{"pnpm", []string{"--filter"}, 0, false},
+		{"pnpm", []string{"--filter", "web"}, 0, false},
+		{"pnpm", []string{"--", "add", "lodash"}, 0, false},
+		{"npm", []string{"-C"}, 0, false},
 	}
 	for _, tt := range tests {
 		m, _ := Lookup(tt.bin)

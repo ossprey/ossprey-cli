@@ -291,10 +291,25 @@ check.
   declared dependency before forwarding — it does **not** fall through
   unchecked.
 
+Global options before the subcommand are understood, so the workspace forms are
+checked like any other install:
+
+```sh
+ossprey pnpm --filter web add left-pad   # checked
+ossprey npm --prefix ./app install foo   # checked
+ossprey pnpm --filter web run build      # not an install, forwarded
+```
+
 If the registry can't be reached to resolve an unpinned named version, that
 package is skipped (fail-open) so a registry outage never blocks development.
 An install whose only targets are local paths or URLs (nothing checkable and no
 manifest to scan) is forwarded with a warning.
+
+> **Known gap (pnpm):** `pnpm run` and `pnpm exec` install the project's
+> declared dependencies as a side effect when `node_modules` is missing, which
+> `npm run` does not do. Those are pass-through commands, so the packages they
+> pull in are not checked. Run `ossprey pnpm install` (or `ossprey scan`) after
+> a fresh clone for coverage.
 
 Configuration comes from the environment (flag parsing is disabled so every
 argument reaches the real manager):

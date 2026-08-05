@@ -53,12 +53,12 @@ type Manager struct {
 // `yarn install`, `poetry install`, `uv sync`); the latter trigger a project
 // manifest scan instead of falling through unchecked (OSS-1284).
 var managers = map[string]*Manager{
-	"npm":    {Bin: "npm", Ecosystem: "npm", installAt: verbAt(0, "install", "i", "add", "ci", "update", "up")},
-	"pnpm":   {Bin: "pnpm", Ecosystem: "npm", installAt: verbAt(0, "install", "i", "add", "update", "up")},
-	"yarn":   {Bin: "yarn", Ecosystem: "npm", installAt: verbAt(0, "add", "install", "upgrade", "up")},
-	"pip":    {Bin: "pip", Ecosystem: "pypi", installAt: verbAt(0, "install")},
-	"pip3":   {Bin: "pip3", Ecosystem: "pypi", installAt: verbAt(0, "install")},
-	"poetry": {Bin: "poetry", Ecosystem: "pypi", installAt: verbAt(0, "add", "install", "update", "lock")},
+	"npm":    {Bin: "npm", Ecosystem: "npm", installAt: verbAt("npm", "install", "i", "add", "ci", "update", "up")},
+	"pnpm":   {Bin: "pnpm", Ecosystem: "npm", installAt: verbAt("pnpm", "install", "i", "add", "update", "up")},
+	"yarn":   {Bin: "yarn", Ecosystem: "npm", installAt: verbAt("yarn", "add", "install", "upgrade", "up")},
+	"pip":    {Bin: "pip", Ecosystem: "pypi", installAt: verbAt("pip", "install")},
+	"pip3":   {Bin: "pip3", Ecosystem: "pypi", installAt: verbAt("pip3", "install")},
+	"poetry": {Bin: "poetry", Ecosystem: "pypi", installAt: verbAt("poetry", "add", "install", "update", "lock")},
 	// uv: `uv add <pkg>`, `uv sync`, and `uv pip install <pkg>`.
 	"uv": {Bin: "uv", Ecosystem: "pypi", installAt: uvInstallAt},
 }
@@ -79,11 +79,13 @@ func Lookup(bin string) (*Manager, bool) {
 	return m, ok
 }
 
-// verbAt returns an installAt matcher: args[idx] must equal one of verbs, and
-// the package specs begin at idx+1.
-func verbAt(idx int, verbs ...string) func([]string) (int, bool) {
+// verbAt returns an installAt matcher: the verb is the first token that is not a
+// global flag (or a global flag's value), it must equal one of verbs, and the
+// package specs begin just after it.
+func verbAt(bin string, verbs ...string) func([]string) (int, bool) {
 	return func(args []string) (int, bool) {
-		if len(args) <= idx {
+		idx := verbIndex(bin, args)
+		if idx < 0 || idx >= len(args) {
 			return 0, false
 		}
 		if slices.Contains(verbs, args[idx]) {
@@ -93,15 +95,76 @@ func verbAt(idx int, verbs ...string) func([]string) (int, bool) {
 	}
 }
 
-// uvInstallAt matches `uv add ...`, `uv sync`, and `uv pip install ...`.
-func uvInstallAt(args []string) (int, bool) {
-	if len(args) >= 1 && (args[0] == "add" || args[0] == "sync") {
-		return 1, true
+// verbIndex returns the index of the sub-command verb, skipping global flags
+// that precede it. Package managers accept their global options before the verb
+// — `pnpm --filter web add x`, `npm --prefix /tmp install x`, `pip --quiet
+// install x` — and pnpm workspaces do it as a matter of course. Reading only
+// args[0] classified those as "not an install" and forwarded them unchecked.
+//
+// Only the first non-flag token is considered: it is the verb or nothing is. We
+// never scan ahead for a verb-shaped token, because `pnpm run add` must stay a
+// script run rather than becoming an install of a package called "add".
+func verbIndex(bin string, args []string) int {
+	global := globalValueFlags[bin]
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "" {
+			continue
+		}
+		if !strings.HasPrefix(a, "-") {
+			return i
+		}
+		// "--" ends option parsing; the verb cannot follow it meaningfully.
+		if a == "--" {
+			return -1
+		}
+		flag, _, hasInline := splitFlagValue(a)
+		if global[flag] && !hasInline {
+			i++ // this flag's value is the next token, not the verb
+		}
 	}
-	if len(args) >= 2 && args[0] == "pip" && args[1] == "install" {
-		return 2, true
+	return -1
+}
+
+// uvInstallAt matches `uv add ...`, `uv sync`, and `uv pip install ...`, with
+// uv's global flags allowed before the verb.
+func uvInstallAt(args []string) (int, bool) {
+	idx := verbIndex("uv", args)
+	if idx < 0 {
+		return 0, false
+	}
+	rest := args[idx:]
+	if len(rest) >= 1 && (rest[0] == "add" || rest[0] == "sync") {
+		return idx + 1, true
+	}
+	if len(rest) >= 2 && rest[0] == "pip" && rest[1] == "install" {
+		return idx + 2, true
 	}
 	return 0, false
+}
+
+// globalValueFlags lists, per manager, the flags valid *before* the verb whose
+// following token is a value rather than the verb itself.
+//
+// Bias: when in doubt, leave a flag out. Omitting a value-taking flag means its
+// value is read as the verb, matches nothing, and the command forwards unchecked
+// — the same fail-open behaviour as before this existed. Wrongly listing a
+// *boolean* flag would instead swallow the real verb and hide an install, so
+// only flags known to take a value belong here. Notably pnpm's -w
+// (--workspace-root) is boolean, where npm's -w (--workspace) takes a value.
+var globalValueFlags = map[string]map[string]bool{
+	"npm": flagSet("--prefix", "-C", "--loglevel", "--registry", "--userconfig",
+		"--globalconfig", "--cache", "-w", "--workspace", "--omit", "--include"),
+	"pnpm": flagSet("--filter", "-F", "--filter-prod", "--dir", "-C", "--loglevel",
+		"--reporter", "--store-dir", "--virtual-store-dir", "--resolution-mode",
+		"--use-node-version", "--package-import-method", "--workspace-concurrency",
+		"--network-concurrency", "--registry"),
+	"yarn": flagSet("--cwd", "--registry", "--cache-folder", "--modules-folder"),
+	"pip": flagSet("--log", "--proxy", "--timeout", "--retries", "--cache-dir",
+		"--python", "-i", "--index-url"),
+	"poetry": flagSet("-C", "--directory", "--project", "-P"),
+	"uv": flagSet("--directory", "--project", "--cache-dir", "--python", "-p",
+		"--config-file", "--color"),
 }
 
 // Options configures a forwarder Run.
@@ -393,6 +456,7 @@ func init() {
 	valueFlags["pip3"] = valueFlags["pip"]
 	valueFlags["pnpm"] = valueFlags["npm"]
 	requirementFileFlags["pip3"] = requirementFileFlags["pip"]
+	globalValueFlags["pip3"] = globalValueFlags["pip"]
 }
 
 // requirementFileFlags name the flags whose value is a requirements/constraints
