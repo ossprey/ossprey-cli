@@ -23,6 +23,7 @@ sandbox, no virtualenv.
 - [Authentication](#authentication)
 - [`check` — scan named packages](#check--scan-named-packages)
 - [Package-manager forwarder](#package-manager-forwarder) — check before install for `npm` / `yarn` / `pip` / `poetry` / `uv`
+- [How to make Ossprey scan on all package manager commands](#how-to-make-ossprey-scan-on-all-package-manager-commands) — shell aliases so you don't type `ossprey` first
 - [Supported ecosystems](#supported-ecosystems)
 - [CI usage](#ci-usage)
 - [Output](#output)
@@ -156,6 +157,23 @@ Get an API key at [dashboard.ossprey.com](https://dashboard.ossprey.com).
 
 ## Usage
 
+| Command | What it does |
+|---------|--------------|
+| [`ossprey scan [path]`](#scan) | Catalogue a directory, submit the OSSBOM, fail on malware. `path` defaults to `.`. |
+| [`ossprey check -e <pypi\|npm> <pkg>...`](#check--scan-named-packages) | Check packages by name, no project needed. |
+| [`ossprey npm\|yarn\|pip\|poetry\|uv ...`](#package-manager-forwarder) | Check, then run the real package manager. Blocks the install on malware. |
+| [`ossprey login`](#authentication) | Browser login via Auth0. Stores tokens locally. |
+| [`ossprey whoami`](#authentication) | Show who the stored login belongs to. |
+| [`ossprey logout`](#authentication) | Remove the stored login. |
+| [`ossprey update`](#updating) | Replace the binary with a newer release. |
+| `ossprey completion <shell>` | Print a completion script for bash, zsh, fish or PowerShell. |
+| `ossprey --version` | Print the CLI version. |
+
+To have the forwarders run without typing `ossprey` every time, see
+[how to make Ossprey scan on all package manager commands](#how-to-make-ossprey-scan-on-all-package-manager-commands).
+
+### `scan`
+
 ```
 ossprey scan [path] [flags]
 ```
@@ -170,7 +188,8 @@ ossprey scan [path] [flags]
 | `--no-version-lookup` | Don't query the registry to resolve unpinned dependencies; leave them versionless. |
 | `--url <url>` | Override the Ossprey API URL (default `https://api.ossprey.com`). |
 | `--api-key <key>` | Provide the API key on the command line instead of an env var. |
-| `--version` | Print the CLI version. |
+| `--dry-run-safe` | Skip the API; report an empty vulnerability list. |
+| `--dry-run-malicious` | Skip the API; inject a test finding against the first component. |
 
 ### Authentication
 
@@ -241,6 +260,8 @@ registry (PyPI / npm) and checked. Both `name@version` and pip's
 | `-e, --eco-system <pypi\|npm>` | Package ecosystem (required). |
 | `--url <url>` | Override the Ossprey API URL. |
 | `--api-key <key>` | API key (or env var). |
+| `--dry-run-safe` | Skip the API; report an empty vulnerability list. |
+| `--dry-run-malicious` | Skip the API; inject a test finding against the first package. |
 
 Exit codes match `scan`: `1` on a malware verdict or error, `0` otherwise.
 
@@ -282,11 +303,89 @@ package is skipped (fail-open) so a registry outage never blocks development.
 An install whose only targets are local paths or URLs (nothing checkable and no
 manifest to scan) is forwarded with a warning.
 
-Configuration comes from the environment (flag parsing is disabled so every
-argument reaches the real manager):
+Flag parsing is disabled so every argument reaches the real manager, which
+means the forwarder has no `--api-key` or `--url` of its own. It reads:
 
 - `OSSPREY_API_KEY` — API key
 - `OSSPREY_API_URL` — override the API URL (default `https://api.ossprey.com`)
+
+A session from `ossprey login` also counts, and takes precedence over
+`OSSPREY_API_KEY`, so on your own machine the forwarder usually needs no
+environment at all.
+
+## How to make Ossprey scan on all package manager commands
+
+The forwarder only runs when somebody remembers to type `ossprey` first. One
+alias per manager removes that step in your own terminal.
+
+Bash or Zsh, in `~/.bashrc` / `~/.zshrc`:
+
+```sh
+for mgr in npm yarn pip poetry uv; do alias "$mgr=ossprey $mgr"; done
+```
+
+Fish, in `~/.config/fish/config.fish`:
+
+```fish
+for mgr in npm yarn pip poetry uv
+    alias $mgr "ossprey $mgr"
+end
+```
+
+PowerShell, in `$PROFILE` (`Set-Alias` can't carry an argument, so these are
+functions):
+
+```powershell
+function npm    { ossprey npm    @args }
+function yarn   { ossprey yarn   @args }
+function pip    { ossprey pip    @args }
+function poetry { ossprey poetry @args }
+function uv     { ossprey uv     @args }
+```
+
+Open a new shell to pick them up. There's no recursion to worry about:
+`ossprey npm` resolves the real `npm` through `PATH` rather than through your
+shell, so the alias doesn't apply a second time. Wrap only the five managers
+above, since `ossprey <anything else>` isn't a command.
+
+An intercepted install needs credentials exactly like `ossprey scan` does, so
+run `ossprey login` once (or export `OSSPREY_API_KEY`) before relying on the
+aliases. With neither, the install stops on a credentials error rather than
+being quietly forwarded.
+
+To check they took, run `type npm`. Non-install commands (`npm run build`, `pip
+list`, `poetry run pytest`) go straight through untouched, so an
+ordinary-looking `npm --version` means the handoff works. An install prints to
+stderr before it forwards:
+
+```console
+$ npm install left-pad
+ossprey: no malware found, forwarding to npm
+
+added 1 package in 525ms
+```
+
+If a check comes back dirty you get the finding, a blocked line naming the
+command, and an exit code of `1`. The real manager never starts.
+
+An alias inherits the forwarder's scope: an install that names packages checks
+those packages, not their dependencies. Run `ossprey scan` afterwards for the
+full tree.
+
+Skip the check for one command by calling the manager directly:
+
+```sh
+command npm install ./local-tarball.tgz    # or \npm install ...
+```
+
+In PowerShell, `& (Get-Command npm -CommandType Application) install ...` steps
+around the profile function. To undo the whole thing, delete the alias lines
+and open a new shell.
+
+The limit of aliases is that they exist only in interactive shells. `make
+setup`, a `package.json` script, a CI job, and whatever your editor spawns in
+the background all miss them. Covering those takes a real executable earlier on
+`PATH`, not a shell feature.
 
 ## Supported ecosystems
 
