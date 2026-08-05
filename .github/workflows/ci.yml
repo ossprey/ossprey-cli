@@ -58,18 +58,51 @@ jobs:
       - name: go test -race
         run: go test -race ./...
 
+  # The pnpm forwarder drives a real pnpm, so unit tests can't cover it. Runs on
+  # Windows as well because pnpm there is a .cmd and the shims are .cmd files —
+  # the combination that unit tests only model (OSS-1566).
+  pnpm-smoke:
+    name: pnpm smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4
+        with:
+          node-version: '22'
+
+      - name: Install pnpm
+        run: npm install -g pnpm@latest
+
+      - name: pnpm version
+        run: pnpm --version
+
+      - name: go test -tags smoke -run TestPnpm
+        run: go test -tags smoke -count=1 -timeout 15m -v -run TestPnpm ./test/smoke/...
+
   # Aggregate gate for branch protection: reports a single "Test" check that
   # is green only when every matrix leg passed. `if: always()` is required —
   # a skipped job would satisfy the required check even when the matrix failed.
   test:
     name: Test
-    needs: test-matrix
+    needs: [test-matrix, pnpm-smoke]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Require all matrix jobs to pass
         env:
           RESULT: ${{ needs.test-matrix.result }}
+          PNPM_RESULT: ${{ needs.pnpm-smoke.result }}
         run: |
           echo "matrix result: $RESULT"
-          [ "$RESULT" = "success" ]
+          echo "pnpm smoke result: $PNPM_RESULT"
+          [ "$RESULT" = "success" ] && [ "$PNPM_RESULT" = "success" ]

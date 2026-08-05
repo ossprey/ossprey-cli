@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -156,18 +157,53 @@ func runForward(t *testing.T, dir, apiURL string, args ...string) runResult {
 	return runForwardEnv(t, dir, forwardEnv(home, apiURL, os.Getenv("PATH")), binPath, args...)
 }
 
-// forwardEnv is the environment a forwarded invocation runs under. HOME is a
-// scratch dir so the test never touches the developer's pnpm store or config.
+// forwardEnv is the environment a forwarded invocation runs under: the real
+// environment with the home directory redirected into a scratch dir, so the test
+// never touches the developer's pnpm store, config or shell profiles.
+//
+// It inherits rather than building from scratch because Windows processes need
+// SystemRoot, ComSpec, PATHEXT and TEMP to start at all, and pnpm on Windows is
+// itself a .cmd that depends on them.
 func forwardEnv(home, apiURL, path string) []string {
-	return []string{
-		"HOME=" + home,
-		"PATH=" + path,
-		"OSSPREY_API_URL=" + apiURL,
-		"OSSPREY_API_KEY=test-key",
-		// pnpm writes its store/state under HOME; keep it in the scratch dir.
-		"PNPM_HOME=" + filepath.Join(home, ".pnpm"),
-		"CI=1",
+	drop := map[string]bool{
+		"HOME": true, "PATH": true, "PNPM_HOME": true,
+		"OSSPREY_API_URL": true, "OSSPREY_API_KEY": true, "API_KEY": true,
+		"OSSPREY_SHIM_DIR": true, "OSSPREY_SHIM_BYPASS": true,
+		// Windows home resolution (os.UserHomeDir) reads USERPROFILE.
+		"USERPROFILE": true,
+		// Leaving these pointed at the real home would defeat the redirect.
+		"XDG_CONFIG_HOME": true, "XDG_DATA_HOME": true, "XDG_CACHE_HOME": true,
+		"APPDATA": true, "LOCALAPPDATA": true, "npm_config_userconfig": true,
 	}
+	var env []string
+	for _, kv := range os.Environ() {
+		if k, _, ok := strings.Cut(kv, "="); ok && drop[k] {
+			continue
+		}
+		env = append(env, kv)
+	}
+	env = append(env,
+		"HOME="+home,
+		"USERPROFILE="+home,
+		"APPDATA="+filepath.Join(home, "AppData", "Roaming"),
+		"LOCALAPPDATA="+filepath.Join(home, "AppData", "Local"),
+		"PATH="+path,
+		"OSSPREY_API_URL="+apiURL,
+		"OSSPREY_API_KEY=test-key",
+		// pnpm writes its store/state under the home dir; keep it in the scratch dir.
+		"PNPM_HOME="+filepath.Join(home, ".pnpm"),
+		"CI=1",
+	)
+	return env
+}
+
+// shimFile is the on-disk name of a manager's shim. Windows needs the extension
+// for the file to be executable at all.
+func shimFile(dir, manager string) string {
+	if runtime.GOOS == "windows" {
+		return filepath.Join(dir, manager+".cmd")
+	}
+	return filepath.Join(dir, manager)
 }
 
 func runForwardEnv(t *testing.T, dir string, env []string, bin string, args ...string) runResult {
@@ -370,12 +406,12 @@ func TestPnpmThroughShim(t *testing.T) {
 		"PNPM_HOME=" + filepath.Join(home, ".pnpm"),
 		"CI=1",
 	}
-	out, code := run(t, env, binPath, "shim", "install", "--managers", "pnpm")
+	out, code := run(t, env, binPath, "shim", "install", "--managers", "pnpm", "--no-path")
 	if code != 0 {
 		t.Fatalf("shim install exited %d: %s", code, out)
 	}
 	shimDir := filepath.Join(home, ".ossprey", "shims")
-	shimPath := filepath.Join(shimDir, "pnpm")
+	shimPath := shimFile(shimDir, "pnpm")
 	if _, err := os.Stat(shimPath); err != nil {
 		t.Fatalf("no pnpm shim written: %v", err)
 	}
@@ -429,6 +465,62 @@ func TestPnpmWorkspaceFilterInstallIsChecked(t *testing.T) {
 	}
 	if !installed(filepath.Join(root, "packages", "web"), "left-pad") {
 		t.Error("pnpm did not install into the filtered workspace package")
+	}
+}
+
+// TestPnpmMonorepoBareInstallChecksEveryPackage covers the case where the root
+// manifest declares nothing and the real dependencies live in the workspace
+// packages. A bare `pnpm install` there installs all of them, so the scan has to
+// reach into packages/*/package.json rather than stopping at the root.
+func TestPnpmMonorepoBareInstallChecksEveryPackage(t *testing.T) {
+	if testing.Short() {
+		t.Skip("hits the npm registry")
+	}
+	pnpmBin(t)
+
+	api := newFakeAPI(t, "")
+	root := pnpmWorkspace(t)
+
+	// Root declares nothing; each package declares its own dependency.
+	if err := os.WriteFile(filepath.Join(root, "package.json"),
+		[]byte(`{"name":"root","version":"1.0.0","private":true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "packages", "web", "package.json"),
+		[]byte(`{"name":"web","version":"1.0.0","private":true,`+
+			`"dependencies":{"left-pad":"1.3.0"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	apiPkg := filepath.Join(root, "packages", "api")
+	if err := os.MkdirAll(apiPkg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(apiPkg, "package.json"),
+		[]byte(`{"name":"api","version":"1.0.0","private":true,`+
+			`"dependencies":{"is-odd":"3.0.1"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res := runForward(t, root, api.URL, "pnpm", "install")
+	if res.exitCode != 0 {
+		t.Fatalf("expected exit 0, got %d\nstdout: %s\nstderr: %s", res.exitCode, res.stdout, res.stderr)
+	}
+
+	_, purls := api.stats()
+	for _, want := range []string{"left-pad", "is-odd"} {
+		found := false
+		for _, p := range purls {
+			if strings.Contains(p, want) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("workspace package dependency %q was not checked; got %v", want, purls)
+		}
+	}
+	if !installed(filepath.Join(root, "packages", "web"), "left-pad") ||
+		!installed(apiPkg, "is-odd") {
+		t.Error("bare monorepo install did not install both workspace packages' deps")
 	}
 }
 
@@ -509,20 +601,23 @@ func TestPnpmShimStripsOwnPathEntry(t *testing.T) {
 
 	home := t.TempDir()
 	stubDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(stubDir, "pnpm"),
-		[]byte("#!/bin/sh\necho \"STUB-PNPM-PATH=$PATH\"\n"), 0o755); err != nil {
+	stub, body := filepath.Join(stubDir, "pnpm"), "#!/bin/sh\necho \"STUB-PNPM-PATH=$PATH\"\n"
+	if runtime.GOOS == "windows" {
+		stub, body = stub+".cmd", "@echo off\r\necho STUB-PNPM-PATH=%PATH%\r\n"
+	}
+	if err := os.WriteFile(stub, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
 	env := forwardEnv(home, "http://127.0.0.1:1", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	if out, code := run(t, env, binPath, "shim", "install", "--managers", "pnpm"); code != 0 {
+	if out, code := run(t, env, binPath, "shim", "install", "--managers", "pnpm", "--no-path"); code != 0 {
 		t.Fatalf("shim install exited %d: %s", code, out)
 	}
 	shimDir := filepath.Join(home, ".ossprey", "shims")
 
 	shimPATH := shimDir + string(os.PathListSeparator) + stubDir
 	env = append(forwardEnv(home, "http://127.0.0.1:1", shimPATH), "OSSPREY_SHIM_BYPASS=1")
-	res := runForwardEnv(t, t.TempDir(), env, filepath.Join(shimDir, "pnpm"), "add", "left-pad")
+	res := runForwardEnv(t, t.TempDir(), env, shimFile(shimDir, "pnpm"), "add", "left-pad")
 	if res.exitCode != 0 {
 		t.Fatalf("bypassed shim exited %d\nstdout: %s\nstderr: %s", res.exitCode, res.stdout, res.stderr)
 	}
@@ -549,7 +644,7 @@ func TestPnpmRefusesToExecAShim(t *testing.T) {
 	home := t.TempDir()
 
 	env := forwardEnv(home, api.URL, os.Getenv("PATH"))
-	if out, code := run(t, env, binPath, "shim", "install", "--managers", "pnpm", "--all"); code != 0 {
+	if out, code := run(t, env, binPath, "shim", "install", "--managers", "pnpm", "--all", "--no-path"); code != 0 {
 		t.Fatalf("shim install exited %d: %s", code, out)
 	}
 	shimDir := filepath.Join(home, ".ossprey", "shims")
