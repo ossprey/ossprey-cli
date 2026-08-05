@@ -85,8 +85,25 @@ func New(env Environment) *SBOM {
 	}
 }
 
+// normalize keeps empty collections non-nil so they marshal as [] and {}, not null.
+func (c *Component) normalize() {
+	if c.Source == nil {
+		c.Source = []string{}
+	}
+	if c.Env == nil {
+		c.Env = []string{}
+	}
+	if c.Location == nil {
+		c.Location = []string{}
+	}
+	if c.Metadata == nil {
+		c.Metadata = map[string]any{}
+	}
+}
+
 // AddComponent merges into the SBOM, deduping on PURL-ish key (type/name@version).
 func (s *SBOM) AddComponent(c Component) {
+	c.normalize()
 	key := c.Type + "/" + c.Name + "@" + c.Version
 	if idx, ok := s.dedupe[key]; ok {
 		s.Components[idx].Source = mergeUnique(s.Components[idx].Source, c.Source)

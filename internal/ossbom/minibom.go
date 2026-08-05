@@ -40,8 +40,8 @@ func (s *SBOM) ToMiniBOM() MiniBOM {
 	for _, c := range s.Components {
 		out.Components = append(out.Components, MiniComponent{
 			Purl:     componentPurl(c),
-			Source:   nonNil(c.Source),
-			Env:      nonNil(c.Env),
+			Source:   c.Source,
+			Env:      c.Env,
 			Location: c.Location,
 		})
 	}
@@ -50,13 +50,6 @@ func (s *SBOM) ToMiniBOM() MiniBOM {
 
 func componentPurl(c Component) string {
 	return "pkg:" + c.Type + "/" + c.Name + "@" + c.Version
-}
-
-func nonNil(s []string) []string {
-	if s == nil {
-		return []string{}
-	}
-	return s
 }
 
 // ApplyAPIResponse copies vulnerabilities from a MiniBOM-shaped API response
