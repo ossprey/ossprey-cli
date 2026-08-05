@@ -197,6 +197,23 @@ func forwardEnv(home, apiURL, path string) []string {
 	return env
 }
 
+// shimDirOf asks the binary where its shims live rather than assuming. The
+// location is OS-specific — Windows prefers %LOCALAPPDATA%\ossprey\shims over
+// ~/.ossprey/shims — and hard-coding the POSIX path silently sent these tests
+// looking in an empty directory.
+func shimDirOf(t *testing.T, env []string) string {
+	t.Helper()
+	out, code := run(t, env, binPath, "shim", "dir")
+	if code != 0 {
+		t.Fatalf("shim dir exited %d: %s", code, out)
+	}
+	dir := strings.TrimSpace(out)
+	if dir == "" {
+		t.Fatal("shim dir printed nothing")
+	}
+	return dir
+}
+
 // shimFile is the on-disk name of a manager's shim. Windows needs the extension
 // for the file to be executable at all.
 func shimFile(dir, manager string) string {
@@ -398,19 +415,12 @@ func TestPnpmThroughShim(t *testing.T) {
 	home := t.TempDir()
 	dir := pnpmProject(t, nil)
 
-	env := []string{
-		"HOME=" + home,
-		"PATH=" + os.Getenv("PATH"),
-		"OSSPREY_API_URL=" + api.URL,
-		"OSSPREY_API_KEY=test-key",
-		"PNPM_HOME=" + filepath.Join(home, ".pnpm"),
-		"CI=1",
-	}
+	env := forwardEnv(home, api.URL, os.Getenv("PATH"))
 	out, code := run(t, env, binPath, "shim", "install", "--managers", "pnpm", "--no-path")
 	if code != 0 {
 		t.Fatalf("shim install exited %d: %s", code, out)
 	}
-	shimDir := filepath.Join(home, ".ossprey", "shims")
+	shimDir := shimDirOf(t, env)
 	shimPath := shimFile(shimDir, "pnpm")
 	if _, err := os.Stat(shimPath); err != nil {
 		t.Fatalf("no pnpm shim written: %v", err)
@@ -613,7 +623,10 @@ func TestPnpmShimStripsOwnPathEntry(t *testing.T) {
 	if out, code := run(t, env, binPath, "shim", "install", "--managers", "pnpm", "--no-path"); code != 0 {
 		t.Fatalf("shim install exited %d: %s", code, out)
 	}
-	shimDir := filepath.Join(home, ".ossprey", "shims")
+	shimDir := shimDirOf(t, env)
+	if _, err := os.Stat(shimFile(shimDir, "pnpm")); err != nil {
+		t.Fatalf("no pnpm shim written to %s: %v", shimDir, err)
+	}
 
 	shimPATH := shimDir + string(os.PathListSeparator) + stubDir
 	env = append(forwardEnv(home, "http://127.0.0.1:1", shimPATH), "OSSPREY_SHIM_BYPASS=1")
@@ -647,7 +660,10 @@ func TestPnpmRefusesToExecAShim(t *testing.T) {
 	if out, code := run(t, env, binPath, "shim", "install", "--managers", "pnpm", "--all", "--no-path"); code != 0 {
 		t.Fatalf("shim install exited %d: %s", code, out)
 	}
-	shimDir := filepath.Join(home, ".ossprey", "shims")
+	shimDir := shimDirOf(t, env)
+	if _, err := os.Stat(shimFile(shimDir, "pnpm")); err != nil {
+		t.Fatalf("no pnpm shim written to %s: %v", shimDir, err)
+	}
 
 	// The shim is now the *only* pnpm reachable: a bare PATH with nothing else on
 	// it. ossprey must error out instead of exec'ing the shim.
