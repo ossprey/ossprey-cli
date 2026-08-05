@@ -43,6 +43,7 @@ func main() {
 	root.AddCommand(newLogoutCmd())
 	root.AddCommand(newWhoamiCmd())
 	root.AddCommand(newUpdateCmd())
+	root.AddCommand(newShimCmd())
 	for _, bin := range forward.Managers() {
 		root.AddCommand(newForwardCmd(bin))
 	}

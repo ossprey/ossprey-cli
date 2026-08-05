@@ -5,9 +5,19 @@
 #   curl -fsSL https://github.com/ossprey/ossprey-cli/releases/latest/download/install.sh | sh
 #   curl -fsSL https://github.com/ossprey/ossprey-cli/releases/latest/download/install.sh | sudo sh
 #
+#   # ...and have ossprey intercept npm/pip/... installs automatically:
+#   curl -fsSL .../install.sh | sh -s -- --override-package-managers
+#
+# Flags:
+#   --override-package-managers  Install PATH shims so npm, pnpm, yarn, pip,
+#                                pip3, poetry and uv route through ossprey
+#                                without being prefixed. Equivalent to running
+#                                `ossprey shim install` afterwards.
+#
 # Env vars:
-#   OSSPREY_VERSION   Tag to install (e.g. v0.1.0). Default: latest.
+#   OSSPREY_VERSION      Tag to install (e.g. v0.1.0). Default: latest.
 #   OSSPREY_INSTALL_DIR  Install location. Default: /usr/local/bin.
+#   OSSPREY_OVERRIDE_PACKAGE_MANAGERS=1   Same as --override-package-managers.
 
 set -eu
 
@@ -15,9 +25,40 @@ REPO="ossprey/ossprey-cli"
 BIN="ossprey"
 VERSION="${OSSPREY_VERSION:-latest}"
 INSTALL_DIR="${OSSPREY_INSTALL_DIR:-/usr/local/bin}"
+OVERRIDE="${OSSPREY_OVERRIDE_PACKAGE_MANAGERS:-}"
 
 log()  { printf '==> %s\n' "$*" >&2; }
 err()  { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+  cat >&2 <<'EOF'
+Ossprey CLI installer.
+
+  curl -fsSL .../install.sh | sh
+  curl -fsSL .../install.sh | sh -s -- --override-package-managers
+
+Flags:
+  --override-package-managers   Install PATH shims so npm, pnpm, yarn, pip,
+                                pip3, poetry and uv route through ossprey
+                                without being prefixed (`ossprey shim install`).
+  -h, --help                    Show this help.
+
+Env vars:
+  OSSPREY_VERSION               Tag to install (e.g. v0.1.0). Default: latest.
+  OSSPREY_INSTALL_DIR           Install location. Default: /usr/local/bin.
+  OSSPREY_OVERRIDE_PACKAGE_MANAGERS=1   Same as --override-package-managers.
+EOF
+  exit 0
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --override-package-managers|--shims) OVERRIDE=1 ;;
+    -h|--help) usage ;;
+    *) err "unknown option: $1 (try --help)" ;;
+  esac
+  shift
+done
 
 # --- detect OS ---
 os_raw="$(uname -s)"
@@ -91,3 +132,15 @@ else
 fi
 
 log "installed $($INSTALL_DIR/$BIN --version 2>/dev/null || echo "$BIN") to $INSTALL_DIR/$BIN"
+
+# --- optional: PATH shims over the package managers ---
+if [ -n "$OVERRIDE" ]; then
+  log "installing package-manager shims"
+  if [ "$(id -u)" = 0 ] && [ -n "${SUDO_USER:-}" ]; then
+    sudo -u "$SUDO_USER" -H "$INSTALL_DIR/$BIN" shim install \
+      || log "shim install failed; ossprey itself is installed — run 'ossprey shim install' to retry"
+  else
+    "$INSTALL_DIR/$BIN" shim install \
+      || log "shim install failed; ossprey itself is installed — run 'ossprey shim install' to retry"
+  fi
+fi

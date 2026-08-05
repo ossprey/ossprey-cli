@@ -22,8 +22,9 @@ sandbox, no virtualenv.
 - [Usage](#usage)
 - [Authentication](#authentication)
 - [`check` — scan named packages](#check--scan-named-packages)
-- [Package-manager forwarder](#package-manager-forwarder) — check before install for `npm` / `yarn` / `pip` / `poetry` / `uv`
+- [Package-manager forwarder](#package-manager-forwarder) — check before install for `npm` / `pnpm` / `yarn` / `pip` / `poetry` / `uv`
 - [How to make Ossprey scan on all package manager commands](#how-to-make-ossprey-scan-on-all-package-manager-commands) — shell aliases so you don't type `ossprey` first
+- [PATH shims](#path-shims--drop-the-ossprey-prefix) — intercept installs in scripts, CI and agents too
 - [Supported ecosystems](#supported-ecosystems)
 - [CI usage](#ci-usage)
 - [Output](#output)
@@ -51,6 +52,15 @@ curl -fsSL https://github.com/ossprey/ossprey-cli/releases/latest/download/insta
 # Install to a user-writable dir (no sudo)
 curl -fsSL https://github.com/ossprey/ossprey-cli/releases/latest/download/install.sh \
   | OSSPREY_INSTALL_DIR=$HOME/.local/bin sh
+```
+
+Add `--override-package-managers` to also install [PATH
+shims](#path-shims--drop-the-ossprey-prefix), so `npm install` and `pip install`
+are checked without typing `ossprey`:
+
+```sh
+curl -fsSL https://github.com/ossprey/ossprey-cli/releases/latest/download/install.sh \
+  | sudo sh -s -- --override-package-managers
 ```
 
 ### One-liner (Windows PowerShell)
@@ -81,6 +91,10 @@ irm https://github.com/ossprey/ossprey-cli/releases/latest/download/install.ps1 
 
 # Custom install location
 $env:OSSPREY_INSTALL_DIR = 'C:\tools\ossprey'
+irm https://github.com/ossprey/ossprey-cli/releases/latest/download/install.ps1 | iex
+
+# Also install PATH shims over npm/pip/... (see "PATH shims" below)
+$env:OSSPREY_OVERRIDE_PACKAGE_MANAGERS = '1'
 irm https://github.com/ossprey/ossprey-cli/releases/latest/download/install.ps1 | iex
 ```
 
@@ -161,7 +175,8 @@ Get an API key at [dashboard.ossprey.com](https://dashboard.ossprey.com).
 |---------|--------------|
 | [`ossprey scan [path]`](#scan) | Catalogue a directory, submit the OSSBOM, fail on malware. `path` defaults to `.`. |
 | [`ossprey check -e <pypi\|npm> <pkg>...`](#check--scan-named-packages) | Check packages by name, no project needed. |
-| [`ossprey npm\|yarn\|pip\|poetry\|uv ...`](#package-manager-forwarder) | Check, then run the real package manager. Blocks the install on malware. |
+| [`ossprey npm\|pnpm\|yarn\|pip\|pip3\|poetry\|uv ...`](#package-manager-forwarder) | Check, then run the real package manager. Blocks the install on malware. |
+| [`ossprey shim install`](#path-shims--drop-the-ossprey-prefix) | Put shims on `PATH` so installs are checked without the `ossprey` prefix. |
 | [`ossprey login`](#authentication) | Browser login via Auth0. Stores tokens locally. |
 | [`ossprey whoami`](#authentication) | Show who the stored login belongs to. |
 | [`ossprey logout`](#authentication) | Remove the stored login. |
@@ -279,7 +294,7 @@ ossprey poetry add foo
 ossprey uv pip install foo==1.2.3
 ```
 
-Supported managers: `npm`, `yarn`, `pip`, `poetry`, `uv`. Non-install
+Supported managers: `npm`, `pnpm`, `yarn`, `pip`, `pip3`, `poetry`, `uv`. Non-install
 subcommands (`npm run`, `pip list`, …) are forwarded straight through with no
 check.
 
@@ -298,10 +313,25 @@ check.
   declared dependency before forwarding — it does **not** fall through
   unchecked.
 
+Global options before the subcommand are understood, so the workspace forms are
+checked like any other install:
+
+```sh
+ossprey pnpm --filter web add left-pad   # checked
+ossprey npm --prefix ./app install foo   # checked
+ossprey pnpm --filter web run build      # not an install, forwarded
+```
+
 If the registry can't be reached to resolve an unpinned named version, that
 package is skipped (fail-open) so a registry outage never blocks development.
 An install whose only targets are local paths or URLs (nothing checkable and no
 manifest to scan) is forwarded with a warning.
+
+> **Known gap (pnpm):** `pnpm run` and `pnpm exec` install the project's
+> declared dependencies as a side effect when `node_modules` is missing, which
+> `npm run` does not do. Those are pass-through commands, so the packages they
+> pull in are not checked. Run `ossprey pnpm install` (or `ossprey scan`) after
+> a fresh clone for coverage.
 
 Flag parsing is disabled so every argument reaches the real manager, which
 means the forwarder has no `--api-key` or `--url` of its own. It reads:
@@ -321,13 +351,13 @@ alias per manager removes that step in your own terminal.
 Bash or Zsh, in `~/.bashrc` / `~/.zshrc`:
 
 ```sh
-for mgr in npm yarn pip poetry uv; do alias "$mgr=ossprey $mgr"; done
+for mgr in npm pnpm yarn pip pip3 poetry uv; do alias "$mgr=ossprey $mgr"; done
 ```
 
 Fish, in `~/.config/fish/config.fish`:
 
 ```fish
-for mgr in npm yarn pip poetry uv
+for mgr in npm pnpm yarn pip pip3 poetry uv
     alias $mgr "ossprey $mgr"
 end
 ```
@@ -337,16 +367,18 @@ functions):
 
 ```powershell
 function npm    { ossprey npm    @args }
+function pnpm   { ossprey pnpm   @args }
 function yarn   { ossprey yarn   @args }
 function pip    { ossprey pip    @args }
+function pip3   { ossprey pip3   @args }
 function poetry { ossprey poetry @args }
 function uv     { ossprey uv     @args }
 ```
 
 Open a new shell to pick them up. There's no recursion to worry about:
 `ossprey npm` resolves the real `npm` through `PATH` rather than through your
-shell, so the alias doesn't apply a second time. Wrap only the five managers
-above, since `ossprey <anything else>` isn't a command.
+shell, so the alias doesn't apply a second time. Wrap only the managers
+listed above, since `ossprey <anything else>` isn't a command.
 
 An intercepted install needs credentials exactly like `ossprey scan` does, so
 run `ossprey login` once (or export `OSSPREY_API_KEY`) before relying on the
@@ -385,7 +417,79 @@ and open a new shell.
 The limit of aliases is that they exist only in interactive shells. `make
 setup`, a `package.json` script, a CI job, and whatever your editor spawns in
 the background all miss them. Covering those takes a real executable earlier on
-`PATH`, not a shell feature.
+`PATH`, not a shell feature — see [PATH shims](#path-shims--drop-the-ossprey-prefix).
+
+## PATH shims — drop the `ossprey` prefix
+
+Aliases stop at the interactive shell, as above. Shims cover the rest: a shim is
+a real executable, so Makefiles, CI steps and the commands your coding agent
+spawns go through it too.
+
+A shim is a small script named after the package manager
+in a directory at the **front of your PATH**, so `execvp` finds it wherever the
+command is run from — scripts and agents included.
+
+```sh
+# During install
+curl -fsSL https://github.com/ossprey/ossprey-cli/releases/latest/download/install.sh \
+  | sh -s -- --override-package-managers
+
+# Or any time afterwards
+ossprey shim install
+```
+
+Then just use your package manager as normal:
+
+```console
+$ npm install left-pad
+ossprey: no malware found, forwarding to npm
+added 1 package in 412ms
+```
+
+| Command | What it does |
+|---------|--------------|
+| `ossprey shim install` | Write the shims and put their directory first on PATH |
+| `ossprey shim install --dry-run` | Show what would be written and changed; write nothing |
+| `ossprey shim status` | Which managers are intercepted right now, and what they run |
+| `ossprey shim uninstall` | Remove the shims and the PATH entry |
+| `ossprey shim dir` | Print the shim directory (for `ENV PATH=…` in a Dockerfile) |
+
+Useful flags: `--managers npm,pip` to shim a subset, `--all` to shim managers
+you have not installed yet, `--no-path` to write the shims but manage PATH
+yourself, `--dir` / `$OSSPREY_SHIM_DIR` to relocate them.
+
+**How it behaves**
+
+- **Only installs are checked.** `npm run build`, `poetry run pytest`, `pip
+  list` and friends are exec'd straight through. The allowlist is the same one
+  the forwarder uses, so there is only one place it can drift.
+- **It fails open.** If the ossprey binary goes missing the shim prints a
+  warning and runs the real manager anyway. `OSSPREY_SHIM_BYPASS=1 npm install
+  …` skips the check for one command, and `ossprey shim uninstall` removes them
+  for good.
+- **It cannot recurse.** Each shim strips its own directory from PATH before
+  exec'ing, and ossprey independently refuses to exec any file carrying the shim
+  marker.
+- **It only touches its own files.** Shell profiles are edited inside a marked
+  block that uninstall removes cleanly, and uninstall deletes only files ossprey
+  generated.
+
+Which profiles get the PATH entry: `~/.profile` always; `~/.bashrc`,
+`~/.zshrc` and `~/.config/fish/config.fish` if the file exists or that shell is
+installed; `~/.bash_profile` and `~/.zprofile` only if they already exist. On
+Windows the shims are `.cmd` files and the directory is prepended to your user
+PATH.
+
+In a container image, skip the profile edit and set PATH directly:
+
+```dockerfile
+RUN ossprey shim install --no-path --all
+ENV PATH="/root/.ossprey/shims:${PATH}"
+```
+
+> **Note on latency:** a package Ossprey has never seen before takes a scan to
+> come back, so the first install of a brand-new version is slower than an
+> unprotected one. Subsequent installs hit a cached verdict.
 
 ## Supported ecosystems
 
