@@ -28,8 +28,6 @@ func TestWriteBlockPreservesUserContent(t *testing.T) {
 	if !strings.Contains(body, "/opt/shims") {
 		t.Fatalf("PATH entry missing:\n%s", body)
 	}
-	// Windows has no POSIX permission bits — Go models only the read-only flag,
-	// so a 0600 file reads back as 0666 there. The guarantee is a POSIX one.
 	if runtime.GOOS != "windows" {
 		fi, err := os.Stat(path)
 		if err != nil || fi.Mode().Perm() != 0o600 {
@@ -49,8 +47,6 @@ func TestWriteBlockPreservesUserContent(t *testing.T) {
 	}
 }
 
-// A user who edits the block by hand can leave it without its end marker. We
-// must still be able to take it out rather than stacking a second copy.
 func TestWriteBlockRepairsTruncatedBlock(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".bashrc")
@@ -90,13 +86,12 @@ func TestWriteBlockCreatesFishConfig(t *testing.T) {
 
 func TestProfilesAlwaysIncludesDotProfile(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("PATH", home) // no shells installed
+	t.Setenv("PATH", home)
 	got := Profiles(home)
 	if len(got) != 1 || got[0].Path != filepath.Join(home, ".profile") {
 		t.Fatalf("Profiles = %v, want just ~/.profile", got)
 	}
 
-	// An existing file is picked up even when its shell is not on PATH.
 	zshrc := filepath.Join(home, ".zshrc")
 	if err := os.WriteFile(zshrc, nil, 0o644); err != nil {
 		t.Fatal(err)

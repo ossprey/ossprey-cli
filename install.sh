@@ -30,8 +30,6 @@ OVERRIDE="${OSSPREY_OVERRIDE_PACKAGE_MANAGERS:-}"
 log()  { printf '==> %s\n' "$*" >&2; }
 err()  { printf 'error: %s\n' "$*" >&2; exit 1; }
 
-# Printed inline rather than sed'ed out of the file: when this script arrives
-# through `curl | sh` there is no file to read.
 usage() {
   cat >&2 <<'EOF'
 Ossprey CLI installer.
@@ -138,8 +136,6 @@ log "installed $($INSTALL_DIR/$BIN --version 2>/dev/null || echo "$BIN") to $INS
 # --- optional: PATH shims over the package managers ---
 if [ -n "$OVERRIDE" ]; then
   log "installing package-manager shims"
-  # Shims and the PATH entry belong to the human running this, not to root —
-  # `curl … | sudo sh` must not leave them in /root.
   if [ "$(id -u)" = 0 ] && [ -n "${SUDO_USER:-}" ]; then
     sudo -u "$SUDO_USER" -H "$INSTALL_DIR/$BIN" shim install \
       || log "shim install failed; ossprey itself is installed — run 'ossprey shim install' to retry"

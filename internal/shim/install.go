@@ -11,56 +11,32 @@ import (
 	"strings"
 )
 
-// Options configures Install and Uninstall. The zero value is the sane default
-// for every field: user's shim directory, the running binary, every supported
-// manager that is actually installed, shell profiles updated.
 type Options struct {
-	// Dir is the shim directory. Empty means Dir().
-	Dir string
-	// Binary is the ossprey executable the shims call. Empty means the running
-	// executable.
-	Binary string
-	// Managers limits the shims to these commands. Empty means every supported
-	// manager found on PATH (or all of them when All is set).
-	Managers []string
-	// All installs shims for supported managers that are not installed yet, so a
-	// later `brew install pnpm` is covered without re-running install.
-	All bool
-	// SkipProfiles leaves shell startup files untouched. For containers and
-	// CI, where PATH is set in the image or the workflow rather than a profile.
+	Dir          string
+	Binary       string
+	Managers     []string
+	All          bool
 	SkipProfiles bool
-	// Home overrides the home directory searched for shell profiles (test seam).
-	Home string
+	Home         string
 }
 
-// ManagerResult is the per-manager outcome of an install or uninstall.
 type ManagerResult struct {
 	Name string
-	Path string // shim script path
-	Real string // the genuine manager this shim shadows, if found
-	Note string // why it was skipped, when it was
+	Path string
+	Real string
+	Note string
 }
 
-// Result reports what an install or uninstall did, in enough detail for the CLI
-// to print something a developer can act on.
 type Result struct {
 	Dir      string
 	Binary   string
-	Done     []ManagerResult // shims written (install) or removed (uninstall)
-	Skipped  []ManagerResult // managers deliberately not touched
-	Profiles []string        // startup files that changed
-	// OnPath reports whether Dir is on the PATH of the *current* process, i.e.
-	// whether the change is already live in this shell.
-	OnPath bool
-	// PathHint, when non-empty, is the command a user must run themselves
-	// because we could not make the PATH change for them.
+	Done     []ManagerResult
+	Skipped  []ManagerResult
+	Profiles []string
+	OnPath   bool
 	PathHint string
 }
 
-// Plan reports what Install would do, without writing anything. It backs
-// `ossprey shim install --dry-run`: this command edits shell profiles and
-// shadows the commands a developer's whole day runs on, so "show me first" has
-// to be available.
 func Plan(o Options) (*Result, error) {
 	dir, bin, err := resolve(o)
 	if err != nil {
@@ -88,17 +64,13 @@ func Plan(o Options) (*Result, error) {
 		return res, nil
 	}
 	for _, p := range Profiles(home) {
-		if !hasBlockFor(p.Path, dir) { // report what would change, not what we would touch
+		if !hasBlockFor(p.Path, dir) {
 			res.Profiles = append(res.Profiles, p.Path)
 		}
 	}
 	return res, nil
 }
 
-// Install writes the shim scripts and prepends the shim directory to PATH.
-//
-// It is idempotent: running it twice changes nothing the second time, and it is
-// the supported way to re-point existing shims after ossprey moves.
 func Install(o Options) (*Result, error) {
 	res, err := Plan(o)
 	if err != nil {
@@ -125,9 +97,6 @@ func Install(o Options) (*Result, error) {
 	return res, nil
 }
 
-// Uninstall removes the shims and the PATH block. It only deletes files
-// carrying Marker, so anything else a user has put in the directory survives —
-// deleting a directory's worth of unknown files is not ours to do.
 func Uninstall(o Options) (*Result, error) {
 	dir := o.Dir
 	if dir == "" {
@@ -167,11 +136,9 @@ func Uninstall(o Options) (*Result, error) {
 		res.Done = append(res.Done, ManagerResult{Name: name, Path: path})
 	}
 	if kept == 0 {
-		_ = os.Remove(dir) // best effort; a non-empty dir simply stays
+		_ = os.Remove(dir)
 	}
 
-	// A partial uninstall (`--managers npm`) must leave PATH alone: the
-	// remaining shims still need the directory in front.
 	if len(only) == 0 && !o.SkipProfiles {
 		profiles, err := removePath(o)
 		if err != nil {
@@ -188,13 +155,10 @@ func Uninstall(o Options) (*Result, error) {
 	return res, nil
 }
 
-// writeShim writes one shim, refusing to clobber a file that is not ours.
 func writeShim(path, manager, dir, bin string) error {
 	if _, err := os.Stat(path); err == nil && !IsShim(path) {
 		return fmt.Errorf("%s already exists and was not created by ossprey; move it aside or choose another shim directory with %s", path, DirEnv)
 	}
-	// Write-then-rename: a shim must never be observed half-written, because
-	// the thing observing it is the shell trying to run `npm`.
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, []byte(Script(manager, dir, bin)), 0o755); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
@@ -232,8 +196,6 @@ func resolve(o Options) (dir, bin string, err error) {
 	return dir, bin, nil
 }
 
-// managersFor returns the managers to shim and whether the user named them
-// explicitly (in which case "not installed" is not a reason to skip: they asked).
 func managersFor(o Options) (names []string, explicit bool, err error) {
 	if len(o.Managers) == 0 {
 		return DefaultManagers(), false, nil
@@ -296,7 +258,6 @@ func homeDir(o Options) (string, error) {
 	return home, nil
 }
 
-// onPath reports whether dir is on the current process's PATH.
 func onPath(dir string) bool {
 	for _, e := range filepath.SplitList(os.Getenv("PATH")) {
 		if sameDir(e, dir) {
@@ -314,10 +275,6 @@ func sameDir(a, b string) bool {
 	return a == b
 }
 
-// windowsAddUserPath prepends dir to the persistent user PATH. It goes through
-// PowerShell rather than `setx`, which silently truncates a PATH longer than
-// 1024 characters — a real risk on a developer machine and an unpleasant way to
-// find out we shipped this.
 func windowsAddUserPath(dir string) (bool, error) {
 	script := fmt.Sprintf(`$d='%s'
 $p=[Environment]::GetEnvironmentVariable('Path','User')
@@ -327,7 +284,6 @@ if ($p) { $p = "$d;$p" } else { $p = $d }
 	return runPowerShell(script)
 }
 
-// windowsRemoveUserPath drops dir from the persistent user PATH.
 func windowsRemoveUserPath(dir string) (bool, error) {
 	script := fmt.Sprintf(`$d='%s'
 $p=[Environment]::GetEnvironmentVariable('Path','User')
@@ -337,7 +293,6 @@ $p = (($p -split ';') | Where-Object { $_ -ne $d }) -join ';'
 	return runPowerShell(script)
 }
 
-// runPowerShell reports (changed, err). Exit code 2 means "nothing to do".
 func runPowerShell(script string) (bool, error) {
 	ps, err := exec.LookPath("powershell")
 	if err != nil {

@@ -12,9 +12,6 @@ import (
 	"testing"
 )
 
-// TestShimEndToEnd installs real shims with the real binary, then runs a package
-// manager through one. It is the only test that covers the whole chain the
-// customer actually uses: PATH → shim script → ossprey → real manager.
 func TestShimEndToEnd(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shim scripts; the .cmd path is covered by unit tests")
@@ -28,7 +25,6 @@ func TestShimEndToEnd(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// A stand-in npm, so this test needs nothing installed on the machine.
 	if err := os.WriteFile(filepath.Join(realDir, "npm"),
 		[]byte("#!/bin/sh\necho \"REAL NPM: $*\"\n"), 0o755); err != nil {
 		t.Fatal(err)
@@ -48,8 +44,6 @@ func TestShimEndToEnd(t *testing.T) {
 		t.Fatalf("~/.profile does not prepend the shim dir: %v\n%s", err, profile)
 	}
 
-	// With the shim dir first on PATH, `npm run build` must reach the real npm
-	// with its arguments intact — and must not loop.
 	shimEnv := []string{"HOME=" + home, "PATH=" + shimDir + ":" + realDir}
 	out, code = run(t, shimEnv, filepath.Join(shimDir, "npm"), "run", "build")
 	if code != 0 {

@@ -8,16 +8,6 @@ import (
 	"strings"
 )
 
-// LookPathReal resolves bin the way exec.LookPath would, except that it skips
-// ossprey shims. It is what stands between `npm` (the shim) → `ossprey npm` →
-// `npm` (the shim again) and an infinite fork bomb.
-//
-// The shim scripts already strip their own directory from PATH before exec'ing
-// ossprey, so in the normal case this changes nothing. It matters when that
-// stripping does not bite: the directory reached through a symlink or a
-// differently-spelled path, a wrapper that re-prepends PATH, a shim copied
-// somewhere else by hand. Cheap insurance against the one bug in this feature
-// that would render a developer's machine unusable.
 func LookPathReal(bin string) (string, error) {
 	if strings.ContainsRune(bin, filepath.Separator) || (runtime.GOOS == "windows" && strings.ContainsRune(bin, '/')) {
 		if err := executable(bin); err != nil {
@@ -29,7 +19,7 @@ func LookPathReal(bin string) (string, error) {
 	var skipped []string
 	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
 		if dir == "" {
-			dir = "." // POSIX: an empty PATH entry means the working directory.
+			dir = "."
 		}
 		for _, cand := range candidates(filepath.Join(dir, bin)) {
 			if executable(cand) != nil {
@@ -50,13 +40,10 @@ func LookPathReal(bin string) (string, error) {
 	return "", fmt.Errorf("%s not found on PATH", bin)
 }
 
-// candidates expands a path to the names the OS would actually try. On Windows
-// a bare `npm` is really `npm.cmd`/`npm.exe`, chosen via PATHEXT.
 func candidates(path string) []string {
 	if runtime.GOOS != "windows" {
 		return []string{path}
 	}
-	// An extension already spelled out is used as-is.
 	if ext := filepath.Ext(path); ext != "" {
 		for _, e := range pathExts() {
 			if strings.EqualFold(ext, e) {
@@ -89,7 +76,6 @@ func pathExts() []string {
 	return out
 }
 
-// executable reports whether path is a runnable file.
 func executable(path string) error {
 	fi, err := os.Stat(path)
 	if err != nil {
@@ -99,7 +85,7 @@ func executable(path string) error {
 		return fmt.Errorf("%s is a directory", path)
 	}
 	if runtime.GOOS == "windows" {
-		return nil // Windows decides by extension, handled in candidates.
+		return nil
 	}
 	if fi.Mode()&0o111 == 0 {
 		return fmt.Errorf("%s is not executable", path)

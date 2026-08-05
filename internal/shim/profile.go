@@ -8,25 +8,15 @@ import (
 	"strings"
 )
 
-// Profile is a shell startup file ossprey manages a PATH block in.
 type Profile struct {
 	Path string
-	Fish bool // fish syntax rather than POSIX
+	Fish bool
 }
 
-// Profiles returns the startup files to write the PATH block into, for a given
-// home directory.
-//
-// Several files, not one, because no single file covers the ways a package
-// manager gets invoked: ~/.profile is read by login shells and by most
-// dev-container / desktop-session setups, ~/.bashrc by interactive bash,
-// ~/.zshrc by interactive zsh (which never reads ~/.profile). A file is
-// included when it already exists, or when its shell is installed and the file
-// is one we are willing to create.
 func Profiles(home string) []Profile {
 	type candidate struct {
 		rel     string
-		shell   string // create the file if this shell is installed ("" = never create)
+		shell   string
 		fish    bool
 		always  bool
 		mkdirAt string
@@ -61,7 +51,6 @@ func shellInstalled(name string) bool {
 	return err == nil
 }
 
-// HasBlock reports whether path already carries the managed ossprey block.
 func HasBlock(path string) bool {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -70,8 +59,6 @@ func HasBlock(path string) bool {
 	return strings.Contains(string(b), blockStart)
 }
 
-// hasBlockFor reports whether path already carries a managed block pointing at
-// dir — i.e. whether WriteBlock would be a no-op.
 func hasBlockFor(path, dir string) bool {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -81,9 +68,6 @@ func hasBlockFor(path, dir string) bool {
 	return strings.Contains(s, blockStart) && strings.Contains(s, dir)
 }
 
-// WriteBlock makes p contain exactly one managed block pointing at dir,
-// creating the file if needed. It reports whether the file changed, so install
-// can stay quiet about profiles that were already correct.
 func WriteBlock(p Profile, dir string) (bool, error) {
 	old, err := os.ReadFile(p.Path)
 	if err != nil && !os.IsNotExist(err) {
@@ -108,8 +92,6 @@ func WriteBlock(p Profile, dir string) (bool, error) {
 	return true, nil
 }
 
-// RemoveBlock deletes the managed block from p, leaving everything else — and
-// the file itself — alone. Reports whether the file changed.
 func RemoveBlock(p Profile) (bool, error) {
 	old, err := os.ReadFile(p.Path)
 	if err != nil {
@@ -128,9 +110,6 @@ func RemoveBlock(p Profile) (bool, error) {
 	return true, nil
 }
 
-// block renders the managed region. The PATH edit is idempotent in the shell
-// too: sourcing a profile twice (tmux, `exec zsh`, nested shells) must not stack
-// duplicate entries.
 func block(p Profile, dir string) string {
 	var b strings.Builder
 	b.WriteString(blockStart + "\n")
@@ -155,16 +134,12 @@ func block(p Profile, dir string) string {
 	return b.String()
 }
 
-// stripBlock removes every managed block from content, including a block whose
-// end marker is missing (a half-deleted edit should not make us give up).
 func stripBlock(content string) string {
 	for {
 		start := strings.Index(content, blockStart)
 		if start < 0 {
 			return content
 		}
-		// Trim the newline before the block so repeated install/uninstall cycles
-		// do not accumulate blank lines.
 		head := strings.TrimRight(content[:start], "\n")
 		if head != "" {
 			head += "\n"
@@ -181,8 +156,6 @@ func stripBlock(content string) string {
 	}
 }
 
-// writeFilePreservingMode writes data to path, keeping the existing file mode
-// when there is one — a profile a user has chmod'ed 600 stays 600.
 func writeFilePreservingMode(path string, data []byte, def os.FileMode) error {
 	mode := def
 	if fi, err := os.Stat(path); err == nil {
@@ -194,8 +167,6 @@ func writeFilePreservingMode(path string, data []byte, def os.FileMode) error {
 	return nil
 }
 
-// fishQuote renders s as a single-quoted fish word. fish escapes with a
-// backslash inside single quotes, unlike POSIX shells.
 func fishQuote(s string) string {
 	r := strings.NewReplacer(`\`, `\\`, `'`, `\'`)
 	return "'" + r.Replace(s) + "'"

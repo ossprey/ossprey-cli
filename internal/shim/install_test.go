@@ -7,9 +7,6 @@ import (
 	"testing"
 )
 
-// sandbox builds an isolated home + shim dir + a stand-in ossprey binary, and
-// puts a fake `npm` and `pip` on PATH so the "is it installed?" check has
-// something to find.
 type sandbox struct {
 	root, home, shimDir, binary, realDir string
 }
@@ -106,7 +103,7 @@ func TestInstallExplicitManagerNotOnPath(t *testing.T) {
 	s := newSandbox(t)
 
 	o := s.opts()
-	o.Managers = []string{"poetry"} // deliberately not installed in the sandbox
+	o.Managers = []string{"poetry"}
 	res, err := Install(o)
 	if err != nil {
 		t.Fatal(err)

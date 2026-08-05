@@ -6,9 +6,6 @@ import (
 	"testing"
 )
 
-// TestLookPathRealSkipsShims covers the failure this whole guard exists for: if
-// `ossprey npm` resolved `npm` to the shim that invoked it, every install would
-// fork until the machine died.
 func TestLookPathRealSkipsShims(t *testing.T) {
 	requirePOSIX(t)
 
@@ -44,8 +41,6 @@ func TestLookPathRealReportsShimOnlyPath(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error when only a shim is on PATH")
 	}
-	// The message has to name the fix; this is the state a broken uninstall or a
-	// removed node install leaves a developer in.
 	if !strings.Contains(err.Error(), "ossprey shim") {
 		t.Fatalf("error does not tell the user what to do: %v", err)
 	}

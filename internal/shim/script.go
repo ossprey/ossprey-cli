@@ -5,13 +5,6 @@ import (
 	"strings"
 )
 
-// Script renders the shim for manager, calling the ossprey binary at binPath
-// and living in dir. Rendering is pure so tests can assert on the text without
-// touching a filesystem.
-//
-// The header is load-bearing UX, not decoration: the single most likely support
-// question this feature generates is "why is npm behaving strangely?", and the
-// answer needs to be in the first thing a confused developer opens.
 func Script(manager, dir, binPath string) string {
 	if runtime.GOOS == "windows" {
 		return windowsScript(manager, dir, binPath)
@@ -137,7 +130,6 @@ call {{MANAGER}} %*
 exit /b %ERRORLEVEL%
 `
 
-// shellQuote renders s as a single-quoted POSIX shell word.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

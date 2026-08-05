@@ -10,10 +10,6 @@ import (
 	"github.com/ossprey/ossprey-cli/internal/shim"
 )
 
-// newShimCmd wires `ossprey shim install|uninstall|status|dir`: PATH shims that
-// route package-manager commands through ossprey without the developer typing
-// `ossprey` (and, crucially, without relying on a shell alias, which coding
-// agents and scripts never see).
 func newShimCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "shim",
@@ -148,9 +144,6 @@ func newShimStatusCmd() *cobra.Command {
 	return cmd
 }
 
-// newShimDirCmd exists so a Dockerfile or CI step can do the PATH edit itself:
-//
-//	ENV PATH="/root/.ossprey/shims:${PATH}"
 func newShimDirCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "dir",
@@ -253,8 +246,6 @@ func printStatus(st *shim.Status) {
 		case m.Shim != "":
 			fmt.Printf("  %s %-8s shim installed but NOT active: %s runs %s\n", no, m.Name, m.Name, m.Resolves)
 		case m.Resolves != "":
-			// Installed but not intercepted. Informational rather than an error:
-			// the user may have chosen this with --managers.
 			uncovered = append(uncovered, m.Name)
 			fmt.Printf("  %s %-8s not shimmed: %s runs %s unchecked\n", meh, m.Name, m.Name, m.Resolves)
 		default:
@@ -288,8 +279,6 @@ func printStatus(st *shim.Status) {
 	}
 }
 
-// marks returns the status glyphs. Legacy Windows consoles run a codepage that
-// renders ✓ as mojibake, so they get ASCII.
 func marks() (yes, no, meh string) {
 	if runtime.GOOS == "windows" {
 		return "[ok]", "[!!]", "[--]"

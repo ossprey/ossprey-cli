@@ -39,9 +39,6 @@ func TestIsShimIgnoresOtherFiles(t *testing.T) {
 	}
 }
 
-// TestShimExecsOssprey runs a generated shim for real. It is the test that would
-// have caught a shim which loops, drops arguments, or leaves its own directory
-// on PATH for the child process.
 func TestShimExecsOssprey(t *testing.T) {
 	requirePOSIX(t)
 
@@ -54,10 +51,8 @@ func TestShimExecsOssprey(t *testing.T) {
 		}
 	}
 
-	// A stand-in ossprey that reports how it was called.
 	ossprey := filepath.Join(root, "ossprey")
 	writeExec(t, ossprey, "#!/bin/sh\necho \"ossprey called: $*\"\necho \"PATH=$PATH\"\n")
-	// A real npm the shim must not shadow for the child process.
 	writeExec(t, filepath.Join(realDir, "npm"), "#!/bin/sh\necho \"real npm: $*\"\n")
 
 	writeExec(t, filepath.Join(shimDir, "npm"), Script("npm", shimDir, ossprey))
@@ -71,8 +66,6 @@ func TestShimExecsOssprey(t *testing.T) {
 	}
 }
 
-// A PATH entry containing a glob character must survive the recursion guard's
-// loop untouched — pathname expansion would otherwise rewrite it.
 func TestShimPreservesGlobbyPathEntries(t *testing.T) {
 	requirePOSIX(t)
 
@@ -83,7 +76,6 @@ func TestShimPreservesGlobbyPathEntries(t *testing.T) {
 	ossprey := filepath.Join(root, "ossprey")
 	writeExec(t, ossprey, "#!/bin/sh\necho \"PATH=$PATH\"\n")
 	writeExec(t, filepath.Join(shimDir, "npm"), Script("npm", shimDir, ossprey))
-	// Directories the glob would match if pathname expansion were left on.
 	mkdirs(t, filepath.Join(root, "match-a"), filepath.Join(root, "match-b"))
 
 	globby := filepath.Join(root, "match-*")
@@ -119,8 +111,6 @@ func TestShimBypassSkipsOssprey(t *testing.T) {
 	}
 }
 
-// TestShimFailsOpen: a missing ossprey binary must degrade to an unchecked
-// install, not to a broken toolchain.
 func TestShimFailsOpen(t *testing.T) {
 	requirePOSIX(t)
 
@@ -140,7 +130,6 @@ func TestShimFailsOpen(t *testing.T) {
 	}
 }
 
-// runShim invokes shimDir/npm with a PATH of exactly shimDir:realDir.
 func runShim(t *testing.T, shimDir, realDir string, env []string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command(filepath.Join(shimDir, "npm"), args...)
