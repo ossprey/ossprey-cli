@@ -435,9 +435,22 @@ func flagSet(flags ...string) map[string]bool {
 // and long forms are listed. Boolean flags (e.g. npm --save-dev) are absent so
 // the package after them is still read. The structural isNonPackageToken check
 // is the backstop for value flags not listed here whose value is a URL or path.
+//
+// Same asymmetry as globalValueFlags, and it bites harder here: omitting a
+// value-taking flag makes its value read as a package, which checks something
+// that isn't being installed (noisy, but safe), while wrongly listing a boolean
+// flag swallows the package name and skips its check entirely (silent, unsafe).
+// Only flags known to take a value belong. Per-manager tables, never shared —
+// pnpm inheriting npm's list is what hid `pnpm add -w <pkg>` (OSS-1577).
 var valueFlags = map[string]map[string]bool{
 	"npm": flagSet("--registry", "--prefix", "-C", "--cache", "--userconfig",
 		"--globalconfig", "--tag", "--otp", "-w", "--workspace", "--omit", "--include"),
+	// pnpm's own, deliberately not npm's: -w is --workspace-root here and takes
+	// no value, and --filter is accepted after the verb as well as before it.
+	"pnpm": flagSet("--filter", "-F", "--filter-prod", "--dir", "-C", "--registry",
+		"--store-dir", "--virtual-store-dir", "--cache-dir", "--loglevel", "--reporter",
+		"--resolution-mode", "--use-node-version", "--package-import-method",
+		"--workspace-concurrency", "--network-concurrency"),
 	"yarn": flagSet("--registry", "--cache-folder", "--modules-folder", "--cwd"),
 	"pip": flagSet("-t", "--target", "-e", "--editable", "-i", "--index-url",
 		"--extra-index-url", "-f", "--find-links", "-c", "--constraint", "--prefix",
@@ -452,9 +465,10 @@ var valueFlags = map[string]map[string]bool{
 		"-t", "--target", "--prefix", "-e", "--editable", "--optional", "--extra"),
 }
 
+// pip3 is pip under another name, so it shares every table. pnpm is not npm and
+// has its own (OSS-1577).
 func init() {
 	valueFlags["pip3"] = valueFlags["pip"]
-	valueFlags["pnpm"] = valueFlags["npm"]
 	requirementFileFlags["pip3"] = requirementFileFlags["pip"]
 	globalValueFlags["pip3"] = globalValueFlags["pip"]
 }
