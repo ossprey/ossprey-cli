@@ -29,7 +29,12 @@ func TestMain(m *testing.M) {
 	}
 	defer os.RemoveAll(tmp)
 
+	// Windows will not exec an extension-less file, so the built binary needs
+	// .exe for any of these tests to run there.
 	binPath = filepath.Join(tmp, "ossprey")
+	if runtime.GOOS == "windows" {
+		binPath += ".exe"
+	}
 	_, thisFile, _, _ := runtime.Caller(0)
 	repoRoot := filepath.Join(filepath.Dir(thisFile), "..", "..")
 
