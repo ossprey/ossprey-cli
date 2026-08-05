@@ -294,9 +294,43 @@ ossprey poetry add foo
 ossprey uv pip install foo==1.2.3
 ```
 
-Supported managers: `npm`, `pnpm`, `yarn`, `pip`, `pip3`, `poetry`, `uv`. Non-install
-subcommands (`npm run`, `pip list`, …) are forwarded straight through with no
-check.
+Supported managers: `npm`, `pnpm`, `yarn`, `pip`, `pip3`, `poetry`, `uv`.
+
+### What is checked
+
+Exactly these subcommands. Everything else is forwarded straight through with no
+check and no API call.
+
+| Manager | Checked subcommands |
+| ------- | ------------------- |
+| `npm` | `install`, `i`, `add`, `ci`, `update`, `up` |
+| `pnpm` | `install`, `i`, `add`, `update`, `up` |
+| `yarn` | `add`, `install`, `upgrade`, `up` |
+| `pip`, `pip3` | `install` |
+| `poetry` | `add`, `install`, `update`, `lock` |
+| `uv` | `add`, `sync`, `pip install` |
+
+Each manager's global options are understood before the subcommand, so
+`pnpm --filter web add x` and `npm --prefix ./app install x` are checked like any
+other install.
+
+### What is not checked
+
+Pass-through commands are not checked, which is intended for `npm run`,
+`pip list` and friends. Three groups are worth calling out, because they can
+still put code on your machine:
+
+- **Fetch-and-execute.** `npm exec`, `pnpm dlx`, `yarn dlx` and `uv tool run`
+  download a package and run it. They name a package, but it is not an install
+  verb, so it is forwarded unchecked. `npx` and `uvx` are separate binaries and
+  are not shimmed at all, so they bypass Ossprey entirely.
+- **Script runners.** `npm run`, `pnpm run`, `poetry run` and equivalents. The
+  scripts themselves are not inspected.
+- **Anything the manager resolves that was not named and is not in the
+  manifest.** Transitive dependencies of a named install are not resolved here;
+  run `ossprey scan` for full-tree coverage.
+
+For these, run `ossprey scan` on the project afterwards.
 
 **Two modes, picked automatically:**
 
@@ -327,11 +361,12 @@ package is skipped (fail-open) so a registry outage never blocks development.
 An install whose only targets are local paths or URLs (nothing checkable and no
 manifest to scan) is forwarded with a warning.
 
-> **Known gap (pnpm):** `pnpm run` and `pnpm exec` install the project's
-> declared dependencies as a side effect when `node_modules` is missing, which
-> `npm run` does not do. Those are pass-through commands, so the packages they
-> pull in are not checked. Run `ossprey pnpm install` (or `ossprey scan`) after
-> a fresh clone for coverage.
+> **Known gap (pnpm 9 and earlier):** `pnpm run` and `pnpm exec` install the
+> project's declared dependencies as a side effect when `node_modules` is
+> missing, which `npm run` does not do. Those are pass-through commands, so the
+> packages they pull in are not checked. pnpm 10 no longer appears to do this.
+> Either way, run `ossprey pnpm install` (or `ossprey scan`) after a fresh clone
+> for coverage.
 
 Flag parsing is disabled so every argument reaches the real manager, which
 means the forwarder has no `--api-key` or `--url` of its own. It reads:
