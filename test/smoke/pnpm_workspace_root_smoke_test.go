@@ -1,9 +1,12 @@
 //go:build smoke
 
 // Coverage for pnpm flag forms whose npm lookalikes take a value but which are
-// boolean (or absent) in pnpm. `valueFlags["pnpm"] = valueFlags["npm"]` in
-// forward's init aliases the whole npm table, so any such flag swallows the
-// package name that follows it.
+// boolean (or absent) in pnpm.
+//
+// These guard one failure mode: if pnpm's value-flag tables are ever aliased to
+// npm's again (`valueFlags["pnpm"] = valueFlags["npm"]`, the shape of OSS-1577)
+// or gain an npm-only entry, a flag consumes the package name that follows it
+// and the install forwards with that package unchecked.
 //
 // Run with: go test -tags smoke -run TestPnpm -v ./test/smoke/...
 
@@ -80,7 +83,10 @@ func TestPnpmWorkspaceRootAddLongFormIsChecked(t *testing.T) {
 	api := newFakeAPI(t, "")
 	dir := pnpmWorkspace(t)
 
-	runForward(t, dir, api.URL, "pnpm", "add", "--workspace-root", "left-pad@1.3.0")
+	res := runForward(t, dir, api.URL, "pnpm", "add", "--workspace-root", "left-pad@1.3.0")
+	if res.exitCode != 0 {
+		t.Fatalf("expected exit 0, got %d\nstdout: %s\nstderr: %s", res.exitCode, res.stdout, res.stderr)
+	}
 
 	_, purls := api.stats()
 	if len(purls) != 1 || purls[0] != "pkg:npm/left-pad@1.3.0" {
@@ -89,8 +95,13 @@ func TestPnpmWorkspaceRootAddLongFormIsChecked(t *testing.T) {
 }
 
 // TestPnpmPostVerbFilterChecksOnlyTheRealPackage covers `--filter` after the
-// verb. It is in pnpm's pre-verb table but not the post-verb one inherited from
-// npm, so its value is read as a package to check.
+// verb, which pnpm accepts as readily as before it. If it is missing from pnpm's
+// post-verb value-flag table its value is read as an install target, resolved
+// against the real registry and checked — there is a package called `web`.
+//
+// Asserted as an exact set, so it fails both ways: a phantom `web` appearing,
+// and left-pad going unchecked if the parse regresses and the install falls
+// through.
 func TestPnpmPostVerbFilterChecksOnlyTheRealPackage(t *testing.T) {
 	if testing.Short() {
 		t.Skip("hits the npm registry")
@@ -100,12 +111,14 @@ func TestPnpmPostVerbFilterChecksOnlyTheRealPackage(t *testing.T) {
 	api := newFakeAPI(t, "")
 	dir := pnpmWorkspace(t)
 
-	runForward(t, dir, api.URL, "pnpm", "add", "--filter", "web", "left-pad@1.3.0")
+	res := runForward(t, dir, api.URL, "pnpm", "add", "--filter", "web", "left-pad@1.3.0")
+	if res.exitCode != 0 {
+		t.Fatalf("expected exit 0, got %d\nstdout: %s\nstderr: %s", res.exitCode, res.stdout, res.stderr)
+	}
 
 	_, purls := api.stats()
-	for _, p := range purls {
-		if strings.HasPrefix(p, "pkg:npm/web@") {
-			t.Errorf("checked a phantom package from --filter's value: %v", purls)
-		}
+	if len(purls) != 1 || purls[0] != "pkg:npm/left-pad@1.3.0" {
+		t.Errorf("checked %v, want exactly [pkg:npm/left-pad@1.3.0]; a pkg:npm/web@ entry means "+
+			"--filter's value was read as a package", purls)
 	}
 }
