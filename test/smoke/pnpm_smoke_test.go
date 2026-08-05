@@ -269,7 +269,8 @@ func TestPnpmForwardCleanInstall(t *testing.T) {
 	if res.exitCode != 0 {
 		t.Fatalf("expected exit 0, got %d\nstdout: %s\nstderr: %s", res.exitCode, res.stdout, res.stderr)
 	}
-	if !strings.Contains(res.stderr, "no malware found, forwarding to pnpm") {
+	// The count pins that one package was actually checked, not zero.
+	if !strings.Contains(res.stderr, "no malware found in 1 package, forwarding to pnpm") {
 		t.Errorf("missing forward notice in stderr:\n%s", res.stderr)
 	}
 	if !installed(dir, "left-pad") {
@@ -435,7 +436,7 @@ func TestPnpmThroughShim(t *testing.T) {
 		t.Fatalf("pnpm through the shim exited %d\nstdout: %s\nstderr: %s", res.exitCode, res.stdout, res.stderr)
 	}
 	got := res.stdout + res.stderr
-	if !strings.Contains(got, "no malware found, forwarding to pnpm") {
+	if !strings.Contains(got, "no malware found in 1 package, forwarding to pnpm") {
 		t.Errorf("shim did not run the ossprey check:\n%s", got)
 	}
 	if !installed(dir, "left-pad") {

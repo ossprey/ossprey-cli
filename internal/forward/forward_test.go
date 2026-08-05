@@ -312,6 +312,8 @@ func TestRun_BareInstall_ScansProjectManifest(t *testing.T) {
 	}
 }
 
+// The stub SBOM carries a verdict with zero components, so this also pins that
+// reportAndForward checks for malware before it branches on the component count.
 func TestRun_BareInstall_MalwareInManifestBlocks(t *testing.T) {
 	ex := &stubExec{}
 	swap(t, ex.fn, cleanSBOM)

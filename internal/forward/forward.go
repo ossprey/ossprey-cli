@@ -277,8 +277,29 @@ func reportAndForward(ctx context.Context, m *Manager, opts Options, sbom *ossbo
 		fmt.Fprintf(os.Stderr, "ossprey: blocked `%s %s`\n", m.Bin, strings.Join(opts.Args, " "))
 		return ErrBlocked
 	}
-	fmt.Fprintln(os.Stderr, "ossprey: no malware found, forwarding to "+m.Bin)
+	// Both messages sit after the malware check, never in front of it: gating the
+	// block on a component count would forward an SBOM that carried a verdict but
+	// no components.
+	if n := len(sbom.Components); n == 0 {
+		// Nothing catalogued means nothing verified, whether the project declares
+		// nothing or every cataloger failed. "No malware found" would read as a
+		// clean bill of health for an install that was never checked.
+		fmt.Fprintf(os.Stderr, "ossprey: found no dependencies to check; forwarding `%s %s` unchecked\n",
+			m.Bin, strings.Join(opts.Args, " "))
+	} else {
+		// The count is load-bearing: "no malware found" alone read the same
+		// whether 40 packages were checked or none were.
+		fmt.Fprintf(os.Stderr, "ossprey: no malware found in %s, forwarding to %s\n",
+			countPackages(n), m.Bin)
+	}
 	return execFn(ctx, m.Bin, opts.Args)
+}
+
+func countPackages(n int) string {
+	if n == 1 {
+		return "1 package"
+	}
+	return fmt.Sprintf("%d packages", n)
 }
 
 // manifestInstall reports whether an install with no explicitly named packages
