@@ -38,6 +38,14 @@ type Options struct {
 	// manifest/lockfile is left versionless (no network calls) instead of
 	// defaulting to its latest published release.
 	SkipVersionLookup bool
+
+	// NoExec restricts the run to pure manifest/lockfile parsing: the custom
+	// catalogers that shell out to a package manager (uv, npm) are not
+	// instantiated. Used by callers cataloging synthetic trees (e.g. staged git
+	// blobs in the pre-commit hook) where invoking a resolver would be slow,
+	// surprising, or hit the network. Combine with SkipVersionLookup for a
+	// fully offline catalog.
+	NoExec bool
 }
 
 // Catalog returns Python + JavaScript packages under path.
@@ -74,25 +82,33 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 		python.NewPackageCataloger(pyCfg),
 		javascript.NewPackageCataloger(),
 		javascript.NewLockCataloger(jsCfg),
-		// Custom: full transitive resolution via uv (covers hatch, uv, bare
-		// pyproject without poetry.lock).
-		NewUVCataloger(absRoot),
-		// Custom: resolve transitives from setup.py when pyproject is absent
-		// or lacks a [project] table (legacy setuptools projects).
-		NewSetupPyCataloger(absRoot),
-		// Custom: resolve transitives from requirements.txt via uv (syft's
-		// built-in reads the file literally — direct deps only).
-		NewRequirementsCataloger(absRoot),
-		// Custom: direct-deps fallback for pyproject.toml when uv is missing.
-		NewPyProjectCataloger(absRoot),
-		// Custom: resolve npm ranges to concrete versions via `npm install
-		// --package-lock-only` when no lockfile is committed (npm analogue of
-		// uv). The package.json fallback below then folds in versionless.
-		NewNpmResolveCataloger(absRoot),
-		// Custom: direct-deps fallback for package.json (syft only emits the
-		// root project from package.json, not its deps).
-		NewPackageJSONCataloger(absRoot),
 	}
+	if !opts.NoExec {
+		catalogers = append(catalogers,
+			// Custom: full transitive resolution via uv (covers hatch, uv, bare
+			// pyproject without poetry.lock).
+			NewUVCataloger(absRoot),
+			// Custom: resolve transitives from setup.py when pyproject is absent
+			// or lacks a [project] table (legacy setuptools projects).
+			NewSetupPyCataloger(absRoot),
+			// Custom: resolve transitives from requirements.txt via uv (syft's
+			// built-in reads the file literally — direct deps only).
+			NewRequirementsCataloger(absRoot),
+		)
+	}
+	// Custom: direct-deps fallback for pyproject.toml when uv is missing.
+	catalogers = append(catalogers, NewPyProjectCataloger(absRoot))
+	if !opts.NoExec {
+		catalogers = append(catalogers,
+			// Custom: resolve npm ranges to concrete versions via `npm install
+			// --package-lock-only` when no lockfile is committed (npm analogue of
+			// uv). The package.json fallback below then folds in versionless.
+			NewNpmResolveCataloger(absRoot),
+		)
+	}
+	// Custom: direct-deps fallback for package.json (syft only emits the
+	// root project from package.json, not its deps).
+	catalogers = append(catalogers, NewPackageJSONCataloger(absRoot))
 
 	seen := map[string]struct{}{}
 	locks := newNpmLockClassifier(absRoot)
