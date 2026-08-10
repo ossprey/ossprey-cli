@@ -35,12 +35,18 @@ var (
 // through submit.NewClient — the exact order the scan path uses (--api-key,
 // then the stored `ossprey login` session, then OSSPREY_API_KEY / API_KEY).
 func checkMalwarePurls(ctx context.Context, apiURL, apiKey string, purls []string) ([]client.MalwareHit, error) {
+	// The timeout wraps credential resolution too, not just the lookup:
+	// submit.NewClient may refresh an expired `ossprey login` token over
+	// HTTP (auth.AccessToken), and on the raw command context that refresh
+	// could stall `git commit` for the HTTP client's full ~30s before
+	// failing open. Everything network-shaped in this hook shares the one
+	// 5s budget.
+	ctx, cancel := context.WithTimeout(ctx, precommitCheckTimeout)
+	defer cancel()
 	c, err := submit.NewClient(ctx, apiURL, apiKey)
 	if err != nil {
 		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(ctx, precommitCheckTimeout)
-	defer cancel()
 	return c.CheckMalware(ctx, purls)
 }
 
