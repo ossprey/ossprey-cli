@@ -7,9 +7,21 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ossprey/ossprey-cli/internal/auth"
 	"github.com/ossprey/ossprey-cli/internal/client"
 	"github.com/ossprey/ossprey-cli/internal/precommit"
 )
+
+// stubPrecommitLogin pins the stored-login seam and clears the API-key env
+// vars so credential tests never depend on the developer's real environment.
+func stubPrecommitLogin(t *testing.T, loginErr error) {
+	t.Helper()
+	t.Setenv("OSSPREY_API_KEY", "")
+	t.Setenv("API_KEY", "")
+	orig := precommitLoginFn
+	t.Cleanup(func() { precommitLoginFn = orig })
+	precommitLoginFn = func() error { return loginErr }
+}
 
 // stubPrecommit swaps the delta and check seams for the test's duration.
 func stubPrecommit(t *testing.T,
@@ -94,23 +106,72 @@ func TestPrecommitScopedHitWithoutDeltaMatch(t *testing.T) {
 	}
 }
 
-func TestPrecommitNoAPIKeyFailsOpen(t *testing.T) {
+func TestPrecommitNoCredentialsFailsOpen(t *testing.T) {
+	stubPrecommitLogin(t, auth.ErrNotLoggedIn)
 	stubPrecommit(t,
 		func(context.Context, string) (precommit.Delta, error) {
-			t.Error("delta must not be computed without an API key")
+			t.Error("delta must not be computed without credentials")
 			return precommit.Delta{}, nil
 		},
 		func(context.Context, string, string, []string) ([]client.MalwareHit, error) {
-			t.Error("check must not run without an API key")
+			t.Error("check must not run without credentials")
 			return nil, nil
 		})
 
 	var out bytes.Buffer
 	if blocked := runPrecommit(context.Background(), "https://api.test", "", false, &out); blocked {
-		t.Fatal("missing API key must fail open")
+		t.Fatal("missing credentials must fail open")
 	}
-	if !strings.Contains(out.String(), "no API key") {
-		t.Errorf("want single-line warning about API key, got: %q", out.String())
+	if !strings.Contains(out.String(), "no API key or login session") {
+		t.Errorf("want single-line warning about both credential sources, got: %q", out.String())
+	}
+}
+
+func TestPrecommitLoginSessionOnlyRunsCheck(t *testing.T) {
+	// No --api-key, no env key, but a stored `ossprey login` session: the
+	// check must run (submit.NewClient resolves the session to a bearer
+	// client) rather than fail open.
+	stubPrecommitLogin(t, nil)
+	var gotAPIKey string
+	checked := false
+	stubPrecommit(t, oneStagedPackage(),
+		func(_ context.Context, _, apiKey string, purls []string) ([]client.MalwareHit, error) {
+			checked = true
+			gotAPIKey = apiKey
+			return nil, nil
+		})
+
+	var out bytes.Buffer
+	if blocked := runPrecommit(context.Background(), "https://api.test", "", false, &out); blocked {
+		t.Fatal("clean commit must not be blocked")
+	}
+	if !checked {
+		t.Fatal("check must run when a login session exists")
+	}
+	if gotAPIKey != "" {
+		t.Errorf("api key passed through must stay empty so the session wins, got %q", gotAPIKey)
+	}
+	if out.Len() != 0 {
+		t.Errorf("clean commit must be silent, got: %q", out.String())
+	}
+}
+
+func TestPrecommitEnvKeyOnlyRunsCheck(t *testing.T) {
+	stubPrecommitLogin(t, auth.ErrNotLoggedIn)
+	t.Setenv("OSSPREY_API_KEY", "env-key")
+	checked := false
+	stubPrecommit(t, oneStagedPackage(),
+		func(context.Context, string, string, []string) ([]client.MalwareHit, error) {
+			checked = true
+			return nil, nil
+		})
+
+	var out bytes.Buffer
+	if blocked := runPrecommit(context.Background(), "https://api.test", "", false, &out); blocked {
+		t.Fatal("clean commit must not be blocked")
+	}
+	if !checked {
+		t.Fatal("check must run when an env API key exists")
 	}
 }
 

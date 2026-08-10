@@ -22,7 +22,7 @@ import (
 // A *client.ErrSkipped error flows back unwrapped so callers can detect a
 // quota skip via errors.As and report it without failing the build.
 func Validate(ctx context.Context, sbom *ossbom.SBOM, apiURL, apiKey string) error {
-	c, err := newClient(ctx, apiURL, apiKey)
+	c, err := NewClient(ctx, apiURL, apiKey)
 	if err != nil {
 		return err
 	}
@@ -33,11 +33,13 @@ func Validate(ctx context.Context, sbom *ossbom.SBOM, apiURL, apiKey string) err
 	return sbom.ApplyAPIResponse(raw)
 }
 
-// newClient picks the credential and builds the matching client. The stored
+// NewClient picks the credential and builds the matching client. The stored
 // JWT login beats environment API keys so an interactive `ossprey login` isn't
 // silently shadowed by a stale key exported in the shell; env keys remain the
-// fallback (and the norm in CI, where nobody is logged in).
-func newClient(ctx context.Context, apiURL, apiKey string) (*client.Client, error) {
+// fallback (and the norm in CI, where nobody is logged in). Exported so other
+// authenticated commands (e.g. `ossprey precommit`) share the exact same
+// resolution order as scan/check rather than reimplementing it.
+func NewClient(ctx context.Context, apiURL, apiKey string) (*client.Client, error) {
 	if apiKey != "" {
 		return client.New(apiURL, apiKey)
 	}

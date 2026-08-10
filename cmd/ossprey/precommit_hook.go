@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os/exec"
 
 	"github.com/spf13/cobra"
 
@@ -43,6 +44,12 @@ lets the commit through, and any single commit can bypass it with
 			fmt.Println("Installed pre-commit hook: " + st.Path)
 			fmt.Println("Staged dependency changes are now checked against Ossprey's known-malware list on every commit.")
 			fmt.Println("Bypass a single commit with `git commit --no-verify`; remove with `ossprey precommit uninstall`.")
+			// Non-fatal PATH sanity check: the hook script invokes `ossprey`
+			// by name and warns-and-skips when it can't find it, so tell the
+			// user now rather than on their next commit.
+			if _, err := exec.LookPath("ossprey"); err != nil {
+				fmt.Println("Note: `ossprey` is not on your PATH; the hook will warn and skip until it is.")
+			}
 			return nil
 		},
 	}
