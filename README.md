@@ -534,7 +534,8 @@ ENV PATH="/root/.ossprey/shims:${PATH}"
 — staged changes to `package.json`, lockfiles, `requirements.txt`,
 `pyproject.toml` and friends — against Ossprey's database of already-confirmed
 malware. It runs no new scans: parsing the staged diff is local and typically
-takes well under 100 ms, plus one HTTP round trip for the lookup. A clean
+takes well under 100 ms, plus one small HTTP request (per 100 packages) for
+the lookup. A clean
 commit prints nothing at all; a commit that touches no dependency manifest
 never calls the API.
 
@@ -547,7 +548,8 @@ session). Without one it warns and lets the commit through.
 ```yaml
 repos:
   - repo: https://github.com/ossprey/ossprey-cli
-    rev: v0.1.0   # pin a release tag
+    rev: v0.11.0  # pin the first release that ships the hook (the next release
+                  # after v0.10.0) — or run `pre-commit autoupdate` to resolve it
     hooks:
       - id: ossprey
 ```
