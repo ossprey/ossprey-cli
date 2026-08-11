@@ -594,7 +594,9 @@ framework manage both.
 - **Unpinned ranges.** Only pinned versions are looked up. A manifest change
   like `"left-pad": "^1.3.0"` with no lockfile staged alongside it is skipped —
   resolving "latest" at commit time could block you over a version you'll never
-  install. Pin the version or commit the lockfile to get coverage.
+  install. Pin the version or commit a lockfile — a lockfile also gives the
+  hook the full transitive tree, where a bare manifest yields direct
+  dependencies only.
 - **Packages already committed.** The hook diffs the staged manifests against
   `HEAD`, so it only sees what this commit introduces. Auditing what's already
   in the tree is `ossprey scan`'s job.

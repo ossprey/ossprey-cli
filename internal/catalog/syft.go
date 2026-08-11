@@ -45,6 +45,11 @@ type Options struct {
 	// blobs in the pre-commit hook) where invoking a resolver would be slow,
 	// surprising, or hit the network. Combine with SkipVersionLookup for a
 	// fully offline catalog.
+	//
+	// Transitive coverage: lockfiles enumerate the full transitive tree and are
+	// still parsed, so they lose nothing. Only manifest-without-lockfile
+	// projects (bare package.json / pyproject.toml / setup.py) degrade to
+	// direct deps — resolving their transitives is what the skipped catalogers do.
 	NoExec bool
 }
 
