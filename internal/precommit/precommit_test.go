@@ -231,6 +231,84 @@ func TestStagedDeltaSubdirectoryPathPreserved(t *testing.T) {
 	}
 }
 
+// TestRepoRelLocation exercises every location spelling the resolvers are
+// known to produce, on every platform — including the Windows-only forms that
+// broke on CI (OSS-1564): the function is pure string work, so the
+// Windows-shaped inputs run verbatim on unix.
+func TestRepoRelLocation(t *testing.T) {
+	// As in diffPackages: longest-first so nested manifests win.
+	known := []string{"web/package-lock.json", "package-lock.json"}
+	root := `C:\Users\RUNNER~1\AppData\Local\Temp\ossprey-precommit-1\staged`
+
+	cases := []struct {
+		name string
+		locs []string
+		want string
+	}{
+		{
+			name: "posix scan-root-relative path",
+			locs: []string{"package-lock.json"},
+			want: "package-lock.json",
+		},
+		{
+			name: "posix relative subdirectory path",
+			locs: []string{"web/package-lock.json"},
+			want: "web/package-lock.json",
+		},
+		{
+			name: "windows absolute long-name path under a short-name MkdirTemp root",
+			// GitHub runners set %TMP% to the 8.3 short form (RUNNER~1); the
+			// resolver reports the long form. filepath.Rel between the two
+			// produced ..-laden garbage — suffix matching must not care.
+			locs: []string{`C:\Users\runneradmin\AppData\Local\Temp\ossprey-precommit-1\staged\package-lock.json`},
+			want: "package-lock.json",
+		},
+		{
+			name: "windows path with case-variant prefix",
+			locs: []string{`C:\USERS\RunnerAdmin\AppData\Local\Temp\ossprey-precommit-1\staged\web\package-lock.json`},
+			want: "web/package-lock.json",
+		},
+		{
+			name: "posix-converted windows path (/c/... form)",
+			locs: []string{"/c/Users/runneradmin/AppData/Local/Temp/ossprey-precommit-1/staged/package-lock.json"},
+			want: "package-lock.json",
+		},
+		{
+			name: "symlink-resolved root differing from MkdirTemp root",
+			// e.g. macOS /var/folders vs /private/var/folders.
+			locs: []string{"/private/var/folders/ab/T/ossprey-precommit-1/staged/web/package-lock.json"},
+			want: "web/package-lock.json",
+		},
+		{
+			name: "nested manifest prefers the longest known suffix",
+			locs: []string{"staged/web/package-lock.json"},
+			want: "web/package-lock.json",
+		},
+		{
+			name: "dot-slash prefixed relative path",
+			locs: []string{"./package-lock.json"},
+			want: "package-lock.json",
+		},
+		{
+			name: "empty locations",
+			locs: nil,
+			want: "",
+		},
+		{
+			name: "unknown location falls back to slash-normalized trim",
+			locs: []string{"something-else.json"},
+			want: "something-else.json",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := repoRelLocation(tc.locs, root, known); got != tc.want {
+				t.Errorf("repoRelLocation(%v) = %q, want %q", tc.locs, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestIsManifestPath(t *testing.T) {
 	cases := []struct {
 		p    string

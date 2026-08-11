@@ -111,7 +111,7 @@ func StagedDelta(ctx context.Context, repoDir string) (Delta, error) {
 		return Delta{}, fmt.Errorf("precommit: catalog head tree: %w", err)
 	}
 
-	return diffPackages(stagedPkgs, headPkgs, stagedRoot), nil
+	return diffPackages(stagedPkgs, headPkgs, stagedRoot, paths), nil
 }
 
 // diffPackages returns the staged packages absent from head, keyed by
@@ -119,7 +119,12 @@ func StagedDelta(ctx context.Context, repoDir string) (Delta, error) {
 // versionless staged entry (an unpinned manifest range) is treated as
 // already-present when HEAD carries the same (type, name) at any version —
 // it is a lower-fidelity view of the same package, not a new one.
-func diffPackages(staged, head []catalog.Package, stagedRoot string) Delta {
+func diffPackages(staged, head []catalog.Package, stagedRoot string, repoPaths []string) Delta {
+	// Longest-first so a nested manifest (web/package-lock.json) wins over a
+	// root one (package-lock.json) when both are suffixes of a location.
+	known := append([]string(nil), repoPaths...)
+	sort.Slice(known, func(a, b int) bool { return len(known[a]) > len(known[b]) })
+
 	exact := make(map[string]struct{}, len(head))
 	names := make(map[string]struct{}, len(head))
 	for _, p := range head {
@@ -150,7 +155,7 @@ func diffPackages(staged, head []catalog.Package, stagedRoot string) Delta {
 			Type:    p.Type,
 			Name:    p.Name,
 			Version: p.Version,
-			Path:    repoRelLocation(p.Locations, stagedRoot),
+			Path:    repoRelLocation(p.Locations, stagedRoot, known),
 		})
 	}
 
@@ -176,13 +181,36 @@ func nameKey(t, name string) string {
 }
 
 // repoRelLocation maps a cataloged location back to its repo-relative path.
-// Syft's directory resolver reports paths relative to the scan root on POSIX
-// but absolute on Windows; the temp tree preserves repo-relative layout, so
-// stripping the root recovers the original path.
-func repoRelLocation(locs []string, root string) string {
+//
+// The temp tree preserves repo-relative layout, so a file's path under the
+// tree root IS its repo path. But the form the resolver reports varies:
+// relative to the scan root on POSIX, absolute on Windows — and on Windows
+// the resolver's absolute path can disagree with our os.MkdirTemp root in
+// spelling alone: 8.3 short names (C:\Users\RUNNER~1 vs C:\Users\runneradmin
+// on GitHub runners, where %TMP% is the short form), letter case, or symlink
+// resolution. Reconstructing via filepath.Rel against the root broke on
+// exactly that (OSS-1564 Windows CI: a ..-laden path instead of
+// "package-lock.json").
+//
+// So don't reconstruct from the root at all: every cataloged file is one we
+// materialized, so match the location's slash-normalized tail against the
+// known repo paths (longest-first, case-insensitively — the tail's spelling
+// is ours, only the root prefix is untrusted). The Rel fallback remains for
+// the never-expected case of a location matching no known path.
+func repoRelLocation(locs []string, root string, knownLongestFirst []string) string {
 	for _, l := range locs {
 		if l == "" {
 			continue
+		}
+		nl := strings.TrimPrefix(strings.ReplaceAll(l, `\`, "/"), "./")
+		for _, p := range knownLongestFirst {
+			if strings.EqualFold(nl, p) {
+				return p
+			}
+			if len(nl) > len(p) && nl[len(nl)-len(p)-1] == '/' &&
+				strings.EqualFold(nl[len(nl)-len(p):], p) {
+				return p
+			}
 		}
 		if filepath.IsAbs(l) {
 			if rel, err := filepath.Rel(root, l); err == nil {
