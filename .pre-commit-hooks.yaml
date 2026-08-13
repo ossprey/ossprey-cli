@@ -1,0 +1,28 @@
+# Hook definitions for the pre-commit framework (https://pre-commit.com).
+#
+# `ossprey precommit` decides for itself whether anything needs checking (it
+# diffs the staged manifests/lockfiles against HEAD), so both hooks run on
+# every commit with no filenames passed: a commit that touches no dependency
+# manifest costs one fast local git diff and no network at all.
+- id: ossprey
+  name: ossprey known-malware check
+  description: >-
+    Check the dependencies added or version-bumped by the staged changes
+    against Ossprey's known-malware database. Builds the CLI from source
+    with Go; use ossprey-system if the binary is already on your PATH.
+  entry: ossprey precommit
+  language: golang
+  always_run: true
+  pass_filenames: false
+  stages: [pre-commit]
+
+- id: ossprey-system
+  name: ossprey known-malware check (system binary)
+  description: >-
+    Same check via an `ossprey` binary already installed on PATH — no Go
+    toolchain needed.
+  entry: ossprey precommit
+  language: system
+  always_run: true
+  pass_filenames: false
+  stages: [pre-commit]

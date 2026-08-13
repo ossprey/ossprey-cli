@@ -44,6 +44,7 @@ func main() {
 	root.AddCommand(newWhoamiCmd())
 	root.AddCommand(newUpdateCmd())
 	root.AddCommand(newShimCmd())
+	root.AddCommand(newPrecommitCmdWithHooks())
 	for _, bin := range forward.Managers() {
 		root.AddCommand(newForwardCmd(bin))
 	}

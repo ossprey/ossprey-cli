@@ -25,6 +25,7 @@ sandbox, no virtualenv.
 - [Package-manager forwarder](#package-manager-forwarder) — check before install for `npm` / `pnpm` / `yarn` / `pip` / `poetry` / `uv`
 - [How to make Ossprey scan on all package manager commands](#how-to-make-ossprey-scan-on-all-package-manager-commands) — shell aliases so you don't type `ossprey` first
 - [PATH shims](#path-shims--drop-the-ossprey-prefix) — intercept installs in scripts, CI and agents too
+- [Pre-commit hook](#pre-commit-hook--block-known-malware-at-commit-time) — check staged dependency changes on every `git commit`
 - [Supported ecosystems](#supported-ecosystems)
 - [CI usage](#ci-usage)
 - [Output](#output)
@@ -177,6 +178,7 @@ Get an API key at [dashboard.ossprey.com](https://dashboard.ossprey.com).
 | [`ossprey check -e <pypi\|npm> <pkg>...`](#check--scan-named-packages) | Check packages by name, no project needed. |
 | [`ossprey npm\|pnpm\|yarn\|pip\|pip3\|poetry\|uv ...`](#package-manager-forwarder) | Check, then run the real package manager. Blocks the install on malware. |
 | [`ossprey shim install`](#path-shims--drop-the-ossprey-prefix) | Put shims on `PATH` so installs are checked without the `ossprey` prefix. |
+| [`ossprey precommit`](#pre-commit-hook--block-known-malware-at-commit-time) | Git pre-commit hook: block commits that stage known-malicious packages. |
 | [`ossprey login`](#authentication) | Browser login via Auth0. Stores tokens locally. |
 | [`ossprey whoami`](#authentication) | Show who the stored login belongs to. |
 | [`ossprey logout`](#authentication) | Remove the stored login. |
@@ -525,6 +527,79 @@ ENV PATH="/root/.ossprey/shims:${PATH}"
 > **Note on latency:** a package Ossprey has never seen before takes a scan to
 > come back, so the first install of a brand-new version is slower than an
 > unprotected one. Subsequent installs hit a cached verdict.
+
+## Pre-commit hook — block known malware at commit time
+
+`ossprey precommit` checks the dependencies a commit **adds or version-bumps**
+— staged changes to `package.json`, lockfiles, `requirements.txt`,
+`pyproject.toml` and friends — against Ossprey's database of already-confirmed
+malware. It runs no new scans: parsing the staged diff is local and typically
+takes well under 100 ms, plus one small HTTP request (per 100 packages) for
+the lookup. A clean
+commit prints nothing at all; a commit that touches no dependency manifest
+never calls the API.
+
+It needs an API key via `OSSPREY_API_KEY` (or a stored `ossprey login`
+session). Without one it warns and lets the commit through.
+
+**Via the [pre-commit framework](https://pre-commit.com)**, in your
+`.pre-commit-config.yaml`:
+
+```yaml
+repos:
+  - repo: https://github.com/ossprey/ossprey-cli
+    rev: v0.11.0  # pin the first release that ships the hook (the next release
+                  # after v0.10.0) — or run `pre-commit autoupdate` to resolve it
+    hooks:
+      - id: ossprey
+```
+
+`id: ossprey` builds the CLI from source, which needs a Go toolchain. If
+`ossprey` is already installed on your `PATH`, use `id: ossprey-system`
+instead — no Go required.
+
+**Or as a plain git hook**, no framework needed:
+
+```sh
+cd your-repo
+ossprey precommit install
+```
+
+| Command | What it does |
+|---------|--------------|
+| `ossprey precommit` | Run the check itself (this is what the hook invokes) |
+| `ossprey precommit install` | Write `.git/hooks/pre-commit` in the current repo (respects `core.hooksPath`) |
+| `ossprey precommit status` | Show whether the hook is installed in this repo |
+| `ossprey precommit uninstall` | Remove the hook — only if ossprey wrote it |
+
+Re-running `install` refreshes an existing ossprey hook in place. A
+pre-commit hook that ossprey did **not** write is never overwritten or
+removed: chain `ossprey precommit` into it yourself, or let the pre-commit
+framework manage both.
+
+**How it behaves**
+
+- **It fails open.** No API key, network outage, API error, git trouble — every
+  failure mode short of a confirmed malware hit prints a one-line warning and
+  lets the commit through (exit `0`). Exit `1` means exactly one thing: a
+  staged package is known-malicious. A hook that can break `git commit` gets
+  ripped out, so this one can't.
+- **Bypass when you must.** `git commit --no-verify` skips the hook for a
+  single commit, at your own risk.
+- **It only touches its own files.** `uninstall` deletes the hook only when it
+  carries the ossprey marker.
+
+### What is not checked
+
+- **Unpinned ranges.** Only pinned versions are looked up. A manifest change
+  like `"left-pad": "^1.3.0"` with no lockfile staged alongside it is skipped —
+  resolving "latest" at commit time could block you over a version you'll never
+  install. Pin the version or commit a lockfile — a lockfile also gives the
+  hook the full transitive tree, where a bare manifest yields direct
+  dependencies only.
+- **Packages already committed.** The hook diffs the staged manifests against
+  `HEAD`, so it only sees what this commit introduces. Auditing what's already
+  in the tree is `ossprey scan`'s job.
 
 ## Supported ecosystems
 
