@@ -4,6 +4,11 @@
 # diffs the staged manifests/lockfiles against HEAD), so both hooks run on
 # every commit with no filenames passed: a commit that touches no dependency
 # manifest costs one fast local git diff and no network at all.
+#
+# `verbose: true` because pre-commit normally shows hook output only on
+# failure — and `ossprey precommit` fails OPEN (exit 0 with a warning) when
+# the check can't run. Without verbose, that warning is swallowed and the
+# hook displays "Passed" while nothing was checked.
 - id: ossprey
   name: ossprey known-malware check
   description: >-
@@ -14,6 +19,7 @@
   language: golang
   always_run: true
   pass_filenames: false
+  verbose: true
   stages: [pre-commit]
 
 - id: ossprey-system
@@ -25,4 +31,5 @@
   language: system
   always_run: true
   pass_filenames: false
+  verbose: true
   stages: [pre-commit]

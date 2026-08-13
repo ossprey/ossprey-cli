@@ -548,8 +548,8 @@ session). Without one it warns and lets the commit through.
 ```yaml
 repos:
   - repo: https://github.com/ossprey/ossprey-cli
-    rev: v0.11.0  # pin the first release that ships the hook (the next release
-                  # after v0.10.0) — or run `pre-commit autoupdate` to resolve it
+    rev: v0.11.1  # pin the latest release — or run `pre-commit autoupdate`
+                  # to resolve it (the hook first shipped in v0.11.0)
     hooks:
       - id: ossprey
 ```
@@ -583,7 +583,9 @@ framework manage both.
   failure mode short of a confirmed malware hit prints a one-line warning and
   lets the commit through (exit `0`). Exit `1` means exactly one thing: a
   staged package is known-malicious. A hook that can break `git commit` gets
-  ripped out, so this one can't.
+  ripped out, so this one can't. The lookup gets a 10s budget (enough to cover
+  the API's cold start) and fails open past it — override with
+  `OSSPREY_PRECOMMIT_TIMEOUT` (a Go duration like `15s`).
 - **Bypass when you must.** `git commit --no-verify` skips the hook for a
   single commit, at your own risk.
 - **It only touches its own files.** `uninstall` deletes the hook only when it

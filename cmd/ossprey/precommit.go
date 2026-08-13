@@ -16,10 +16,29 @@ import (
 	"github.com/ossprey/ossprey-cli/internal/submit"
 )
 
-// precommitCheckTimeout bounds the whole known-bad lookup. A pre-commit hook
-// runs on every `git commit`, so the network budget is tight: better to fail
-// open after 5s than to make committing feel broken.
-const precommitCheckTimeout = 5 * time.Second
+// defaultPrecommitCheckTimeout bounds the whole known-bad lookup. A
+// pre-commit hook runs on every `git commit`, so the network budget is tight
+// — but it must also cover the API's cold start. Measured in production: the
+// first check after the backend Lambda goes idle takes ~6-7s end-to-end
+// (first-invocation handler cost, plus a possible Auth0 token refresh
+// client-side), while warm checks take 0.3-0.5s. The old 5s budget made
+// every post-idle commit silently fail open, so the default is 10s: warm
+// commits never feel it, cold ones get checked instead of skipped.
+const defaultPrecommitCheckTimeout = 10 * time.Second
+
+// precommitCheckTimeout returns the check budget, honoring the
+// OSSPREY_PRECOMMIT_TIMEOUT env var (a Go duration string like "3s" or
+// "15s"). An unset, unparseable, or non-positive value falls back to the
+// default without a warning — this runs inside a git hook, and a typo'd env
+// var must never make committing noisier or break it.
+func precommitCheckTimeout() time.Duration {
+	if v := os.Getenv("OSSPREY_PRECOMMIT_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return defaultPrecommitCheckTimeout
+}
 
 // Test seams, mirroring internal/forward's execFn/checkFn pattern.
 var (
@@ -40,8 +59,8 @@ func checkMalwarePurls(ctx context.Context, apiURL, apiKey string, purls []strin
 	// HTTP (auth.AccessToken), and on the raw command context that refresh
 	// could stall `git commit` for the HTTP client's full ~30s before
 	// failing open. Everything network-shaped in this hook shares the one
-	// 5s budget.
-	ctx, cancel := context.WithTimeout(ctx, precommitCheckTimeout)
+	// budget.
+	ctx, cancel := context.WithTimeout(ctx, precommitCheckTimeout())
 	defer cancel()
 	c, err := submit.NewClient(ctx, apiURL, apiKey)
 	if err != nil {

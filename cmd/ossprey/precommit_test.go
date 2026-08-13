@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ossprey/ossprey-cli/internal/auth"
 	"github.com/ossprey/ossprey-cli/internal/client"
@@ -244,6 +247,56 @@ func TestPrecommitVersionlessPackagesAreSkipped(t *testing.T) {
 	}
 	if out.Len() != 0 {
 		t.Errorf("must be silent, got: %q", out.String())
+	}
+}
+
+func TestPrecommitTimeoutDefault(t *testing.T) {
+	t.Setenv("OSSPREY_PRECOMMIT_TIMEOUT", "")
+	if got := precommitCheckTimeout(); got != defaultPrecommitCheckTimeout {
+		t.Errorf("unset env: got %v, want %v", got, defaultPrecommitCheckTimeout)
+	}
+}
+
+func TestPrecommitTimeoutEnvOverride(t *testing.T) {
+	t.Setenv("OSSPREY_PRECOMMIT_TIMEOUT", "3s")
+	if got := precommitCheckTimeout(); got != 3*time.Second {
+		t.Errorf("got %v, want 3s", got)
+	}
+}
+
+func TestPrecommitTimeoutInvalidFallsBackToDefault(t *testing.T) {
+	// Invalid or non-positive values must silently fall back — this runs in
+	// a git hook, so a typo'd env var can never be an error.
+	for _, v := range []string{"bananas", "10", "-2s", "0s", "0"} {
+		t.Run(v, func(t *testing.T) {
+			t.Setenv("OSSPREY_PRECOMMIT_TIMEOUT", v)
+			if got := precommitCheckTimeout(); got != defaultPrecommitCheckTimeout {
+				t.Errorf("env %q: got %v, want default %v", v, got, defaultPrecommitCheckTimeout)
+			}
+		})
+	}
+}
+
+func TestPrecommitCheckHonorsEnvTimeout(t *testing.T) {
+	// The real precommitCheckFn (checkMalwarePurls) against a server that
+	// never answers: with a tiny env timeout it must give up quickly rather
+	// than hang `git commit`. This exercises the full wrap — credential
+	// resolution and the HTTP call share the one budget.
+	hang := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-hang
+	}))
+	t.Cleanup(func() { close(hang); srv.Close() })
+
+	t.Setenv("OSSPREY_PRECOMMIT_TIMEOUT", "50ms")
+	start := time.Now()
+	_, err := checkMalwarePurls(context.Background(), srv.URL, "key", []string{"pkg:npm/evil-pkg@1.2.3"})
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("hanging server must yield an error")
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("check took %v; the 50ms env timeout was not honored", elapsed)
 	}
 }
 
