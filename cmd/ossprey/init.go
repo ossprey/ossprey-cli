@@ -35,6 +35,7 @@ func newInitCmd() *cobra.Command {
 		apiURL     string
 		keyName    string
 		keyExpiry  time.Duration
+		noKey      bool
 		noWorkflow bool
 		noScan     bool
 	)
@@ -66,23 +67,41 @@ untouched, and a fresh key name is generated per run.`,
 			}
 
 			// Step 1: authenticate — reuse a stored login, else device flow.
-			fmt.Println("[1/4] Checking login...")
-			token, err := ensureLogin(ctx, cfg)
-			if err != nil {
-				return err
+			// Only the key and the scan need credentials, so `--no-key
+			// --no-scan` ("just write me the workflow file") stays offline
+			// rather than demanding a browser login it will never use.
+			var token string
+			if noKey && noScan {
+				fmt.Println("[1/4] Skipping login (nothing to authenticate)")
+			} else {
+				fmt.Println("[1/4] Checking login...")
+				var err error
+				if token, err = ensureLogin(ctx, cfg); err != nil {
+					return err
+				}
 			}
 
 			// Step 2: mint a CI API key. Failure warns rather than aborts:
 			// the user may already have a key, and the remaining steps
 			// (workflow file, first scan) still deliver value.
-			fmt.Println("[2/4] Creating an API key for CI...")
-			key := createCIKey(ctx, apiURL, token, keyName, keyExpiry)
+			var key *client.APIKey
+			if noKey {
+				fmt.Println("[2/4] Skipping API key creation (--no-key)")
+			} else {
+				fmt.Println("[2/4] Creating an API key for CI...")
+				key = createCIKey(ctx, apiURL, token, keyName, keyExpiry)
+			}
 			if key != nil {
 				fmt.Printf("Created API key %q (expires %s).\n", key.Name, key.Expiry)
 				fmt.Println("This is the only time it is shown — add it to your repository now:")
 				fmt.Printf("\n    %s\n\n", key.Key)
 				fmt.Println("    gh secret set OSSPREY_API_KEY   # paste the key when prompted")
 				fmt.Println("    (or GitHub -> Settings -> Secrets and variables -> Actions -> New repository secret)")
+				// The key is a long-lived credential sitting in the terminal:
+				// say so, because scrollback and piped logs outlive the session.
+				fmt.Println("\nTreat it like a password. It stays in your terminal scrollback, so clear it")
+				fmt.Println("when you're done, and don't pipe this command's output to a file or CI log.")
+				fmt.Println("Revoke it any time at https://dashboard.ossprey.com")
 				fmt.Println()
 			}
 
@@ -105,16 +124,22 @@ untouched, and a fresh key name is generated per run.`,
 			// Step 4: first scan, authenticated by the login from step 1.
 			if noScan {
 				fmt.Println("[4/4] Skipping first scan (--no-scan)")
+				printNextSteps()
 				return nil
 			}
 			fmt.Println("[4/4] Running your first scan...")
-			return runFirstScan(ctx, path, apiURL)
+			if err := runFirstScan(ctx, path, apiURL); err != nil {
+				return err
+			}
+			printNextSteps()
+			return nil
 		},
 	}
 
 	cmd.Flags().StringVar(&apiURL, "url", defaultAPIURL, "Ossprey API URL")
 	cmd.Flags().StringVar(&keyName, "key-name", "", "name for the created API key (default: generated, e.g. ci-a1b2c3d4)")
 	cmd.Flags().DurationVar(&keyExpiry, "key-expiry", defaultKeyExpiry, "lifetime of the created API key (max 2 years)")
+	cmd.Flags().BoolVar(&noKey, "no-key", false, "don't create an API key (use when CI already has one)")
 	cmd.Flags().BoolVar(&noWorkflow, "no-workflow", false, "don't write the GitHub Actions workflow file")
 	cmd.Flags().BoolVar(&noScan, "no-scan", false, "don't run the first scan")
 	cmd.Flags().StringVar(&cfg.Domain, "auth0-domain", defaults.Domain, "Auth0 domain (or OSSPREY_AUTH0_DOMAIN env var)")
@@ -127,11 +152,23 @@ untouched, and a fresh key name is generated per run.`,
 // ensureLogin returns a valid access token, reusing (and silently refreshing)
 // a stored login or walking the user through the device flow when there is
 // none.
+//
+// A stored login is only reused when it belongs to the tenant cfg asks for.
+// Otherwise `ossprey init --auth0-domain <qa> --audience <qa>` from a machine
+// already logged into production would silently reuse the production token and
+// then fail confusingly against the QA API, with the flags looking honoured.
 func ensureLogin(ctx context.Context, cfg auth.Config) (string, error) {
+	stored, loadErr := auth.Load()
+	if loadErr == nil && !matchesTenant(stored, cfg) {
+		fmt.Printf("Stored login is for %s (audience %s), but this run targets %s (audience %s); logging in again.\n",
+			stored.Domain, stored.Audience, cfg.Domain, cfg.Audience)
+		return freshLogin(ctx, cfg)
+	}
+
 	token, err := auth.AccessToken(ctx, nil)
 	if err == nil {
-		if creds, loadErr := auth.Load(); loadErr == nil {
-			if id := creds.Identity(); id != "" {
+		if loadErr == nil {
+			if id := stored.Identity(); id != "" {
 				fmt.Printf("Already logged in as %s.\n", id)
 			} else {
 				fmt.Println("Already logged in.")
@@ -144,6 +181,24 @@ func ensureLogin(ctx context.Context, cfg auth.Config) (string, error) {
 		// device flow rather than telling the user to run another command.
 		fmt.Printf("Stored login could not be refreshed (%v); starting a fresh login.\n", err)
 	}
+	return freshLogin(ctx, cfg)
+}
+
+// matchesTenant reports whether stored credentials were issued by the tenant
+// and for the audience cfg names. An empty field in either is treated as
+// "unknown, don't force a re-login" so credentials written by older CLI
+// versions keep working.
+func matchesTenant(stored *auth.Credentials, cfg auth.Config) bool {
+	if stored.Domain != "" && cfg.Domain != "" && stored.Domain != cfg.Domain {
+		return false
+	}
+	if stored.Audience != "" && cfg.Audience != "" && stored.Audience != cfg.Audience {
+		return false
+	}
+	return true
+}
+
+func freshLogin(ctx context.Context, cfg auth.Config) (string, error) {
 	creds, err := runDeviceLogin(ctx, cfg)
 	if err != nil {
 		return "", err
@@ -183,6 +238,15 @@ func createCIKey(ctx context.Context, apiURL, token, name string, expiry time.Du
 	}
 	fmt.Fprintf(os.Stderr, "warning: could not create an API key: %d generated names collided\n", keyNameAttempts)
 	return nil
+}
+
+// printNextSteps points at the two protections init deliberately does not
+// install on its own, since both change how the user's machine behaves outside
+// this project and so should stay an explicit choice.
+func printNextSteps() {
+	fmt.Println("\nNext steps — catch malware before CI ever sees it:")
+	fmt.Println("    ossprey shim install    # check every npm/pip install on this machine")
+	fmt.Println("    ossprey precommit install    # block commits that add known-malicious packages")
 }
 
 // runFirstScan catalogs the project, submits it with the stored login, and

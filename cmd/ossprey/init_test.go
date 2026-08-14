@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ossprey/ossprey-cli/internal/auth"
 )
 
 func TestCreateCIKey_RetriesOnNameCollision(t *testing.T) {
@@ -104,9 +106,53 @@ func TestCreateCIKey_SendsExpiryAndBearer(t *testing.T) {
 	}
 }
 
+// A login stored against one tenant must not be reused when the flags name a
+// different one — otherwise `init --audience <qa>` from a prod-logged-in machine
+// silently sends a prod token to the QA API while reporting success.
+func TestMatchesTenant(t *testing.T) {
+	cases := []struct {
+		name   string
+		stored auth.Credentials
+		cfg    auth.Config
+		want   bool
+	}{
+		{
+			name:   "same tenant",
+			stored: auth.Credentials{Domain: "auth.ossprey.com", Audience: "https://api.ossprey.com"},
+			cfg:    auth.Config{Domain: "auth.ossprey.com", Audience: "https://api.ossprey.com"},
+			want:   true,
+		},
+		{
+			name:   "different domain",
+			stored: auth.Credentials{Domain: "auth.ossprey.com", Audience: "https://api.ossprey.com"},
+			cfg:    auth.Config{Domain: "auth.qa.ossprey.com", Audience: "https://api.ossprey.com"},
+			want:   false,
+		},
+		{
+			name:   "different audience",
+			stored: auth.Credentials{Domain: "auth.ossprey.com", Audience: "https://api.ossprey.com"},
+			cfg:    auth.Config{Domain: "auth.ossprey.com", Audience: "https://api.qa.ossprey.com"},
+			want:   false,
+		},
+		{
+			name:   "stored fields empty (older CLI) still reused",
+			stored: auth.Credentials{},
+			cfg:    auth.Config{Domain: "auth.ossprey.com", Audience: "https://api.ossprey.com"},
+			want:   true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := matchesTenant(&tc.stored, tc.cfg); got != tc.want {
+				t.Errorf("matchesTenant: got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestInitCmd_Flags(t *testing.T) {
 	cmd := newInitCmd()
-	for _, name := range []string{"url", "key-name", "key-expiry", "no-workflow", "no-scan", "auth0-domain"} {
+	for _, name := range []string{"url", "key-name", "key-expiry", "no-key", "no-workflow", "no-scan", "auth0-domain"} {
 		if cmd.Flags().Lookup(name) == nil {
 			t.Errorf("missing --%s flag", name)
 		}

@@ -118,9 +118,9 @@ func (e *initEnv) seedLogin(t *testing.T) {
 	payload := base64.RawURLEncoding.EncodeToString(
 		[]byte(`{"email":"smoke@example.com","sub":"auth0|smoke"}`))
 	creds := map[string]any{
-		"domain":        "auth.example.com",
+		"domain":        stubDomain,
 		"client_id":     "smoke-client",
-		"audience":      "https://api.example.com",
+		"audience":      stubAudience,
 		"access_token":  "smoke-access-token",
 		"refresh_token": "smoke-refresh-token",
 		"id_token":      "e30." + payload + ".sig",
@@ -135,9 +135,22 @@ func (e *initEnv) seedLogin(t *testing.T) {
 	}
 }
 
+// stubDomain/stubAudience must match the seeded credentials: init refuses to
+// reuse a login belonging to a different tenant, so passing these keeps the test
+// on the stored token instead of launching a real device-flow login.
+const (
+	stubDomain   = "auth.example.com"
+	stubAudience = "https://api.example.com"
+)
+
 func (e *initEnv) run(t *testing.T, args ...string) runResult {
 	t.Helper()
-	full := append([]string{"init", e.projectDir, "--url", e.server.URL}, args...)
+	full := append([]string{
+		"init", e.projectDir,
+		"--url", e.server.URL,
+		"--auth0-domain", stubDomain,
+		"--audience", stubAudience,
+	}, args...)
 	cmd := exec.Command(binPath, full...)
 	cmd.Env = append(os.Environ(),
 		"OSSPREY_CONFIG_DIR="+e.configDir,
@@ -203,7 +216,7 @@ func TestInitFullFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("workflow not written: %v", err)
 	}
-	for _, want := range []string{"branches: [trunk]", "secrets.OSSPREY_API_KEY", "ossprey scan ."} {
+	for _, want := range []string{"branches: ['trunk']", "secrets.OSSPREY_API_KEY", "ossprey scan ."} {
 		assertContains(t, string(wf), want)
 	}
 	// The workflow must never embed the secret itself.
@@ -302,13 +315,71 @@ func TestInitSkipFlags(t *testing.T) {
 	}
 }
 
+// TestInitWorkflowOnlyNeedsNoCredentials pins the offline path: with both the
+// key and the scan skipped there is nothing to authenticate, so `init` must
+// write the workflow without a login. An empty config dir and an unreachable
+// Auth0 domain prove no login was attempted.
+func TestInitWorkflowOnlyNeedsNoCredentials(t *testing.T) {
+	e := newInitEnv(t, "main")
+	emptyCfg := t.TempDir() // no credentials.json
+
+	cmd := exec.Command(binPath, "init", e.projectDir,
+		"--no-key", "--no-scan",
+		"--url", e.server.URL,
+		"--auth0-domain", "127.0.0.1:9")
+	cmd.Env = append(os.Environ(), "OSSPREY_CONFIG_DIR="+emptyCfg)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("want success with no credentials, got %v:\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "Skipping login") {
+		t.Errorf("expected the login step to be skipped:\n%s", out)
+	}
+	if _, err := os.Stat(e.workflowPath()); err != nil {
+		t.Errorf("workflow not written: %v", err)
+	}
+}
+
+// TestInitRefusesForeignTenantLogin pins the tenant check: a login stored for
+// one Auth0 tenant must not be reused when the flags name another. Pointing at a
+// closed port proves a fresh device flow was attempted (and that no key was
+// minted with the wrong token) without contacting a real Auth0.
+func TestInitRefusesForeignTenantLogin(t *testing.T) {
+	e := newInitEnv(t, "main")
+
+	cmd := exec.Command(binPath, "init", e.projectDir,
+		"--url", e.server.URL,
+		"--auth0-domain", "127.0.0.1:9",
+		"--audience", "https://api.other.example.com")
+	cmd.Env = append(os.Environ(), "OSSPREY_CONFIG_DIR="+e.configDir)
+	out, err := cmd.CombinedOutput()
+
+	if err == nil {
+		t.Fatalf("want failure when the stored login is for another tenant, got success:\n%s", out)
+	}
+	if !strings.Contains(string(out), "Stored login is for") {
+		t.Errorf("no tenant-mismatch explanation in output:\n%s", out)
+	}
+	if !strings.Contains(string(out), "device code") {
+		t.Errorf("expected a fresh device-flow attempt:\n%s", out)
+	}
+
+	e.mu.Lock()
+	keys, scans := len(e.keyNames), len(e.scanAuth)
+	e.mu.Unlock()
+	if keys != 0 || scans != 0 {
+		t.Errorf("used the foreign-tenant token anyway: %d keys, %d scans", keys, scans)
+	}
+}
+
 // TestInitRejectsMissingPath fails before touching the network when the project
 // path does not exist.
 func TestInitRejectsMissingPath(t *testing.T) {
 	e := newInitEnv(t, "main")
 	missing := filepath.Join(e.projectDir, "nope")
 
-	cmd := exec.Command(binPath, "init", missing, "--url", e.server.URL)
+	cmd := exec.Command(binPath, "init", missing, "--url", e.server.URL,
+		"--auth0-domain", stubDomain, "--audience", stubAudience)
 	cmd.Env = append(os.Environ(), "OSSPREY_CONFIG_DIR="+e.configDir)
 	out, err := cmd.CombinedOutput()
 	if err == nil {

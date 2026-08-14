@@ -209,16 +209,26 @@ This is the only time it is shown — add it to your repository now:
     gh secret set OSSPREY_API_KEY   # paste the key when prompted
     (or GitHub -> Settings -> Secrets and variables -> Actions -> New repository secret)
 
+Treat it like a password. It stays in your terminal scrollback, so clear it
+when you're done, and don't pipe this command's output to a file or CI log.
+Revoke it any time at https://dashboard.ossprey.com
+
 [3/4] Adding GitHub Actions workflow...
 Wrote .github/workflows/ossprey.yml — commit it to enable scans in CI.
 [4/4] Running your first scan...
 No malware found. See your scans at https://dashboard.ossprey.com
+
+Next steps — catch malware before CI ever sees it:
+    ossprey shim install    # check every npm/pip install on this machine
+    ossprey precommit install    # block commits that add known-malicious packages
 ```
 
-Re-running is safe: an existing login is reused, an existing workflow file is
-left untouched, and each run generates a fresh key name. If key creation fails
-(for example you have already hit the per-account key limit), `init` warns and
-carries on with the workflow file and the scan.
+Re-running is safe: an existing login is reused and an existing workflow file is
+left untouched. Note that **step 2 creates a new key every run** — keys are shown
+only once, so the usual reason to re-run is that you didn't save the last one.
+Your account is capped at 10 keys, so if you re-run often, pass `--no-key` or
+delete the unused keys in the dashboard. If key creation fails for any reason,
+`init` warns and carries on with the workflow file and the scan.
 
 Flags:
 
@@ -226,12 +236,31 @@ Flags:
 |------|---------|---------|
 | `--key-name <name>` | generated (`ci-<random>`) | Name for the created API key (max 20 chars, no whitespace). |
 | `--key-expiry <dur>` | `8760h` (1 year) | Lifetime of the created key. The API caps this at 2 years. |
+| `--no-key` | off | Don't create an API key (CI already has one). |
 | `--no-workflow` | off | Skip writing the CI workflow file. |
 | `--no-scan` | off | Skip the first scan. |
 | `--url <url>` | `https://api.ossprey.com` | Ossprey API URL. |
 
+`--no-key --no-scan` together mean "just give me the workflow file". Nothing
+then needs credentials, so that combination skips the login and works offline.
+
 Creating an API key requires a browser login — API keys cannot mint other API
 keys — so `init` always authenticates via Auth0 rather than `OSSPREY_API_KEY`.
+
+The generated workflow pins `actions/checkout` to a commit SHA rather than a
+mutable tag, matching this repo's own convention — a tag can be repointed at new
+code, which is the risk the workflow exists to catch.
+
+The generated workflow skips pull requests opened from forks. GitHub deliberately
+withholds repository secrets from fork PRs, so `OSSPREY_API_KEY` would be empty
+and every external contributor's PR would fail for a missing key rather than for
+malware. Don't switch the trigger to `pull_request_target` to work around this —
+that exposes your secrets to untrusted code.
+
+`init` does not install the [pre-commit
+hook](#pre-commit-hook--block-known-malware-at-commit-time) or [PATH
+shims](#path-shims--drop-the-ossprey-prefix), because both change how your
+machine behaves outside this project. It prints the commands at the end.
 
 ## Usage
 
