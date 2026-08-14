@@ -62,6 +62,27 @@ Windows resolves it under `%LOCALAPPDATA%`.
    login, so the scan still happens. That fail-**open** posture is deliberate — a
    key limit must not cost the user their scan.
 
+   The scan is the user's **choice** (`wantScan`): `--scan`/`--no-scan` answer up
+   front, otherwise an interactive terminal is prompted and a non-interactive run
+   declines, printing how to opt in. Use `term.IsTerminal`, **not** `os.Stat` +
+   `ModeCharDevice`, to detect interactivity — `/dev/null` is itself a character
+   device, so the naive check treats `ossprey init < /dev/null` as interactive and
+   silently takes the prompt default. `TestInitNonInteractiveDoesNotScan` pins
+   this with a real `/dev/null` stdin.
+
+   `--key-stdout` writes the bare key to stdout for piping into a secret store
+   (`ossprey init --key-stdout | gh secret set OSSPREY_API_KEY`), so every
+   human-facing line must go to `logOut` (stderr in that mode) — hence the
+   `io.Writer` threaded through `ensureLogin`/`freshLogin`/`runDeviceLogin`. It is
+   mutually exclusive with `--scan` because a scan verdict on stdout would corrupt
+   the pipe, and with `--no-key` because there would be nothing to print.
+
+   **The key cannot be recovered after creation**: the backend stores only an
+   HMAC-SHA256 (`keys/api_db.py: hash_api_key`) and the list endpoint redacts it
+   (`keys/get_api_keys.py: redact_key`). So "just look it up in the dashboard" is
+   not an option to offer users — print-once plus `--key-stdout` is the whole
+   surface, and the dashboard link is for revoking, not retrieving.
+
    **Re-running is safe but not idempotent:** step 2 mints a *new* key each run
    (fresh random name, retried on a 409 collision). That is deliberate — the
    common re-run reason is "I never saved the key" — but the backend caps keys at

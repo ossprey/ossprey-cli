@@ -274,6 +274,94 @@ func TestGenerateKeyName(t *testing.T) {
 	}
 }
 
+// The scan is the user's choice. Flags answer up front; without them an
+// interactive terminal gets asked, and a non-interactive one is skipped rather
+// than silently doing extra work in someone's script.
+func TestWantScan_Flags(t *testing.T) {
+	cases := []struct {
+		name                     string
+		doScan, noScan, keyStdou bool
+		wantRun                  bool
+		reasonContains           string
+	}{
+		{name: "--scan wins", doScan: true, wantRun: true},
+		{name: "--no-scan wins", noScan: true, wantRun: false, reasonContains: "--no-scan"},
+		{name: "--key-stdout skips", keyStdou: true, wantRun: false, reasonContains: "--key-stdout"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			run, reason := wantScan(tc.doScan, tc.noScan, tc.keyStdou)
+			if run != tc.wantRun {
+				t.Errorf("run: got %v, want %v", run, tc.wantRun)
+			}
+			if tc.reasonContains != "" && !strings.Contains(reason, tc.reasonContains) {
+				t.Errorf("reason %q does not mention %q", reason, tc.reasonContains)
+			}
+		})
+	}
+}
+
+// Under `go test` stdin is not a terminal, so this also covers the
+// non-interactive path: no flags means no scan, with a reason that tells the
+// caller how to opt in.
+func TestWantScan_NonInteractiveSkips(t *testing.T) {
+	run, reason := wantScan(false, false, false)
+	if run {
+		t.Error("want no scan when stdin is not a terminal")
+	}
+	if !strings.Contains(reason, "--scan") {
+		t.Errorf("reason %q should tell the user how to opt in", reason)
+	}
+}
+
+func TestPromptYesNo(t *testing.T) {
+	cases := []struct {
+		input string
+		def   bool
+		want  bool
+	}{
+		{input: "y\n", def: false, want: true},
+		{input: "Y\n", def: false, want: true},
+		{input: "yes\n", def: false, want: true},
+		{input: "n\n", def: true, want: false},
+		{input: "no\n", def: true, want: false},
+		{input: "\n", def: true, want: true},   // empty takes the default
+		{input: "\n", def: false, want: false}, // ...either way
+		{input: "", def: true, want: true},     // EOF takes the default
+		{input: "", def: false, want: false},
+		{input: "  yes  \n", def: false, want: true}, // whitespace tolerated
+		{input: "banana\n", def: true, want: false},  // anything else is no
+	}
+	for _, tc := range cases {
+		var out strings.Builder
+		got := promptYesNo(strings.NewReader(tc.input), &out, "Scan?", tc.def)
+		if got != tc.want {
+			t.Errorf("promptYesNo(%q, def=%v): got %v, want %v", tc.input, tc.def, got, tc.want)
+		}
+		if !strings.Contains(out.String(), "Scan?") {
+			t.Errorf("prompt not written for input %q: %q", tc.input, out.String())
+		}
+	}
+}
+
+// --key-stdout exists so the key can be piped; a scan verdict on stdout would
+// corrupt the pipe, and --no-key would leave nothing to print.
+func TestInitCmd_KeyStdoutConflicts(t *testing.T) {
+	for _, args := range [][]string{
+		{".", "--key-stdout", "--scan"},
+		{".", "--key-stdout", "--no-key"},
+		{".", "--scan", "--no-scan"},
+	} {
+		cmd := newInitCmd()
+		cmd.SetArgs(args)
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
+		if err := cmd.Execute(); err == nil {
+			t.Errorf("%v: want a mutual-exclusion error, got nil", args)
+		}
+	}
+}
+
 func TestKeyValue(t *testing.T) {
 	// "" is the signal submit.Validate reads as "use the stored login".
 	if got := keyValue(nil); got != "" {

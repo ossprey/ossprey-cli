@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"runtime"
 	"time"
@@ -31,7 +32,7 @@ no API key is needed. Tokens refresh automatically; run "ossprey logout" to
 remove them.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			creds, err := runDeviceLogin(cmd.Context(), cfg)
+			creds, err := runDeviceLogin(cmd.Context(), cmd.OutOrStdout(), cfg)
 			if err != nil {
 				return err
 			}
@@ -102,8 +103,9 @@ func newWhoamiCmd() *cobra.Command {
 
 // runDeviceLogin walks the user through the Auth0 device-authorization flow
 // (print code, open browser, poll for approval) and stores the resulting
-// credentials. Shared by `ossprey login` and `ossprey init`.
-func runDeviceLogin(ctx context.Context, cfg auth.Config) (*auth.Credentials, error) {
+// credentials. Shared by `ossprey login` and `ossprey init`. Prompts go to out
+// so callers keeping stdout machine-readable can route them to stderr.
+func runDeviceLogin(ctx context.Context, out io.Writer, cfg auth.Config) (*auth.Credentials, error) {
 	dc, err := cfg.RequestDeviceCode(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -113,13 +115,13 @@ func runDeviceLogin(ctx context.Context, cfg auth.Config) (*auth.Credentials, er
 	if verifyURL == "" {
 		verifyURL = dc.VerificationURI
 	}
-	fmt.Printf("First, confirm this code matches your browser: %s\n", dc.UserCode)
+	fmt.Fprintf(out, "First, confirm this code matches your browser: %s\n", dc.UserCode)
 	if openBrowser(verifyURL) {
-		fmt.Printf("Your browser has been opened to complete the login:\n\n    %s\n\n", verifyURL)
+		fmt.Fprintf(out, "Your browser has been opened to complete the login:\n\n    %s\n\n", verifyURL)
 	} else {
-		fmt.Printf("Open this URL in a browser to complete the login:\n\n    %s\n\n", verifyURL)
+		fmt.Fprintf(out, "Open this URL in a browser to complete the login:\n\n    %s\n\n", verifyURL)
 	}
-	fmt.Println("Waiting for the login to be approved...")
+	fmt.Fprintln(out, "Waiting for the login to be approved...")
 
 	creds, err := cfg.PollToken(ctx, nil, dc)
 	if err != nil {

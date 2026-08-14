@@ -210,15 +210,29 @@ const (
 	stubAudience = "https://api.example.com"
 )
 
+// run invokes init with --scan by default. Tests exec the binary with a pipe for
+// stdin, which is not a terminal, so init would otherwise decline to scan rather
+// than prompt nobody — pass "--no-scan" explicitly to exercise the skip path.
 func (e *initEnv) run(t *testing.T, args ...string) runResult {
 	t.Helper()
-	full := append([]string{
+	scanFlag := "--scan"
+	for _, a := range args {
+		if a == "--no-scan" || a == "--key-stdout" {
+			scanFlag = ""
+			break
+		}
+	}
+	full := []string{
 		"init", e.projectDir,
 		"--url", e.server.URL,
 		"--auth0-domain", stubDomain,
 		"--client-id", stubClientID,
 		"--audience", stubAudience,
-	}, args...)
+	}
+	if scanFlag != "" {
+		full = append(full, scanFlag)
+	}
+	full = append(full, args...)
 	cmd := exec.Command(binPath, full...)
 	cmd.Env = append(os.Environ(),
 		"OSSPREY_CONFIG_DIR="+e.configDir,
@@ -419,6 +433,76 @@ func TestInitNoKeyScansWithLogin(t *testing.T) {
 		t.Errorf("scan credential: got %q, want the stored login", scanAuth[0])
 	}
 	assertContains(t, res.stdout, "No malware found")
+}
+
+// The scan is the user's choice, so a run with nobody to ask must not silently
+// do it. stdin here is /dev/null — deliberately, because /dev/null IS a
+// character device and a naive isatty check would treat it as interactive.
+func TestInitNonInteractiveDoesNotScan(t *testing.T) {
+	e := newInitEnv(t, "main")
+
+	devnull, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer devnull.Close()
+
+	cmd := exec.Command(binPath, "init", e.projectDir,
+		"--url", e.server.URL,
+		"--auth0-domain", stubDomain,
+		"--client-id", stubClientID,
+		"--audience", stubAudience)
+	cmd.Stdin = devnull
+	cmd.Env = append(os.Environ(), "OSSPREY_CONFIG_DIR="+e.configDir)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("want success, got %v:\n%s", err, out)
+	}
+
+	if !strings.Contains(string(out), "not an interactive terminal") {
+		t.Errorf("expected the scan to be declined for lack of a terminal:\n%s", out)
+	}
+	e.mu.Lock()
+	keys, scans := len(e.keyNames), len(e.scanAuth)
+	e.mu.Unlock()
+	if scans != 0 {
+		t.Errorf("scanned %d times without being asked", scans)
+	}
+	if keys != 1 {
+		t.Errorf("want the key still created, got %d", keys)
+	}
+}
+
+// --key-stdout must leave stdout containing exactly the key and nothing else, so
+// it can be piped straight into a secret store.
+func TestInitKeyStdoutIsPipeable(t *testing.T) {
+	e := newInitEnv(t, "main")
+
+	cmd := exec.Command(binPath, "init", e.projectDir,
+		"--url", e.server.URL,
+		"--auth0-domain", stubDomain,
+		"--client-id", stubClientID,
+		"--audience", stubAudience,
+		"--key-stdout")
+	cmd.Env = append(os.Environ(), "OSSPREY_CONFIG_DIR="+e.configDir)
+
+	var stdout, stderr strings.Builder
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("run: %v\nstderr: %s", err, stderr.String())
+	}
+
+	if got := stdout.String(); got != "ospy_smoke_secret\n" {
+		t.Errorf("stdout must be only the key; got %q", got)
+	}
+	// The narration must still reach the user, just on stderr.
+	if !strings.Contains(stderr.String(), "Creating an API key") {
+		t.Errorf("progress output missing from stderr: %q", stderr.String())
+	}
+	if strings.Contains(stderr.String(), "ospy_smoke_secret") {
+		t.Error("key duplicated onto stderr; it should appear only on stdout")
+	}
 }
 
 // TestInitRefusesForeignTenantLogin pins the tenant check: a login stored for
