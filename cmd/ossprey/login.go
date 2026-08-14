@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"runtime"
 	"time"
@@ -30,30 +32,8 @@ no API key is needed. Tokens refresh automatically; run "ossprey logout" to
 remove them.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := cmd.Context()
-
-			dc, err := cfg.RequestDeviceCode(ctx, nil)
+			creds, err := runDeviceLogin(cmd.Context(), cmd.OutOrStdout(), cfg)
 			if err != nil {
-				return err
-			}
-
-			verifyURL := dc.VerificationURIComplete
-			if verifyURL == "" {
-				verifyURL = dc.VerificationURI
-			}
-			fmt.Printf("First, confirm this code matches your browser: %s\n", dc.UserCode)
-			if openBrowser(verifyURL) {
-				fmt.Printf("Your browser has been opened to complete the login:\n\n    %s\n\n", verifyURL)
-			} else {
-				fmt.Printf("Open this URL in a browser to complete the login:\n\n    %s\n\n", verifyURL)
-			}
-			fmt.Println("Waiting for the login to be approved...")
-
-			creds, err := cfg.PollToken(ctx, nil, dc)
-			if err != nil {
-				return err
-			}
-			if err := auth.Save(creds); err != nil {
 				return err
 			}
 
@@ -119,6 +99,38 @@ func newWhoamiCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// runDeviceLogin walks the user through the Auth0 device-authorization flow
+// (print code, open browser, poll for approval) and stores the resulting
+// credentials. Shared by `ossprey login` and `ossprey init`. Prompts go to out
+// so callers keeping stdout machine-readable can route them to stderr.
+func runDeviceLogin(ctx context.Context, out io.Writer, cfg auth.Config) (*auth.Credentials, error) {
+	dc, err := cfg.RequestDeviceCode(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	verifyURL := dc.VerificationURIComplete
+	if verifyURL == "" {
+		verifyURL = dc.VerificationURI
+	}
+	fmt.Fprintf(out, "First, confirm this code matches your browser: %s\n", dc.UserCode)
+	if openBrowser(verifyURL) {
+		fmt.Fprintf(out, "Your browser has been opened to complete the login:\n\n    %s\n\n", verifyURL)
+	} else {
+		fmt.Fprintf(out, "Open this URL in a browser to complete the login:\n\n    %s\n\n", verifyURL)
+	}
+	fmt.Fprintln(out, "Waiting for the login to be approved...")
+
+	creds, err := cfg.PollToken(ctx, nil, dc)
+	if err != nil {
+		return nil, err
+	}
+	if err := auth.Save(creds); err != nil {
+		return nil, err
+	}
+	return creds, nil
 }
 
 // openBrowser makes a best-effort attempt to open url in the default browser,

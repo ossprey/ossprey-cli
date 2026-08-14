@@ -122,6 +122,16 @@ fi
 chmod +x "$tmpdir/$BIN"
 
 # --- install ---
+# A custom OSSPREY_INSTALL_DIR often does not exist yet (the README's own
+# $HOME/.local/bin example, CI runners). Without this, `test -w` fails on the
+# missing directory and we fall through to sudo, which then also fails moving
+# into a path that isn't there. Only attempt this for a non-default dir the
+# user can create; /usr/local/bin already exists and may need root.
+if [ ! -d "$INSTALL_DIR" ] && [ "$INSTALL_DIR" != "/usr/local/bin" ]; then
+  mkdir -p "$INSTALL_DIR" 2>/dev/null \
+    || log "could not create $INSTALL_DIR; will try with sudo"
+fi
+
 if [ -w "$INSTALL_DIR" ]; then
   mv "$tmpdir/$BIN" "$INSTALL_DIR/$BIN"
 elif command -v sudo >/dev/null 2>&1; then

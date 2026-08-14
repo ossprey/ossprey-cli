@@ -12,6 +12,7 @@ import (
 	"github.com/ossprey/ossprey-cli/internal/check"
 	"github.com/ossprey/ossprey-cli/internal/client"
 	"github.com/ossprey/ossprey-cli/internal/forward"
+	"github.com/ossprey/ossprey-cli/internal/ossbom"
 	"github.com/ossprey/ossprey-cli/internal/registry"
 	"github.com/ossprey/ossprey-cli/internal/scan"
 	"github.com/ossprey/ossprey-cli/internal/submit"
@@ -37,6 +38,7 @@ func main() {
 		Version:       version,
 	}
 
+	root.AddCommand(newInitCmd())
 	root.AddCommand(newScanCmd())
 	root.AddCommand(newCheckCmd())
 	root.AddCommand(newLoginCmd())
@@ -122,11 +124,7 @@ func newScanCmd() *cobra.Command {
 				}
 			}
 
-			reports, hasMalware := scan.MalwareReports(sbom)
-			if hasMalware {
-				for _, msg := range reports {
-					fmt.Println("Error: " + msg)
-				}
+			if reportMalware(sbom) {
 				os.Exit(1)
 			}
 
@@ -199,11 +197,7 @@ func newCheckCmd() *cobra.Command {
 				return err
 			}
 
-			reports, hasMalware := scan.MalwareReports(sbom)
-			if hasMalware {
-				for _, msg := range reports {
-					fmt.Println("Error: " + msg)
-				}
+			if reportMalware(sbom) {
 				os.Exit(1)
 			}
 
@@ -259,6 +253,18 @@ func newForwardCmd(bin string) *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// reportMalware prints one "Error: ..." line per malware finding and reports
+// whether any were found. Shared by scan, check and init so the verdict wording
+// and the exit decision cannot drift apart between them. Callers own the
+// os.Exit(1) and their own success message.
+func reportMalware(sbom *ossbom.SBOM) bool {
+	reports, hasMalware := scan.MalwareReports(sbom)
+	for _, msg := range reports {
+		fmt.Println("Error: " + msg)
+	}
+	return hasMalware
 }
 
 // reportSkipped prints a friendly quota-skip message and returns true when err
