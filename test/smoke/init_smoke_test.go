@@ -5,6 +5,7 @@ package smoke
 import (
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -28,6 +29,10 @@ type initEnv struct {
 	keyNames []string
 	keyAuth  []string
 	scanAuth []string
+	// scanPurls records the components of each submitted SBOM, so a test can
+	// prove init actually catalogued and sent the project's dependency rather
+	// than posting an empty SBOM.
+	scanPurls [][]string
 	// keyStatus, when non-zero, is returned by the api-keys endpoint instead
 	// of 201, to exercise the fail-open path.
 	keyStatus int
@@ -50,6 +55,11 @@ func newInitEnv(t *testing.T, branch string) *initEnv {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/dashboard/v1/api-keys", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("api-keys: got %s, want POST", r.Method)
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
 		var body map[string]string
 		json.NewDecoder(r.Body).Decode(&body)
 
@@ -74,18 +84,40 @@ func newInitEnv(t *testing.T, branch string) *initEnv {
 		})
 	})
 	mux.HandleFunc("/dashboard/v1/scans", func(w http.ResponseWriter, r *http.Request) {
-		var payload struct {
-			SBOM json.RawMessage `json:"sbom"`
+		if r.Method != http.MethodPost {
+			t.Errorf("scans: got %s, want POST", r.Method)
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
 		}
-		json.NewDecoder(r.Body).Decode(&payload)
+		var payload struct {
+			SBOM struct {
+				Components []struct {
+					Purl string `json:"purl"`
+				} `json:"components"`
+			} `json:"sbom"`
+		}
+		raw, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(raw, &payload); err != nil {
+			t.Errorf("scans: undecodable body: %v", err)
+		}
+
+		purls := make([]string, 0, len(payload.SBOM.Components))
+		for _, c := range payload.SBOM.Components {
+			purls = append(purls, c.Purl)
+		}
 
 		e.mu.Lock()
 		e.scanAuth = append(e.scanAuth, r.Header.Get("Authorization"))
+		e.scanPurls = append(e.scanPurls, purls)
 		e.mu.Unlock()
 
 		// Echo the submitted MiniBOM back untouched: a clean verdict.
+		var echo struct {
+			SBOM json.RawMessage `json:"sbom"`
+		}
+		json.Unmarshal(raw, &echo)
 		w.WriteHeader(http.StatusOK)
-		w.Write(payload.SBOM)
+		w.Write(echo.SBOM)
 	})
 	e.server = httptest.NewServer(mux)
 	t.Cleanup(e.server.Close)
@@ -115,12 +147,20 @@ func gitInit(t *testing.T, dir, branch string) {
 // hand-rolled JWT suffices.
 func (e *initEnv) seedLogin(t *testing.T) {
 	t.Helper()
+	e.seedLoginAs(t, stubDomain, stubClientID, stubAudience)
+}
+
+// seedLoginAs writes stored credentials for an explicit tenant triple, so a test
+// can vary exactly one of domain/client-id/audience and prove that field alone
+// participates in the reuse decision.
+func (e *initEnv) seedLoginAs(t *testing.T, domain, clientID, audience string) {
+	t.Helper()
 	payload := base64.RawURLEncoding.EncodeToString(
 		[]byte(`{"email":"smoke@example.com","sub":"auth0|smoke"}`))
 	creds := map[string]any{
-		"domain":        stubDomain,
-		"client_id":     stubClientID,
-		"audience":      stubAudience,
+		"domain":        domain,
+		"client_id":     clientID,
+		"audience":      audience,
 		"access_token":  "smoke-access-token",
 		"refresh_token": "smoke-refresh-token",
 		"id_token":      "e30." + payload + ".sig",
@@ -200,7 +240,7 @@ func TestInitFullFlow(t *testing.T) {
 	}
 
 	e.mu.Lock()
-	keyNames, keyAuth, scanAuth := e.keyNames, e.keyAuth, e.scanAuth
+	keyNames, keyAuth, scanAuth, scanPurls := e.keyNames, e.keyAuth, e.scanAuth, e.scanPurls
 	e.mu.Unlock()
 
 	if len(keyNames) != 1 {
@@ -232,6 +272,21 @@ func TestInitFullFlow(t *testing.T) {
 	}
 	if scanAuth[0] != "Bearer smoke-access-token" {
 		t.Errorf("scans auth: got %q", scanAuth[0])
+	}
+	// Not just "a scan happened" — the project's declared dependency must
+	// actually be in the submitted SBOM, or init could post an empty one and
+	// still print "No malware found".
+	if len(scanPurls) != 1 {
+		t.Fatalf("recorded %d submitted SBOMs, want 1", len(scanPurls))
+	}
+	var foundLeftPad bool
+	for _, purl := range scanPurls[0] {
+		if strings.Contains(purl, "left-pad") {
+			foundLeftPad = true
+		}
+	}
+	if !foundLeftPad {
+		t.Errorf("submitted SBOM does not contain left-pad: %v", scanPurls[0])
 	}
 	assertContains(t, res.stdout, "No malware found")
 }
@@ -346,60 +401,76 @@ func TestInitWorkflowOnlyNeedsNoCredentials(t *testing.T) {
 // one Auth0 tenant must not be reused when the flags name another. Pointing at a
 // closed port proves a fresh device flow was attempted (and that no key was
 // minted with the wrong token) without contacting a real Auth0.
+// Each case varies exactly ONE of domain / client-id / audience, with the other
+// two identical on both sides. That isolation is the point: a check that compared
+// only the domain would still pass a case that changed domain *and* audience
+// together, so the audience and client-id cases would prove nothing. The command
+// always targets the closed port 127.0.0.1:9, so a fresh device-flow attempt
+// fails visibly instead of reaching a real Auth0.
 func TestInitRefusesForeignTenantLogin(t *testing.T) {
-	e := newInitEnv(t, "main")
+	const unreachable = "127.0.0.1:9"
 
-	cmd := exec.Command(binPath, "init", e.projectDir,
-		"--url", e.server.URL,
-		"--auth0-domain", "127.0.0.1:9",
-		"--audience", "https://api.other.example.com")
-	cmd.Env = append(os.Environ(), "OSSPREY_CONFIG_DIR="+e.configDir)
-	out, err := cmd.CombinedOutput()
-
-	if err == nil {
-		t.Fatalf("want failure when the stored login is for another tenant, got success:\n%s", out)
-	}
-	if !strings.Contains(string(out), "Stored login is for") {
-		t.Errorf("no tenant-mismatch explanation in output:\n%s", out)
-	}
-	if !strings.Contains(string(out), "device code") {
-		t.Errorf("expected a fresh device-flow attempt:\n%s", out)
-	}
-
-	e.mu.Lock()
-	keys, scans := len(e.keyNames), len(e.scanAuth)
-	e.mu.Unlock()
-	if keys != 0 || scans != 0 {
-		t.Errorf("used the foreign-tenant token anyway: %d keys, %d scans", keys, scans)
-	}
-}
-
-// A mismatched --client-id alone must also force a re-login: the token was
-// minted for a different Auth0 application even though the domain and audience
-// line up.
-func TestInitRefusesForeignClientIDLogin(t *testing.T) {
-	e := newInitEnv(t, "main")
-
-	cmd := exec.Command(binPath, "init", e.projectDir,
-		"--url", e.server.URL,
-		"--auth0-domain", "127.0.0.1:9", // unreachable: proves a login was attempted
-		"--client-id", "a-different-app",
-		"--audience", stubAudience)
-	cmd.Env = append(os.Environ(), "OSSPREY_CONFIG_DIR="+e.configDir)
-	out, err := cmd.CombinedOutput()
-
-	if err == nil {
-		t.Fatalf("want failure on a client-id mismatch, got success:\n%s", out)
-	}
-	if !strings.Contains(string(out), "Stored login is for") {
-		t.Errorf("no tenant-mismatch explanation:\n%s", out)
+	cases := []struct {
+		field                     string
+		storedDomain              string
+		storedClientID            string
+		storedAudience            string
+		argDomain                 string
+		argClientID               string
+		argAudience               string
+		wantDeviceFlowInterrupted bool
+	}{
+		{
+			field:        "domain",
+			storedDomain: "auth.stored.example.com", storedClientID: stubClientID, storedAudience: stubAudience,
+			argDomain: unreachable, argClientID: stubClientID, argAudience: stubAudience,
+			wantDeviceFlowInterrupted: true,
+		},
+		{
+			field:        "client id",
+			storedDomain: unreachable, storedClientID: "stored-app", storedAudience: stubAudience,
+			argDomain: unreachable, argClientID: "a-different-app", argAudience: stubAudience,
+			wantDeviceFlowInterrupted: true,
+		},
+		{
+			field:        "audience",
+			storedDomain: unreachable, storedClientID: stubClientID, storedAudience: "https://api.stored.example.com",
+			argDomain: unreachable, argClientID: stubClientID, argAudience: "https://api.other.example.com",
+			wantDeviceFlowInterrupted: true,
+		},
 	}
 
-	e.mu.Lock()
-	keys := len(e.keyNames)
-	e.mu.Unlock()
-	if keys != 0 {
-		t.Errorf("minted %d keys with a token from another application", keys)
+	for _, tc := range cases {
+		t.Run(tc.field, func(t *testing.T) {
+			e := newInitEnv(t, "main")
+			e.seedLoginAs(t, tc.storedDomain, tc.storedClientID, tc.storedAudience)
+
+			cmd := exec.Command(binPath, "init", e.projectDir,
+				"--url", e.server.URL,
+				"--auth0-domain", tc.argDomain,
+				"--client-id", tc.argClientID,
+				"--audience", tc.argAudience)
+			cmd.Env = append(os.Environ(), "OSSPREY_CONFIG_DIR="+e.configDir)
+			out, err := cmd.CombinedOutput()
+
+			if err == nil {
+				t.Fatalf("%s mismatch: want failure, got success:\n%s", tc.field, out)
+			}
+			if !strings.Contains(string(out), "Stored login is for") {
+				t.Errorf("%s mismatch: no explanation in output:\n%s", tc.field, out)
+			}
+			if tc.wantDeviceFlowInterrupted && !strings.Contains(string(out), "device code") {
+				t.Errorf("%s mismatch: expected a fresh device-flow attempt:\n%s", tc.field, out)
+			}
+
+			e.mu.Lock()
+			keys, scans := len(e.keyNames), len(e.scanAuth)
+			e.mu.Unlock()
+			if keys != 0 || scans != 0 {
+				t.Errorf("%s mismatch: used the stored token anyway (%d keys, %d scans)",
+					tc.field, keys, scans)
+			}
+		})
 	}
 }
 
@@ -422,9 +493,12 @@ func TestInitRejectsMissingPath(t *testing.T) {
 	}
 
 	e.mu.Lock()
-	calls := len(e.keyNames)
+	calls, scans := len(e.keyNames), len(e.scanAuth)
 	e.mu.Unlock()
 	if calls != 0 {
 		t.Errorf("created %d keys despite an invalid path", calls)
+	}
+	if scans != 0 {
+		t.Errorf("submitted %d scans despite an invalid path", scans)
 	}
 }
