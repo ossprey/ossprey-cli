@@ -37,6 +37,7 @@ func main() {
 		Version:       version,
 	}
 
+	root.AddCommand(newInitCmd())
 	root.AddCommand(newScanCmd())
 	root.AddCommand(newCheckCmd())
 	root.AddCommand(newLoginCmd())

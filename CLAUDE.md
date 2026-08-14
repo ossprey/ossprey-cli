@@ -42,6 +42,17 @@ Windows resolves it under `%LOCALAPPDATA%`.
 
 `cmd/ossprey/main.go` wires three command families with cobra:
 
+0. **`init [path]`** (`cmd/ossprey/init.go` → `internal/setup`) — the one-command
+   onboarding path (OSS-1387): ensure a login, mint a CI API key, write
+   `.github/workflows/ossprey.yml`, run the first scan. Key creation goes through
+   `client.CreateAPIKey` on `/dashboard/v1/api-keys`, which **requires a bearer
+   token** — API keys cannot mint API keys, so `init` never takes an
+   `--api-key`. Every step is idempotent: `ensureLogin` reuses/refreshes a stored
+   login, `setup.WriteWorkflow` refuses to overwrite an existing file, and each
+   run generates a new key name (retrying on a 409 name collision). Key creation
+   fails **open** — a warning, then the workflow and scan still run — because the
+   scan is the value and the user can always make a key in the dashboard. The
+   device-flow prompt is shared with `login` via `runDeviceLogin`.
 1. **`scan [path]`** — catalog a directory, submit, report.
 2. **`check -e <pypi|npm> <name[@version]>...`** — check named packages with no project on disk.
 3. **Forwarders** (`npm`/`pnpm`/`yarn`/`pip`/`pip3`/`poetry`/`uv`) — registered dynamically from `forward.Managers()`. Each wraps an install, blocks on malware, otherwise execs the real manager. `DisableFlagParsing: true` so every arg reaches the real tool untouched; config comes only from `OSSPREY_API_URL` / `OSSPREY_API_KEY` env vars. `forward.Run` has two modes (`internal/forward/forward.go`): when packages are **named** it checks exactly those (`ParseSpecs` classifies args into `Specs` / `NonPackages` / `ReqFiles`, skipping flag-values, local paths, archives, URLs, VCS refs); when **no** packages are named — a bare `install`/`ci`/`yarn install`/`poetry install`/`uv sync`/`pip install -r` — the manager installs from the project manifest, so it runs a directory scan (`scanProjectFn` → `scan.Run` + `submit.Validate`) and checks every declared dependency rather than falling through unchecked (OSS-1284). Only installs whose sole targets are local/URL refs forward without a check.

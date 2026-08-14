@@ -19,6 +19,7 @@ sandbox, no virtualenv.
 
 - [Install](#install) — [Linux / macOS](#one-liner-linux--macos) · [Windows](#one-liner-windows-powershell) · [manual download](#manual-download) · [from source](#from-source) · [updating](#updating)
 - [Quick start](#quick-start)
+- [`init` — one-command setup](#init--one-command-setup)
 - [Usage](#usage)
 - [Authentication](#authentication)
 - [`check` — scan named packages](#check--scan-named-packages)
@@ -152,6 +153,13 @@ is user-writable, so no elevation is needed.
 ## Quick start
 
 ```sh
+# Set everything up in one command: login, CI API key, CI workflow, first scan
+ossprey init
+```
+
+Or do it by hand:
+
+```sh
 # Interactive: log in once via your browser...
 ossprey login
 ossprey scan .
@@ -170,10 +178,66 @@ If you need to distinguish "clean" from "errored" in CI, check stderr or parse t
 
 Get an API key at [dashboard.ossprey.com](https://dashboard.ossprey.com).
 
+## `init` — one-command setup
+
+```
+ossprey init [path] [flags]
+```
+
+`ossprey init` takes a project from nothing to scanned-and-monitored in one
+command. `path` defaults to the current directory. It runs four steps:
+
+1. **Log in.** Reuses a stored login if there is one (refreshing it silently),
+   otherwise runs the same browser device flow as `ossprey login`.
+2. **Create an API key for CI** and print it once, along with the `gh secret
+   set` command to store it. Keys default to a one-year expiry.
+3. **Write `.github/workflows/ossprey.yml`** — a GitHub Actions workflow that
+   installs the CLI and scans on every push to the default branch and every
+   pull request.
+4. **Run the first scan** of the project, exactly as `ossprey scan` would.
+
+```sh
+$ ossprey init
+[1/4] Checking login...
+Already logged in as you@example.com.
+[2/4] Creating an API key for CI...
+Created API key "ci-3f9a1c02" (expires 2027-08-14T09:15:00Z).
+This is the only time it is shown — add it to your repository now:
+
+    ospy_...
+
+    gh secret set OSSPREY_API_KEY   # paste the key when prompted
+    (or GitHub -> Settings -> Secrets and variables -> Actions -> New repository secret)
+
+[3/4] Adding GitHub Actions workflow...
+Wrote .github/workflows/ossprey.yml — commit it to enable scans in CI.
+[4/4] Running your first scan...
+No malware found. See your scans at https://dashboard.ossprey.com
+```
+
+Re-running is safe: an existing login is reused, an existing workflow file is
+left untouched, and each run generates a fresh key name. If key creation fails
+(for example you have already hit the per-account key limit), `init` warns and
+carries on with the workflow file and the scan.
+
+Flags:
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `--key-name <name>` | generated (`ci-<random>`) | Name for the created API key (max 20 chars, no whitespace). |
+| `--key-expiry <dur>` | `8760h` (1 year) | Lifetime of the created key. The API caps this at 2 years. |
+| `--no-workflow` | off | Skip writing the CI workflow file. |
+| `--no-scan` | off | Skip the first scan. |
+| `--url <url>` | `https://api.ossprey.com` | Ossprey API URL. |
+
+Creating an API key requires a browser login — API keys cannot mint other API
+keys — so `init` always authenticates via Auth0 rather than `OSSPREY_API_KEY`.
+
 ## Usage
 
 | Command | What it does |
 |---------|--------------|
+| [`ossprey init [path]`](#init--one-command-setup) | Set up a project: log in, create a CI API key, add a CI workflow, run the first scan. |
 | [`ossprey scan [path]`](#scan) | Catalogue a directory, submit the OSSBOM, fail on malware. `path` defaults to `.`. |
 | [`ossprey check -e <pypi\|npm> <pkg>...`](#check--scan-named-packages) | Check packages by name, no project needed. |
 | [`ossprey npm\|pnpm\|yarn\|pip\|pip3\|poetry\|uv ...`](#package-manager-forwarder) | Check, then run the real package manager. Blocks the install on malware. |
@@ -631,7 +695,9 @@ then left versionless.
 
 ## CI usage
 
-Typical GitHub Actions step:
+`ossprey init` writes a ready-to-commit GitHub Actions workflow for you — see
+[`init`](#init--one-command-setup). To wire it up by hand, a typical GitHub
+Actions step is:
 
 ```yaml
 - name: Ossprey scan
