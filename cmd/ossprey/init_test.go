@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -147,6 +148,46 @@ func TestMatchesTenant(t *testing.T) {
 				t.Errorf("matchesTenant: got %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// An over-limit --key-expiry should be rejected locally with a clear message,
+// not surface as the generic "could not create an API key" warning after a
+// pointless round trip.
+func TestInitCmd_RejectsBadKeyExpiry(t *testing.T) {
+	cases := []struct {
+		expiry string
+		want   string
+	}{
+		{"20000h", "cannot exceed 2 years"},
+		{"0s", "must be positive"},
+		{"-1h", "must be positive"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.expiry, func(t *testing.T) {
+			cmd := newInitCmd()
+			cmd.SetArgs([]string{".", "--key-expiry", tc.expiry})
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+			err := cmd.Execute()
+			if err == nil {
+				t.Fatalf("--key-expiry %s: want an error, got nil", tc.expiry)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not mention %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// --no-key means the expiry is never used, so it must not be validated.
+func TestInitCmd_KeyExpiryUncheckedWithNoKey(t *testing.T) {
+	cmd := newInitCmd()
+	cmd.SetArgs([]string{".", "--key-expiry", "20000h", "--no-key", "--no-scan", "--no-workflow"})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("--no-key should skip expiry validation, got: %v", err)
 	}
 }
 

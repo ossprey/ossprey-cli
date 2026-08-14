@@ -26,6 +26,11 @@ const keyNameAttempts = 3
 // minting eternal credentials.
 const defaultKeyExpiry = 365 * 24 * time.Hour
 
+// maxKeyExpiry mirrors the API's two-year ceiling. Checked locally so an
+// over-limit --key-expiry says so plainly, instead of surfacing as the generic
+// "could not create an API key" warning after a round trip.
+const maxKeyExpiry = 2 * 365 * 24 * time.Hour
+
 // newInitCmd implements `ossprey init`: one command that logs in, mints a CI
 // API key, drops a GitHub Actions workflow, and runs the first scan.
 func newInitCmd() *cobra.Command {
@@ -64,6 +69,14 @@ untouched, and a fresh key name is generated per run.`,
 			}
 			if _, err := os.Stat(path); err != nil {
 				return fmt.Errorf("project path: %w", err)
+			}
+			if !noKey {
+				if keyExpiry <= 0 {
+					return fmt.Errorf("--key-expiry must be positive, got %s", keyExpiry)
+				}
+				if keyExpiry > maxKeyExpiry {
+					return fmt.Errorf("--key-expiry cannot exceed 2 years (got %s)", keyExpiry)
+				}
 			}
 
 			// Step 1: authenticate — reuse a stored login, else device flow.
@@ -263,11 +276,7 @@ func runFirstScan(ctx context.Context, path, apiURL string) error {
 		return err
 	}
 
-	reports, hasMalware := scan.MalwareReports(sbom)
-	if hasMalware {
-		for _, msg := range reports {
-			fmt.Println("Error: " + msg)
-		}
+	if reportMalware(sbom) {
 		os.Exit(1)
 	}
 	fmt.Println("No malware found. See your scans at https://dashboard.ossprey.com")
