@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -173,8 +174,9 @@ untouched, and a fresh key name is generated per run.`,
 func ensureLogin(ctx context.Context, cfg auth.Config) (string, error) {
 	stored, loadErr := auth.Load()
 	if loadErr == nil && !matchesTenant(stored, cfg) {
-		fmt.Printf("Stored login is for %s (audience %s), but this run targets %s (audience %s); logging in again.\n",
-			stored.Domain, stored.Audience, cfg.Domain, cfg.Audience)
+		fmt.Printf("Stored login is for a different Ossprey tenant (%s), but this run targets %s; logging in again.\n",
+			describeTenant(stored.Domain, stored.ClientID, stored.Audience),
+			describeTenant(cfg.Domain, cfg.ClientID, cfg.Audience))
 		return freshLogin(ctx, cfg)
 	}
 
@@ -197,18 +199,44 @@ func ensureLogin(ctx context.Context, cfg auth.Config) (string, error) {
 	return freshLogin(ctx, cfg)
 }
 
-// matchesTenant reports whether stored credentials were issued by the tenant
-// and for the audience cfg names. An empty field in either is treated as
-// "unknown, don't force a re-login" so credentials written by older CLI
-// versions keep working.
+// matchesTenant reports whether stored credentials were issued by the tenant,
+// application and audience cfg names. All three identify the token's origin, and
+// all three are settable via flags, so all three must agree — comparing only
+// domain and audience would let `--client-id <other-app>` silently reuse a token
+// minted for a different Auth0 application. An empty field on either side is
+// treated as "unknown, don't force a re-login" so credentials written by older
+// CLI versions keep working.
 func matchesTenant(stored *auth.Credentials, cfg auth.Config) bool {
-	if stored.Domain != "" && cfg.Domain != "" && stored.Domain != cfg.Domain {
-		return false
-	}
-	if stored.Audience != "" && cfg.Audience != "" && stored.Audience != cfg.Audience {
-		return false
+	for _, f := range []struct{ got, want string }{
+		{stored.Domain, cfg.Domain},
+		{stored.ClientID, cfg.ClientID},
+		{stored.Audience, cfg.Audience},
+	} {
+		if f.got != "" && f.want != "" && f.got != f.want {
+			return false
+		}
 	}
 	return true
+}
+
+// describeTenant renders the tenant triple for the mismatch message, omitting
+// the parts that are empty (older stored credentials) rather than printing
+// stray empty parentheses.
+func describeTenant(domain, clientID, audience string) string {
+	parts := make([]string, 0, 3)
+	if domain != "" {
+		parts = append(parts, domain)
+	}
+	if audience != "" {
+		parts = append(parts, "audience "+audience)
+	}
+	if clientID != "" {
+		parts = append(parts, "client "+clientID)
+	}
+	if len(parts) == 0 {
+		return "unknown"
+	}
+	return strings.Join(parts, ", ")
 }
 
 func freshLogin(ctx context.Context, cfg auth.Config) (string, error) {

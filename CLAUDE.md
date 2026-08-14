@@ -47,9 +47,11 @@ Windows resolves it under `%LOCALAPPDATA%`.
    `.github/workflows/ossprey.yml`, run the first scan. Key creation goes through
    `client.CreateAPIKey` on `/dashboard/v1/api-keys`, which **requires a bearer
    token** — API keys cannot mint API keys, so `init` never takes an
-   `--api-key`. `ensureLogin` reuses/refreshes a stored login — but only when it
-   matches the tenant the flags ask for, else a prod token would be silently
-   reused against a QA `--audience`. `setup.WriteWorkflow` refuses to overwrite,
+   `--api-key`. `ensureLogin` reuses/refreshes a stored login — but only when
+   `matchesTenant` says domain, client ID **and** audience all agree, else a prod
+   token would be silently reused against a QA `--audience`. All three matter:
+   comparing only domain and audience let `--client-id <other-app>` reuse a token
+   minted for a different Auth0 application. `setup.WriteWorkflow` refuses to overwrite,
    atomically (`O_EXCL`, not stat-then-write). Key creation fails **open** — a
    warning, then the workflow and scan still run — because the scan is the value
    and the user can always make a key in the dashboard. The device-flow prompt is

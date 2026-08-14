@@ -136,9 +136,38 @@ func TestMatchesTenant(t *testing.T) {
 			want:   false,
 		},
 		{
+			// --client-id names a different Auth0 application; reusing a token
+			// minted for another app is the same silent-ignore bug as domain.
+			name: "different client id",
+			stored: auth.Credentials{
+				Domain: "auth.ossprey.com", ClientID: "app-a", Audience: "https://api.ossprey.com",
+			},
+			cfg: auth.Config{
+				Domain: "auth.ossprey.com", ClientID: "app-b", Audience: "https://api.ossprey.com",
+			},
+			want: false,
+		},
+		{
+			name: "all three match",
+			stored: auth.Credentials{
+				Domain: "auth.ossprey.com", ClientID: "app-a", Audience: "https://api.ossprey.com",
+			},
+			cfg: auth.Config{
+				Domain: "auth.ossprey.com", ClientID: "app-a", Audience: "https://api.ossprey.com",
+			},
+			want: true,
+		},
+		{
 			name:   "stored fields empty (older CLI) still reused",
 			stored: auth.Credentials{},
 			cfg:    auth.Config{Domain: "auth.ossprey.com", Audience: "https://api.ossprey.com"},
+			want:   true,
+		},
+		{
+			// Only the stored client id is known: nothing to contradict, reuse.
+			name:   "stored client id but cfg empty",
+			stored: auth.Credentials{ClientID: "app-a"},
+			cfg:    auth.Config{Domain: "auth.ossprey.com"},
 			want:   true,
 		},
 	}

@@ -240,9 +240,16 @@ Flags:
 | `--no-workflow` | off | Skip writing the CI workflow file. |
 | `--no-scan` | off | Skip the first scan. |
 | `--url <url>` | `https://api.ossprey.com` | Ossprey API URL. |
+| `--auth0-domain <host>` | `auth.ossprey.com` | Auth0 domain (or `OSSPREY_AUTH0_DOMAIN`). |
+| `--client-id <id>` | production app | Auth0 client ID (or `OSSPREY_AUTH0_CLIENT_ID`). |
+| `--audience <url>` | `https://api.ossprey.com` | Auth0 API audience (or `OSSPREY_AUTH0_AUDIENCE`). |
 
 `--no-key --no-scan` together mean "just give me the workflow file". Nothing
 then needs credentials, so that combination skips the login and works offline.
+
+A stored login is only reused when its domain, client ID and audience all match
+the ones this run targets. Point any of those three at a different tenant and
+`init` logs in again rather than sending the wrong token to the wrong API.
 
 Creating an API key requires a browser login — API keys cannot mint other API
 keys — so `init` always authenticates via Auth0 rather than `OSSPREY_API_KEY`.

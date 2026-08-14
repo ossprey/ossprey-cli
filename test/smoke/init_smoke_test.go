@@ -119,7 +119,7 @@ func (e *initEnv) seedLogin(t *testing.T) {
 		[]byte(`{"email":"smoke@example.com","sub":"auth0|smoke"}`))
 	creds := map[string]any{
 		"domain":        stubDomain,
-		"client_id":     "smoke-client",
+		"client_id":     stubClientID,
 		"audience":      stubAudience,
 		"access_token":  "smoke-access-token",
 		"refresh_token": "smoke-refresh-token",
@@ -140,6 +140,7 @@ func (e *initEnv) seedLogin(t *testing.T) {
 // on the stored token instead of launching a real device-flow login.
 const (
 	stubDomain   = "auth.example.com"
+	stubClientID = "smoke-client"
 	stubAudience = "https://api.example.com"
 )
 
@@ -149,6 +150,7 @@ func (e *initEnv) run(t *testing.T, args ...string) runResult {
 		"init", e.projectDir,
 		"--url", e.server.URL,
 		"--auth0-domain", stubDomain,
+		"--client-id", stubClientID,
 		"--audience", stubAudience,
 	}, args...)
 	cmd := exec.Command(binPath, full...)
@@ -372,6 +374,35 @@ func TestInitRefusesForeignTenantLogin(t *testing.T) {
 	}
 }
 
+// A mismatched --client-id alone must also force a re-login: the token was
+// minted for a different Auth0 application even though the domain and audience
+// line up.
+func TestInitRefusesForeignClientIDLogin(t *testing.T) {
+	e := newInitEnv(t, "main")
+
+	cmd := exec.Command(binPath, "init", e.projectDir,
+		"--url", e.server.URL,
+		"--auth0-domain", "127.0.0.1:9", // unreachable: proves a login was attempted
+		"--client-id", "a-different-app",
+		"--audience", stubAudience)
+	cmd.Env = append(os.Environ(), "OSSPREY_CONFIG_DIR="+e.configDir)
+	out, err := cmd.CombinedOutput()
+
+	if err == nil {
+		t.Fatalf("want failure on a client-id mismatch, got success:\n%s", out)
+	}
+	if !strings.Contains(string(out), "Stored login is for") {
+		t.Errorf("no tenant-mismatch explanation:\n%s", out)
+	}
+
+	e.mu.Lock()
+	keys := len(e.keyNames)
+	e.mu.Unlock()
+	if keys != 0 {
+		t.Errorf("minted %d keys with a token from another application", keys)
+	}
+}
+
 // TestInitRejectsMissingPath fails before touching the network when the project
 // path does not exist.
 func TestInitRejectsMissingPath(t *testing.T) {
@@ -379,7 +410,8 @@ func TestInitRejectsMissingPath(t *testing.T) {
 	missing := filepath.Join(e.projectDir, "nope")
 
 	cmd := exec.Command(binPath, "init", missing, "--url", e.server.URL,
-		"--auth0-domain", stubDomain, "--audience", stubAudience)
+		"--auth0-domain", stubDomain, "--client-id", stubClientID,
+		"--audience", stubAudience)
 	cmd.Env = append(os.Environ(), "OSSPREY_CONFIG_DIR="+e.configDir)
 	out, err := cmd.CombinedOutput()
 	if err == nil {

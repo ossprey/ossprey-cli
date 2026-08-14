@@ -82,11 +82,16 @@ func WriteWorkflow(dir, defaultBranch string) (path string, created bool, err er
 	}
 	defer f.Close()
 
+	// A failed write must not leave a truncated file behind: the next run's
+	// O_EXCL would then report "already exists; left untouched" and quietly
+	// keep unparseable YAML in place.
 	content := fmt.Sprintf(workflowTemplate, yamlQuote(defaultBranch))
 	if _, err := f.WriteString(content); err != nil {
+		os.Remove(path)
 		return path, false, fmt.Errorf("write workflow: %w", err)
 	}
 	if err := f.Close(); err != nil {
+		os.Remove(path)
 		return path, false, fmt.Errorf("write workflow: %w", err)
 	}
 	return path, true, nil
