@@ -19,7 +19,7 @@ sandbox, no virtualenv.
 
 - [Install](#install) — [Linux / macOS](#one-liner-linux--macos) · [Windows](#one-liner-windows-powershell) · [manual download](#manual-download) · [from source](#from-source) · [updating](#updating)
 - [Quick start](#quick-start)
-- [`init` — one-command setup](#init--one-command-setup)
+- [`init` — one-command setup](#init--one-command-setup) — [common invocations](#common-invocations)
 - [Usage](#usage)
 - [Authentication](#authentication)
 - [`check` — scan named packages](#check--scan-named-packages)
@@ -230,6 +230,76 @@ Next steps:
     ossprey precommit install    # block commits that add known-malicious packages
 ```
 
+### Common invocations
+
+**Getting started**
+
+```sh
+ossprey init                     # log in, create a key, ask about scanning
+ossprey init ./some/project      # same, against another directory
+```
+
+**Controlling the scan**
+
+```sh
+ossprey init --scan              # scan, don't ask
+ossprey init --no-scan           # skip the scan, just get a key
+```
+
+In CI — or any time output is piped — the scan is skipped automatically, because
+there is nobody to ask. Pass `--scan` if you want it anyway.
+
+**Controlling the key**
+
+```sh
+ossprey init --no-key                    # don't create one; scan with your login
+ossprey init --key-name my-ci-key        # name it yourself
+ossprey init --key-expiry 720h           # 30 days instead of the default year
+```
+
+**Piping the key straight into a secret store**
+
+```sh
+# GitHub — gh reads the secret value from stdin
+ossprey init --key-stdout | gh secret set OSSPREY_API_KEY
+
+# Into a shell variable (progress output goes to stderr, so discard it)
+KEY=$(ossprey init --key-stdout 2>/dev/null)
+```
+
+`--key-stdout` ends the key with a newline. `gh` strips it, but not every tool
+does — if yours doesn't, use command substitution, which strips it for you:
+
+```sh
+some-tool set-secret OSSPREY_API_KEY "$(ossprey init --key-stdout 2>/dev/null)"
+```
+
+**Just authenticate**
+
+```sh
+ossprey init --no-key --no-scan   # login only — same as `ossprey login`
+```
+
+**Targeting a non-production tenant**
+
+```sh
+ossprey init \
+  --url https://api.qa.ossprey.com \
+  --auth0-domain auth.qa.ossprey.com \
+  --audience https://api.qa.ossprey.com \
+  --client-id <qa-app-client-id>
+
+# or via env vars
+OSSPREY_AUTH0_DOMAIN=auth.qa.ossprey.com ossprey init
+
+# keep the login out of your real config dir
+OSSPREY_CONFIG_DIR=/tmp/ossprey-creds ossprey init
+```
+
+**`init` always needs a login.** There is no offline mode: creating a key and
+scanning both require credentials, so even `--no-key --no-scan` opens the browser
+if you aren't already logged in.
+
 ### Getting the key somewhere useful
 
 **The key is shown once and cannot be recovered** — the API stores only an
@@ -264,6 +334,14 @@ Flags:
 | `--auth0-domain <host>` | `auth.ossprey.com` | Auth0 domain (or `OSSPREY_AUTH0_DOMAIN`). |
 | `--client-id <id>` | production app | Auth0 client ID (or `OSSPREY_AUTH0_CLIENT_ID`). |
 | `--audience <url>` | `https://api.ossprey.com` | Auth0 API audience (or `OSSPREY_AUTH0_AUDIENCE`). |
+
+These three combinations are rejected rather than silently resolved:
+
+| Combination | Why |
+|-------------|-----|
+| `--scan --no-scan` | Contradictory. |
+| `--scan --key-stdout` | A scan verdict on stdout would corrupt the pipe. |
+| `--no-key --key-stdout` | No key means nothing to print. |
 
 A stored login is only reused when its domain, client ID and audience all match
 the ones this run targets. Point any of those three at a different tenant and
