@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ossprey/ossprey-cli/internal/auth"
+	"github.com/ossprey/ossprey-cli/internal/client"
 )
 
 func TestCreateCIKey_RetriesOnNameCollision(t *testing.T) {
@@ -209,25 +210,76 @@ func TestInitCmd_RejectsBadKeyExpiry(t *testing.T) {
 	}
 }
 
-// --no-key means the expiry is never used, so it must not be validated.
+// --no-key means the expiry is never used, so it must not be validated. The run
+// still fails (it needs a login, and 127.0.0.1:9 is closed) — but it must fail
+// on the login, not on the expiry, which proves validation was skipped.
 func TestInitCmd_KeyExpiryUncheckedWithNoKey(t *testing.T) {
+	t.Setenv("OSSPREY_CONFIG_DIR", t.TempDir()) // no stored login
+
 	cmd := newInitCmd()
-	cmd.SetArgs([]string{".", "--key-expiry", "20000h", "--no-key", "--no-scan", "--no-workflow"})
+	cmd.SetArgs([]string{".",
+		"--key-expiry", "20000h", // way over the 2-year cap
+		"--no-key", "--no-scan",
+		"--auth0-domain", "127.0.0.1:9",
+	})
 	cmd.SetOut(io.Discard)
 	cmd.SetErr(io.Discard)
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("--no-key should skip expiry validation, got: %v", err)
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected a login failure, got success")
+	}
+	if strings.Contains(err.Error(), "key-expiry") {
+		t.Errorf("--no-key should skip expiry validation, but got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "device code") {
+		t.Errorf("expected a device-code failure, got: %v", err)
 	}
 }
 
 func TestInitCmd_Flags(t *testing.T) {
 	cmd := newInitCmd()
-	for _, name := range []string{"url", "key-name", "key-expiry", "no-key", "no-workflow", "no-scan", "auth0-domain"} {
+	for _, name := range []string{"url", "key-name", "key-expiry", "no-key", "no-scan", "auth0-domain", "client-id", "audience"} {
 		if cmd.Flags().Lookup(name) == nil {
 			t.Errorf("missing --%s flag", name)
 		}
 	}
+	// The workflow-file step was dropped: init is CI-agnostic now, so this flag
+	// must not quietly come back.
+	if cmd.Flags().Lookup("no-workflow") != nil {
+		t.Error("--no-workflow should no longer exist")
+	}
 	if cmd.Use != "init [path]" {
 		t.Errorf("Use: got %q", cmd.Use)
+	}
+}
+
+func TestGenerateKeyName(t *testing.T) {
+	seen := map[string]bool{}
+	for i := 0; i < 10; i++ {
+		name := generateKeyName()
+		if len(name) > 20 {
+			t.Errorf("name %q longer than the API's 20-char limit", name)
+		}
+		if strings.ContainsAny(name, " \t\n") {
+			t.Errorf("name %q contains whitespace, which the API rejects", name)
+		}
+		if !strings.HasPrefix(name, "ci-") {
+			t.Errorf("name %q missing ci- prefix", name)
+		}
+		if seen[name] {
+			t.Errorf("duplicate name %q", name)
+		}
+		seen[name] = true
+	}
+}
+
+func TestKeyValue(t *testing.T) {
+	// "" is the signal submit.Validate reads as "use the stored login".
+	if got := keyValue(nil); got != "" {
+		t.Errorf("keyValue(nil): got %q, want empty", got)
+	}
+	if got := keyValue(&client.APIKey{Key: "ospy_x"}); got != "ospy_x" {
+		t.Errorf("keyValue: got %q", got)
 	}
 }

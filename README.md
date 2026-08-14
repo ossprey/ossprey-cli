@@ -153,7 +153,7 @@ is user-writable, so no elevation is needed.
 ## Quick start
 
 ```sh
-# Set everything up in one command: login, CI API key, CI workflow, first scan
+# Set up in one command: log in, create an API key, scan with it
 ossprey init
 ```
 
@@ -184,51 +184,51 @@ Get an API key at [dashboard.ossprey.com](https://dashboard.ossprey.com).
 ossprey init [path] [flags]
 ```
 
-`ossprey init` takes a project from nothing to scanned-and-monitored in one
-command. `path` defaults to the current directory. It runs four steps:
+`ossprey init` gets you from a fresh install to a working, CI-ready setup in one
+command. `path` defaults to the current directory. It runs three steps:
 
 1. **Log in.** Reuses a stored login if there is one (refreshing it silently),
    otherwise runs the same browser device flow as `ossprey login`.
-2. **Create an API key for CI** and print it once, along with the `gh secret
-   set` command to store it. Keys default to a one-year expiry.
-3. **Write `.github/workflows/ossprey.yml`** — a GitHub Actions workflow that
-   installs the CLI and scans on every push to the default branch and every
-   pull request.
-4. **Run the first scan** of the project, exactly as `ossprey scan` would.
+2. **Create an API key** and print it once. Keys default to a one-year expiry.
+3. **Scan the project using that key**, reporting the verdict exactly as
+   `ossprey scan` would.
+
+Step 3 deliberately authenticates with the key from step 2 rather than with your
+login, so **a clean scan is proof the key works** before you paste it into CI.
+`init` writes no files and makes no assumptions about which CI you use — see
+[CI usage](#ci-usage) for the snippet to add.
 
 ```sh
 $ ossprey init
-[1/4] Checking login...
+[1/3] Checking login...
 Already logged in as you@example.com.
-[2/4] Creating an API key for CI...
+[2/3] Creating an API key...
 Created API key "ci-3f9a1c02" (expires 2027-08-14T09:15:00Z).
-This is the only time it is shown — add it to your repository now:
+This is the only time it is shown — save it now:
 
     ospy_...
 
+Set it as OSSPREY_API_KEY wherever your scans run. For GitHub Actions:
     gh secret set OSSPREY_API_KEY   # paste the key when prompted
-    (or GitHub -> Settings -> Secrets and variables -> Actions -> New repository secret)
 
 Treat it like a password. It stays in your terminal scrollback, so clear it
 when you're done, and don't pipe this command's output to a file or CI log.
 Revoke it any time at https://dashboard.ossprey.com
 
-[3/4] Adding GitHub Actions workflow...
-Wrote .github/workflows/ossprey.yml — commit it to enable scans in CI.
-[4/4] Running your first scan...
+[3/3] Scanning with your new API key...
 No malware found. See your scans at https://dashboard.ossprey.com
 
-Next steps — catch malware before CI ever sees it:
-    ossprey shim install    # check every npm/pip install on this machine
+Next steps:
+    Add `ossprey scan .` to your CI, with OSSPREY_API_KEY set from the key above.
+    ossprey shim install         # check every npm/pip install on this machine
     ossprey precommit install    # block commits that add known-malicious packages
 ```
 
-Re-running is safe: an existing login is reused and an existing workflow file is
-left untouched. Note that **step 2 creates a new key every run** — keys are shown
-only once, so the usual reason to re-run is that you didn't save the last one.
-Your account is capped at 10 keys, so if you re-run often, pass `--no-key` or
+**Re-running creates another key.** Keys are shown only once, so the usual reason
+to re-run is that you didn't save the last one — that's the intended path. But
+your account is capped at 10 keys, so if you re-run often, pass `--no-key` or
 delete the unused keys in the dashboard. If key creation fails for any reason,
-`init` warns and carries on with the workflow file and the scan.
+`init` warns and still runs the scan (falling back to your login).
 
 Flags:
 
@@ -236,33 +236,19 @@ Flags:
 |------|---------|---------|
 | `--key-name <name>` | generated (`ci-<random>`) | Name for the created API key (max 20 chars, no whitespace). |
 | `--key-expiry <dur>` | `8760h` (1 year) | Lifetime of the created key. The API caps this at 2 years. |
-| `--no-key` | off | Don't create an API key (CI already has one). |
-| `--no-workflow` | off | Skip writing the CI workflow file. |
-| `--no-scan` | off | Skip the first scan. |
+| `--no-key` | off | Don't create a key. The scan then uses your login. |
+| `--no-scan` | off | Skip the scan; just log in and create the key. |
 | `--url <url>` | `https://api.ossprey.com` | Ossprey API URL. |
 | `--auth0-domain <host>` | `auth.ossprey.com` | Auth0 domain (or `OSSPREY_AUTH0_DOMAIN`). |
 | `--client-id <id>` | production app | Auth0 client ID (or `OSSPREY_AUTH0_CLIENT_ID`). |
 | `--audience <url>` | `https://api.ossprey.com` | Auth0 API audience (or `OSSPREY_AUTH0_AUDIENCE`). |
-
-`--no-key --no-scan` together mean "just give me the workflow file". Nothing
-then needs credentials, so that combination skips the login and works offline.
 
 A stored login is only reused when its domain, client ID and audience all match
 the ones this run targets. Point any of those three at a different tenant and
 `init` logs in again rather than sending the wrong token to the wrong API.
 
 Creating an API key requires a browser login — API keys cannot mint other API
-keys — so `init` always authenticates via Auth0 rather than `OSSPREY_API_KEY`.
-
-The generated workflow pins `actions/checkout` to a commit SHA rather than a
-mutable tag, matching this repo's own convention — a tag can be repointed at new
-code, which is the risk the workflow exists to catch.
-
-The generated workflow skips pull requests opened from forks. GitHub deliberately
-withholds repository secrets from fork PRs, so `OSSPREY_API_KEY` would be empty
-and every external contributor's PR would fail for a missing key rather than for
-malware. Don't switch the trigger to `pull_request_target` to work around this —
-that exposes your secrets to untrusted code.
+keys — so step 2 always authenticates via Auth0, never via `OSSPREY_API_KEY`.
 
 `init` does not install the [pre-commit
 hook](#pre-commit-hook--block-known-malware-at-commit-time) or [PATH
@@ -273,7 +259,7 @@ machine behaves outside this project. It prints the commands at the end.
 
 | Command | What it does |
 |---------|--------------|
-| [`ossprey init [path]`](#init--one-command-setup) | Set up a project: log in, create a CI API key, add a CI workflow, run the first scan. |
+| [`ossprey init [path]`](#init--one-command-setup) | Set up a project: log in, create an API key, scan with it. |
 | [`ossprey scan [path]`](#scan) | Catalogue a directory, submit the OSSBOM, fail on malware. `path` defaults to `.`. |
 | [`ossprey check -e <pypi\|npm> <pkg>...`](#check--scan-named-packages) | Check packages by name, no project needed. |
 | [`ossprey npm\|pnpm\|yarn\|pip\|pip3\|poetry\|uv ...`](#package-manager-forwarder) | Check, then run the real package manager. Blocks the install on malware. |
@@ -731,9 +717,11 @@ then left versionless.
 
 ## CI usage
 
-`ossprey init` writes a ready-to-commit GitHub Actions workflow for you — see
-[`init`](#init--one-command-setup). To wire it up by hand, a typical GitHub
-Actions step is:
+Get a key with [`ossprey init`](#init--one-command-setup) (or from the
+dashboard), store it as a secret, and add a scan step. The CLI exits non-zero on
+a malware verdict, which fails the build.
+
+The minimal GitHub Actions step:
 
 ```yaml
 - name: Ossprey scan
@@ -742,7 +730,48 @@ Actions step is:
   run: ossprey scan .
 ```
 
-The CLI exits non-zero on a malware verdict, which fails the workflow.
+A complete workflow, with the two things that are easy to get wrong called out:
+
+```yaml
+name: Ossprey malware scan
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  ossprey:
+    runs-on: ubuntu-latest
+    # GitHub withholds repository secrets from pull_request runs that originate
+    # in a fork, so OSSPREY_API_KEY would be empty and the scan would fail for a
+    # missing key rather than for malware — a red build no contributor can fix.
+    # Skip those runs instead. Do NOT "fix" this by switching the trigger to
+    # pull_request_target, which grants your secrets to untrusted code.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      # Pin actions to a commit SHA, not a mutable tag: a tag can be repointed
+      # at new code, which is the same supply-chain risk this job exists to catch.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Install ossprey
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL https://github.com/ossprey/ossprey-cli/releases/latest/download/install.sh \
+            | OSSPREY_INSTALL_DIR="$HOME/.local/bin" sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Ossprey scan
+        env:
+          OSSPREY_API_KEY: ${{ secrets.OSSPREY_API_KEY }}
+        run: ossprey scan .
+```
+
+For other CI systems the shape is the same: install the CLI, set
+`OSSPREY_API_KEY` from your secret store, run `ossprey scan .`.
 
 ## Output
 

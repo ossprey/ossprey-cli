@@ -28,7 +28,12 @@ type initEnv struct {
 	mu       sync.Mutex
 	keyNames []string
 	keyAuth  []string
-	scanAuth []string
+	// scanAuth records how each scan authenticated. An API-key client sends
+	// x-api-key to /public/v1; a bearer client sends Authorization to
+	// /dashboard/v1 — so this distinguishes "scanned with the new key" from
+	// "scanned with the login", which is the whole point of step 3.
+	scanAuth  []string
+	scanMount []string
 	// scanPurls records the components of each submitted SBOM, so a test can
 	// prove init actually catalogued and sent the project's dependency rather
 	// than posting an empty SBOM.
@@ -83,7 +88,11 @@ func newInitEnv(t *testing.T, branch string) *initEnv {
 			"expiry":  body["expiry"],
 		})
 	})
-	mux.HandleFunc("/dashboard/v1/scans", func(w http.ResponseWriter, r *http.Request) {
+	// Both scan mounts are served: /public/v1 is where an API-key client goes,
+	// /dashboard/v1 where a bearer (login) client goes. Registering both means a
+	// test can assert which credential init actually used instead of failing with
+	// an unhelpful 404.
+	scanHandler := func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Errorf("scans: got %s, want POST", r.Method)
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -106,8 +115,22 @@ func newInitEnv(t *testing.T, branch string) *initEnv {
 			purls = append(purls, c.Purl)
 		}
 
+		// Record whichever credential arrived, tagged so a test can tell them
+		// apart: an API key comes as x-api-key, a login as a bearer token.
+		cred := "none"
+		if k := r.Header.Get("x-api-key"); k != "" {
+			cred = "api-key:" + k
+		} else if a := r.Header.Get("Authorization"); a != "" {
+			cred = a
+		}
+		mount := "/dashboard/v1"
+		if strings.HasPrefix(r.URL.Path, "/public/v1") {
+			mount = "/public/v1"
+		}
+
 		e.mu.Lock()
-		e.scanAuth = append(e.scanAuth, r.Header.Get("Authorization"))
+		e.scanAuth = append(e.scanAuth, cred)
+		e.scanMount = append(e.scanMount, mount)
 		e.scanPurls = append(e.scanPurls, purls)
 		e.mu.Unlock()
 
@@ -118,7 +141,10 @@ func newInitEnv(t *testing.T, branch string) *initEnv {
 		json.Unmarshal(raw, &echo)
 		w.WriteHeader(http.StatusOK)
 		w.Write(echo.SBOM)
-	})
+	}
+	mux.HandleFunc("/public/v1/scans", scanHandler)
+	mux.HandleFunc("/dashboard/v1/scans", scanHandler)
+
 	e.server = httptest.NewServer(mux)
 	t.Cleanup(e.server.Close)
 	return e
@@ -214,13 +240,9 @@ func (e *initEnv) run(t *testing.T, args ...string) runResult {
 	return runResult{stdout: stdout.String(), stderr: stderr.String(), exitCode: code}
 }
 
-func (e *initEnv) workflowPath() string {
-	return filepath.Join(e.projectDir, ".github", "workflows", "ossprey.yml")
-}
-
 // TestInitFullFlow is the headline assertion: one command reuses the stored
-// login, creates an API key with bearer auth, writes the workflow, and submits
-// a real scan — all four steps, against a real HTTP server.
+// login, mints an API key with that login, then scans using the key it just
+// created — all three steps, against a real HTTP server.
 func TestInitFullFlow(t *testing.T) {
 	e := newInitEnv(t, "trunk")
 	res := e.run(t)
@@ -240,7 +262,8 @@ func TestInitFullFlow(t *testing.T) {
 	}
 
 	e.mu.Lock()
-	keyNames, keyAuth, scanAuth, scanPurls := e.keyNames, e.keyAuth, e.scanAuth, e.scanPurls
+	keyNames, keyAuth := e.keyNames, e.keyAuth
+	scanAuth, scanMount, scanPurls := e.scanAuth, e.scanMount, e.scanPurls
 	e.mu.Unlock()
 
 	if len(keyNames) != 1 {
@@ -249,30 +272,24 @@ func TestInitFullFlow(t *testing.T) {
 	if !strings.HasPrefix(keyNames[0], "ci-") {
 		t.Errorf("generated key name %q missing ci- prefix", keyNames[0])
 	}
+	// Key creation must use the login: an API key cannot mint an API key.
 	if keyAuth[0] != "Bearer smoke-access-token" {
 		t.Errorf("api-keys auth: got %q, want the stored access token", keyAuth[0])
 	}
 
-	// Step 3: the workflow exists and targets the repo's actual branch.
-	wf, err := os.ReadFile(e.workflowPath())
-	if err != nil {
-		t.Fatalf("workflow not written: %v", err)
-	}
-	for _, want := range []string{"branches: ['trunk']", "secrets.OSSPREY_API_KEY", "ossprey scan ."} {
-		assertContains(t, string(wf), want)
-	}
-	// The workflow must never embed the secret itself.
-	if strings.Contains(string(wf), "ospy_") {
-		t.Error("workflow file contains a literal key value")
-	}
-
-	// Step 4: the scan really was submitted, with the same bearer token.
+	// Step 3: the scan must authenticate with the key just created, not the
+	// login. That is what makes a clean scan proof the key actually works.
 	if len(scanAuth) != 1 {
 		t.Fatalf("scans called %d times, want 1", len(scanAuth))
 	}
-	if scanAuth[0] != "Bearer smoke-access-token" {
-		t.Errorf("scans auth: got %q", scanAuth[0])
+	if scanAuth[0] != "api-key:ospy_smoke_secret" {
+		t.Errorf("scan credential: got %q, want the new API key", scanAuth[0])
 	}
+	if scanMount[0] != "/public/v1" {
+		t.Errorf("scan mount: got %q, want /public/v1 (the API-key route)", scanMount[0])
+	}
+	assertContains(t, res.stdout, "Scanning with your new API key")
+
 	// Not just "a scan happened" — the project's declared dependency must
 	// actually be in the submitted SBOM, or init could post an empty one and
 	// still print "No malware found".
@@ -289,39 +306,46 @@ func TestInitFullFlow(t *testing.T) {
 		t.Errorf("submitted SBOM does not contain left-pad: %v", scanPurls[0])
 	}
 	assertContains(t, res.stdout, "No malware found")
+
+	// The workflow-file step is gone: init must not write into the project.
+	if _, err := os.Stat(filepath.Join(e.projectDir, ".github")); !os.IsNotExist(err) {
+		t.Errorf("init created .github in the project (err=%v); it should not write files", err)
+	}
 }
 
-// TestInitIsRerunnable checks the idempotency promise: a second run leaves an
-// existing workflow file untouched and still completes cleanly.
+// TestInitIsRerunnable checks the re-run promise: a second run reuses the login,
+// completes cleanly, and mints a second key (deliberately — keys are shown once,
+// so re-running is how you get a replacement).
 func TestInitIsRerunnable(t *testing.T) {
 	e := newInitEnv(t, "main")
 	if res := e.run(t); res.exitCode != 0 {
 		t.Fatalf("first run: exit %d\n%s%s", res.exitCode, res.stdout, res.stderr)
 	}
 
-	sentinel := "# hand-edited\n"
-	if err := os.WriteFile(e.workflowPath(), []byte(sentinel), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
 	res := e.run(t)
 	if res.exitCode != 0 {
 		t.Fatalf("second run: exit %d\n%s%s", res.exitCode, res.stdout, res.stderr)
 	}
-	assertContains(t, res.stdout, "already exists; left untouched")
+	assertContains(t, res.stdout, "Already logged in as smoke@example.com")
 
-	got, err := os.ReadFile(e.workflowPath())
-	if err != nil {
-		t.Fatal(err)
+	e.mu.Lock()
+	keyNames, scans := e.keyNames, len(e.scanAuth)
+	e.mu.Unlock()
+
+	if len(keyNames) != 2 {
+		t.Fatalf("want 2 keys across 2 runs, got %d (%v)", len(keyNames), keyNames)
 	}
-	if string(got) != sentinel {
-		t.Errorf("re-run overwrote the hand-edited workflow: %q", got)
+	if keyNames[0] == keyNames[1] {
+		t.Errorf("both runs used the same key name %q; names must be fresh", keyNames[0])
+	}
+	if scans != 2 {
+		t.Errorf("want 2 scans across 2 runs, got %d", scans)
 	}
 }
 
 // TestInitKeyFailureIsNonFatal pins the fail-open decision: if the API refuses
-// to mint a key, init still writes the workflow and runs the scan, because the
-// scan is the value the user came for.
+// to mint a key, init still runs the scan — falling back to the login, since
+// there is no key to scan with — because the scan is the value the user came for.
 func TestInitKeyFailureIsNonFatal(t *testing.T) {
 	e := newInitEnv(t, "main")
 	e.mu.Lock()
@@ -334,30 +358,31 @@ func TestInitKeyFailureIsNonFatal(t *testing.T) {
 			res.exitCode, res.stdout, res.stderr)
 	}
 	assertContains(t, res.stderr, "could not create an API key")
-	if _, err := os.Stat(e.workflowPath()); err != nil {
-		t.Errorf("workflow not written after key failure: %v", err)
-	}
 	assertContains(t, res.stdout, "No malware found")
 
 	e.mu.Lock()
-	scans := len(e.scanAuth)
+	scanAuth, scanMount := e.scanAuth, e.scanMount
 	e.mu.Unlock()
-	if scans != 1 {
-		t.Errorf("scan submitted %d times, want 1", scans)
+
+	if len(scanAuth) != 1 {
+		t.Fatalf("scan submitted %d times, want 1", len(scanAuth))
+	}
+	// No key exists, so the scan must fall back to the stored login.
+	if scanAuth[0] != "Bearer smoke-access-token" {
+		t.Errorf("scan credential: got %q, want the stored login as fallback", scanAuth[0])
+	}
+	if scanMount[0] != "/dashboard/v1" {
+		t.Errorf("scan mount: got %q, want /dashboard/v1 (the bearer route)", scanMount[0])
 	}
 }
 
-// TestInitSkipFlags checks --no-workflow / --no-scan suppress exactly their own
-// steps and nothing else.
+// TestInitSkipFlags checks --no-scan suppresses exactly its own step, and that
+// --key-name is honoured.
 func TestInitSkipFlags(t *testing.T) {
 	e := newInitEnv(t, "main")
-	res := e.run(t, "--no-workflow", "--no-scan", "--key-name", "smoke-key")
+	res := e.run(t, "--no-scan", "--key-name", "smoke-key")
 	if res.exitCode != 0 {
 		t.Fatalf("exit %d\n%s%s", res.exitCode, res.stdout, res.stderr)
-	}
-
-	if _, err := os.Stat(e.workflowPath()); !os.IsNotExist(err) {
-		t.Errorf("--no-workflow still wrote a workflow file (err=%v)", err)
 	}
 
 	e.mu.Lock()
@@ -372,29 +397,28 @@ func TestInitSkipFlags(t *testing.T) {
 	}
 }
 
-// TestInitWorkflowOnlyNeedsNoCredentials pins the offline path: with both the
-// key and the scan skipped there is nothing to authenticate, so `init` must
-// write the workflow without a login. An empty config dir and an unreachable
-// Auth0 domain prove no login was attempted.
-func TestInitWorkflowOnlyNeedsNoCredentials(t *testing.T) {
+// TestInitNoKeyScansWithLogin checks --no-key still scans, using the login.
+func TestInitNoKeyScansWithLogin(t *testing.T) {
 	e := newInitEnv(t, "main")
-	emptyCfg := t.TempDir() // no credentials.json
+	res := e.run(t, "--no-key")
+	if res.exitCode != 0 {
+		t.Fatalf("exit %d\n%s%s", res.exitCode, res.stdout, res.stderr)
+	}
 
-	cmd := exec.Command(binPath, "init", e.projectDir,
-		"--no-key", "--no-scan",
-		"--url", e.server.URL,
-		"--auth0-domain", "127.0.0.1:9")
-	cmd.Env = append(os.Environ(), "OSSPREY_CONFIG_DIR="+emptyCfg)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("want success with no credentials, got %v:\n%s", err, out)
+	e.mu.Lock()
+	keys, scanAuth := len(e.keyNames), e.scanAuth
+	e.mu.Unlock()
+
+	if keys != 0 {
+		t.Errorf("--no-key still created %d keys", keys)
 	}
-	if !strings.Contains(string(out), "Skipping login") {
-		t.Errorf("expected the login step to be skipped:\n%s", out)
+	if len(scanAuth) != 1 {
+		t.Fatalf("want 1 scan, got %d", len(scanAuth))
 	}
-	if _, err := os.Stat(e.workflowPath()); err != nil {
-		t.Errorf("workflow not written: %v", err)
+	if scanAuth[0] != "Bearer smoke-access-token" {
+		t.Errorf("scan credential: got %q, want the stored login", scanAuth[0])
 	}
+	assertContains(t, res.stdout, "No malware found")
 }
 
 // TestInitRefusesForeignTenantLogin pins the tenant check: a login stored for

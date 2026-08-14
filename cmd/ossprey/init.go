@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -14,7 +16,6 @@ import (
 	"github.com/ossprey/ossprey-cli/internal/auth"
 	"github.com/ossprey/ossprey-cli/internal/client"
 	"github.com/ossprey/ossprey-cli/internal/scan"
-	"github.com/ossprey/ossprey-cli/internal/setup"
 	"github.com/ossprey/ossprey-cli/internal/submit"
 )
 
@@ -32,35 +33,36 @@ const defaultKeyExpiry = 365 * 24 * time.Hour
 // "could not create an API key" warning after a round trip.
 const maxKeyExpiry = 2 * 365 * 24 * time.Hour
 
-// newInitCmd implements `ossprey init`: one command that logs in, mints a CI
-// API key, drops a GitHub Actions workflow, and runs the first scan.
+// newInitCmd implements `ossprey init`: one command that logs in, mints an API
+// key, and scans the project with that key.
 func newInitCmd() *cobra.Command {
 	defaults := auth.ConfigFromEnv()
 	var (
-		cfg        auth.Config
-		apiURL     string
-		keyName    string
-		keyExpiry  time.Duration
-		noKey      bool
-		noWorkflow bool
-		noScan     bool
+		cfg       auth.Config
+		apiURL    string
+		keyName   string
+		keyExpiry time.Duration
+		noKey     bool
+		noScan    bool
 	)
 
 	cmd := &cobra.Command{
 		Use:   "init [path]",
-		Short: "Set up Ossprey for a project: log in, create a CI API key, add a CI workflow, run the first scan",
+		Short: "Set up Ossprey for a project: log in, create an API key, run the first scan",
 		Long: `Set up Ossprey for a project in one command.
 
-Runs four steps against the project directory (default "."):
+Runs three steps against the project directory (default "."):
 
   1. Log in via your browser (skipped if already logged in)
-  2. Create an API key for CI and print it once
-  3. Write a GitHub Actions workflow (.github/workflows/ossprey.yml)
-     that scans every push and pull request
-  4. Run the first scan right away
+  2. Create an API key and print it once
+  3. Scan the project using that key
 
-Each step is safe to re-run: an existing login and workflow file are left
-untouched, and a fresh key name is generated per run.`,
+The scan in step 3 deliberately authenticates with the key just created rather
+than with your login, so a successful scan is proof the key works before you
+paste it into CI. Skip it with --no-scan.
+
+Re-running is safe: an existing login is reused, and each run generates a fresh
+key name.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
@@ -81,71 +83,45 @@ untouched, and a fresh key name is generated per run.`,
 			}
 
 			// Step 1: authenticate — reuse a stored login, else device flow.
-			// Only the key and the scan need credentials, so `--no-key
-			// --no-scan` ("just write me the workflow file") stays offline
-			// rather than demanding a browser login it will never use.
-			var token string
-			if noKey && noScan {
-				fmt.Println("[1/4] Skipping login (nothing to authenticate)")
-			} else {
-				fmt.Println("[1/4] Checking login...")
-				var err error
-				if token, err = ensureLogin(ctx, cfg); err != nil {
-					return err
-				}
+			// Both remaining steps need credentials, so there is no offline
+			// path here: creating a key needs the login, and the scan needs
+			// either the key or the login.
+			fmt.Println("[1/3] Checking login...")
+			token, err := ensureLogin(ctx, cfg)
+			if err != nil {
+				return err
 			}
 
-			// Step 2: mint a CI API key. Failure warns rather than aborts:
-			// the user may already have a key, and the remaining steps
-			// (workflow file, first scan) still deliver value.
+			// Step 2: mint an API key. Failure warns rather than aborts, so a
+			// key limit or a registry hiccup can't cost the user their scan.
 			var key *client.APIKey
 			if noKey {
-				fmt.Println("[2/4] Skipping API key creation (--no-key)")
+				fmt.Println("[2/3] Skipping API key creation (--no-key)")
 			} else {
-				fmt.Println("[2/4] Creating an API key for CI...")
+				fmt.Println("[2/3] Creating an API key...")
 				key = createCIKey(ctx, apiURL, token, keyName, keyExpiry)
 			}
 			if key != nil {
-				fmt.Printf("Created API key %q (expires %s).\n", key.Name, key.Expiry)
-				fmt.Println("This is the only time it is shown — add it to your repository now:")
-				fmt.Printf("\n    %s\n\n", key.Key)
-				fmt.Println("    gh secret set OSSPREY_API_KEY   # paste the key when prompted")
-				fmt.Println("    (or GitHub -> Settings -> Secrets and variables -> Actions -> New repository secret)")
-				// The key is a long-lived credential sitting in the terminal:
-				// say so, because scrollback and piped logs outlive the session.
-				fmt.Println("\nTreat it like a password. It stays in your terminal scrollback, so clear it")
-				fmt.Println("when you're done, and don't pipe this command's output to a file or CI log.")
-				fmt.Println("Revoke it any time at https://dashboard.ossprey.com")
-				fmt.Println()
+				printKey(key)
 			}
 
-			// Step 3: drop the CI workflow.
-			if noWorkflow {
-				fmt.Println("[3/4] Skipping CI workflow (--no-workflow)")
-			} else {
-				fmt.Println("[3/4] Adding GitHub Actions workflow...")
-				wfPath, created, err := setup.WriteWorkflow(path, setup.DefaultBranch(path))
-				switch {
-				case err != nil:
-					return err
-				case created:
-					fmt.Printf("Wrote %s — commit it to enable scans in CI.\n", wfPath)
-				default:
-					fmt.Printf("%s already exists; left untouched.\n", wfPath)
-				}
-			}
-
-			// Step 4: first scan, authenticated by the login from step 1.
+			// Step 3: scan, authenticated by the key from step 2 where we have
+			// one. Using the key rather than the login makes a clean scan proof
+			// that the credential the user is about to paste into CI works.
 			if noScan {
-				fmt.Println("[4/4] Skipping first scan (--no-scan)")
-				printNextSteps()
+				fmt.Println("[3/3] Skipping scan (--no-scan)")
+				printNextSteps(key != nil)
 				return nil
 			}
-			fmt.Println("[4/4] Running your first scan...")
-			if err := runFirstScan(ctx, path, apiURL); err != nil {
+			if key != nil {
+				fmt.Println("[3/3] Scanning with your new API key...")
+			} else {
+				fmt.Println("[3/3] Scanning with your login (no API key to test)...")
+			}
+			if err := runFirstScan(ctx, path, apiURL, keyValue(key)); err != nil {
 				return err
 			}
-			printNextSteps()
+			printNextSteps(key != nil)
 			return nil
 		},
 	}
@@ -154,7 +130,6 @@ untouched, and a fresh key name is generated per run.`,
 	cmd.Flags().StringVar(&keyName, "key-name", "", "name for the created API key (default: generated, e.g. ci-a1b2c3d4)")
 	cmd.Flags().DurationVar(&keyExpiry, "key-expiry", defaultKeyExpiry, "lifetime of the created API key (max 2 years)")
 	cmd.Flags().BoolVar(&noKey, "no-key", false, "don't create an API key (use when CI already has one)")
-	cmd.Flags().BoolVar(&noWorkflow, "no-workflow", false, "don't write the GitHub Actions workflow file")
 	cmd.Flags().BoolVar(&noScan, "no-scan", false, "don't run the first scan")
 	cmd.Flags().StringVar(&cfg.Domain, "auth0-domain", defaults.Domain, "Auth0 domain (or OSSPREY_AUTH0_DOMAIN env var)")
 	cmd.Flags().StringVar(&cfg.ClientID, "client-id", defaults.ClientID, "Auth0 client ID (or OSSPREY_AUTH0_CLIENT_ID env var)")
@@ -263,7 +238,7 @@ func createCIKey(ctx context.Context, apiURL, token, name string, expiry time.Du
 	fixedName := name != ""
 	for attempt := 0; attempt < keyNameAttempts; attempt++ {
 		if !fixedName {
-			name = setup.GenerateKeyName()
+			name = generateKeyName()
 		}
 		key, err := c.CreateAPIKey(ctx, name, time.Now().Add(expiry))
 		if err == nil {
@@ -274,30 +249,73 @@ func createCIKey(ctx context.Context, apiURL, token, name string, expiry time.Du
 			continue // name collision: try a fresh random name
 		}
 		fmt.Fprintf(os.Stderr, "warning: could not create an API key: %v\n", err)
-		fmt.Fprintln(os.Stderr, "You can create one at https://dashboard.ossprey.com and store it as the OSSPREY_API_KEY repository secret.")
+		fmt.Fprintln(os.Stderr, "You can create one at https://dashboard.ossprey.com.")
 		return nil
 	}
 	fmt.Fprintf(os.Stderr, "warning: could not create an API key: %d generated names collided\n", keyNameAttempts)
 	return nil
 }
 
-// printNextSteps points at the two protections init deliberately does not
-// install on its own, since both change how the user's machine behaves outside
-// this project and so should stay an explicit choice.
-func printNextSteps() {
-	fmt.Println("\nNext steps — catch malware before CI ever sees it:")
-	fmt.Println("    ossprey shim install    # check every npm/pip install on this machine")
+// generateKeyName returns a fresh key name like "ci-a1b2c3d4". It stays within
+// the API's constraints (max 20 chars, no whitespace) and the random suffix keeps
+// re-runs of init from colliding with earlier keys.
+func generateKeyName() string {
+	b := make([]byte, 4)
+	if _, err := rand.Read(b); err != nil {
+		// crypto/rand failing is effectively fatal elsewhere; a fixed name
+		// still works (the API rejects duplicates and init retries).
+		return "ci-ossprey-init"
+	}
+	return "ci-" + hex.EncodeToString(b)
+}
+
+// keyValue returns the key's secret, or "" when no key was created — which is
+// exactly what submit.Validate treats as "fall back to the stored login".
+func keyValue(key *client.APIKey) string {
+	if key == nil {
+		return ""
+	}
+	return key.Key
+}
+
+// printKey shows the created key once, with the handling advice it warrants.
+// The guidance stays CI-agnostic: init doesn't know or care whether the key is
+// destined for GitHub Actions, GitLab, Jenkins or a shell profile.
+func printKey(key *client.APIKey) {
+	fmt.Printf("Created API key %q (expires %s).\n", key.Name, key.Expiry)
+	fmt.Println("This is the only time it is shown — save it now:")
+	fmt.Printf("\n    %s\n\n", key.Key)
+	fmt.Println("Set it as OSSPREY_API_KEY wherever your scans run. For GitHub Actions:")
+	fmt.Println("    gh secret set OSSPREY_API_KEY   # paste the key when prompted")
+	// The key is a long-lived credential sitting in the terminal: say so,
+	// because scrollback and piped logs outlive the session.
+	fmt.Println("\nTreat it like a password. It stays in your terminal scrollback, so clear it")
+	fmt.Println("when you're done, and don't pipe this command's output to a file or CI log.")
+	fmt.Println("Revoke it any time at https://dashboard.ossprey.com")
+	fmt.Println()
+}
+
+// printNextSteps points at what init deliberately does not do for the user:
+// wiring CI (it can't know which CI) and installing the machine-wide
+// protections, which change behaviour outside this project.
+func printNextSteps(haveKey bool) {
+	fmt.Println("\nNext steps:")
+	if haveKey {
+		fmt.Println("    Add `ossprey scan .` to your CI, with OSSPREY_API_KEY set from the key above.")
+	}
+	fmt.Println("    ossprey shim install         # check every npm/pip install on this machine")
 	fmt.Println("    ossprey precommit install    # block commits that add known-malicious packages")
 }
 
-// runFirstScan catalogs the project, submits it with the stored login, and
-// reports the verdict exactly like `ossprey scan`.
-func runFirstScan(ctx context.Context, path, apiURL string) error {
+// runFirstScan catalogs the project and reports the verdict exactly like
+// `ossprey scan`. apiKey is the key just minted: passing it makes a clean scan
+// proof the credential works. Empty falls back to the stored login.
+func runFirstScan(ctx context.Context, path, apiURL, apiKey string) error {
 	sbom, err := scan.Run(ctx, scan.Options{Path: path})
 	if err != nil {
 		return err
 	}
-	if err := submit.Validate(ctx, sbom, apiURL, ""); err != nil {
+	if err := submit.Validate(ctx, sbom, apiURL, apiKey); err != nil {
 		if reportSkipped(err) {
 			return nil
 		}
