@@ -10,13 +10,17 @@ jobs:
   lint-title:
     runs-on: ${{ github.server_url == 'https://github.com' && 'ubuntu-latest' || 'self-hosted' }}
     steps:
-      - name: Validate PR title
+      # This repo is public and ossprey/cicd is private, so the shared
+      # ossprey/cicd/pr-lint action cannot be resolved from here. This step
+      # mirrors that action's check (same type list and pattern) inline.
+      - name: Check PR title follows conventional commits
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
-          pattern='^[a-z]+(\([a-z0-9._/-]+\))?!?: .+'
-
-          if [[ ! "$PR_TITLE" =~ $pattern ]]; then
-            echo "::error title=Invalid pull request title::PR titles must follow Conventional Commits, for example 'fix: handle nil value' or 'feat(cli): add json output'."
+          types='build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test'
+          if printf '%s' "$PR_TITLE" | grep -qE "^(${types})(\([[:alnum:]_./-]+\))?(!)?: .+$"; then
+            echo "PR title OK: $PR_TITLE"
+          else
+            echo "::error::PR title must follow conventional commits, e.g. 'feat(scope): description'. Allowed types: ${types//|/, }"
             exit 1
           fi
