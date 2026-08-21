@@ -162,6 +162,47 @@ Output is deduped by `(type, name, version)`. `mergeVersionless` then collapses
 a package emitted both versionless (direct-deps fallback) and pinned (uv-resolved)
 into the pinned one. Vendored paths (`node_modules/`) are skipped (`isVendoredPath`).
 
+#### Why the npm resolve skips workspace members (OSS-1353)
+
+`NpmResolveCataloger` stands down for a manifest whose own dir ships a lockfile,
+**and** for one that is a declared workspace member of an ancestor that ships
+one (`isWorkspaceMember`, `npm_workspace.go`). The root lockfile already
+enumerates every declared member's full transitive tree, so resolving them again
+costs a network round trip and adds nothing. On gatsby that is 117 of 362
+manifests, each ~17.7s, which is what pushed monorepo scans past the platform's
+850s budget.
+
+**The gate is membership, not ancestry, and that distinction is the whole point.**
+An earlier revision skipped whenever *any* ancestor had a lockfile. That is wrong:
+gatsby's root declares only `workspaces: ["packages/*"]`, so its 237
+`examples/`, `integration-tests/`, `benchmarks/` and `e2e-tests/` manifests are
+not members and their deps are absent from the root lock. Skipping them silently
+dropped real transitives (verified: a non-member depending on `is-odd` lost
+`is-number`). If you ever widen this gate, widen it to a path exclusion you can
+name, not to "an ancestor had a lock".
+
+Membership reads `workspaces` from `package.json` (bare array and yarn's object
+form) and `packages:` from `pnpm-workspace.yaml`, which wins where present since
+pnpm ignores the `package.json` field. `!` exclusions prune their subtree
+wherever they are listed. A `pnpm-workspace.yaml` with no `packages` key claims
+nothing (verified against pnpm 10, which then reports the root project alone).
+Do not "fix" that to a catch-all, it would skip every resolve in the tree.
+
+#### Timeouts
+
+Two independent budgets, both off-by-default-safe:
+
+- `OSSPREY_RESOLVE_TIMEOUT` (default 2m) caps **one** uv/npm invocation, so a
+  single hung manifest cannot eat the whole scan. A real 166-dep manifest
+  resolves in ~18s, so the default is roughly 7x headroom.
+- `--timeout` / `OSSPREY_SCAN_TIMEOUT` (default off) caps the **whole**
+  catalogue. On expiry the SBOM cataloged so far is emitted and the exit code is
+  unchanged, because partial results beat being SIGKILLed by an external budget
+  with nothing to show. Off by default because an interactive scan has no such
+  budget; the platform sets the env var. Per-manifest warnings are suppressed
+  once the deadline passes, since every remaining manifest fails identically and
+  `scan.Run` already says so once.
+
 ### OSSBOM model (`internal/ossbom`)
 
 `SBOM` is the rich internal model. `MiniBOM` (`minibom.go`) is the compressed

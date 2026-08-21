@@ -48,9 +48,12 @@ func (c *NpmResolveCataloger) Catalog(ctx context.Context, resolver file.Resolve
 		if hasNpmLockfile(dir) {
 			return nil, nil // syft's lock cataloger already resolves this project
 		}
+		if isWorkspaceMember(dir, c.root) {
+			return nil, nil // an ancestor lockfile already carries this member's full tree
+		}
 		return runNpmResolve(ctx, npm, cache, absPath, loc)
 	}
-	out, err := catalogByGlob(resolver, c.root, "**/package.json", "npm", parse)
+	out, err := catalogByGlob(ctx, resolver, c.root, "**/package.json", "npm", parse)
 	return out, nil, err
 }
 
@@ -84,6 +87,9 @@ func runNpmResolve(ctx context.Context, npm, cache, packageJSON string, loc file
 	if err := os.WriteFile(filepath.Join(tmp, "package.json"), data, 0o644); err != nil {
 		return nil, err
 	}
+
+	ctx, cancel := context.WithTimeout(ctx, resolverTimeout())
+	defer cancel()
 
 	cmd := exec.CommandContext(ctx, npm, "install",
 		"--package-lock-only",

@@ -50,7 +50,7 @@ func (c *UVCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]pk
 		args := uvArgsForPyProject(dir)
 		return runUV(ctx, uv, cache, dir, args, loc)
 	}
-	out, err := catalogByGlob(resolver, c.root, "**/pyproject.toml", "uv", parse)
+	out, err := catalogByGlob(ctx, resolver, c.root, "**/pyproject.toml", "uv", parse)
 	return out, nil, err
 }
 
@@ -77,6 +77,9 @@ func uvArgsForPyProject(dir string) []string {
 }
 
 func runUV(ctx context.Context, uv, cache, dir string, args []string, loc file.Location) ([]pkg.Package, error) {
+	ctx, cancel := context.WithTimeout(ctx, resolverTimeout())
+	defer cancel()
+
 	cmd := exec.CommandContext(ctx, uv, args...)
 	cmd.Env = append(os.Environ(), "UV_CACHE_DIR="+cache)
 	stdout, err := cmd.Output()

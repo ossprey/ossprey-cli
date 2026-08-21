@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/anchore/syft/syft/file"
 	"github.com/anchore/syft/syft/pkg"
@@ -19,6 +21,14 @@ func catalogConcurrency() int {
 		return n
 	}
 	return 8
+}
+
+// resolverTimeout caps one uv/npm invocation so a single hung manifest cannot eat the whole scan budget.
+func resolverTimeout() time.Duration {
+	if d, err := time.ParseDuration(strings.TrimSpace(os.Getenv("OSSPREY_RESOLVE_TIMEOUT"))); err == nil && d > 0 {
+		return d
+	}
+	return 2 * time.Minute
 }
 
 // fileParser converts one matched manifest into syft packages.
@@ -43,7 +53,7 @@ func hostPath(root, realPath string) string {
 // catalogByGlob runs parse against every file matching glob under the
 // resolver's root, dedup'd by (name, version). Shared by every ossprey-*
 // cataloger — they differ only by glob + parse.
-func catalogByGlob(resolver file.Resolver, root, glob, label string, parse fileParser) ([]pkg.Package, error) {
+func catalogByGlob(ctx context.Context, resolver file.Resolver, root, glob, label string, parse fileParser) ([]pkg.Package, error) {
 	locs, err := resolver.FilesByGlob(glob)
 	if err != nil {
 		return nil, fmt.Errorf("%s cataloger: glob: %w", label, err)
@@ -71,7 +81,10 @@ func catalogByGlob(resolver file.Resolver, root, glob, label string, parse fileP
 				// the host Python is too old to resolve the pins) otherwise
 				// looks identical to "nothing found". Warn to stderr — the SBOM
 				// goes to stdout, so this never corrupts --local output.
-				fmt.Fprintf(os.Stderr, "ossprey: %s cataloger: %v\n", label, err)
+				// Past the deadline every remaining manifest fails the same way, and scan.Run reports that once.
+				if ctx.Err() == nil {
+					fmt.Fprintf(os.Stderr, "ossprey: %s cataloger: %v\n", label, err)
+				}
 				return nil
 			}
 			if len(pkgs) == 0 {

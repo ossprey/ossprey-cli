@@ -26,8 +26,8 @@ func NewPackageJSONCataloger(root string) *PackageJSONCataloger {
 
 func (c *PackageJSONCataloger) Name() string { return "ossprey-packagejson-cataloger" }
 
-func (c *PackageJSONCataloger) Catalog(_ context.Context, resolver file.Resolver) ([]pkg.Package, []artifact.Relationship, error) {
-	out, err := catalogByGlob(resolver, c.root, "**/package.json", "packagejson", parsePackageJSONFile)
+func (c *PackageJSONCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]pkg.Package, []artifact.Relationship, error) {
+	out, err := catalogByGlob(ctx, resolver, c.root, "**/package.json", "packagejson", parsePackageJSONFile)
 	return out, nil, err
 }
 

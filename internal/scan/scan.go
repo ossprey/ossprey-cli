@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/ossprey/ossprey-cli/internal/catalog"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
@@ -18,6 +19,9 @@ type Options struct {
 	// SkipVersionLookup disables the registry lookup that resolves unpinned
 	// components to their latest published version, leaving them versionless.
 	SkipVersionLookup bool
+	// Timeout caps the whole catalogue; zero means no deadline. On expiry the
+	// SBOM cataloged so far is returned rather than discarded.
+	Timeout time.Duration
 }
 
 // ErrNoComponents is returned by InjectTestVulnerability when nothing was catalogued.
@@ -30,11 +34,21 @@ func Run(ctx context.Context, opts Options) (*ossbom.SBOM, error) {
 		return nil, fmt.Errorf("scan path: %w", err)
 	}
 
+	// A deadline beats an external SIGKILL: catalogers swallow per-manifest cancellation, so what resolved so far survives.
+	if opts.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, opts.Timeout)
+		defer cancel()
+	}
+
 	pkgs, err := catalog.Catalog(ctx, opts.Path, catalog.Options{
 		SkipVersionLookup: opts.SkipVersionLookup,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("catalog: %w", err)
+	}
+	if ctx.Err() != nil {
+		fmt.Fprintf(os.Stderr, "ossprey: scan deadline (%s) reached; emitting %d component(s) cataloged so far\n", opts.Timeout, len(pkgs))
 	}
 
 	abs, err := filepath.Abs(opts.Path)

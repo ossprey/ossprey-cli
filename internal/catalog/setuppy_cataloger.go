@@ -50,6 +50,6 @@ func (c *SetupPyCataloger) Catalog(ctx context.Context, resolver file.Resolver) 
 		args := []string{"pip", "compile", "--universal", "--no-progress", absPath}
 		return runUV(ctx, uv, cache, dir, args, loc)
 	}
-	out, err := catalogByGlob(resolver, c.root, "**/setup.py", "setup.py", parse)
+	out, err := catalogByGlob(ctx, resolver, c.root, "**/setup.py", "setup.py", parse)
 	return out, nil, err
 }

@@ -389,6 +389,7 @@ ossprey scan [path] [flags]
 | `-v, --verbose` | Verbose logging. |
 | `--local` | Catalogue only. Dump the OSSBOM to stdout and exit — no API submission, no malware verdict. |
 | `--no-version-lookup` | Don't query the registry to resolve unpinned dependencies; leave them versionless. |
+| `--timeout <dur>` | Give up cataloguing after this long and emit whatever resolved (or `OSSPREY_SCAN_TIMEOUT`). Off by default. |
 | `--url <url>` | Override the Ossprey API URL (default `https://api.ossprey.com`). |
 | `--api-key <key>` | Provide the API key on the command line instead of an env var. |
 | `--dry-run-safe` | Skip the API; report an empty vulnerability list. |
