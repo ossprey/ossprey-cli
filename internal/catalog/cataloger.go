@@ -70,6 +70,9 @@ func catalogByGlob(ctx context.Context, resolver file.Resolver, root, glob, labe
 	g := new(errgroup.Group)
 	g.SetLimit(catalogConcurrency())
 	for i, loc := range locs {
+		if ctx.Err() != nil {
+			break // past the deadline a queued resolve would only start in order to die
+		}
 		if isVendoredPath(loc.RealPath) {
 			continue
 		}

@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/anchore/syft/syft/artifact"
 	"github.com/anchore/syft/syft/file"
@@ -88,7 +89,8 @@ func runNpmResolve(ctx context.Context, npm, cache, packageJSON string, loc file
 		return nil, err
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, resolverTimeout())
+	budget := resolverTimeout()
+	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, npm, "install",
@@ -100,7 +102,11 @@ func runNpmResolve(ctx context.Context, npm, cache, packageJSON string, loc file
 	)
 	cmd.Dir = tmp
 	cmd.Env = append(os.Environ(), "npm_config_cache="+cache)
+	cmd.WaitDelay = 5 * time.Second // the kill lands on npm, but CombinedOutput still waits on pipes a grandchild may hold
 	if out, err := cmd.CombinedOutput(); err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("npm install --package-lock-only: timed out after %s (raise OSSPREY_RESOLVE_TIMEOUT)", budget)
+		}
 		return nil, fmt.Errorf("npm install --package-lock-only: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 

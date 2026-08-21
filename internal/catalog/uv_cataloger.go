@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/anchore/syft/syft/artifact"
 	"github.com/anchore/syft/syft/file"
@@ -77,13 +78,18 @@ func uvArgsForPyProject(dir string) []string {
 }
 
 func runUV(ctx context.Context, uv, cache, dir string, args []string, loc file.Location) ([]pkg.Package, error) {
-	ctx, cancel := context.WithTimeout(ctx, resolverTimeout())
+	budget := resolverTimeout()
+	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, uv, args...)
 	cmd.Env = append(os.Environ(), "UV_CACHE_DIR="+cache)
+	cmd.WaitDelay = 5 * time.Second // the kill lands on uv, but Output still waits on pipes a PEP 517 build backend may hold
 	stdout, err := cmd.Output()
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("uv %s: timed out after %s (raise OSSPREY_RESOLVE_TIMEOUT)", dir, budget)
+		}
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
 			return nil, fmt.Errorf("uv %s: %s", dir, strings.TrimSpace(string(ee.Stderr)))
