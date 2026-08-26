@@ -15,16 +15,9 @@ import (
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
 )
 
-// pollInterval is the wait between status polls. Constant rather than a
-// backoff: the previous attempt*attempt curve put polls at 1s, 5s, 14s, 30s and
-// 55s cumulative, so a verdict ready at 20s was not observed until 30s and one
-// ready at 35s waited until 55s. Scan size barely mattered; a 3-component scan
-// took 60s and 2781 components took 95s, almost all of it spent asleep.
 const pollInterval = 3 * time.Second
 
-// maxPollAttempts caps the number of status polls before giving up. At
-// pollInterval this allows ~15 minutes, which covers the platform's own 850s
-// scan budget with margin.
+// 300 polls at pollInterval gives a ~15 minute ceiling, above the platform's 850s budget.
 const maxPollAttempts = 300
 
 // defaultBaseURL is used when New is called without an explicit URL.
@@ -51,9 +44,7 @@ type Client struct {
 	BearerToken string
 	HTTP        *http.Client
 
-	// PollBackoff returns the wait between status polls for the given attempt
-	// (1-indexed). Defaults to a constant pollInterval. Override in tests for
-	// sub-second polling.
+	// PollBackoff returns the wait before poll `attempt`. Overridden in tests.
 	PollBackoff func(attempt int) time.Duration
 }
 
