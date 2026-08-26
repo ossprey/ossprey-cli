@@ -830,7 +830,7 @@ this CLI, scans, writes a job summary and posts the malicious packages as a
 pull-request comment:
 
 ```yaml
-- uses: ossprey/gh-action@v1
+- uses: ossprey/gh-action@v3
   with:
     api-key: ${{ secrets.OSSPREY_API_KEY }}
 ```
