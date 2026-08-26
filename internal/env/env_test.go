@@ -19,6 +19,7 @@ var ciVars = []string{
 	"GITHUB_ACTIONS",
 	"GITHUB_REPOSITORY",
 	"GITHUB_REF_NAME",
+	"GITHUB_HEAD_REF",
 }
 
 func TestOverlay(t *testing.T) {
@@ -97,6 +98,33 @@ func TestOverlay(t *testing.T) {
 			want: ossbom.Environment{
 				GithubOrg:  "acme",
 				GithubRepo: "widget",
+				Branch:     "main",
+				ProductEnv: ProductGitHubActions,
+			},
+		},
+		{
+			name: "github actions pull request uses the head ref",
+			env: map[string]string{
+				"GITHUB_ACTIONS":    "true",
+				"GITHUB_REPOSITORY": "acme/widget",
+				"GITHUB_REF_NAME":   "123/merge",
+				"GITHUB_HEAD_REF":   "feature/foo",
+			},
+			want: ossbom.Environment{
+				GithubOrg:  "acme",
+				GithubRepo: "widget",
+				Branch:     "feature/foo",
+				ProductEnv: ProductGitHubActions,
+			},
+		},
+		{
+			name: "github actions with a malformed slug reports no org or repo",
+			env: map[string]string{
+				"GITHUB_ACTIONS":    "true",
+				"GITHUB_REPOSITORY": "widget",
+				"GITHUB_REF_NAME":   "main",
+			},
+			want: ossbom.Environment{
 				Branch:     "main",
 				ProductEnv: ProductGitHubActions,
 			},

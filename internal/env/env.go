@@ -97,11 +97,23 @@ func detectGitHubActions() (ossbom.Environment, bool) {
 	if os.Getenv("GITHUB_ACTIONS") == "" {
 		return ossbom.Environment{}, false
 	}
-	org, repo, _ := strings.Cut(os.Getenv("GITHUB_REPOSITORY"), "/")
-	return ossbom.Environment{
-		GithubOrg:  org,
-		GithubRepo: repo,
-		Branch:     os.Getenv("GITHUB_REF_NAME"),
-		ProductEnv: ProductGitHubActions,
-	}, true
+
+	e := ossbom.Environment{Branch: githubBranch(), ProductEnv: ProductGitHubActions}
+	// Attribute only when the slug is well formed. The platform needs org and
+	// repo together, so a half-filled pair groups nothing and reads as corrupt.
+	if org, repo, ok := strings.Cut(os.Getenv("GITHUB_REPOSITORY"), "/"); ok {
+		e.GithubOrg, e.GithubRepo = org, repo
+	}
+	return e, true
+}
+
+// githubBranch prefers GITHUB_HEAD_REF, the pull request's source branch, which
+// is set only on pull_request events. GITHUB_REF_NAME is the synthetic merge ref
+// there ("123/merge") and would attribute the scan to a branch nobody has,
+// which is the same trap azureBranch avoids.
+func githubBranch() string {
+	if head := os.Getenv("GITHUB_HEAD_REF"); head != "" {
+		return head
+	}
+	return os.Getenv("GITHUB_REF_NAME")
 }
