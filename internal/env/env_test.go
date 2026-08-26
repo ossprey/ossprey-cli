@@ -6,9 +6,7 @@ import (
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
 )
 
-// ciVars is every variable the detectors read. Each case sets all of them, blank
-// included, so a test stays hermetic when it runs inside CI, where the real
-// GITHUB_ACTIONS would otherwise leak in.
+// Every case sets all of these, blank included, so real CI values cannot leak in.
 var ciVars = []string{
 	"TF_BUILD",
 	"SYSTEM_TEAMPROJECT",
@@ -151,7 +149,6 @@ func TestOverlay(t *testing.T) {
 			got := ossbom.Environment{Path: "/src", MachineName: "agent-1"}
 			Overlay(&got)
 
-			// Overlay must not touch Path or MachineName.
 			want := tt.want
 			want.Path, want.MachineName = "/src", "agent-1"
 
@@ -181,8 +178,7 @@ func TestOverlayDoesNotClobberExistingAttribution(t *testing.T) {
 	}
 }
 
-// The regression this guards: Azure Pipelines checks out into /home/vsts/work/1/s,
-// so deriving Project from the directory showed every scan in the dashboard as "s".
+// An ADO checkout directory is ".../1/s", which must not become the scan name.
 func TestOverlayNamesTheScanAfterTheRepositoryNotTheCheckoutDirectory(t *testing.T) {
 	for _, k := range ciVars {
 		t.Setenv(k, "")
