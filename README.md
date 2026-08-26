@@ -830,10 +830,15 @@ this CLI, scans, writes a job summary and posts the malicious packages as a
 pull-request comment:
 
 ```yaml
+# Pin to the tag's commit SHA in a real workflow — see the note below.
 - uses: ossprey/gh-action@v3
   with:
     api-key: ${{ secrets.OSSPREY_API_KEY }}
 ```
+
+This step is handed your API key, so pin it to a commit SHA rather than the
+`v3` tag: a tag can be repointed at new code after you have reviewed it, which
+is the supply-chain risk the job exists to catch.
 
 Or drive the CLI yourself. The minimal step:
 

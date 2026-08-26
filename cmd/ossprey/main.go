@@ -148,7 +148,7 @@ func newScanCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVarP(&output, "output", "o", "", "write SBOM to file")
-	cmd.Flags().StringVar(&reportPath, "report", "", "write a JSON malware report (verdict + findings) to file")
+	cmd.Flags().StringVar(&reportPath, "report", "", "write a JSON verdict report (verdict + findings) to file")
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "verbose logging")
 	cmd.Flags().BoolVar(&local, "local", false, "dump SBOM JSON to stdout and exit (no API submission, no verdict)")
 	cmd.Flags().BoolVar(&dryRunSafe, "dry-run-safe", false, "skip API submission; emit empty vulnerability list")
@@ -230,7 +230,7 @@ func newCheckCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVarP(&ecosystem, "eco-system", "e", "", "package ecosystem: pypi or npm (required)")
-	cmd.Flags().StringVar(&reportPath, "report", "", "write a JSON malware report (verdict + findings) to file")
+	cmd.Flags().StringVar(&reportPath, "report", "", "write a JSON verdict report (verdict + findings) to file")
 	cmd.Flags().StringVar(&apiURL, "url", defaultAPIURL, "Ossprey API URL")
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "Ossprey API key (or OSSPREY_API_KEY / API_KEY env var; optional after `ossprey login`)")
 	cmd.Flags().BoolVar(&dryRunSafe, "dry-run-safe", false, "skip API submission; emit empty vulnerability list")

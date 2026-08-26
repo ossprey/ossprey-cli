@@ -289,6 +289,14 @@ func TestParsePurl(t *testing.T) {
 		// what follows the last one.
 		{"pkg:npm/@scope/pkg@1.2.3", "npm", "@scope/pkg", "1.2.3"},
 		{"pkg:npm/@scope/pkg", "npm", "@scope/pkg", ""},
+		// The spec spells a scope "%40scope"; a hand-rolled split would leave
+		// the escape in the package name the user is shown.
+		{"pkg:npm/%40scope/pkg@1.2.3", "npm", "@scope/pkg", "1.2.3"},
+		// Qualifiers and a subpath belong to neither the name nor the version.
+		{"pkg:npm/pkg@1.2.3?arch=x86#src/lib", "npm", "pkg", "1.2.3"},
+		{"pkg:pypi/requests@2.31.0?extension=whl", "pypi", "requests", "2.31.0"},
+		// Not PURLs at all — the fallback salvages what it can rather than
+		// printing "WARNING: : contains malware" at somebody.
 		{"requests@2.31.0", "", "requests", "2.31.0"},
 		{"requests", "", "requests", ""},
 		{"", "", "", ""},
