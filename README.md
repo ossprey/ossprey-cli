@@ -174,7 +174,9 @@ Exit codes:
 - `0` — no malware found, `--local` dump, or scan skipped by the API (e.g. quota exhausted)
 - `1` — malware found, **or** the scan itself failed (bad path, catalog error, API/network error, missing key)
 
-If you need to distinguish "clean" from "errored" in CI, check stderr or parse the OSSBOM emitted via `-o`.
+If you need to distinguish "clean" from "errored" in CI, pass
+[`--report report.json`](#machine-readable-verdict---report): the file exists
+with a `verdict` only when the scan actually reached one.
 
 Get an API key at [dashboard.ossprey.com](https://dashboard.ossprey.com).
 
@@ -821,7 +823,19 @@ Get a key with [`ossprey init`](#init--one-command-setup) (or from the
 dashboard), store it as a secret, and add a scan step. The CLI exits non-zero on
 a malware verdict, which fails the build.
 
-The minimal GitHub Actions step:
+### GitHub Actions
+
+Use [`ossprey/gh-action`](https://github.com/ossprey/gh-action). It installs
+this CLI, scans, writes a job summary and posts the malicious packages as a
+pull-request comment:
+
+```yaml
+- uses: ossprey/gh-action@v1
+  with:
+    api-key: ${{ secrets.OSSPREY_API_KEY }}
+```
+
+Or drive the CLI yourself. The minimal step:
 
 ```yaml
 - name: Ossprey scan
@@ -873,6 +887,12 @@ jobs:
 For other CI systems the shape is the same: install the CLI, set
 `OSSPREY_API_KEY` from your secret store, run `ossprey scan .`.
 
+Inside GitHub Actions the scan also picks up `GITHUB_REPOSITORY` and the branch
+(`GITHUB_HEAD_REF`, else `GITHUB_REF_NAME`) and sends them with the OSSBOM, so
+the dashboard groups runs by repository and branch instead of by the runner's
+throwaway hostname. Nothing to configure; outside CI those variables are unset
+and nothing is sent.
+
 ## Output
 
 `ossprey scan` prints `No malware found` on success or one `Error: WARNING:
@@ -882,6 +902,52 @@ failure.
 Pass `-o sbom.json` to also write the full OSSBOM JSON (components +
 vulnerabilities) to disk, or `--local` to emit it to stdout instead of
 calling the API.
+
+### Machine-readable verdict (`--report`)
+
+`--report report.json` writes the verdict and the malicious packages to a file,
+for CI that needs to do something with them — fail a check, open an issue,
+comment on a pull request. `scan` and `check` both take it.
+
+```sh
+ossprey scan . --report report.json
+```
+
+```json
+{
+  "verdict": "malware",
+  "project": "my-service",
+  "path": "/home/me/my-service",
+  "components": 412,
+  "findings": [
+    {
+      "purl": "pkg:npm/@acme/logger@1.4.2",
+      "ecosystem": "npm",
+      "name": "@acme/logger",
+      "version": "1.4.2",
+      "id": "OSSPREY-2026-0031",
+      "type": "Malware",
+      "description": "Exfiltrates environment variables on postinstall.",
+      "reference": "https://dashboard.ossprey.com/..."
+    }
+  ]
+}
+```
+
+`verdict` is one of:
+
+| Verdict   | Exit code | Meaning |
+|-----------|-----------|---------|
+| `clean`   | 0         | Scanned, nothing flagged. |
+| `malware` | 1         | `findings` lists every flagged package. |
+| `skipped` | 0         | Your quota was exhausted; **nothing was checked**. `skipped.message` and `skipped.reset_at` say why and until when. Do not read this as "clean". |
+
+`findings` is always present, empty on a clean scan, so
+`jq '.findings | length'` works either way. The file is written before the
+process exits non-zero, so it is there on exactly the runs you care about.
+
+`--report` never writes to stdout, and it is rejected alongside `--local`:
+`--local` owns stdout for the OSSBOM and exits before any verdict exists.
 
 ## Status
 

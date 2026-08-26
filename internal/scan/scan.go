@@ -47,11 +47,13 @@ func Run(ctx context.Context, opts Options) (*ossbom.SBOM, error) {
 	// the machine name (the host); use the scanned directory's base name so the
 	// scan surfaces as the project rather than the host.
 	project := filepath.Base(abs)
-	sbom := ossbom.New(ossbom.Environment{
+	env := ossbom.Environment{
 		Path:        abs,
 		MachineName: host,
 		Project:     project,
-	})
+	}
+	ApplyCIEnv(&env)
+	sbom := ossbom.New(env)
 	sbom.Name = project
 
 	for _, p := range pkgs {
@@ -99,19 +101,26 @@ func MalwareReports(sbom *ossbom.SBOM) ([]string, bool) {
 	}
 	reports := make([]string, 0, len(sbom.Vulnerabilities))
 	for _, v := range sbom.Vulnerabilities {
-		name, version := splitPurl(v.Purl)
+		_, name, version := parsePurl(v.Purl)
 		reports = append(reports,
 			fmt.Sprintf("WARNING: %s:%s contains malware. Remediate this immediately", name, version))
 	}
 	return reports, true
 }
 
-// splitPurl extracts (name, version) from a PURL string like "pkg:pypi/foo@1.2.3".
-func splitPurl(purl string) (string, string) {
+// parsePurl splits a PURL like "pkg:pypi/foo@1.2.3" into its ecosystem, name
+// and version. Any part the string doesn't carry comes back empty.
+func parsePurl(purl string) (ecosystem, name, version string) {
 	s := strings.TrimPrefix(purl, "pkg:")
-	if _, after, ok := strings.Cut(s, "/"); ok {
-		s = after
+	if before, after, ok := strings.Cut(s, "/"); ok {
+		ecosystem, s = before, after
 	}
-	name, version, _ := strings.Cut(s, "@")
-	return name, version
+	// An npm scope puts an '@' at the *start* of the name ("@scope/pkg"), so the
+	// version delimiter is the last '@' — and only when it isn't that leading
+	// one. Cutting on the first '@' instead reported scoped malware as an empty
+	// package name at version "scope/pkg@1.2.3".
+	if i := strings.LastIndex(s, "@"); i > 0 {
+		return ecosystem, s[:i], s[i+1:]
+	}
+	return ecosystem, s, ""
 }

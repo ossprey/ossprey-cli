@@ -276,24 +276,30 @@ func TestMalwareReports(t *testing.T) {
 	}
 }
 
-func TestSplitPurl(t *testing.T) {
+func TestParsePurl(t *testing.T) {
 	tests := []struct {
-		purl        string
-		wantName    string
-		wantVersion string
+		purl     string
+		wantEco  string
+		wantName string
+		wantVers string
 	}{
-		{"pkg:pypi/requests@2.31.0", "requests", "2.31.0"},
-		{"pkg:npm/lodash@4.17.21", "lodash", "4.17.21"},
-		{"requests@2.31.0", "requests", "2.31.0"},
-		{"requests", "requests", ""},
+		{"pkg:pypi/requests@2.31.0", "pypi", "requests", "2.31.0"},
+		{"pkg:npm/lodash@4.17.21", "npm", "lodash", "4.17.21"},
+		// A scoped npm name carries its own leading '@'; the version is still
+		// what follows the last one.
+		{"pkg:npm/@scope/pkg@1.2.3", "npm", "@scope/pkg", "1.2.3"},
+		{"pkg:npm/@scope/pkg", "npm", "@scope/pkg", ""},
+		{"requests@2.31.0", "", "requests", "2.31.0"},
+		{"requests", "", "requests", ""},
+		{"", "", "", ""},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.purl, func(t *testing.T) {
-			name, version := splitPurl(tt.purl)
-			if name != tt.wantName || version != tt.wantVersion {
-				t.Errorf("splitPurl(%q) = (%q, %q), want (%q, %q)",
-					tt.purl, name, version, tt.wantName, tt.wantVersion)
+			eco, name, version := parsePurl(tt.purl)
+			if eco != tt.wantEco || name != tt.wantName || version != tt.wantVers {
+				t.Errorf("parsePurl(%q) = (%q, %q, %q), want (%q, %q, %q)",
+					tt.purl, eco, name, version, tt.wantEco, tt.wantName, tt.wantVers)
 			}
 		})
 	}
