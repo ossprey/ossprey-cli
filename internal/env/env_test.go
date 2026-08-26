@@ -42,6 +42,7 @@ func TestOverlay(t *testing.T) {
 				GithubRepo: "my-repo",
 				Branch:     "feature/foo/bar",
 				ProductEnv: ProductAzureDevOps,
+				Project:    "my-repo",
 			},
 		},
 		{
@@ -57,6 +58,7 @@ func TestOverlay(t *testing.T) {
 				GithubRepo: "my-repo",
 				Branch:     "main",
 				ProductEnv: ProductAzureDevOps,
+				Project:    "my-repo",
 			},
 		},
 		{
@@ -73,6 +75,7 @@ func TestOverlay(t *testing.T) {
 				GithubRepo: "widget",
 				Branch:     "main",
 				ProductEnv: ProductAzureDevOps,
+				Project:    "widget",
 			},
 		},
 		{
@@ -86,6 +89,7 @@ func TestOverlay(t *testing.T) {
 				GithubRepo: "my-repo",
 				Branch:     "main",
 				ProductEnv: ProductAzureDevOps,
+				Project:    "my-repo",
 			},
 		},
 		{
@@ -100,6 +104,7 @@ func TestOverlay(t *testing.T) {
 				GithubRepo: "widget",
 				Branch:     "main",
 				ProductEnv: ProductGitHubActions,
+				Project:    "widget",
 			},
 		},
 		{
@@ -115,6 +120,7 @@ func TestOverlay(t *testing.T) {
 				GithubRepo: "widget",
 				Branch:     "feature/foo",
 				ProductEnv: ProductGitHubActions,
+				Project:    "widget",
 			},
 		},
 		{
@@ -142,12 +148,12 @@ func TestOverlay(t *testing.T) {
 				t.Setenv(k, tt.env[k])
 			}
 
-			got := ossbom.Environment{Path: "/src", MachineName: "agent-1", Project: "proj"}
+			got := ossbom.Environment{Path: "/src", MachineName: "agent-1"}
 			Overlay(&got)
 
-			// Overlay owns only the four attribution fields; the rest must survive.
+			// Overlay must not touch Path or MachineName.
 			want := tt.want
-			want.Path, want.MachineName, want.Project = "/src", "agent-1", "proj"
+			want.Path, want.MachineName = "/src", "agent-1"
 
 			if got != want {
 				t.Errorf("Overlay()\n got: %+v\nwant: %+v", got, want)
@@ -172,5 +178,27 @@ func TestOverlayDoesNotClobberExistingAttribution(t *testing.T) {
 	}
 	if got.ProductEnv != ProductAzureDevOps {
 		t.Errorf("ProductEnv = %q, want %q", got.ProductEnv, ProductAzureDevOps)
+	}
+}
+
+// The regression this guards: Azure Pipelines checks out into /home/vsts/work/1/s,
+// so deriving Project from the directory showed every scan in the dashboard as "s".
+func TestOverlayNamesTheScanAfterTheRepositoryNotTheCheckoutDirectory(t *testing.T) {
+	for _, k := range ciVars {
+		t.Setenv(k, "")
+	}
+	t.Setenv("TF_BUILD", "True")
+	t.Setenv("SYSTEM_TEAMPROJECT", "Ossprey")
+	t.Setenv("BUILD_REPOSITORY_NAME", "Ossprey")
+	t.Setenv("BUILD_SOURCEBRANCH", "refs/heads/main")
+
+	got := ossbom.Environment{Path: "/home/vsts/work/1/s", MachineName: "fv-az123"}
+	Overlay(&got)
+
+	if got.Project == "s" || got.Project == "" {
+		t.Errorf("Project = %q, want the repository name", got.Project)
+	}
+	if got.Project != "Ossprey" {
+		t.Errorf("Project = %q, want %q", got.Project, "Ossprey")
 	}
 }
