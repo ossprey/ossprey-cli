@@ -53,12 +53,10 @@ func Run(ctx context.Context, opts Options) (*ossbom.SBOM, error) {
 	// Project names the scan in the dashboard. Without it the UI falls back to
 	// the machine name (the host), so a package check would surface as the host
 	// rather than the package(s) being checked.
-	env := ossbom.Environment{
+	sbom := ossbom.New(ossbom.Environment{
 		MachineName: host,
 		Project:     scanName(opts.Specs),
-	}
-	scan.ApplyCIEnv(&env)
-	sbom := ossbom.New(env)
+	})
 	sbom.Name = scanName(opts.Specs)
 
 	for _, s := range opts.Specs {

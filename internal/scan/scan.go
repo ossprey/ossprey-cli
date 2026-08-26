@@ -11,6 +11,7 @@ import (
 	"github.com/anchore/packageurl-go"
 
 	"github.com/ossprey/ossprey-cli/internal/catalog"
+	"github.com/ossprey/ossprey-cli/internal/env"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
 )
 
@@ -49,13 +50,15 @@ func Run(ctx context.Context, opts Options) (*ossbom.SBOM, error) {
 	// the machine name (the host); use the scanned directory's base name so the
 	// scan surfaces as the project rather than the host.
 	project := filepath.Base(abs)
-	env := ossbom.Environment{
+	scanEnv := ossbom.Environment{
 		Path:        abs,
 		MachineName: host,
 		Project:     project,
 	}
-	ApplyCIEnv(&env)
-	sbom := ossbom.New(env)
+	// Fill org/repo/branch when running in CI so the platform groups the scan
+	// under its repository rather than minting a fresh asset on every run.
+	env.Overlay(&scanEnv)
+	sbom := ossbom.New(scanEnv)
 	sbom.Name = project
 
 	for _, p := range pkgs {

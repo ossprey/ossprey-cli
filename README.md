@@ -892,11 +892,11 @@ jobs:
 For other CI systems the shape is the same: install the CLI, set
 `OSSPREY_API_KEY` from your secret store, run `ossprey scan .`.
 
-Inside GitHub Actions the scan also picks up `GITHUB_REPOSITORY` and the branch
-(`GITHUB_HEAD_REF`, else `GITHUB_REF_NAME`) and sends them with the OSSBOM, so
-the dashboard groups runs by repository and branch instead of by the runner's
-throwaway hostname. Nothing to configure; outside CI those variables are unset
-and nothing is sent.
+Inside GitHub Actions or Azure Pipelines the scan also picks up the repository,
+organisation and branch from the runner's environment and sends them with the
+OSSBOM, so the dashboard groups runs by repository instead of minting a fresh
+asset per run. Nothing to configure; off CI those variables are unset and
+nothing is sent.
 
 ## Output
 
