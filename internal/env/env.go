@@ -27,8 +27,12 @@ type detector func() (ossbom.Environment, bool)
 // First match wins; each platform's marker is exclusive in practice.
 var detectors = []detector{detectAzureDevOps, detectGitHubActions}
 
-// Overlay fills the SCM attribution fields from the detected CI platform. Path,
-// Project and MachineName are left alone: the caller knows those better than we do.
+// Overlay fills the SCM attribution fields from the detected CI platform, and
+// Project when it is still empty. Path and MachineName are left alone.
+//
+// Project matters because a CI agent's checkout directory is not a name anyone
+// recognises: Azure Pipelines checks out into /home/vsts/work/1/s, so deriving
+// it from the directory shows every scan in the dashboard as "s".
 func Overlay(e *ossbom.Environment) {
 	for _, detect := range detectors {
 		got, ok := detect()
@@ -39,6 +43,7 @@ func Overlay(e *ossbom.Environment) {
 		setIfEmpty(&e.GithubRepo, got.GithubRepo)
 		setIfEmpty(&e.Branch, got.Branch)
 		setIfEmpty(&e.ProductEnv, got.ProductEnv)
+		setIfEmpty(&e.Project, got.Project)
 		return
 	}
 }
@@ -77,6 +82,7 @@ func detectAzureDevOps() (ossbom.Environment, bool) {
 		GithubRepo: repo,
 		Branch:     azureBranch(),
 		ProductEnv: ProductAzureDevOps,
+		Project:    repo,
 	}, true
 }
 
@@ -102,7 +108,7 @@ func detectGitHubActions() (ossbom.Environment, bool) {
 	// Attribute only when the slug is well formed. The platform needs org and
 	// repo together, so a half-filled pair groups nothing and reads as corrupt.
 	if org, repo, ok := strings.Cut(os.Getenv("GITHUB_REPOSITORY"), "/"); ok {
-		e.GithubOrg, e.GithubRepo = org, repo
+		e.GithubOrg, e.GithubRepo, e.Project = org, repo, repo
 	}
 	return e, true
 }
