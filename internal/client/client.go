@@ -15,8 +15,10 @@ import (
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
 )
 
-// maxPollAttempts caps the number of status polls before giving up.
-const maxPollAttempts = 20
+const pollInterval = 3 * time.Second
+
+// 300 polls at pollInterval gives a ~15 minute ceiling, above the platform's 850s budget.
+const maxPollAttempts = 300
 
 // defaultBaseURL is used when New is called without an explicit URL.
 const defaultBaseURL = "https://api.ossprey.com"
@@ -42,9 +44,7 @@ type Client struct {
 	BearerToken string
 	HTTP        *http.Client
 
-	// PollBackoff returns the wait between status polls for the given attempt
-	// (1-indexed). Defaults to attempt*attempt seconds (matches v1). Override
-	// in tests for sub-second polling.
+	// PollBackoff returns the wait before poll `attempt`. Overridden in tests.
 	PollBackoff func(attempt int) time.Duration
 }
 
@@ -96,8 +96,8 @@ func (c *Client) authenticate(req *http.Request) {
 	req.Header.Set("x-api-key", c.APIKey)
 }
 
-func defaultPollBackoff(attempt int) time.Duration {
-	return time.Duration(attempt*attempt) * time.Second
+func defaultPollBackoff(int) time.Duration {
+	return pollInterval
 }
 
 type submitResponse struct {
