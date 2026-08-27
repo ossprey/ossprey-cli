@@ -2,6 +2,9 @@ package check
 
 import (
 	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -138,5 +141,38 @@ func TestRun_Errors(t *testing.T) {
 				t.Fatal("expected error, got nil")
 			}
 		})
+	}
+}
+
+func TestRun_SubmitOnly_PostsWithoutVerdict(t *testing.T) {
+	var posted bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/public/v1/scans":
+			posted = true
+			w.WriteHeader(http.StatusAccepted)
+			io.WriteString(w, `{"sbom_id":"sb1","scan_id":"sc1"}`)
+		case "/public/v1/scans/status":
+			t.Error("SubmitOnly must not poll the status endpoint")
+		default:
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	sbom, err := Run(context.Background(), Options{
+		Specs:      []Spec{{Ecosystem: "npm", Name: "lodash", Version: "4.17.21"}},
+		APIURL:     srv.URL,
+		APIKey:     "test-key",
+		SubmitOnly: true,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !posted {
+		t.Error("SubmitOnly run never posted the SBOM")
+	}
+	if len(sbom.Vulnerabilities) != 0 {
+		t.Errorf("SubmitOnly must not apply a verdict; got %d vulnerabilities", len(sbom.Vulnerabilities))
 	}
 }
