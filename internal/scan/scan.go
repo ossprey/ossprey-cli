@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/anchore/packageurl-go"
+
 	"github.com/ossprey/ossprey-cli/internal/catalog"
 	"github.com/ossprey/ossprey-cli/internal/env"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
@@ -98,19 +100,41 @@ func MalwareReports(sbom *ossbom.SBOM) ([]string, bool) {
 	}
 	reports := make([]string, 0, len(sbom.Vulnerabilities))
 	for _, v := range sbom.Vulnerabilities {
-		name, version := splitPurl(v.Purl)
+		_, name, version := parsePurl(v.Purl)
 		reports = append(reports,
 			fmt.Sprintf("WARNING: %s:%s contains malware. Remediate this immediately", name, version))
 	}
 	return reports, true
 }
 
-// splitPurl extracts (name, version) from a PURL string like "pkg:pypi/foo@1.2.3".
-func splitPurl(purl string) (string, string) {
-	s := strings.TrimPrefix(purl, "pkg:")
-	if _, after, ok := strings.Cut(s, "/"); ok {
-		s = after
+// parsePurl splits a PURL like "pkg:pypi/foo@1.2.3" into its ecosystem, name
+// and version. Any part the string doesn't carry comes back empty.
+//
+// The real parser does the work: it percent-decodes (an npm scope is spelled
+// "%40scope" per the spec) and drops qualifiers and subpaths, which a
+// hand-rolled split would leave glued to the version. Our own componentPurl
+// emits neither, but the purls here come back from the API, so parsing what
+// the spec allows rather than what we happen to send is the safer side.
+func parsePurl(purl string) (ecosystem, name, version string) {
+	if p, err := packageurl.FromString(purl); err == nil && p.Name != "" {
+		name = p.Name
+		if p.Namespace != "" {
+			// npm scopes and the like live in the namespace; users know the
+			// package as the two joined ("@scope/pkg").
+			name = p.Namespace + "/" + name
+		}
+		return p.Type, name, p.Version
 	}
-	name, version, _ := strings.Cut(s, "@")
-	return name, version
+	// Not a well-formed PURL. Rather than render "WARNING: : contains malware"
+	// at someone, salvage a name and version from whatever came back.
+	s := strings.TrimPrefix(purl, "pkg:")
+	if before, after, ok := strings.Cut(s, "/"); ok {
+		ecosystem, s = before, after
+	}
+	// An npm scope puts an '@' at the *start* of the name, so the version
+	// delimiter is the last '@' — and only when it isn't that leading one.
+	if i := strings.LastIndex(s, "@"); i > 0 {
+		return ecosystem, s[:i], s[i+1:]
+	}
+	return ecosystem, s, ""
 }

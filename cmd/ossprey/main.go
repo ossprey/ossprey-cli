@@ -61,6 +61,7 @@ func main() {
 func newScanCmd() *cobra.Command {
 	var (
 		output          string
+		reportPath      string
 		verbose         bool
 		local           bool
 		dryRunSafe      bool
@@ -86,6 +87,13 @@ func newScanCmd() *cobra.Command {
 			path := "."
 			if len(args) == 1 {
 				path = args[0]
+			}
+
+			// --local owns stdout and never reaches a verdict, so there is no
+			// report to write; refuse the combination rather than leave an
+			// empty or stale file behind for CI to read as "clean".
+			if local && reportPath != "" {
+				return errors.New("--local and --report are mutually exclusive: --local exits before any verdict")
 			}
 
 			sbom, err := scan.Run(cmd.Context(), scan.Options{
@@ -121,8 +129,8 @@ func newScanCmd() *cobra.Command {
 				}
 			default:
 				if err := submit.Validate(cmd.Context(), sbom, apiURL, apiKey); err != nil {
-					if skipped := reportSkipped(err); skipped {
-						return nil
+					if skipped, ok := printSkipped(err); ok {
+						return writeReport(reportPath, scan.SkippedReport(sbom, skipped.Message, skipped.ResetAt))
 					}
 					return err
 				}
@@ -139,8 +147,19 @@ func newScanCmd() *cobra.Command {
 				}
 			}
 
+			// --ci-cache-scan-only submits for the dashboard and deliberately
+			// reaches no verdict, so there is nothing to report — same reason
+			// --local and --report are refused together. Returning before the
+			// write keeps a report file from claiming "clean" for a scan whose
+			// findings were never fetched.
 			if cacheOnly {
 				return nil
+			}
+
+			// Written before the exit below: a malware verdict is exactly the
+			// one CI most needs the report for.
+			if err := writeReport(reportPath, scan.NewReport(sbom)); err != nil {
+				return err
 			}
 
 			if reportMalware(sbom) {
@@ -153,6 +172,7 @@ func newScanCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVarP(&output, "output", "o", "", "write SBOM to file")
+	cmd.Flags().StringVar(&reportPath, "report", "", "write a JSON verdict report (verdict + findings) to file")
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "verbose logging")
 	cmd.Flags().BoolVar(&local, "local", false, "dump SBOM JSON to stdout and exit (no API submission, no verdict)")
 	cmd.Flags().BoolVar(&dryRunSafe, "dry-run-safe", false, "skip API submission; emit empty vulnerability list")
@@ -174,6 +194,7 @@ func newCheckCmd() *cobra.Command {
 		ecosystem       string
 		apiURL          string
 		apiKey          string
+		reportPath      string
 		dryRunSafe      bool
 		dryRunMalicious bool
 	)
@@ -213,9 +234,16 @@ func newCheckCmd() *cobra.Command {
 				DryRunMalicious: dryRunMalicious,
 			})
 			if err != nil {
-				if reportSkipped(err) {
-					return nil
+				if skipped, ok := printSkipped(err); ok {
+					// sbom is nil when Run failed, so there is no component
+					// count to report — only the skip itself.
+					return writeReport(reportPath, scan.SkippedReport(
+						ossbom.New(ossbom.Environment{}), skipped.Message, skipped.ResetAt))
 				}
+				return err
+			}
+
+			if err := writeReport(reportPath, scan.NewReport(sbom)); err != nil {
 				return err
 			}
 
@@ -229,6 +257,7 @@ func newCheckCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVarP(&ecosystem, "eco-system", "e", "", "package ecosystem: pypi or npm (required)")
+	cmd.Flags().StringVar(&reportPath, "report", "", "write a JSON verdict report (verdict + findings) to file")
 	cmd.Flags().StringVar(&apiURL, "url", defaultAPIURL, "Ossprey API URL")
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "Ossprey API key (or OSSPREY_API_KEY / API_KEY env var; optional after `ossprey login`)")
 	cmd.Flags().BoolVar(&dryRunSafe, "dry-run-safe", false, "skip API submission; emit empty vulnerability list")
@@ -291,17 +320,32 @@ func reportMalware(sbom *ossbom.SBOM) bool {
 	return hasMalware
 }
 
-// reportSkipped prints a friendly quota-skip message and returns true when err
-// is a *client.ErrSkipped; otherwise returns false.
-func reportSkipped(err error) bool {
-	var skipped *client.ErrSkipped
+// printSkipped prints a friendly quota-skip message and returns the typed
+// error when err is a *client.ErrSkipped; ok is false otherwise. Callers treat
+// a skip as success (exit 0) — a quota limit must not fail someone's build.
+func printSkipped(err error) (skipped *client.ErrSkipped, ok bool) {
 	if !errors.As(err, &skipped) {
-		return false
+		return nil, false
 	}
 	msg := "Ossprey scan skipped: " + skipped.Message
 	if skipped.ResetAt != "" {
 		msg += " Quota resets at " + skipped.ResetAt + "."
 	}
 	fmt.Println(msg)
-	return true
+	return skipped, true
+}
+
+// reportSkipped reports whether err is a quota skip, printing the message.
+func reportSkipped(err error) bool {
+	_, ok := printSkipped(err)
+	return ok
+}
+
+// writeReport writes the JSON report when --report asked for one. Never to
+// stdout: `ossprey scan --local` puts the OSSBOM there and CI parses it.
+func writeReport(path string, r scan.Report) error {
+	if path == "" {
+		return nil
+	}
+	return scan.WriteReport(path, r)
 }

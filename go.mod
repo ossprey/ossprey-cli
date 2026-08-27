@@ -4,6 +4,7 @@ go 1.26.6
 
 require (
 	github.com/BurntSushi/toml v1.6.0
+	github.com/anchore/packageurl-go v0.2.0
 	github.com/anchore/syft v1.44.0
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/sync v0.21.0
@@ -19,7 +20,6 @@ require (
 	github.com/anchore/go-homedir v0.1.0 // indirect
 	github.com/anchore/go-logger v0.1.0 // indirect
 	github.com/anchore/go-sync v0.1.0 // indirect
-	github.com/anchore/packageurl-go v0.2.0 // indirect
 	github.com/anchore/stereoscope v0.1.23 // indirect
 	github.com/aquasecurity/go-pep440-version v0.0.1 // indirect
 	github.com/aquasecurity/go-version v0.0.1 // indirect
