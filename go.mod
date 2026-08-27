@@ -5,6 +5,8 @@ go 1.26.6
 require (
 	github.com/BurntSushi/toml v1.6.0
 	github.com/anchore/syft v1.44.0
+	github.com/bmatcuk/doublestar/v4 v4.10.0
+	github.com/goccy/go-yaml v1.19.2
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/sync v0.21.0
 	golang.org/x/term v0.42.0
@@ -24,7 +26,6 @@ require (
 	github.com/aquasecurity/go-pep440-version v0.0.1 // indirect
 	github.com/aquasecurity/go-version v0.0.1 // indirect
 	github.com/becheran/wildmatch-go v1.0.0 // indirect
-	github.com/bmatcuk/doublestar/v4 v4.10.0 // indirect
 	github.com/containerd/errdefs v1.0.0 // indirect
 	github.com/docker/cli v29.4.0+incompatible // indirect
 	github.com/docker/docker-credential-helpers v0.9.5 // indirect
@@ -36,7 +37,6 @@ require (
 	github.com/gabriel-vasile/mimetype v1.4.13 // indirect
 	github.com/github/go-spdx/v2 v2.4.0 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
-	github.com/goccy/go-yaml v1.19.2 // indirect
 	github.com/gohugoio/hashstructure v0.6.0 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/go-containerregistry v0.21.5 // indirect

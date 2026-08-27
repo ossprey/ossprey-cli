@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"runtime/debug"
+	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -21,6 +23,17 @@ import (
 var version = "0.0.0-dev"
 
 const defaultAPIURL = "https://api.ossprey.com"
+
+// scanTimeout resolves the whole-scan deadline from --timeout, else OSSPREY_SCAN_TIMEOUT, else none: an interactive scan has no external budget to beat.
+func scanTimeout(flag time.Duration) time.Duration {
+	if flag > 0 {
+		return flag
+	}
+	if d, err := time.ParseDuration(strings.TrimSpace(os.Getenv("OSSPREY_SCAN_TIMEOUT"))); err == nil && d > 0 {
+		return d
+	}
+	return 0
+}
 
 func main() {
 	defer func() {
@@ -67,6 +80,7 @@ func newScanCmd() *cobra.Command {
 		apiURL          string
 		apiKey          string
 		noVersionLookup bool
+		timeout         time.Duration
 	)
 
 	cmd := &cobra.Command{
@@ -83,6 +97,7 @@ func newScanCmd() *cobra.Command {
 				Path:              path,
 				Verbose:           verbose,
 				SkipVersionLookup: noVersionLookup,
+				Timeout:           scanTimeout(timeout),
 			})
 			if err != nil {
 				return err
@@ -139,6 +154,7 @@ func newScanCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&dryRunSafe, "dry-run-safe", false, "skip API submission; emit empty vulnerability list")
 	cmd.Flags().BoolVar(&dryRunMalicious, "dry-run-malicious", false, "skip API submission; inject test vulnerability against first component")
 	cmd.Flags().BoolVar(&noVersionLookup, "no-version-lookup", false, "don't query the registry to resolve unpinned dependencies; leave them versionless")
+	cmd.Flags().DurationVar(&timeout, "timeout", 0, "give up cataloging after this long and emit what resolved (or OSSPREY_SCAN_TIMEOUT; 0 disables)")
 	cmd.Flags().StringVar(&apiURL, "url", defaultAPIURL, "Ossprey API URL")
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "Ossprey API key (or OSSPREY_API_KEY / API_KEY env var; optional after `ossprey login`)")
 
