@@ -10,7 +10,15 @@ import (
 )
 
 // The verdicts a Report can carry. They are part of the file's contract with
-// whatever reads it (the GitHub Action, other CI glue), so treat them as API.
+// whatever reads it — CI glue of any flavour — so treat them as API.
+//
+// The report is where the CLI's responsibility to CI ends: it states what was
+// found. Turning that into a Markdown table, a pull-request comment, a job
+// summary or an annotation belongs to the consumer, not here. Resist adding
+// rendering or vendor-specific output to this package however convenient it
+// would be for one caller: `ossprey/gh-action` is only the first consumer, and
+// a CLI carrying features that exist solely for GitHub Actions is worse for
+// everyone else who has to install it.
 const (
 	VerdictClean   = "clean"
 	VerdictMalware = "malware"
