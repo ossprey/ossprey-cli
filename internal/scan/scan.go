@@ -44,20 +44,14 @@ func Run(ctx context.Context, opts Options) (*ossbom.SBOM, error) {
 	}
 	host, _ := os.Hostname() // best-effort; empty hostname is acceptable
 
-	// Project names the scan in the dashboard. Without it the UI falls back to
-	// the machine name (the host); use the scanned directory's base name so the
-	// scan surfaces as the project rather than the host.
-	project := filepath.Base(abs)
-	scanEnv := ossbom.Environment{
-		Path:        abs,
-		MachineName: host,
-		Project:     project,
-	}
-	// Fill org/repo/branch when running in CI so the platform groups the scan
-	// under its repository rather than minting a fresh asset on every run.
+	scanEnv := ossbom.Environment{Path: abs, MachineName: host}
 	env.Overlay(&scanEnv)
+	// Fallback only: an ADO agent checks out into ".../1/s", so CI names it instead.
+	if scanEnv.Project == "" {
+		scanEnv.Project = filepath.Base(abs)
+	}
 	sbom := ossbom.New(scanEnv)
-	sbom.Name = project
+	sbom.Name = scanEnv.Project
 
 	for _, p := range pkgs {
 		c := ossbom.Component{
