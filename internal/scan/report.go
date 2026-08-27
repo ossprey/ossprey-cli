@@ -111,12 +111,19 @@ func WriteReport(path string, r Report) error {
 	if err != nil {
 		return fmt.Errorf("create report: %w", err)
 	}
-	defer f.Close()
 
 	enc := json.NewEncoder(f)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(r); err != nil {
+		f.Close()
 		return fmt.Errorf("write report: %w", err)
 	}
-	return f.Close()
+	// Closed explicitly rather than deferred, and its error is returned: this
+	// file is what CI reads the verdict from, so a failed flush (a full disk,
+	// say) has to surface instead of leaving a truncated report behind that
+	// parses as something else.
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("write report: %w", err)
+	}
+	return nil
 }
