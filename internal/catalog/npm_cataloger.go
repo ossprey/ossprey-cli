@@ -3,6 +3,7 @@ package catalog
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -103,15 +104,23 @@ func runNpmResolve(ctx context.Context, npm, cache, packageJSON string, loc file
 	cmd.Dir = tmp
 	cmd.Env = append(os.Environ(), "npm_config_cache="+cache)
 	cmd.WaitDelay = 5 * time.Second // the kill lands on npm, but CombinedOutput still waits on pipes a grandchild may hold
-	if out, err := cmd.CombinedOutput(); err != nil {
+	out, runErr := cmd.CombinedOutput()
+	if runErr != nil {
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("npm install --package-lock-only: timed out after %s (raise OSSPREY_RESOLVE_TIMEOUT)", budget)
 		}
-		return nil, fmt.Errorf("npm install --package-lock-only: %w: %s", err, strings.TrimSpace(string(out)))
+		// ErrWaitDelay replaces a successful exit, so npm finished and only a
+		// grandchild's pipe lingered; the lock it wrote is complete.
+		if !errors.Is(runErr, exec.ErrWaitDelay) {
+			return nil, fmt.Errorf("npm install --package-lock-only: %w: %s", runErr, strings.TrimSpace(string(out)))
+		}
 	}
 
 	lock, err := os.ReadFile(filepath.Join(tmp, "package-lock.json"))
 	if err != nil {
+		if runErr != nil {
+			return nil, fmt.Errorf("npm install --package-lock-only: %w: %s", runErr, strings.TrimSpace(string(out)))
+		}
 		return nil, fmt.Errorf("npm produced no package-lock.json: %w", err)
 	}
 	return parseNpmLock(lock, loc)
