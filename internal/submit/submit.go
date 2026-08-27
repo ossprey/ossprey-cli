@@ -33,6 +33,14 @@ func Validate(ctx context.Context, sbom *ossbom.SBOM, apiURL, apiKey string) err
 	return sbom.ApplyAPIResponse(raw)
 }
 
+func Post(ctx context.Context, sbom *ossbom.SBOM, apiURL, apiKey string) error {
+	c, err := NewClient(ctx, apiURL, apiKey)
+	if err != nil {
+		return err
+	}
+	return c.Submit(ctx, sbom.ToMiniBOM())
+}
+
 // NewClient picks the credential and builds the matching client. The stored
 // JWT login beats environment API keys so an interactive `ossprey login` isn't
 // silently shadowed by a stale key exported in the shell; env keys remain the

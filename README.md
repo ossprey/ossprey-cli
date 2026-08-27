@@ -395,6 +395,8 @@ ossprey scan [path] [flags]
 | `--api-key <key>` | Provide the API key on the command line instead of an env var. |
 | `--dry-run-safe` | Skip the API; report an empty vulnerability list. |
 | `--dry-run-malicious` | Skip the API; inject a test finding against the first component. |
+| `--skip-ci` | Skip the Ossprey scan entirely and exit 0. Also settable as `OSSPREY_SKIP_CI=1`. |
+| `--ci-cache-scan-only` | Catalogue and submit the scan so results appear in the dashboard, but print no verdict and always exit 0 — the build is never affected, even if the submission fails. Also settable as `OSSPREY_CI_CACHE_SCAN_ONLY=1`. |
 
 ### Authentication
 
@@ -563,6 +565,11 @@ means the forwarder has no `--api-key` or `--url` of its own. It reads:
 
 - `OSSPREY_API_KEY` — API key
 - `OSSPREY_API_URL` — override the API URL (default `https://api.ossprey.com`)
+- `OSSPREY_SKIP_CI` — set to `1` to forward every command straight to the real
+  manager without any Ossprey check
+- `OSSPREY_CI_CACHE_SCAN_ONLY` — set to `1` to still gather and submit the
+  packages (results appear in the dashboard) but never block or fail the
+  install
 
 A session from `ossprey login` also counts, and takes precedence over
 `OSSPREY_API_KEY`, so on your own machine the forwarder usually needs no
@@ -898,6 +905,16 @@ OSSBOM, so the dashboard groups runs by repository instead of minting a fresh
 asset per run. Nothing to configure; off CI those variables are unset and
 nothing is sent.
 
+Two env vars help while rolling Ossprey out across a CI estate, and both work
+for `ossprey scan` and the package-manager forwarders/shims alike:
+
+- `OSSPREY_SKIP_CI=1` — kill switch: no scan runs at all.
+- `OSSPREY_CI_CACHE_SCAN_ONLY=1` — observe-only: scans are gathered and
+  submitted so results appear in the dashboard, but the build never fails and
+  installs are never blocked.
+
+`ossprey scan` also accepts them as `--skip-ci` / `--ci-cache-scan-only` flags.
+
 ## Output
 
 `ossprey scan` prints `No malware found` on success or one `Error: WARNING:
@@ -950,6 +967,10 @@ ossprey scan . --report report.json
 `findings` is always present, empty on a clean scan, so
 `jq '.findings | length'` works either way. The file is written before the
 process exits non-zero, so it is there on exactly the runs you care about.
+
+No file is written when the run never reaches a verdict: `--local`, and the
+`--skip-ci` / `--ci-cache-scan-only` modes above. A consumer should treat a
+missing report as "this scan produced no verdict", never as clean.
 
 `--report` never writes to stdout, and it is rejected alongside `--local`:
 `--local` owns stdout for the OSSBOM and exits before any verdict exists.

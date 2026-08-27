@@ -74,6 +74,7 @@ func TestRun_Fixtures(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			noCI(t)
 			sbom, err := Run(context.Background(), Options{Path: fixture(t, tt.fixture)})
 			if err != nil {
 				t.Fatalf("Run returned error: %v", err)
@@ -83,8 +84,7 @@ func TestRun_Fixtures(t *testing.T) {
 				t.Errorf("component count: got %d, want >= %d", got, tt.minComponents)
 			}
 
-			// Project/Name drive the dashboard scan label; must be the scanned
-			// directory's base name, not the host machine name.
+			// Outside CI, Project falls back to the scanned directory's base name.
 			if sbom.Env.Project != tt.fixture {
 				t.Errorf("env.Project: got %q, want %q", sbom.Env.Project, tt.fixture)
 			}
@@ -310,5 +310,35 @@ func TestParsePurl(t *testing.T) {
 					tt.purl, eco, name, version, tt.wantEco, tt.wantName, tt.wantVers)
 			}
 		})
+	}
+}
+
+// noCI clears the markers internal/env detects on, so a test of the local
+// fallback does not inherit the CI it is running in.
+func noCI(t *testing.T) {
+	t.Helper()
+	t.Setenv("TF_BUILD", "")
+	t.Setenv("GITHUB_ACTIONS", "")
+}
+
+func TestRunNamesTheScanFromCI(t *testing.T) {
+	noCI(t)
+	t.Setenv("TF_BUILD", "True")
+	t.Setenv("SYSTEM_TEAMPROJECT", "MyProject")
+	t.Setenv("BUILD_REPOSITORY_NAME", "my-repo")
+	t.Setenv("BUILD_SOURCEBRANCH", "refs/heads/main")
+
+	sbom, err := Run(context.Background(), Options{Path: fixture(t, "python_simple_math")})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if sbom.Env.Project != "my-repo" {
+		t.Errorf("env.Project: got %q, want %q", sbom.Env.Project, "my-repo")
+	}
+	if sbom.Name != "my-repo" {
+		t.Errorf("sbom.Name: got %q, want %q", sbom.Name, "my-repo")
+	}
+	if sbom.Env.GithubOrg != "MyProject" || sbom.Env.GithubRepo != "my-repo" {
+		t.Errorf("attribution: got %q/%q", sbom.Env.GithubOrg, sbom.Env.GithubRepo)
 	}
 }

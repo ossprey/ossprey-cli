@@ -11,6 +11,7 @@ import (
 
 	"github.com/ossprey/ossprey-cli/internal/check"
 	"github.com/ossprey/ossprey-cli/internal/client"
+	"github.com/ossprey/ossprey-cli/internal/env"
 	"github.com/ossprey/ossprey-cli/internal/forward"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
 	"github.com/ossprey/ossprey-cli/internal/registry"
@@ -68,6 +69,8 @@ func newScanCmd() *cobra.Command {
 		apiURL          string
 		apiKey          string
 		noVersionLookup bool
+		skipCI          bool
+		cacheScanOnly   bool
 	)
 
 	cmd := &cobra.Command{
@@ -75,6 +78,12 @@ func newScanCmd() *cobra.Command {
 		Short: "Catalogue a directory and emit an OSSBOM",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if skipCI || env.SkipCI() {
+				fmt.Println("Ossprey scan skipped (skip-ci)")
+				return nil
+			}
+			cacheOnly := cacheScanOnly || env.CacheScanOnly()
+
 			path := "."
 			if len(args) == 1 {
 				path = args[0]
@@ -112,6 +121,12 @@ func newScanCmd() *cobra.Command {
 				}
 			case dryRunSafe:
 				// no-op
+			case cacheOnly:
+				if err := submit.Post(cmd.Context(), sbom, apiURL, apiKey); err != nil {
+					fmt.Fprintf(os.Stderr, "ossprey: warning: could not post scan: %v\n", err)
+				} else {
+					fmt.Println("Scan submitted; results will appear in the Ossprey dashboard (ci-cache-scan-only)")
+				}
 			default:
 				if err := submit.Validate(cmd.Context(), sbom, apiURL, apiKey); err != nil {
 					if skipped, ok := printSkipped(err); ok {
@@ -130,6 +145,15 @@ func newScanCmd() *cobra.Command {
 				if err := sbom.Encode(f); err != nil {
 					return err
 				}
+			}
+
+			// --ci-cache-scan-only submits for the dashboard and deliberately
+			// reaches no verdict, so there is nothing to report — same reason
+			// --local and --report are refused together. Returning before the
+			// write keeps a report file from claiming "clean" for a scan whose
+			// findings were never fetched.
+			if cacheOnly {
+				return nil
 			}
 
 			// Written before the exit below: a malware verdict is exactly the
@@ -156,6 +180,9 @@ func newScanCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&noVersionLookup, "no-version-lookup", false, "don't query the registry to resolve unpinned dependencies; leave them versionless")
 	cmd.Flags().StringVar(&apiURL, "url", defaultAPIURL, "Ossprey API URL")
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "Ossprey API key (or OSSPREY_API_KEY / API_KEY env var; optional after `ossprey login`)")
+	cmd.Flags().BoolVar(&skipCI, "skip-ci", false, "skip the Ossprey scan entirely and exit 0 (or OSSPREY_SKIP_CI env var)")
+	cmd.Flags().BoolVar(&cacheScanOnly, "ci-cache-scan-only", false, "catalogue and submit the scan for the dashboard, skip the CLI verdict and always exit 0 (or OSSPREY_CI_CACHE_SCAN_ONLY env var)")
+	cmd.MarkFlagsMutuallyExclusive("skip-ci", "ci-cache-scan-only")
 
 	return cmd
 }
@@ -254,10 +281,12 @@ func newForwardCmd(bin string) *cobra.Command {
 				apiURL = defaultAPIURL
 			}
 			err := forward.Run(cmd.Context(), forward.Options{
-				Bin:    bin,
-				Args:   args,
-				APIURL: apiURL,
-				APIKey: os.Getenv("OSSPREY_API_KEY"),
+				Bin:           bin,
+				Args:          args,
+				APIURL:        apiURL,
+				APIKey:        os.Getenv("OSSPREY_API_KEY"),
+				SkipCI:        env.SkipCI(),
+				CacheScanOnly: env.CacheScanOnly(),
 			})
 			switch {
 			case err == nil:

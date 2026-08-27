@@ -176,6 +176,8 @@ type Options struct {
 	// ResolveLatest fills a concrete version for unpinned packages. Defaults to
 	// registry.ResolveLatest; overridable in tests.
 	ResolveLatest func(ctx context.Context, ecosystem, name string) (string, error)
+	SkipCI        bool
+	CacheScanOnly bool
 }
 
 // Run executes the forwarder flow:
@@ -196,6 +198,21 @@ func Run(ctx context.Context, opts Options) error {
 		return fmt.Errorf("unsupported package manager %q", opts.Bin)
 	}
 
+	finish := func(sbom *ossbom.SBOM, err error) error {
+		if opts.CacheScanOnly {
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "ossprey: warning: could not post scan (%v); forwarding\n", err)
+			} else {
+				fmt.Fprintln(os.Stderr, "ossprey: scan posted to the Ossprey dashboard (ci-cache-scan-only); forwarding")
+			}
+			return execFn(ctx, m.Bin, opts.Args)
+		}
+		if err != nil {
+			return err
+		}
+		return reportAndForward(ctx, m, opts, sbom)
+	}
+
 	resolve := opts.ResolveLatest
 	if resolve == nil {
 		resolve = registry.ResolveLatest
@@ -204,6 +221,12 @@ func Run(ctx context.Context, opts Options) error {
 	start, isInstall := m.installAt(opts.Args)
 	if !isInstall {
 		// Not an install (e.g. `npm run`, `pip list`) — nothing to check.
+		return execFn(ctx, m.Bin, opts.Args)
+	}
+
+	if opts.SkipCI {
+		fmt.Fprintf(os.Stderr, "ossprey: skip-ci set; forwarding `%s %s` without checking\n",
+			m.Bin, strings.Join(opts.Args, " "))
 		return execFn(ctx, m.Bin, opts.Args)
 	}
 
@@ -221,11 +244,12 @@ func Run(ctx context.Context, opts Options) error {
 			fmt.Fprintln(os.Stderr, "ossprey: nothing left to check after version resolution; forwarding")
 			return execFn(ctx, m.Bin, opts.Args)
 		}
-		sbom, err := checkFn(ctx, check.Options{Specs: resolved, APIURL: opts.APIURL, APIKey: opts.APIKey})
-		if err != nil {
-			return err
-		}
-		return reportAndForward(ctx, m, opts, sbom)
+		return finish(checkFn(ctx, check.Options{
+			Specs:      resolved,
+			APIURL:     opts.APIURL,
+			APIKey:     opts.APIKey,
+			SubmitOnly: opts.CacheScanOnly,
+		}))
 
 	case manifestInstall(parsed):
 		// No packages named — the manager installs from the project manifest /
@@ -233,11 +257,7 @@ func Run(ctx context.Context, opts Options) error {
 		// than falling through unchecked.
 		fmt.Fprintf(os.Stderr, "ossprey: no packages named; scanning project manifest before `%s %s`\n",
 			m.Bin, strings.Join(opts.Args, " "))
-		sbom, err := scanProjectFn(ctx, ".", opts.APIURL, opts.APIKey)
-		if err != nil {
-			return err
-		}
-		return reportAndForward(ctx, m, opts, sbom)
+		return finish(scanProjectFn(ctx, ".", opts.APIURL, opts.APIKey, opts.CacheScanOnly))
 
 	default:
 		// Only un-checkable explicit targets (local paths, archives, URLs, VCS
@@ -319,13 +339,19 @@ func manifestInstall(p installArgs) bool {
 // returns it with any vulnerabilities applied. It is the default scanProjectFn
 // seam. When the directory has no catalogable dependencies it returns the empty
 // SBOM without an API call so a bare install in a non-project dir forwards.
-func scanProject(ctx context.Context, dir, apiURL, apiKey string) (*ossbom.SBOM, error) {
+func scanProject(ctx context.Context, dir, apiURL, apiKey string, submitOnly bool) (*ossbom.SBOM, error) {
 	sbom, err := scan.Run(ctx, scan.Options{Path: dir})
 	if err != nil {
 		return nil, err
 	}
 	if len(sbom.Components) == 0 {
 		return sbom, nil // nothing declared to check
+	}
+	if submitOnly {
+		if err := submit.Post(ctx, sbom, apiURL, apiKey); err != nil {
+			return nil, err
+		}
+		return sbom, nil
 	}
 	if err := submit.Validate(ctx, sbom, apiURL, apiKey); err != nil {
 		return nil, err
