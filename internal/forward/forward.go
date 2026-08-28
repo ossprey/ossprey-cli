@@ -20,6 +20,7 @@ import (
 
 	"github.com/ossprey/ossprey-cli/internal/check"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
+	"github.com/ossprey/ossprey-cli/internal/progress"
 	"github.com/ossprey/ossprey-cli/internal/registry"
 	"github.com/ossprey/ossprey-cli/internal/scan"
 	"github.com/ossprey/ossprey-cli/internal/shim"
@@ -244,12 +245,18 @@ func Run(ctx context.Context, opts Options) error {
 			fmt.Fprintln(os.Stderr, "ossprey: nothing left to check after version resolution; forwarding")
 			return execFn(ctx, m.Bin, opts.Args)
 		}
-		return finish(checkFn(ctx, check.Options{
+		// The scan is the one part of a forwarded install that takes visible
+		// time, and until it prints something the terminal looks hung.
+		stop := progress.Start(os.Stderr, fmt.Sprintf("ossprey: scan in progress, checking %s",
+			countPackages(len(resolved))))
+		sbom, err := checkFn(ctx, check.Options{
 			Specs:      resolved,
 			APIURL:     opts.APIURL,
 			APIKey:     opts.APIKey,
 			SubmitOnly: opts.CacheScanOnly,
-		}))
+		})
+		stop()
+		return finish(sbom, err)
 
 	case manifestInstall(parsed):
 		// No packages named — the manager installs from the project manifest /
@@ -257,7 +264,12 @@ func Run(ctx context.Context, opts Options) error {
 		// than falling through unchecked.
 		fmt.Fprintf(os.Stderr, "ossprey: no packages named; scanning project manifest before `%s %s`\n",
 			m.Bin, strings.Join(opts.Args, " "))
-		return finish(scanProjectFn(ctx, ".", opts.APIURL, opts.APIKey, opts.CacheScanOnly))
+		// Cataloguing a whole project can take longer than the API scan itself
+		// (npm range resolution, uv), so the indicator wraps both.
+		stop := progress.Start(os.Stderr, "ossprey: scan in progress")
+		sbom, err := scanProjectFn(ctx, ".", opts.APIURL, opts.APIKey, opts.CacheScanOnly)
+		stop()
+		return finish(sbom, err)
 
 	default:
 		// Only un-checkable explicit targets (local paths, archives, URLs, VCS
