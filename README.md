@@ -629,6 +629,10 @@ ossprey: no malware found, forwarding to npm
 added 1 package in 525ms
 ```
 
+While the check runs, the forwarder holds a live `ossprey: scan in progress...
+4s` line on the terminal and erases it once the verdict is in; in a CI log or a
+pipe that becomes a single plain line.
+
 If a check comes back dirty you get the finding, a blocked line naming the
 command, and an exit code of `1`. The real manager never starts.
 
