@@ -117,14 +117,17 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 
 	seen := map[string]struct{}{}
 	locks := newNpmLockClassifier(absRoot)
+	pins := newRequirementPins(absRoot)
 	var out []Package
 	for _, c := range catalogers {
-		pkgs, _, err := c.Catalog(ctx, resolver)
-		if err != nil {
-			// Per-cataloger errors are non-fatal — skip and continue. Matches
-			// syft.CreateSBOM behavior.
-			continue
-		}
+		// Per-cataloger errors are non-fatal AND partial: syft's generic
+		// cataloger returns everything it did parse alongside an "unknown"
+		// error naming the files and lines it could not, which is what
+		// syft.CreateSBOM keeps too. Discarding pkgs whenever err != nil threw
+		// away a whole ecosystem over one unparseable line — a single
+		// `flask>2.0` in requirements.txt emptied the SBOM of every Python
+		// package, silently scanning nothing.
+		pkgs, _, _ := c.Catalog(ctx, resolver)
 		// Syft's manifest catalogers emit the root project itself from
 		// package.json / pyproject.toml — drop those. Our custom catalogers
 		// parse deps only, so the rule does not apply.
@@ -140,14 +143,20 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 			if isUnpublishedNpmLockEntry(p, locks) {
 				continue
 			}
-			key := dedupKey(t, p.Name, p.Version)
+			// Syft truncates PEP 440 versions it reads out of a requirements
+			// file; re-derive the pinned one from the file itself (OSS-1869).
+			version := p.Version
+			if v, ok := pins.versionFor(p); ok {
+				version = v
+			}
+			key := dedupKey(t, p.Name, version)
 			if _, ok := seen[key]; ok {
 				continue
 			}
 			seen[key] = struct{}{}
 			out = append(out, Package{
 				Name:      p.Name,
-				Version:   p.Version,
+				Version:   version,
 				Type:      t,
 				Source:    []string{c.Name()},
 				Locations: locations(p),
