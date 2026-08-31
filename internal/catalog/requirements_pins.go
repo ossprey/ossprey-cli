@@ -38,6 +38,7 @@ type requirementPins struct {
 	cache map[string]map[string][]string // requirements file abs path -> canonical name -> versions
 }
 
+// newRequirementPins returns a corrector for the requirements files under root.
 func newRequirementPins(root string) *requirementPins {
 	return &requirementPins{root: root, cache: map[string]map[string][]string{}}
 }
@@ -89,6 +90,10 @@ func matchPin(pins []string, reported string) (string, bool) {
 	return match, true
 }
 
+// pins returns every exact pin in the requirements file at path, grouped by
+// canonical name. Each file is read and parsed once per Catalog run; an
+// unreadable one caches an empty result so every package from it keeps syft's
+// version rather than re-reading per package.
 func (r *requirementPins) pins(path string) map[string][]string {
 	if pins, ok := r.cache[path]; ok {
 		return pins
@@ -134,6 +139,10 @@ func pinnedRequirements(data []byte) map[string][]string {
 	return pins
 }
 
+// parsePinnedRequirement extracts the canonical name and version from one
+// logical requirements line, and reports whether the line pins exactly one
+// release at all. Comments, environment markers and pip options are stripped
+// first; option lines, editables and URL requirements pin nothing.
 func parsePinnedRequirement(line string) (name, version string, ok bool) {
 	spec := strings.TrimSpace(line)
 	// Blank, or a pip option / "-r" include / "-e" editable rather than a
