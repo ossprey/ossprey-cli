@@ -35,11 +35,11 @@ import (
 // for concurrent use — Catalog consumes cataloger output serially.
 type requirementPins struct {
 	root  string
-	cache map[string]map[string]string // requirements file abs path -> canonical name -> version
+	cache map[string]map[string][]string // requirements file abs path -> canonical name -> versions
 }
 
 func newRequirementPins(root string) *requirementPins {
-	return &requirementPins{root: root, cache: map[string]map[string]string{}}
+	return &requirementPins{root: root, cache: map[string]map[string][]string{}}
 }
 
 // versionFor returns the version p's requirements file pins for it, and whether
@@ -51,14 +51,45 @@ func (r *requirementPins) versionFor(p pkg.Package) (string, bool) {
 	}
 	name := canonicalPackageName(p.Name)
 	for _, l := range p.Locations.ToSlice() {
-		if v, ok := r.pins(hostPath(r.root, l.RealPath))[name]; ok {
+		if v, ok := matchPin(r.pins(hostPath(r.root, l.RealPath))[name], p.Version); ok {
 			return v, true
 		}
 	}
 	return "", false
 }
 
-func (r *requirementPins) pins(path string) map[string]string {
+// matchPin picks the pin that reported is a truncation of. One name can be
+// pinned more than once in a file — most often under mutually exclusive
+// environment markers ("foo==1.0.0-beta.1 ; python_version < '3.9'" and
+// "foo==2.0.0-beta.1 ; python_version >= '3.9'"), which syft emits as two
+// packages. Keying pins by name alone applied the last one to both, so
+// deduplication then collapsed them into a single component and the other
+// version vanished from the SBOM entirely — unscanned, which is worse than a
+// truncated version.
+//
+// Since the defect is truncation, syft's version is a prefix of the pin it came
+// from (a leading "=" first, from the "===" operator it fails to strip). That
+// identifies the pin without having to reconcile marker text, which syft's own
+// capture does not preserve faithfully. Correct only on a unique match: zero
+// leaves a version we cannot attribute, and more than one (two pins truncating
+// alike, e.g. 1.0.0-beta.1 and 1.0.0-beta.2) would be a guess, so both keep
+// syft's value.
+func matchPin(pins []string, reported string) (string, bool) {
+	reported = strings.TrimPrefix(reported, "=")
+	var match string
+	var n int
+	for _, pin := range pins {
+		if strings.HasPrefix(pin, reported) {
+			match, n = pin, n+1
+		}
+	}
+	if n != 1 {
+		return "", false
+	}
+	return match, true
+}
+
+func (r *requirementPins) pins(path string) map[string][]string {
 	if pins, ok := r.cache[path]; ok {
 		return pins
 	}
@@ -81,9 +112,10 @@ func (r *requirementPins) pins(path string) map[string]string {
 var pinnedRequirement = regexp.MustCompile(`^([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[^\]]*\])?(?:===|==)([^,*<>!~=\s]+)$`)
 
 // pinnedRequirements maps the PEP 503 canonical name of every exactly-pinned
-// requirement in one requirements file to the version it pins.
-func pinnedRequirements(data []byte) map[string]string {
-	pins := map[string]string{}
+// requirement in one requirements file to the versions it pins — plural,
+// because environment markers let one name be pinned several times.
+func pinnedRequirements(data []byte) map[string][]string {
+	pins := map[string][]string{}
 	sc := bufio.NewScanner(bytes.NewReader(data))
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	var continued string
@@ -96,7 +128,7 @@ func pinnedRequirements(data []byte) map[string]string {
 		}
 		line, continued = continued+line, ""
 		if name, version, ok := parsePinnedRequirement(line); ok {
-			pins[name] = version
+			pins[name] = append(pins[name], version)
 		}
 	}
 	return pins
