@@ -158,6 +158,23 @@ Custom catalogers shell out via `exec.LookPath`; if the tool is missing they
 `isOspreyCataloger` parse deps only; syft's manifest catalogers also emit the
 root project itself, which is dropped via `isRootManifestPackage`.
 
+A cataloger's error is **not** a reason to drop its packages: syft's generic
+cataloger returns everything it parsed alongside an `unknown` error naming the
+lines it could not, exactly as `syft.CreateSBOM` does. Discarding on `err != nil`
+emptied the SBOM of every Python package over one `flask>2.0` line — a scan that
+silently checked nothing (OSS-1869).
+
+Versions syft reads out of a requirements file are corrected against the file
+itself by `requirementPins` (`requirements_pins.go`). Syft captures the
+constraint with `[0-9a-zA-Z.*]`, which truncates every PEP 440 separator outside
+that class — `==1.0.0-beta.1` becomes `1.0.0`, `==1.2.3+local1` becomes `1.2.3` —
+and strips only `==`, so `===1.0` reaches the SBOM as `=1.0`: real-looking purls
+naming a release the project never installs (OSS-1869). It **corrects, it does
+not catalog** — only requirements that pin exactly one release are touched, so a
+range or wildcard is left to syft's guess, and shapes syft drops outright (a bare
+`>2.0`, an epoch `==1!2.0.0`) stay missing for the resolver-backed catalogers to
+cover.
+
 Output is deduped by `(type, name, version)`. `mergeVersionless` then collapses
 a package emitted both versionless (direct-deps fallback) and pinned (uv-resolved)
 into the pinned one. Vendored paths (`node_modules/`) are skipped (`isVendoredPath`).
