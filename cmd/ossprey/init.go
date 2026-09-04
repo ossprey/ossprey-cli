@@ -19,6 +19,7 @@ import (
 	"github.com/ossprey/ossprey-cli/internal/auth"
 	"github.com/ossprey/ossprey-cli/internal/client"
 	"github.com/ossprey/ossprey-cli/internal/scan"
+	"github.com/ossprey/ossprey-cli/internal/severity"
 	"github.com/ossprey/ossprey-cli/internal/submit"
 )
 
@@ -418,7 +419,7 @@ func runFirstScan(ctx context.Context, path, apiURL, apiKey string) error {
 		return err
 	}
 
-	if reportMalware(sbom) {
+	if reportMalware(sbom, severity.FailingFloor) {
 		os.Exit(1)
 	}
 	fmt.Println("No malware found. See your scans at https://dashboard.ossprey.com")

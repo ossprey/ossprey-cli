@@ -20,16 +20,20 @@ import (
 // would be for one caller: `ossprey/gh-action` is only the first consumer, and
 // a CLI carrying features that exist solely for GitHub Actions is worse for
 // everyone else who has to install it.
+// Verdict is a named string so the compiler can tell one apart from any other
+// string, while marshalling to exactly the same JSON value.
+type Verdict string
+
 const (
-	VerdictClean   = "clean"
-	VerdictMalware = "malware"
-	VerdictSkipped = "skipped"
+	VerdictClean   Verdict = "clean"
+	VerdictMalware Verdict = "malware"
+	VerdictSkipped Verdict = "skipped"
 	// VerdictInformational is a scan whose only findings are below the failing
 	// severity floor. Its own verdict for the same reason "skipped" is: the scan
 	// did find something and said so, and a consumer that renders it as "no
 	// malware found" is hiding a finding we deliberately surfaced. Consumers
 	// that only know clean/malware/skipped should treat it as non-failing.
-	VerdictInformational = "informational"
+	VerdictInformational Verdict = "informational"
 )
 
 // Finding is one malicious package, pre-split so a consumer doesn't have to
@@ -67,7 +71,7 @@ type Skip struct {
 // Findings below the failing floor go in Informational instead, which is
 // omitted when empty so a consumer that predates it sees no change.
 type Report struct {
-	Verdict       string    `json:"verdict"`
+	Verdict       Verdict   `json:"verdict"`
 	Project       string    `json:"project,omitempty"`
 	Path          string    `json:"path,omitempty"`
 	Components    int       `json:"components"`
@@ -79,8 +83,9 @@ type Report struct {
 // NewReport summarises a scanned SBOM: "malware" when any finding is at or
 // above the failing severity floor, "informational" when it found only findings
 // below it, "clean" when it found nothing. Findings are split across the two
-// arrays by the same floor that decides the exit code.
-func NewReport(sbom *ossbom.SBOM) Report {
+// arrays by the same floor that decides the exit code, so a caller that lowers
+// the floor cannot end up with a report that disagrees with its own exit status.
+func NewReport(sbom *ossbom.SBOM, floor severity.Level) Report {
 	r := Report{
 		Verdict:    VerdictClean,
 		Project:    sbom.Env.Project,
@@ -101,7 +106,7 @@ func NewReport(sbom *ossbom.SBOM) Report {
 			Description: v.Description,
 			Reference:   v.Reference,
 		}
-		if severity.Parse(v.Severity).Fails() {
+		if severity.Parse(v.Severity).FailsAt(floor) {
 			r.Findings = append(r.Findings, f)
 			continue
 		}
@@ -120,7 +125,7 @@ func NewReport(sbom *ossbom.SBOM) Report {
 // The verdict is deliberately neither clean nor malware: nothing was checked,
 // and a consumer must not report "no malware found" off the back of it.
 func SkippedReport(sbom *ossbom.SBOM, message, resetAt string) Report {
-	r := NewReport(sbom)
+	r := NewReport(sbom, severity.FailingFloor)
 	r.Verdict = VerdictSkipped
 	r.Skipped = &Skip{Message: message, ResetAt: resetAt}
 	return r

@@ -94,26 +94,38 @@ func InjectTestVulnerability(sbom *ossbom.SBOM) error {
 	return nil
 }
 
-// MalwareReports returns one v1-style report line per failing vulnerability and
-// a boolean indicating whether any were found, plus separate lines for the
-// informational findings.
+// MalwareSummary is the human-facing rendering of a scan's findings, split by
+// whether they fail. The wording lives here rather than at the call sites so
+// the verdict text and the exit decision cannot drift apart between scan,
+// check, init and the install forwarder.
+type MalwareSummary struct {
+	// Failing is one v1-style line per finding at or above the floor.
+	Failing []string
+	// Informational is one line per finding below it, reported but not fatal.
+	Informational []string
+}
+
+// MalwareReports renders a scanned SBOM's findings and reports whether any of
+// them fail at the given floor.
 //
-// A finding below the failing floor (severity Info) is reported but does not
+// A finding below the floor (severity Info by default) is reported but does not
 // make the scan fail; see internal/severity. A finding the API could not grade
-// fails, so an older server that sends no severity behaves exactly as before.
-func MalwareReports(sbom *ossbom.SBOM) (failing []string, hasMalware bool, informational []string) {
+// fails at every floor, so an older server that sends no severity behaves
+// exactly as before.
+func MalwareReports(sbom *ossbom.SBOM, floor severity.Level) (MalwareSummary, bool) {
+	var summary MalwareSummary
 	for _, v := range sbom.Vulnerabilities {
 		_, name, version := parsePurl(v.Purl)
-		if severity.Parse(v.Severity).Fails() {
-			failing = append(failing,
+		if severity.Parse(v.Severity).FailsAt(floor) {
+			summary.Failing = append(summary.Failing,
 				fmt.Sprintf("WARNING: %s:%s contains malware. Remediate this immediately", name, version))
 			continue
 		}
-		informational = append(informational,
+		summary.Informational = append(summary.Informational,
 			fmt.Sprintf("%s:%s was flagged for information only: %s",
 				name, version, apitext.OneLine(v.Description)))
 	}
-	return failing, len(failing) > 0, informational
+	return summary, len(summary.Failing) > 0
 }
 
 // parsePurl splits a PURL like "pkg:pypi/foo@1.2.3" into its ecosystem, name

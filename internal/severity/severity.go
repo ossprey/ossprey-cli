@@ -68,8 +68,22 @@ func (l Level) String() string {
 	return "Unknown"
 }
 
-// Fails reports whether a finding at this level fails a scan. Unknown always
-// fails, whatever the floor.
+// Fails reports whether a finding at this level fails a scan at the default
+// floor. Unknown always fails, whatever the floor.
 func (l Level) Fails() bool {
-	return l == Unknown || l >= FailingFloor
+	return l.FailsAt(FailingFloor)
+}
+
+// FailsAt reports whether a finding at this level fails a scan at the given
+// floor, so a caller can opt into a stricter one (`--fail-on-informational`
+// lowers it to Info). Unknown fails at every floor: a finding we could not
+// grade must never pass because of it.
+func (l Level) FailsAt(floor Level) bool {
+	if l == Unknown {
+		return true
+	}
+	if floor == Unknown {
+		floor = FailingFloor
+	}
+	return l >= floor
 }

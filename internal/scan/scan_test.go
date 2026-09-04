@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
+	"github.com/ossprey/ossprey-cli/internal/severity"
 )
 
 // fixture returns the absolute path to a test/test_packages/<name> directory.
@@ -313,7 +314,8 @@ func TestMalwareReports(t *testing.T) {
 			for _, v := range tt.vulns {
 				s.AddVulnerability(v)
 			}
-			reports, has, informational := MalwareReports(s)
+			summary, has := MalwareReports(s, severity.FailingFloor)
+			reports, informational := summary.Failing, summary.Informational
 			if has != tt.wantHas {
 				t.Errorf("has: got %v, want %v", has, tt.wantHas)
 			}
@@ -411,7 +413,8 @@ func TestMalwareReportsSanitisesInformationalDescription(t *testing.T) {
 		Severity:    "Info",
 	})
 
-	_, hasMalware, informational := MalwareReports(s)
+	summary, hasMalware := MalwareReports(s, severity.FailingFloor)
+	informational := summary.Informational
 	if hasMalware {
 		t.Fatal("an informational finding must not fail the scan")
 	}
@@ -420,5 +423,23 @@ func TestMalwareReportsSanitisesInformationalDescription(t *testing.T) {
 	}
 	if strings.ContainsAny(informational[0], "\n\r\x1b") {
 		t.Errorf("control characters survived into the report line: %q", informational[0])
+	}
+}
+
+// At the Info floor an informational finding fails, which is what
+// --fail-on-informational asks for.
+func TestMalwareReportsAtInfoFloor(t *testing.T) {
+	s := ossbom.New(ossbom.Environment{})
+	s.AddVulnerability(ossbom.Vulnerability{ID: "Z", Purl: "pkg:npm/removed@0.0.1-security", Severity: "Info"})
+
+	summary, hasMalware := MalwareReports(s, severity.Info)
+	if !hasMalware {
+		t.Error("hasMalware = false at the Info floor, want true")
+	}
+	if len(summary.Failing) != 1 {
+		t.Errorf("failing = %d, want 1", len(summary.Failing))
+	}
+	if len(summary.Informational) != 0 {
+		t.Errorf("informational = %d, want 0", len(summary.Informational))
 	}
 }

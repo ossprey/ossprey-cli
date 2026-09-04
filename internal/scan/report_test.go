@@ -8,13 +8,14 @@ import (
 	"testing"
 
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
+	"github.com/ossprey/ossprey-cli/internal/severity"
 )
 
 func TestNewReportClean(t *testing.T) {
 	s := ossbom.New(ossbom.Environment{Project: "proj", Path: "/tmp/proj"})
 	s.AddComponent(ossbom.Component{Name: "requests", Version: "2.31.0", Type: "pypi"})
 
-	r := NewReport(s)
+	r := NewReport(s, severity.FailingFloor)
 	if r.Verdict != VerdictClean {
 		t.Errorf("verdict: got %q, want %q", r.Verdict, VerdictClean)
 	}
@@ -39,7 +40,7 @@ func TestNewReportMalware(t *testing.T) {
 	s.AddVulnerability(ossbom.NewMalwareVulnerability(
 		"OSSPREY-1", "pkg:npm/@scope/pkg@1.2.3", "steals tokens"))
 
-	r := NewReport(s)
+	r := NewReport(s, severity.FailingFloor)
 	if r.Verdict != VerdictMalware {
 		t.Fatalf("verdict: got %q, want %q", r.Verdict, VerdictMalware)
 	}
@@ -87,7 +88,7 @@ func TestWriteReportRoundTrip(t *testing.T) {
 	// A nested path exercises the parent-directory creation the action relies
 	// on when it points --report at a fresh temp dir.
 	path := filepath.Join(t.TempDir(), "nested", "report.json")
-	if err := WriteReport(path, NewReport(s)); err != nil {
+	if err := WriteReport(path, NewReport(s, severity.FailingFloor)); err != nil {
 		t.Fatalf("WriteReport: %v", err)
 	}
 
@@ -116,7 +117,7 @@ func TestNewReportInformationalVerdict(t *testing.T) {
 		Severity:    "Info",
 	})
 
-	r := NewReport(s)
+	r := NewReport(s, severity.FailingFloor)
 	if r.Verdict != VerdictInformational {
 		t.Errorf("verdict = %q, want %q", r.Verdict, VerdictInformational)
 	}
@@ -140,7 +141,7 @@ func TestNewReportSplitsMixedFindings(t *testing.T) {
 	s.AddVulnerability(ossbom.Vulnerability{ID: "Z", Purl: "pkg:npm/removed@0.0.1-security", Severity: "Info"})
 	s.AddVulnerability(ossbom.Vulnerability{ID: "X", Purl: "pkg:pypi/evil@1.0.0", Severity: "Critical"})
 
-	r := NewReport(s)
+	r := NewReport(s, severity.FailingFloor)
 	if r.Verdict != VerdictMalware {
 		t.Errorf("verdict = %q, want %q", r.Verdict, VerdictMalware)
 	}
@@ -157,7 +158,7 @@ func TestNewReportOmitsEmptyInformational(t *testing.T) {
 	s := ossbom.New(ossbom.Environment{Project: "p"})
 	s.AddVulnerability(ossbom.Vulnerability{ID: "X", Purl: "pkg:pypi/evil@1.0.0", Severity: "Critical"})
 
-	raw, err := json.Marshal(NewReport(s))
+	raw, err := json.Marshal(NewReport(s, severity.FailingFloor))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -173,7 +174,7 @@ func TestNewReportMalwareWinsOverInformational(t *testing.T) {
 	s.AddVulnerability(ossbom.Vulnerability{ID: "Z", Purl: "pkg:npm/removed@0.0.1-security", Severity: "Info"})
 	s.AddVulnerability(ossbom.Vulnerability{ID: "X", Purl: "pkg:pypi/evil@1.0.0", Severity: "Critical"})
 
-	if r := NewReport(s); r.Verdict != VerdictMalware {
+	if r := NewReport(s, severity.FailingFloor); r.Verdict != VerdictMalware {
 		t.Errorf("verdict = %q, want %q", r.Verdict, VerdictMalware)
 	}
 }
@@ -183,7 +184,7 @@ func TestNewReportUngradedFindingIsMalware(t *testing.T) {
 	s := ossbom.New(ossbom.Environment{Project: "p"})
 	s.AddVulnerability(ossbom.Vulnerability{ID: "X", Purl: "pkg:pypi/evil@1.0.0"})
 
-	if r := NewReport(s); r.Verdict != VerdictMalware {
+	if r := NewReport(s, severity.FailingFloor); r.Verdict != VerdictMalware {
 		t.Errorf("verdict = %q, want %q", r.Verdict, VerdictMalware)
 	}
 }
@@ -196,5 +197,44 @@ func TestSkippedReportOverridesInformational(t *testing.T) {
 
 	if r := SkippedReport(s, "quota exhausted", ""); r.Verdict != VerdictSkipped {
 		t.Errorf("verdict = %q, want %q", r.Verdict, VerdictSkipped)
+	}
+}
+
+// --fail-on-informational lowers the floor to Info, so a finding that would
+// normally be reported without failing becomes a failing one -- and the report
+// must agree with the exit code rather than still calling it informational.
+func TestNewReportAtInfoFloorTreatsInfoAsFailing(t *testing.T) {
+	s := ossbom.New(ossbom.Environment{Project: "p"})
+	s.AddVulnerability(ossbom.Vulnerability{ID: "Z", Purl: "pkg:npm/removed@0.0.1-security", Severity: "Info"})
+
+	r := NewReport(s, severity.Info)
+	if r.Verdict != VerdictMalware {
+		t.Errorf("verdict = %q, want %q", r.Verdict, VerdictMalware)
+	}
+	if len(r.Findings) != 1 {
+		t.Fatalf("findings = %d, want 1", len(r.Findings))
+	}
+	if len(r.Informational) != 0 {
+		t.Errorf("informational = %d, want 0", len(r.Informational))
+	}
+}
+
+// Lowering the floor must not change a clean scan into anything else.
+func TestNewReportAtInfoFloorLeavesACleanScanClean(t *testing.T) {
+	s := ossbom.New(ossbom.Environment{Project: "p"})
+	if r := NewReport(s, severity.Info); r.Verdict != VerdictClean {
+		t.Errorf("verdict = %q, want %q", r.Verdict, VerdictClean)
+	}
+}
+
+// The named Verdict type must still marshal to the same JSON string values.
+func TestVerdictMarshalsAsAPlainString(t *testing.T) {
+	s := ossbom.New(ossbom.Environment{Project: "p"})
+	raw, err := json.Marshal(NewReport(s, severity.FailingFloor))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(raw), `"verdict": "clean"`) && !strings.Contains(string(raw), `"verdict":"clean"`) {
+		t.Errorf("verdict did not marshal as the plain string \"clean\": %s", raw)
 	}
 }

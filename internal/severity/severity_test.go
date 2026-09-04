@@ -68,3 +68,29 @@ func TestString(t *testing.T) {
 		t.Errorf("Level(99).String() = %q, want Unknown", got)
 	}
 }
+
+// A caller may opt into a stricter floor; it must never be able to loosen past
+// the point where something we could not grade would pass.
+func TestFailsAt(t *testing.T) {
+	if !Info.FailsAt(Info) {
+		t.Error("Info.FailsAt(Info) = false, want true")
+	}
+	if Info.FailsAt(Low) {
+		t.Error("Info.FailsAt(Low) = true, want false")
+	}
+	for _, floor := range []Level{Unknown, Info, Low, Medium, High, Critical} {
+		if !Unknown.FailsAt(floor) {
+			t.Errorf("Unknown.FailsAt(%v) = false, want true", floor)
+		}
+		if !Critical.FailsAt(floor) {
+			t.Errorf("Critical.FailsAt(%v) = false, want true", floor)
+		}
+	}
+	// An unset floor falls back to the default rather than passing everything.
+	if Info.FailsAt(Unknown) {
+		t.Error("Info.FailsAt(Unknown) = true, want false (falls back to FailingFloor)")
+	}
+	if !Low.FailsAt(Unknown) {
+		t.Error("Low.FailsAt(Unknown) = false, want true")
+	}
+}
