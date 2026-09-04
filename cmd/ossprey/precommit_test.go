@@ -314,3 +314,132 @@ func TestPrecommitVerboseCleanReportsCount(t *testing.T) {
 		t.Errorf("verbose output: %q", out.String())
 	}
 }
+
+// An Info hit is reported but must not block, consistent with this hook's
+// documented fail-open posture.
+func TestPrecommitInformationalHitDoesNotBlock(t *testing.T) {
+	stubPrecommit(t, oneStagedPackage(),
+		func(context.Context, string, string, []string) ([]client.MalwareHit, error) {
+			return []client.MalwareHit{{
+				Purl:     "pkg:npm/evil-pkg@1.2.3",
+				Reason:   "This package was previously identified as malicious and removed from NPM",
+				Severity: "Info",
+			}}, nil
+		})
+
+	var out bytes.Buffer
+	if blocked := runPrecommit(context.Background(), "https://api.test", "key", false, &out); blocked {
+		t.Fatal("an informational hit must not block the commit")
+	}
+	got := out.String()
+	if !strings.Contains(got, "flagged for information only") {
+		t.Errorf("output missing the informational notice:\n%s", got)
+	}
+	if strings.Contains(got, "commit blocked") {
+		t.Errorf("output must not claim the commit was blocked:\n%s", got)
+	}
+}
+
+// Info must never mask a real detection staged alongside it.
+func TestPrecommitInformationalAlongsideRealHitStillBlocks(t *testing.T) {
+	stubPrecommit(t,
+		func(context.Context, string) (precommit.Delta, error) {
+			return precommit.Delta{Packages: []precommit.Package{
+				{Type: "npm", Name: "evil-pkg", Version: "1.2.3", Path: "package-lock.json"},
+				{Type: "npm", Name: "removed-pkg", Version: "0.0.1-security", Path: "package-lock.json"},
+			}}, nil
+		},
+		func(context.Context, string, string, []string) ([]client.MalwareHit, error) {
+			return []client.MalwareHit{
+				{Purl: "pkg:npm/removed-pkg@0.0.1-security", Reason: "removed from NPM", Severity: "Info"},
+				{Purl: "pkg:npm/evil-pkg@1.2.3", Reason: "exfiltrates env vars", Severity: "Critical"},
+			}, nil
+		})
+
+	var out bytes.Buffer
+	if blocked := runPrecommit(context.Background(), "https://api.test", "key", false, &out); !blocked {
+		t.Fatal("a real detection must still block even alongside an informational hit")
+	}
+	got := out.String()
+	if !strings.Contains(got, "evil-pkg@1.2.3 (npm, from package-lock.json): exfiltrates env vars") {
+		t.Errorf("output missing the blocking hit:\n%s", got)
+	}
+	if !strings.Contains(got, "flagged for information only") {
+		t.Errorf("output missing the informational notice:\n%s", got)
+	}
+}
+
+// An ungraded hit is exactly what an older server sends, so it must block.
+func TestPrecommitUngradedHitBlocks(t *testing.T) {
+	stubPrecommit(t, oneStagedPackage(),
+		func(context.Context, string, string, []string) ([]client.MalwareHit, error) {
+			return []client.MalwareHit{{Purl: "pkg:npm/evil-pkg@1.2.3", Reason: "exfiltrates env vars"}}, nil
+		})
+
+	var out bytes.Buffer
+	if blocked := runPrecommit(context.Background(), "https://api.test", "key", false, &out); !blocked {
+		t.Fatal("a hit with no severity must block")
+	}
+}
+
+// The reason is API-supplied free text printed to the developer's terminal, on
+// both the blocking and the informational line.
+func TestPrecommitSanitisesHitReason(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		severity string
+		blocks   bool
+	}{
+		{"blocking", "Critical", true},
+		{"informational", "Info", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stubPrecommit(t, oneStagedPackage(),
+				func(context.Context, string, string, []string) ([]client.MalwareHit, error) {
+					return []client.MalwareHit{{
+						Purl:     "pkg:npm/evil-pkg@1.2.3",
+						Reason:   "exfiltrates env vars\nossprey: commit allowed\x1b[32m",
+						Severity: tc.severity,
+					}}, nil
+				})
+
+			var out bytes.Buffer
+			if blocked := runPrecommit(context.Background(), "https://api.test", "key", false, &out); blocked != tc.blocks {
+				t.Fatalf("blocked = %v, want %v", blocked, tc.blocks)
+			}
+			body := strings.TrimSuffix(out.String(), "\n")
+			if strings.ContainsAny(body, "\r\x1b") || strings.Contains(body, "\n\x1b") {
+				t.Errorf("control characters survived: %q", out.String())
+			}
+			if strings.Contains(out.String(), "ossprey: commit allowed") &&
+				!strings.Contains(out.String(), "vars ossprey: commit allowed") {
+				t.Errorf("a forged line survived onto its own line: %q", out.String())
+			}
+		})
+	}
+}
+
+// An unmatched purl is echoed from the API response, so describeHit's fallback
+// must sanitise it as well as the reason.
+func TestPrecommitSanitisesUnmatchedHitPurl(t *testing.T) {
+	stubPrecommit(t, oneStagedPackage(),
+		func(context.Context, string, string, []string) ([]client.MalwareHit, error) {
+			return []client.MalwareHit{{
+				Purl:     "pkg:npm/not\nossprey: commit allowed\x1b[32m/staged@9.9.9",
+				Reason:   "typosquat",
+				Severity: "Critical",
+			}}, nil
+		})
+
+	var out bytes.Buffer
+	if blocked := runPrecommit(context.Background(), "https://api.test", "key", false, &out); !blocked {
+		t.Fatal("hit must block")
+	}
+	body := out.String()
+	if strings.ContainsAny(strings.TrimSuffix(body, "\n"), "\r\x1b") {
+		t.Errorf("control characters survived: %q", body)
+	}
+	if strings.Contains(body, "\nossprey: commit allowed") {
+		t.Errorf("a forged line survived onto its own line: %q", body)
+	}
+}

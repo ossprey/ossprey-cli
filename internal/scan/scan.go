@@ -10,9 +10,11 @@ import (
 
 	"github.com/anchore/packageurl-go"
 
+	"github.com/ossprey/ossprey-cli/internal/apitext"
 	"github.com/ossprey/ossprey-cli/internal/catalog"
 	"github.com/ossprey/ossprey-cli/internal/env"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
+	"github.com/ossprey/ossprey-cli/internal/severity"
 )
 
 type Options struct {
@@ -92,19 +94,41 @@ func InjectTestVulnerability(sbom *ossbom.SBOM) error {
 	return nil
 }
 
-// MalwareReports returns one v1-style report line per vulnerability and a boolean
-// indicating whether any were found.
-func MalwareReports(sbom *ossbom.SBOM) ([]string, bool) {
-	if len(sbom.Vulnerabilities) == 0 {
-		return nil, false
-	}
-	reports := make([]string, 0, len(sbom.Vulnerabilities))
+// MalwareSummary is the human-facing rendering of a scan's findings, split by
+// whether they fail. The wording lives here rather than at the call sites so
+// the verdict text and the exit decision cannot drift apart between scan,
+// check, init and the install forwarder.
+type MalwareSummary struct {
+	// Failing is one v1-style line per finding at or above the floor.
+	Failing []string
+	// Informational is one line per finding below it, reported but not fatal.
+	Informational []string
+}
+
+// MalwareReports renders a scanned SBOM's findings and reports whether any of
+// them fail at the given floor.
+//
+// A finding below the floor (severity Info by default) is reported but does not
+// make the scan fail; see internal/severity. A finding the API could not grade
+// fails at every floor, so an older server that sends no severity behaves
+// exactly as before.
+func MalwareReports(sbom *ossbom.SBOM, floor severity.Level) (MalwareSummary, bool) {
+	var summary MalwareSummary
 	for _, v := range sbom.Vulnerabilities {
 		_, name, version := parsePurl(v.Purl)
-		reports = append(reports,
-			fmt.Sprintf("WARNING: %s:%s contains malware. Remediate this immediately", name, version))
+		// Sanitised here rather than at each format call: the purl is API data on
+		// every path out of this loop, including the failing one.
+		name, version = apitext.OneLine(name), apitext.OneLine(version)
+		if severity.Parse(v.Severity).FailsAt(floor) {
+			summary.Failing = append(summary.Failing,
+				fmt.Sprintf("WARNING: %s:%s contains malware. Remediate this immediately", name, version))
+			continue
+		}
+		summary.Informational = append(summary.Informational,
+			fmt.Sprintf("%s:%s was flagged for information only: %s",
+				name, version, apitext.OneLine(v.Description)))
 	}
-	return reports, true
+	return summary, len(summary.Failing) > 0
 }
 
 // parsePurl splits a PURL like "pkg:pypi/foo@1.2.3" into its ecosystem, name

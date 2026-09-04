@@ -16,6 +16,7 @@ import (
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
 	"github.com/ossprey/ossprey-cli/internal/registry"
 	"github.com/ossprey/ossprey-cli/internal/scan"
+	"github.com/ossprey/ossprey-cli/internal/severity"
 	"github.com/ossprey/ossprey-cli/internal/submit"
 )
 
@@ -60,17 +61,18 @@ func main() {
 
 func newScanCmd() *cobra.Command {
 	var (
-		output          string
-		reportPath      string
-		verbose         bool
-		local           bool
-		dryRunSafe      bool
-		dryRunMalicious bool
-		apiURL          string
-		apiKey          string
-		noVersionLookup bool
-		skipCI          bool
-		cacheScanOnly   bool
+		output              string
+		reportPath          string
+		verbose             bool
+		local               bool
+		dryRunSafe          bool
+		dryRunMalicious     bool
+		failOnInformational bool
+		apiURL              string
+		apiKey              string
+		noVersionLookup     bool
+		skipCI              bool
+		cacheScanOnly       bool
 	)
 
 	cmd := &cobra.Command{
@@ -158,11 +160,11 @@ func newScanCmd() *cobra.Command {
 
 			// Written before the exit below: a malware verdict is exactly the
 			// one CI most needs the report for.
-			if err := writeReport(reportPath, scan.NewReport(sbom)); err != nil {
+			if err := writeReport(reportPath, scan.NewReport(sbom, failingFloor(failOnInformational))); err != nil {
 				return err
 			}
 
-			if reportMalware(sbom) {
+			if reportMalware(sbom, failingFloor(failOnInformational)) {
 				os.Exit(1)
 			}
 
@@ -175,6 +177,7 @@ func newScanCmd() *cobra.Command {
 	cmd.Flags().StringVar(&reportPath, "report", "", "write a JSON verdict report (verdict + findings) to file")
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "verbose logging")
 	cmd.Flags().BoolVar(&local, "local", false, "dump SBOM JSON to stdout and exit (no API submission, no verdict)")
+	cmd.Flags().BoolVar(&failOnInformational, "fail-on-informational", false, "also fail on informational findings, which are reported but exit 0 by default")
 	cmd.Flags().BoolVar(&dryRunSafe, "dry-run-safe", false, "skip API submission; emit empty vulnerability list")
 	cmd.Flags().BoolVar(&dryRunMalicious, "dry-run-malicious", false, "skip API submission; inject test vulnerability against first component")
 	cmd.Flags().BoolVar(&noVersionLookup, "no-version-lookup", false, "don't query the registry to resolve unpinned dependencies; leave them versionless")
@@ -191,12 +194,13 @@ func newScanCmd() *cobra.Command {
 // without needing a project directory.
 func newCheckCmd() *cobra.Command {
 	var (
-		ecosystem       string
-		apiURL          string
-		apiKey          string
-		reportPath      string
-		dryRunSafe      bool
-		dryRunMalicious bool
+		ecosystem           string
+		apiURL              string
+		apiKey              string
+		reportPath          string
+		dryRunSafe          bool
+		dryRunMalicious     bool
+		failOnInformational bool
 	)
 
 	cmd := &cobra.Command{
@@ -243,11 +247,11 @@ func newCheckCmd() *cobra.Command {
 				return err
 			}
 
-			if err := writeReport(reportPath, scan.NewReport(sbom)); err != nil {
+			if err := writeReport(reportPath, scan.NewReport(sbom, failingFloor(failOnInformational))); err != nil {
 				return err
 			}
 
-			if reportMalware(sbom) {
+			if reportMalware(sbom, failingFloor(failOnInformational)) {
 				os.Exit(1)
 			}
 
@@ -260,6 +264,7 @@ func newCheckCmd() *cobra.Command {
 	cmd.Flags().StringVar(&reportPath, "report", "", "write a JSON verdict report (verdict + findings) to file")
 	cmd.Flags().StringVar(&apiURL, "url", defaultAPIURL, "Ossprey API URL")
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "Ossprey API key (or OSSPREY_API_KEY / API_KEY env var; optional after `ossprey login`)")
+	cmd.Flags().BoolVar(&failOnInformational, "fail-on-informational", false, "also fail on informational findings, which are reported but exit 0 by default")
 	cmd.Flags().BoolVar(&dryRunSafe, "dry-run-safe", false, "skip API submission; emit empty vulnerability list")
 	cmd.Flags().BoolVar(&dryRunMalicious, "dry-run-malicious", false, "skip API submission; inject test vulnerability against first package")
 
@@ -308,16 +313,35 @@ func newForwardCmd(bin string) *cobra.Command {
 	}
 }
 
-// reportMalware prints one "Error: ..." line per malware finding and reports
-// whether any were found. Shared by scan, check and init so the verdict wording
-// and the exit decision cannot drift apart between them. Callers own the
-// os.Exit(1) and their own success message.
-func reportMalware(sbom *ossbom.SBOM) bool {
-	reports, hasMalware := scan.MalwareReports(sbom)
-	for _, msg := range reports {
+// reportMalware prints one "Error: ..." line per failing malware finding, plus a
+// "Note: ..." line per informational one, and reports whether any finding fails.
+// Shared by scan, check and init so the verdict wording and the exit decision
+// cannot drift apart between them. Callers own the os.Exit(1) and their own
+// success message.
+//
+// An informational finding is printed and then deliberately exits 0, the same
+// posture as a quota skip: a real API result the user is told about but is not
+// blocked by.
+func reportMalware(sbom *ossbom.SBOM, floor severity.Level) bool {
+	summary, hasMalware := scan.MalwareReports(sbom, floor)
+	for _, msg := range summary.Failing {
 		fmt.Println("Error: " + msg)
 	}
+	for _, msg := range summary.Informational {
+		fmt.Println("Note: " + msg)
+	}
 	return hasMalware
+}
+
+// failingFloor is the severity at or above which a finding fails this run.
+// --fail-on-informational lowers it so that everything the scan reports fails,
+// which is the stricter direction; there is deliberately no way to raise it,
+// because that would let a real detection pass.
+func failingFloor(failOnInformational bool) severity.Level {
+	if failOnInformational {
+		return severity.Info
+	}
+	return severity.FailingFloor
 }
 
 // printSkipped prints a friendly quota-skip message and returns the typed

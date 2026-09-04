@@ -23,7 +23,13 @@ type report struct {
 		Ecosystem string `json:"ecosystem"`
 		Name      string `json:"name"`
 		Version   string `json:"version"`
+		Severity  string `json:"severity"`
 	} `json:"findings"`
+	Informational []struct {
+		Purl     string `json:"purl"`
+		Name     string `json:"name"`
+		Severity string `json:"severity"`
+	} `json:"informational"`
 }
 
 func readReport(t *testing.T, path string) report {

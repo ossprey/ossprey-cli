@@ -23,6 +23,7 @@ import (
 	"github.com/ossprey/ossprey-cli/internal/progress"
 	"github.com/ossprey/ossprey-cli/internal/registry"
 	"github.com/ossprey/ossprey-cli/internal/scan"
+	"github.com/ossprey/ossprey-cli/internal/severity"
 	"github.com/ossprey/ossprey-cli/internal/shim"
 	"github.com/ossprey/ossprey-cli/internal/submit"
 )
@@ -302,8 +303,14 @@ func resolveSpecs(ctx context.Context, resolve func(context.Context, string, str
 // reportAndForward blocks (ErrBlocked) if sbom carries malware, else execs the
 // real manager with the original args.
 func reportAndForward(ctx context.Context, m *Manager, opts Options, sbom *ossbom.SBOM) error {
-	if reports, hasMalware := scan.MalwareReports(sbom); hasMalware {
-		for _, msg := range reports {
+	// The forwarders parse no flags of their own (DisableFlagParsing), so there
+	// is nowhere to opt into a stricter floor; the default applies.
+	summary, hasMalware := scan.MalwareReports(sbom, severity.FailingFloor)
+	for _, msg := range summary.Informational {
+		fmt.Fprintln(os.Stderr, "ossprey: "+msg)
+	}
+	if hasMalware {
+		for _, msg := range summary.Failing {
 			fmt.Fprintln(os.Stderr, "Error: "+msg)
 		}
 		fmt.Fprintf(os.Stderr, "ossprey: blocked `%s %s`\n", m.Bin, strings.Join(opts.Args, " "))

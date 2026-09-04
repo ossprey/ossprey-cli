@@ -171,8 +171,17 @@ ossprey scan .
 
 Exit codes:
 
-- `0` — no malware found, `--local` dump, or scan skipped by the API (e.g. quota exhausted)
+- `0` — no malware found, only informational findings, `--local` dump, or scan skipped by the API (e.g. quota exhausted)
 - `1` — malware found, **or** the scan itself failed (bad path, catalog error, API/network error, missing key)
+
+A finding graded `Info` is reported as a `Note:` line and does not fail the
+scan. Every other grade fails, and so does a finding the API could not grade,
+so an older server that sends no grade behaves exactly as before.
+
+Pass `--fail-on-informational` to fail on those too, if you would rather your
+build stopped on anything Ossprey reports at all. It only ever makes the check
+stricter; there is deliberately no flag to raise the threshold, because that
+would let a real detection through.
 
 If you need to distinguish "clean" from "errored" in CI, pass
 [`--report report.json`](#machine-readable-verdict---report): the file exists
@@ -393,6 +402,7 @@ ossprey scan [path] [flags]
 | `--no-version-lookup` | Don't query the registry to resolve unpinned dependencies; leave them versionless. |
 | `--url <url>` | Override the Ossprey API URL (default `https://api.ossprey.com`). |
 | `--api-key <key>` | Provide the API key on the command line instead of an env var. |
+| `--fail-on-informational` | Also fail on informational findings, which are reported but exit 0 by default. |
 | `--dry-run-safe` | Skip the API; report an empty vulnerability list. |
 | `--dry-run-malicious` | Skip the API; inject a test finding against the first component. |
 | `--skip-ci` | Skip the Ossprey scan entirely and exit 0. Also settable as `OSSPREY_SKIP_CI=1`. |
@@ -470,7 +480,8 @@ registry (PyPI / npm) and checked. Both `name@version` and pip's
 | `--dry-run-safe` | Skip the API; report an empty vulnerability list. |
 | `--dry-run-malicious` | Skip the API; inject a test finding against the first package. |
 
-Exit codes match `scan`: `1` on a malware verdict or error, `0` otherwise.
+Exit codes match `scan`: `1` on a malware verdict or error, `0` otherwise
+(an `Info` finding is reported but does not fail).
 
 ## Package-manager forwarder
 

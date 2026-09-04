@@ -10,9 +10,11 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/ossprey/ossprey-cli/internal/apitext"
 	"github.com/ossprey/ossprey-cli/internal/auth"
 	"github.com/ossprey/ossprey-cli/internal/client"
 	"github.com/ossprey/ossprey-cli/internal/precommit"
+	"github.com/ossprey/ossprey-cli/internal/severity"
 	"github.com/ossprey/ossprey-cli/internal/submit"
 )
 
@@ -107,10 +109,13 @@ Intended to be run from a git pre-commit hook. Silent when the commit is
 clean.
 
 Exit codes:
-  0  no known-malicious packages staged, or the check was skipped
-     (no API key or login session, network/API error, not a git repo) —
-     the check fails open so it can never break committing
-  1  one or more staged packages are known-malicious`,
+  0  no known-malicious packages staged, only informational findings, or
+     the check was skipped (no API key or login session, network/API error,
+     not a git repo) — the check fails open so it can never break committing
+  1  one or more staged packages are known-malicious
+
+An informational finding (severity Info) is printed but does not block the
+commit. Anything we cannot grade does block.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if runPrecommit(cmd.Context(), apiURL, apiKey, verbose, os.Stderr) {
@@ -147,7 +152,6 @@ func runPrecommit(ctx context.Context, apiURL, apiKey string, verbose bool, w io
 	// declares a range with no lockfile pinning it — resolving "latest" here
 	// could block a commit over a version the developer will never install.
 	// Commit-time false blocks are the product risk, so skip them.
-	type staged struct{ pkg precommit.Package }
 	byPurl := make(map[string]staged)
 	var purls []string
 	for _, p := range delta.Packages {
@@ -175,7 +179,20 @@ func runPrecommit(ctx context.Context, apiURL, apiKey string, verbose bool, w io
 		fmt.Fprintf(w, "ossprey: malware check unavailable (%v); allowing commit\n", err)
 		return false
 	}
-	if len(hits) == 0 {
+	// An informational hit is reported but must not block a commit, which is
+	// consistent with this hook's documented fail-open posture. A hit the server
+	// could not grade blocks, so an older server behaves exactly as before.
+	var blocking []client.MalwareHit
+	for _, h := range hits {
+		if severity.Parse(h.Severity).Fails() {
+			blocking = append(blocking, h)
+			continue
+		}
+		fmt.Fprintf(w, "ossprey: %s flagged for information only: %s\n",
+			describeHit(h, byPurl), apitext.OneLine(h.Reason))
+	}
+
+	if len(blocking) == 0 {
 		if verbose {
 			fmt.Fprintf(w, "ossprey: %d staged package(s) checked, none known-malicious\n", len(purls))
 		}
@@ -183,18 +200,28 @@ func runPrecommit(ctx context.Context, apiURL, apiKey string, verbose bool, w io
 	}
 
 	fmt.Fprintln(w, "ossprey: commit blocked — known malicious package(s) staged:")
-	for _, h := range hits {
-		if s, ok := byPurl[h.Purl]; ok {
-			fmt.Fprintf(w, "  %s@%s (%s, from %s): %s\n", s.pkg.Name, s.pkg.Version, s.pkg.Type, s.pkg.Path, h.Reason)
-			continue
-		}
-		// Purl not echoed back exactly as sent — report it raw rather than
-		// dropping a hit.
-		name, version := splitHitPurl(h.Purl)
-		fmt.Fprintf(w, "  %s@%s: %s\n", name, version, h.Reason)
+	for _, h := range blocking {
+		fmt.Fprintf(w, "  %s: %s\n", describeHit(h, byPurl), apitext.OneLine(h.Reason))
 	}
 	fmt.Fprintln(w, "Remove the package(s) and re-stage, or bypass at your own risk with `git commit --no-verify`.")
 	return true
+}
+
+// staged is a staged package indexed by the purl sent to the malware check, so a
+// hit can be reported with the details the developer recognises.
+type staged struct{ pkg precommit.Package }
+
+// describeHit names a hit for the user, preferring the staged package's own
+// details. Falls back to the raw purl when the server did not echo it back
+// exactly as sent, rather than dropping the hit.
+func describeHit(h client.MalwareHit, byPurl map[string]staged) string {
+	if s, ok := byPurl[h.Purl]; ok {
+		return fmt.Sprintf("%s@%s (%s, from %s)", s.pkg.Name, s.pkg.Version, s.pkg.Type, s.pkg.Path)
+	}
+	// The matched branch above describes the package from the staged lockfile;
+	// this one echoes the API's own purl, so it needs sanitising.
+	name, version := splitHitPurl(h.Purl)
+	return fmt.Sprintf("%s@%s", apitext.OneLine(name), apitext.OneLine(version))
 }
 
 // splitHitPurl extracts (name, version) from "pkg:<type>/<name>@<version>".
