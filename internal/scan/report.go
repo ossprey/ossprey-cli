@@ -62,19 +62,24 @@ type Skip struct {
 // so nothing else may.
 //
 // Findings is always non-nil so `jq '.findings | length'` works on a clean
-// scan too.
+// scan too, and it holds only findings that fail: a consumer counting it to
+// say "N malicious packages" stays correct without knowing what a severity is.
+// Findings below the failing floor go in Informational instead, which is
+// omitted when empty so a consumer that predates it sees no change.
 type Report struct {
-	Verdict    string    `json:"verdict"`
-	Project    string    `json:"project,omitempty"`
-	Path       string    `json:"path,omitempty"`
-	Components int       `json:"components"`
-	Findings   []Finding `json:"findings"`
-	Skipped    *Skip     `json:"skipped,omitempty"`
+	Verdict       string    `json:"verdict"`
+	Project       string    `json:"project,omitempty"`
+	Path          string    `json:"path,omitempty"`
+	Components    int       `json:"components"`
+	Findings      []Finding `json:"findings"`
+	Informational []Finding `json:"informational,omitempty"`
+	Skipped       *Skip     `json:"skipped,omitempty"`
 }
 
 // NewReport summarises a scanned SBOM: "malware" when any finding is at or
 // above the failing severity floor, "informational" when it found only findings
-// below it, "clean" when it found nothing.
+// below it, "clean" when it found nothing. Findings are split across the two
+// arrays by the same floor that decides the exit code.
 func NewReport(sbom *ossbom.SBOM) Report {
 	r := Report{
 		Verdict:    VerdictClean,
@@ -83,10 +88,9 @@ func NewReport(sbom *ossbom.SBOM) Report {
 		Components: len(sbom.Components),
 		Findings:   []Finding{},
 	}
-	failing := 0
 	for _, v := range sbom.Vulnerabilities {
 		eco, name, version := parsePurl(v.Purl)
-		r.Findings = append(r.Findings, Finding{
+		f := Finding{
 			Purl:        v.Purl,
 			Ecosystem:   eco,
 			Name:        name,
@@ -96,15 +100,17 @@ func NewReport(sbom *ossbom.SBOM) Report {
 			Severity:    v.Severity,
 			Description: v.Description,
 			Reference:   v.Reference,
-		})
-		if severity.Parse(v.Severity).Fails() {
-			failing++
 		}
+		if severity.Parse(v.Severity).Fails() {
+			r.Findings = append(r.Findings, f)
+			continue
+		}
+		r.Informational = append(r.Informational, f)
 	}
 	switch {
-	case failing > 0:
-		r.Verdict = VerdictMalware
 	case len(r.Findings) > 0:
+		r.Verdict = VerdictMalware
+	case len(r.Informational) > 0:
 		r.Verdict = VerdictInformational
 	}
 	return r

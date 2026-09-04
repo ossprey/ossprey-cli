@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
@@ -119,11 +120,49 @@ func TestNewReportInformationalVerdict(t *testing.T) {
 	if r.Verdict != VerdictInformational {
 		t.Errorf("verdict = %q, want %q", r.Verdict, VerdictInformational)
 	}
-	if len(r.Findings) != 1 {
-		t.Fatalf("findings = %d, want 1", len(r.Findings))
+	// findings holds only what fails, so a consumer counting it to say
+	// "N malicious packages" stays correct.
+	if len(r.Findings) != 0 {
+		t.Fatalf("findings = %d, want 0", len(r.Findings))
 	}
-	if r.Findings[0].Severity != "Info" {
-		t.Errorf("severity = %q, want Info", r.Findings[0].Severity)
+	if len(r.Informational) != 1 {
+		t.Fatalf("informational = %d, want 1", len(r.Informational))
+	}
+	if r.Informational[0].Severity != "Info" {
+		t.Errorf("severity = %q, want Info", r.Informational[0].Severity)
+	}
+}
+
+// The count a consumer renders as "N malicious packages" must not include an
+// informational finding found in the same scan.
+func TestNewReportSplitsMixedFindings(t *testing.T) {
+	s := ossbom.New(ossbom.Environment{Project: "p"})
+	s.AddVulnerability(ossbom.Vulnerability{ID: "Z", Purl: "pkg:npm/removed@0.0.1-security", Severity: "Info"})
+	s.AddVulnerability(ossbom.Vulnerability{ID: "X", Purl: "pkg:pypi/evil@1.0.0", Severity: "Critical"})
+
+	r := NewReport(s)
+	if r.Verdict != VerdictMalware {
+		t.Errorf("verdict = %q, want %q", r.Verdict, VerdictMalware)
+	}
+	if len(r.Findings) != 1 || r.Findings[0].Name != "evil" {
+		t.Fatalf("findings = %+v, want just evil", r.Findings)
+	}
+	if len(r.Informational) != 1 || r.Informational[0].Name != "removed" {
+		t.Fatalf("informational = %+v, want just removed", r.Informational)
+	}
+}
+
+// Omitted when empty, so a consumer that predates the field sees no change.
+func TestNewReportOmitsEmptyInformational(t *testing.T) {
+	s := ossbom.New(ossbom.Environment{Project: "p"})
+	s.AddVulnerability(ossbom.Vulnerability{ID: "X", Purl: "pkg:pypi/evil@1.0.0", Severity: "Critical"})
+
+	raw, err := json.Marshal(NewReport(s))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(raw), "informational") {
+		t.Errorf("informational key present on a malware-only report: %s", raw)
 	}
 }
 
