@@ -10,6 +10,7 @@ import (
 
 	"github.com/anchore/packageurl-go"
 
+	"github.com/ossprey/ossprey-cli/internal/apitext"
 	"github.com/ossprey/ossprey-cli/internal/catalog"
 	"github.com/ossprey/ossprey-cli/internal/env"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
@@ -109,7 +110,8 @@ func MalwareReports(sbom *ossbom.SBOM) (failing []string, hasMalware bool, infor
 			continue
 		}
 		informational = append(informational,
-			fmt.Sprintf("%s:%s was flagged for information only: %s", name, version, v.Description))
+			fmt.Sprintf("%s:%s was flagged for information only: %s",
+				name, version, apitext.OneLine(v.Description)))
 	}
 	return failing, len(failing) > 0, informational
 }

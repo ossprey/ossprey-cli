@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/ossprey/ossprey-cli/internal/apitext"
 	"github.com/ossprey/ossprey-cli/internal/auth"
 	"github.com/ossprey/ossprey-cli/internal/client"
 	"github.com/ossprey/ossprey-cli/internal/precommit"
@@ -187,7 +188,8 @@ func runPrecommit(ctx context.Context, apiURL, apiKey string, verbose bool, w io
 			blocking = append(blocking, h)
 			continue
 		}
-		fmt.Fprintf(w, "ossprey: %s flagged for information only: %s\n", describeHit(h, byPurl), h.Reason)
+		fmt.Fprintf(w, "ossprey: %s flagged for information only: %s\n",
+			describeHit(h, byPurl), apitext.OneLine(h.Reason))
 	}
 
 	if len(blocking) == 0 {
@@ -199,7 +201,7 @@ func runPrecommit(ctx context.Context, apiURL, apiKey string, verbose bool, w io
 
 	fmt.Fprintln(w, "ossprey: commit blocked — known malicious package(s) staged:")
 	for _, h := range blocking {
-		fmt.Fprintf(w, "  %s: %s\n", describeHit(h, byPurl), h.Reason)
+		fmt.Fprintf(w, "  %s: %s\n", describeHit(h, byPurl), apitext.OneLine(h.Reason))
 	}
 	fmt.Fprintln(w, "Remove the package(s) and re-stage, or bypass at your own risk with `git commit --no-verify`.")
 	return true

@@ -399,3 +399,26 @@ func TestRunNamesTheScanFromCI(t *testing.T) {
 		t.Errorf("attribution: got %q/%q", sbom.Env.GithubOrg, sbom.Env.GithubRepo)
 	}
 }
+
+// A description is API-supplied free text printed straight to a terminal, so a
+// newline in it must not be able to forge an extra report line.
+func TestMalwareReportsSanitisesInformationalDescription(t *testing.T) {
+	s := ossbom.New(ossbom.Environment{})
+	s.AddVulnerability(ossbom.Vulnerability{
+		ID:          "Z",
+		Purl:        "pkg:npm/removed@0.0.1-security",
+		Description: "removed from NPM\nError: pkg:npm/other@1.0.0 contains malware\x1b[31m",
+		Severity:    "Info",
+	})
+
+	_, hasMalware, informational := MalwareReports(s)
+	if hasMalware {
+		t.Fatal("an informational finding must not fail the scan")
+	}
+	if len(informational) != 1 {
+		t.Fatalf("informational = %d, want 1", len(informational))
+	}
+	if strings.ContainsAny(informational[0], "\n\r\x1b") {
+		t.Errorf("control characters survived into the report line: %q", informational[0])
+	}
+}

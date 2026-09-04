@@ -381,3 +381,40 @@ func TestPrecommitUngradedHitBlocks(t *testing.T) {
 		t.Fatal("a hit with no severity must block")
 	}
 }
+
+// The reason is API-supplied free text printed to the developer's terminal, on
+// both the blocking and the informational line.
+func TestPrecommitSanitisesHitReason(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		severity string
+		blocks   bool
+	}{
+		{"blocking", "Critical", true},
+		{"informational", "Info", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stubPrecommit(t, oneStagedPackage(),
+				func(context.Context, string, string, []string) ([]client.MalwareHit, error) {
+					return []client.MalwareHit{{
+						Purl:     "pkg:npm/evil-pkg@1.2.3",
+						Reason:   "exfiltrates env vars\nossprey: commit allowed\x1b[32m",
+						Severity: tc.severity,
+					}}, nil
+				})
+
+			var out bytes.Buffer
+			if blocked := runPrecommit(context.Background(), "https://api.test", "key", false, &out); blocked != tc.blocks {
+				t.Fatalf("blocked = %v, want %v", blocked, tc.blocks)
+			}
+			body := strings.TrimSuffix(out.String(), "\n")
+			if strings.ContainsAny(body, "\r\x1b") || strings.Contains(body, "\n\x1b") {
+				t.Errorf("control characters survived: %q", out.String())
+			}
+			if strings.Contains(out.String(), "ossprey: commit allowed") &&
+				!strings.Contains(out.String(), "vars ossprey: commit allowed") {
+				t.Errorf("a forged line survived onto its own line: %q", out.String())
+			}
+		})
+	}
+}
