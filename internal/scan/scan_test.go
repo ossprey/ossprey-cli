@@ -443,3 +443,29 @@ func TestMalwareReportsAtInfoFloor(t *testing.T) {
 		t.Errorf("informational = %d, want 0", len(summary.Informational))
 	}
 }
+
+// The purl is API data too, so a malformed one must not be able to forge output
+// through the name or version on either the failing or the informational line.
+func TestMalwareReportsSanitisesPurlDerivedOutput(t *testing.T) {
+	s := ossbom.New(ossbom.Environment{})
+	s.AddVulnerability(ossbom.Vulnerability{
+		ID:       "X",
+		Purl:     "pkg:npm/evil\nError: forged line\x1b[31m@1.0.0",
+		Severity: "Critical",
+	})
+	s.AddVulnerability(ossbom.Vulnerability{
+		ID:       "Z",
+		Purl:     "pkg:npm/info\rspoof\x1b[32m@0.0.1-security",
+		Severity: "Info",
+	})
+
+	summary, hasMalware := MalwareReports(s, severity.FailingFloor)
+	if !hasMalware {
+		t.Fatal("the Critical finding must still fail")
+	}
+	for _, line := range append(append([]string{}, summary.Failing...), summary.Informational...) {
+		if strings.ContainsAny(line, "\n\r\x1b") {
+			t.Errorf("control characters survived into a report line: %q", line)
+		}
+	}
+}

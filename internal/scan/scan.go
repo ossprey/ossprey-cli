@@ -116,6 +116,9 @@ func MalwareReports(sbom *ossbom.SBOM, floor severity.Level) (MalwareSummary, bo
 	var summary MalwareSummary
 	for _, v := range sbom.Vulnerabilities {
 		_, name, version := parsePurl(v.Purl)
+		// Sanitised here rather than at each format call: the purl is API data on
+		// every path out of this loop, including the failing one.
+		name, version = apitext.OneLine(name), apitext.OneLine(version)
 		if severity.Parse(v.Severity).FailsAt(floor) {
 			summary.Failing = append(summary.Failing,
 				fmt.Sprintf("WARNING: %s:%s contains malware. Remediate this immediately", name, version))

@@ -18,11 +18,22 @@ import (
 // short enough that a runaway field cannot bury the verdict above it.
 const maxLen = 500
 
+// maxInput bounds what OneLine will process. Normalisation only ever shortens a
+// string, so no input longer than one line's worth of runes at UTF-8's
+// worst-case width can contribute to the result -- and reading further would
+// let a hostile response size our allocations for us.
+const maxInput = maxLen * 4
+
 // OneLine returns s as a single printable line: control and formatting
 // characters become spaces, runs of whitespace collapse, and the result is
 // trimmed and truncated. Safe to interpolate into a message written to a
 // terminal.
 func OneLine(s string) string {
+	truncated := false
+	if len(s) > maxInput {
+		// A cut mid-rune yields utf8.RuneError, which the loop below drops.
+		s, truncated = s[:maxInput], true
+	}
 	var b strings.Builder
 	b.Grow(len(s))
 	for _, r := range s {
@@ -41,8 +52,11 @@ func OneLine(s string) string {
 	out := strings.Join(strings.Fields(b.String()), " ")
 	if utf8.RuneCountInString(out) > maxLen {
 		// Cut on a rune boundary so truncation cannot emit a partial sequence.
-		runes := []rune(out)
-		out = string(runes[:maxLen]) + "..."
+		out = string([]rune(out)[:maxLen])
+		truncated = true
+	}
+	if truncated {
+		out += "..."
 	}
 	return out
 }

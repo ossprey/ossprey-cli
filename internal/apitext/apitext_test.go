@@ -59,3 +59,38 @@ func TestOneLineEmpty(t *testing.T) {
 		}
 	}
 }
+
+// A hostile response must not size our allocations. Normalisation only ever
+// shortens, so nothing past maxInput can reach the output anyway.
+func TestOneLineBoundsItsInput(t *testing.T) {
+	huge := strings.Repeat("a", 50*1024*1024)
+	got := OneLine(huge)
+	if utf8.RuneCountInString(got) != maxLen+3 {
+		t.Errorf("rune count = %d, want %d", utf8.RuneCountInString(got), maxLen+3)
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Error("a bounded input must still be marked truncated")
+	}
+}
+
+// Truncating the input must not silently drop content with no ellipsis, even
+// when collapsing whitespace brings the result back under the cap.
+func TestOneLineMarksInputTruncationEvenWhenOutputIsShort(t *testing.T) {
+	// Mostly control characters: they collapse to almost nothing, so the output
+	// is short despite the input being far past the bound.
+	got := OneLine("head" + strings.Repeat("\n", maxInput*2) + "tail")
+	if !strings.HasSuffix(got, "...") {
+		t.Errorf("expected an ellipsis marking the dropped tail, got %q", got)
+	}
+	if strings.Contains(got, "tail") {
+		t.Errorf("content past the bound should not appear, got %q", got)
+	}
+}
+
+// Cutting mid-rune must not leak a partial sequence.
+func TestOneLineBoundedCutStaysValidUTF8(t *testing.T) {
+	got := OneLine(strings.Repeat("é", maxInput))
+	if !utf8.ValidString(got) {
+		t.Errorf("bounded cut produced invalid UTF-8: %q", got)
+	}
+}

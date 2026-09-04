@@ -418,3 +418,28 @@ func TestPrecommitSanitisesHitReason(t *testing.T) {
 		})
 	}
 }
+
+// An unmatched purl is echoed from the API response, so describeHit's fallback
+// must sanitise it as well as the reason.
+func TestPrecommitSanitisesUnmatchedHitPurl(t *testing.T) {
+	stubPrecommit(t, oneStagedPackage(),
+		func(context.Context, string, string, []string) ([]client.MalwareHit, error) {
+			return []client.MalwareHit{{
+				Purl:     "pkg:npm/not\nossprey: commit allowed\x1b[32m/staged@9.9.9",
+				Reason:   "typosquat",
+				Severity: "Critical",
+			}}, nil
+		})
+
+	var out bytes.Buffer
+	if blocked := runPrecommit(context.Background(), "https://api.test", "key", false, &out); !blocked {
+		t.Fatal("hit must block")
+	}
+	body := out.String()
+	if strings.ContainsAny(strings.TrimSuffix(body, "\n"), "\r\x1b") {
+		t.Errorf("control characters survived: %q", body)
+	}
+	if strings.Contains(body, "\nossprey: commit allowed") {
+		t.Errorf("a forged line survived onto its own line: %q", body)
+	}
+}

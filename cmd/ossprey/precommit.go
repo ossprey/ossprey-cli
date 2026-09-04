@@ -218,8 +218,10 @@ func describeHit(h client.MalwareHit, byPurl map[string]staged) string {
 	if s, ok := byPurl[h.Purl]; ok {
 		return fmt.Sprintf("%s@%s (%s, from %s)", s.pkg.Name, s.pkg.Version, s.pkg.Type, s.pkg.Path)
 	}
+	// The matched branch above describes the package from the staged lockfile;
+	// this one echoes the API's own purl, so it needs sanitising.
 	name, version := splitHitPurl(h.Purl)
-	return fmt.Sprintf("%s@%s", name, version)
+	return fmt.Sprintf("%s@%s", apitext.OneLine(name), apitext.OneLine(version))
 }
 
 // splitHitPurl extracts (name, version) from "pkg:<type>/<name>@<version>".
