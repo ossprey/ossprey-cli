@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
+	"github.com/ossprey/ossprey-cli/internal/severity"
 )
 
 // The verdicts a Report can carry. They are part of the file's contract with
@@ -23,17 +24,27 @@ const (
 	VerdictClean   = "clean"
 	VerdictMalware = "malware"
 	VerdictSkipped = "skipped"
+	// VerdictInformational is a scan whose only findings are below the failing
+	// severity floor. Its own verdict for the same reason "skipped" is: the scan
+	// did find something and said so, and a consumer that renders it as "no
+	// malware found" is hiding a finding we deliberately surfaced. Consumers
+	// that only know clean/malware/skipped should treat it as non-failing.
+	VerdictInformational = "informational"
 )
 
 // Finding is one malicious package, pre-split so a consumer doesn't have to
 // parse PURLs to render "name @ version".
 type Finding struct {
-	Purl        string `json:"purl"`
-	Ecosystem   string `json:"ecosystem,omitempty"`
-	Name        string `json:"name"`
-	Version     string `json:"version,omitempty"`
-	ID          string `json:"id,omitempty"`
-	Type        string `json:"type,omitempty"`
+	Purl      string `json:"purl"`
+	Ecosystem string `json:"ecosystem,omitempty"`
+	Name      string `json:"name"`
+	Version   string `json:"version,omitempty"`
+	ID        string `json:"id,omitempty"`
+	Type      string `json:"type,omitempty"`
+	// Severity grades the finding (Info, Low, Medium, High, Critical). Empty
+	// when the API could not grade it, which counts as failing. Only Info is
+	// below the failing floor.
+	Severity    string `json:"severity,omitempty"`
 	Description string `json:"description,omitempty"`
 	Reference   string `json:"reference,omitempty"`
 }
@@ -61,8 +72,9 @@ type Report struct {
 	Skipped    *Skip     `json:"skipped,omitempty"`
 }
 
-// NewReport summarises a scanned SBOM: "malware" when it carries
-// vulnerabilities, "clean" otherwise.
+// NewReport summarises a scanned SBOM: "malware" when any finding is at or
+// above the failing severity floor, "informational" when it found only findings
+// below it, "clean" when it found nothing.
 func NewReport(sbom *ossbom.SBOM) Report {
 	r := Report{
 		Verdict:    VerdictClean,
@@ -71,6 +83,7 @@ func NewReport(sbom *ossbom.SBOM) Report {
 		Components: len(sbom.Components),
 		Findings:   []Finding{},
 	}
+	failing := 0
 	for _, v := range sbom.Vulnerabilities {
 		eco, name, version := parsePurl(v.Purl)
 		r.Findings = append(r.Findings, Finding{
@@ -80,12 +93,19 @@ func NewReport(sbom *ossbom.SBOM) Report {
 			Version:     version,
 			ID:          v.ID,
 			Type:        v.Type,
+			Severity:    v.Severity,
 			Description: v.Description,
 			Reference:   v.Reference,
 		})
+		if severity.Parse(v.Severity).Fails() {
+			failing++
+		}
 	}
-	if len(r.Findings) > 0 {
+	switch {
+	case failing > 0:
 		r.Verdict = VerdictMalware
+	case len(r.Findings) > 0:
+		r.Verdict = VerdictInformational
 	}
 	return r
 }

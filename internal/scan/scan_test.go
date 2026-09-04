@@ -229,6 +229,8 @@ func TestMalwareReports(t *testing.T) {
 		wantHas     bool
 		wantNReport int
 		wantMatch   string
+		wantNInfo   int
+		wantInfo    string
 	}{
 		{
 			name:        "no vulnerabilities",
@@ -254,6 +256,55 @@ func TestMalwareReports(t *testing.T) {
 			wantHas:     true,
 			wantNReport: 2,
 		},
+		{
+			// Info is the only level below the failing floor.
+			name: "informational only does not fail",
+			vulns: []ossbom.Vulnerability{
+				{
+					ID:          "Z",
+					Purl:        "pkg:npm/removed@0.0.1-security",
+					Description: "This package was previously identified as malicious and removed from NPM",
+					Severity:    "Info",
+				},
+			},
+			wantHas:     false,
+			wantNReport: 0,
+			wantNInfo:   1,
+			wantInfo: "removed:0.0.1-security was flagged for information only: " +
+				"This package was previously identified as malicious and removed from NPM",
+		},
+		{
+			// Info must not mask a real detection in the same SBOM.
+			name: "informational alongside a real detection still fails",
+			vulns: []ossbom.Vulnerability{
+				{ID: "Z", Purl: "pkg:npm/removed@0.0.1-security", Severity: "Info"},
+				{ID: "X", Purl: "pkg:pypi/requests@2.31.0", Severity: "Critical"},
+			},
+			wantHas:     true,
+			wantNReport: 1,
+			wantMatch:   "WARNING: requests:2.31.0 contains malware. Remediate this immediately",
+			wantNInfo:   1,
+		},
+		{
+			// Casing has varied in the store, so parsing is case-insensitive.
+			name: "uppercase INFO still does not fail",
+			vulns: []ossbom.Vulnerability{
+				{ID: "Z", Purl: "pkg:npm/removed@0.0.1-security", Severity: "INFO"},
+			},
+			wantHas:     false,
+			wantNReport: 0,
+			wantNInfo:   1,
+		},
+		{
+			// Fail closed: an ungraded finding is exactly what an older server
+			// sends, and what an OSV-sourced finding carries.
+			name: "unrecognised severity fails",
+			vulns: []ossbom.Vulnerability{
+				{ID: "X", Purl: "pkg:pypi/requests@2.31.0", Severity: "bogus"},
+			},
+			wantHas:     true,
+			wantNReport: 1,
+		},
 	}
 
 	for _, tt := range tests {
@@ -262,7 +313,7 @@ func TestMalwareReports(t *testing.T) {
 			for _, v := range tt.vulns {
 				s.AddVulnerability(v)
 			}
-			reports, has := MalwareReports(s)
+			reports, has, informational := MalwareReports(s)
 			if has != tt.wantHas {
 				t.Errorf("has: got %v, want %v", has, tt.wantHas)
 			}
@@ -271,6 +322,12 @@ func TestMalwareReports(t *testing.T) {
 			}
 			if tt.wantMatch != "" && reports[0] != tt.wantMatch {
 				t.Errorf("report[0]: got %q, want %q", reports[0], tt.wantMatch)
+			}
+			if len(informational) != tt.wantNInfo {
+				t.Fatalf("informational: got %d, want %d", len(informational), tt.wantNInfo)
+			}
+			if tt.wantInfo != "" && informational[0] != tt.wantInfo {
+				t.Errorf("informational[0]: got %q, want %q", informational[0], tt.wantInfo)
 			}
 		})
 	}

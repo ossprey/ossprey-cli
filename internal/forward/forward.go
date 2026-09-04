@@ -302,7 +302,11 @@ func resolveSpecs(ctx context.Context, resolve func(context.Context, string, str
 // reportAndForward blocks (ErrBlocked) if sbom carries malware, else execs the
 // real manager with the original args.
 func reportAndForward(ctx context.Context, m *Manager, opts Options, sbom *ossbom.SBOM) error {
-	if reports, hasMalware := scan.MalwareReports(sbom); hasMalware {
+	reports, hasMalware, informational := scan.MalwareReports(sbom)
+	for _, msg := range informational {
+		fmt.Fprintln(os.Stderr, "ossprey: "+msg)
+	}
+	if hasMalware {
 		for _, msg := range reports {
 			fmt.Fprintln(os.Stderr, "Error: "+msg)
 		}

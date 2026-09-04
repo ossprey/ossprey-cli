@@ -171,8 +171,12 @@ ossprey scan .
 
 Exit codes:
 
-- `0` — no malware found, `--local` dump, or scan skipped by the API (e.g. quota exhausted)
+- `0` — no malware found, only informational findings, `--local` dump, or scan skipped by the API (e.g. quota exhausted)
 - `1` — malware found, **or** the scan itself failed (bad path, catalog error, API/network error, missing key)
+
+A finding graded `Info` is reported as a `Note:` line and does not fail the
+scan. Every other grade fails, and so does a finding the API could not grade,
+so an older server that sends no grade behaves exactly as before.
 
 If you need to distinguish "clean" from "errored" in CI, pass
 [`--report report.json`](#machine-readable-verdict---report): the file exists
@@ -470,7 +474,8 @@ registry (PyPI / npm) and checked. Both `name@version` and pip's
 | `--dry-run-safe` | Skip the API; report an empty vulnerability list. |
 | `--dry-run-malicious` | Skip the API; inject a test finding against the first package. |
 
-Exit codes match `scan`: `1` on a malware verdict or error, `0` otherwise.
+Exit codes match `scan`: `1` on a malware verdict or error, `0` otherwise
+(an `Info` finding is reported but does not fail).
 
 ## Package-manager forwarder
 

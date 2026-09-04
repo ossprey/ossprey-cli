@@ -308,14 +308,22 @@ func newForwardCmd(bin string) *cobra.Command {
 	}
 }
 
-// reportMalware prints one "Error: ..." line per malware finding and reports
-// whether any were found. Shared by scan, check and init so the verdict wording
-// and the exit decision cannot drift apart between them. Callers own the
-// os.Exit(1) and their own success message.
+// reportMalware prints one "Error: ..." line per failing malware finding, plus a
+// "Note: ..." line per informational one, and reports whether any finding fails.
+// Shared by scan, check and init so the verdict wording and the exit decision
+// cannot drift apart between them. Callers own the os.Exit(1) and their own
+// success message.
+//
+// An informational finding is printed and then deliberately exits 0, the same
+// posture as a quota skip: a real API result the user is told about but is not
+// blocked by.
 func reportMalware(sbom *ossbom.SBOM) bool {
-	reports, hasMalware := scan.MalwareReports(sbom)
+	reports, hasMalware, informational := scan.MalwareReports(sbom)
 	for _, msg := range reports {
 		fmt.Println("Error: " + msg)
+	}
+	for _, msg := range informational {
+		fmt.Println("Note: " + msg)
 	}
 	return hasMalware
 }

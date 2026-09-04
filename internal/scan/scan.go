@@ -13,6 +13,7 @@ import (
 	"github.com/ossprey/ossprey-cli/internal/catalog"
 	"github.com/ossprey/ossprey-cli/internal/env"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
+	"github.com/ossprey/ossprey-cli/internal/severity"
 )
 
 type Options struct {
@@ -92,19 +93,25 @@ func InjectTestVulnerability(sbom *ossbom.SBOM) error {
 	return nil
 }
 
-// MalwareReports returns one v1-style report line per vulnerability and a boolean
-// indicating whether any were found.
-func MalwareReports(sbom *ossbom.SBOM) ([]string, bool) {
-	if len(sbom.Vulnerabilities) == 0 {
-		return nil, false
-	}
-	reports := make([]string, 0, len(sbom.Vulnerabilities))
+// MalwareReports returns one v1-style report line per failing vulnerability and
+// a boolean indicating whether any were found, plus separate lines for the
+// informational findings.
+//
+// A finding below the failing floor (severity Info) is reported but does not
+// make the scan fail; see internal/severity. A finding the API could not grade
+// fails, so an older server that sends no severity behaves exactly as before.
+func MalwareReports(sbom *ossbom.SBOM) (failing []string, hasMalware bool, informational []string) {
 	for _, v := range sbom.Vulnerabilities {
 		_, name, version := parsePurl(v.Purl)
-		reports = append(reports,
-			fmt.Sprintf("WARNING: %s:%s contains malware. Remediate this immediately", name, version))
+		if severity.Parse(v.Severity).Fails() {
+			failing = append(failing,
+				fmt.Sprintf("WARNING: %s:%s contains malware. Remediate this immediately", name, version))
+			continue
+		}
+		informational = append(informational,
+			fmt.Sprintf("%s:%s was flagged for information only: %s", name, version, v.Description))
 	}
-	return reports, true
+	return failing, len(failing) > 0, informational
 }
 
 // parsePurl splits a PURL like "pkg:pypi/foo@1.2.3" into its ecosystem, name

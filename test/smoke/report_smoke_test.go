@@ -23,6 +23,7 @@ type report struct {
 		Ecosystem string `json:"ecosystem"`
 		Name      string `json:"name"`
 		Version   string `json:"version"`
+		Severity  string `json:"severity"`
 	} `json:"findings"`
 }
 

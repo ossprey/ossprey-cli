@@ -105,3 +105,57 @@ func TestWriteReportRoundTrip(t *testing.T) {
 		t.Errorf("finding name: got %q, want lodash", got.Findings[0].Name)
 	}
 }
+
+func TestNewReportInformationalVerdict(t *testing.T) {
+	s := ossbom.New(ossbom.Environment{Project: "p"})
+	s.AddVulnerability(ossbom.Vulnerability{
+		ID:          "Z",
+		Purl:        "pkg:npm/removed@0.0.1-security",
+		Description: "removed from NPM",
+		Severity:    "Info",
+	})
+
+	r := NewReport(s)
+	if r.Verdict != VerdictInformational {
+		t.Errorf("verdict = %q, want %q", r.Verdict, VerdictInformational)
+	}
+	if len(r.Findings) != 1 {
+		t.Fatalf("findings = %d, want 1", len(r.Findings))
+	}
+	if r.Findings[0].Severity != "Info" {
+		t.Errorf("severity = %q, want Info", r.Findings[0].Severity)
+	}
+}
+
+// An informational finding must not soften the verdict for a real detection
+// found in the same scan.
+func TestNewReportMalwareWinsOverInformational(t *testing.T) {
+	s := ossbom.New(ossbom.Environment{Project: "p"})
+	s.AddVulnerability(ossbom.Vulnerability{ID: "Z", Purl: "pkg:npm/removed@0.0.1-security", Severity: "Info"})
+	s.AddVulnerability(ossbom.Vulnerability{ID: "X", Purl: "pkg:pypi/evil@1.0.0", Severity: "Critical"})
+
+	if r := NewReport(s); r.Verdict != VerdictMalware {
+		t.Errorf("verdict = %q, want %q", r.Verdict, VerdictMalware)
+	}
+}
+
+// Fail closed: no severity is what an older server sends.
+func TestNewReportUngradedFindingIsMalware(t *testing.T) {
+	s := ossbom.New(ossbom.Environment{Project: "p"})
+	s.AddVulnerability(ossbom.Vulnerability{ID: "X", Purl: "pkg:pypi/evil@1.0.0"})
+
+	if r := NewReport(s); r.Verdict != VerdictMalware {
+		t.Errorf("verdict = %q, want %q", r.Verdict, VerdictMalware)
+	}
+}
+
+// A skipped scan checked nothing, so it stays skipped even when the SBOM it was
+// built from happens to carry an informational finding.
+func TestSkippedReportOverridesInformational(t *testing.T) {
+	s := ossbom.New(ossbom.Environment{Project: "p"})
+	s.AddVulnerability(ossbom.Vulnerability{ID: "Z", Purl: "pkg:npm/removed@0.0.1-security", Severity: "Info"})
+
+	if r := SkippedReport(s, "quota exhausted", ""); r.Verdict != VerdictSkipped {
+		t.Errorf("verdict = %q, want %q", r.Verdict, VerdictSkipped)
+	}
+}
