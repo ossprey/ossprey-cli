@@ -228,3 +228,45 @@ func TestValidate_ServerError(t *testing.T) {
 		t.Errorf("no vulns should be applied on error, got %d", len(sbom.Vulnerabilities))
 	}
 }
+
+func TestPost_SubmitsWithoutPolling(t *testing.T) {
+	var posted bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/public/v1/scans":
+			posted = true
+			if r.Header.Get("x-api-key") != "test-key" {
+				t.Errorf("missing/wrong x-api-key: %q", r.Header.Get("x-api-key"))
+			}
+			w.WriteHeader(http.StatusAccepted)
+			io.WriteString(w, `{"sbom_id":"sb1","scan_id":"sc1"}`)
+		case "/public/v1/scans/status":
+			t.Error("Post must not poll the status endpoint")
+		default:
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	sbom := newSBOM()
+	if err := Post(context.Background(), sbom, srv.URL, "test-key"); err != nil {
+		t.Fatalf("Post: %v", err)
+	}
+	if !posted {
+		t.Error("Post never hit the scans endpoint")
+	}
+	if len(sbom.Vulnerabilities) != 0 {
+		t.Errorf("Post must not apply a verdict; got %d vulnerabilities", len(sbom.Vulnerabilities))
+	}
+}
+
+func TestPost_ServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	if err := Post(context.Background(), newSBOM(), srv.URL, "test-key"); err == nil {
+		t.Fatal("expected error, got nil")
+	}
+}

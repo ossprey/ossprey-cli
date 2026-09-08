@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
+	"github.com/ossprey/ossprey-cli/internal/severity"
 )
 
 // fixture returns the absolute path to a test/test_packages/<name> directory.
@@ -74,6 +75,7 @@ func TestRun_Fixtures(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			noCI(t)
 			sbom, err := Run(context.Background(), Options{Path: fixture(t, tt.fixture)})
 			if err != nil {
 				t.Fatalf("Run returned error: %v", err)
@@ -83,8 +85,7 @@ func TestRun_Fixtures(t *testing.T) {
 				t.Errorf("component count: got %d, want >= %d", got, tt.minComponents)
 			}
 
-			// Project/Name drive the dashboard scan label; must be the scanned
-			// directory's base name, not the host machine name.
+			// Outside CI, Project falls back to the scanned directory's base name.
 			if sbom.Env.Project != tt.fixture {
 				t.Errorf("env.Project: got %q, want %q", sbom.Env.Project, tt.fixture)
 			}
@@ -229,6 +230,8 @@ func TestMalwareReports(t *testing.T) {
 		wantHas     bool
 		wantNReport int
 		wantMatch   string
+		wantNInfo   int
+		wantInfo    string
 	}{
 		{
 			name:        "no vulnerabilities",
@@ -254,6 +257,55 @@ func TestMalwareReports(t *testing.T) {
 			wantHas:     true,
 			wantNReport: 2,
 		},
+		{
+			// Info is the only level below the failing floor.
+			name: "informational only does not fail",
+			vulns: []ossbom.Vulnerability{
+				{
+					ID:          "Z",
+					Purl:        "pkg:npm/removed@0.0.1-security",
+					Description: "This package was previously identified as malicious and removed from NPM",
+					Severity:    "Info",
+				},
+			},
+			wantHas:     false,
+			wantNReport: 0,
+			wantNInfo:   1,
+			wantInfo: "removed:0.0.1-security was flagged for information only: " +
+				"This package was previously identified as malicious and removed from NPM",
+		},
+		{
+			// Info must not mask a real detection in the same SBOM.
+			name: "informational alongside a real detection still fails",
+			vulns: []ossbom.Vulnerability{
+				{ID: "Z", Purl: "pkg:npm/removed@0.0.1-security", Severity: "Info"},
+				{ID: "X", Purl: "pkg:pypi/requests@2.31.0", Severity: "Critical"},
+			},
+			wantHas:     true,
+			wantNReport: 1,
+			wantMatch:   "WARNING: requests:2.31.0 contains malware. Remediate this immediately",
+			wantNInfo:   1,
+		},
+		{
+			// Casing has varied in the store, so parsing is case-insensitive.
+			name: "uppercase INFO still does not fail",
+			vulns: []ossbom.Vulnerability{
+				{ID: "Z", Purl: "pkg:npm/removed@0.0.1-security", Severity: "INFO"},
+			},
+			wantHas:     false,
+			wantNReport: 0,
+			wantNInfo:   1,
+		},
+		{
+			// Fail closed: an ungraded finding is exactly what an older server
+			// sends, and what an OSV-sourced finding carries.
+			name: "unrecognised severity fails",
+			vulns: []ossbom.Vulnerability{
+				{ID: "X", Purl: "pkg:pypi/requests@2.31.0", Severity: "bogus"},
+			},
+			wantHas:     true,
+			wantNReport: 1,
+		},
 	}
 
 	for _, tt := range tests {
@@ -262,7 +314,8 @@ func TestMalwareReports(t *testing.T) {
 			for _, v := range tt.vulns {
 				s.AddVulnerability(v)
 			}
-			reports, has := MalwareReports(s)
+			summary, has := MalwareReports(s, severity.FailingFloor)
+			reports, informational := summary.Failing, summary.Informational
 			if has != tt.wantHas {
 				t.Errorf("has: got %v, want %v", has, tt.wantHas)
 			}
@@ -272,29 +325,147 @@ func TestMalwareReports(t *testing.T) {
 			if tt.wantMatch != "" && reports[0] != tt.wantMatch {
 				t.Errorf("report[0]: got %q, want %q", reports[0], tt.wantMatch)
 			}
+			if len(informational) != tt.wantNInfo {
+				t.Fatalf("informational: got %d, want %d", len(informational), tt.wantNInfo)
+			}
+			if tt.wantInfo != "" && informational[0] != tt.wantInfo {
+				t.Errorf("informational[0]: got %q, want %q", informational[0], tt.wantInfo)
+			}
 		})
 	}
 }
 
-func TestSplitPurl(t *testing.T) {
+func TestParsePurl(t *testing.T) {
 	tests := []struct {
-		purl        string
-		wantName    string
-		wantVersion string
+		purl     string
+		wantEco  string
+		wantName string
+		wantVers string
 	}{
-		{"pkg:pypi/requests@2.31.0", "requests", "2.31.0"},
-		{"pkg:npm/lodash@4.17.21", "lodash", "4.17.21"},
-		{"requests@2.31.0", "requests", "2.31.0"},
-		{"requests", "requests", ""},
+		{"pkg:pypi/requests@2.31.0", "pypi", "requests", "2.31.0"},
+		{"pkg:npm/lodash@4.17.21", "npm", "lodash", "4.17.21"},
+		// A scoped npm name carries its own leading '@'; the version is still
+		// what follows the last one.
+		{"pkg:npm/@scope/pkg@1.2.3", "npm", "@scope/pkg", "1.2.3"},
+		{"pkg:npm/@scope/pkg", "npm", "@scope/pkg", ""},
+		// The spec spells a scope "%40scope"; a hand-rolled split would leave
+		// the escape in the package name the user is shown.
+		{"pkg:npm/%40scope/pkg@1.2.3", "npm", "@scope/pkg", "1.2.3"},
+		// Qualifiers and a subpath belong to neither the name nor the version.
+		{"pkg:npm/pkg@1.2.3?arch=x86#src/lib", "npm", "pkg", "1.2.3"},
+		{"pkg:pypi/requests@2.31.0?extension=whl", "pypi", "requests", "2.31.0"},
+		// Not PURLs at all — the fallback salvages what it can rather than
+		// printing "WARNING: : contains malware" at somebody.
+		{"requests@2.31.0", "", "requests", "2.31.0"},
+		{"requests", "", "requests", ""},
+		{"", "", "", ""},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.purl, func(t *testing.T) {
-			name, version := splitPurl(tt.purl)
-			if name != tt.wantName || version != tt.wantVersion {
-				t.Errorf("splitPurl(%q) = (%q, %q), want (%q, %q)",
-					tt.purl, name, version, tt.wantName, tt.wantVersion)
+			eco, name, version := parsePurl(tt.purl)
+			if eco != tt.wantEco || name != tt.wantName || version != tt.wantVers {
+				t.Errorf("parsePurl(%q) = (%q, %q, %q), want (%q, %q, %q)",
+					tt.purl, eco, name, version, tt.wantEco, tt.wantName, tt.wantVers)
 			}
 		})
+	}
+}
+
+// noCI clears the markers internal/env detects on, so a test of the local
+// fallback does not inherit the CI it is running in.
+func noCI(t *testing.T) {
+	t.Helper()
+	t.Setenv("TF_BUILD", "")
+	t.Setenv("GITHUB_ACTIONS", "")
+}
+
+func TestRunNamesTheScanFromCI(t *testing.T) {
+	noCI(t)
+	t.Setenv("TF_BUILD", "True")
+	t.Setenv("SYSTEM_TEAMPROJECT", "MyProject")
+	t.Setenv("BUILD_REPOSITORY_NAME", "my-repo")
+	t.Setenv("BUILD_SOURCEBRANCH", "refs/heads/main")
+
+	sbom, err := Run(context.Background(), Options{Path: fixture(t, "python_simple_math")})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if sbom.Env.Project != "my-repo" {
+		t.Errorf("env.Project: got %q, want %q", sbom.Env.Project, "my-repo")
+	}
+	if sbom.Name != "my-repo" {
+		t.Errorf("sbom.Name: got %q, want %q", sbom.Name, "my-repo")
+	}
+	if sbom.Env.GithubOrg != "MyProject" || sbom.Env.GithubRepo != "my-repo" {
+		t.Errorf("attribution: got %q/%q", sbom.Env.GithubOrg, sbom.Env.GithubRepo)
+	}
+}
+
+// A description is API-supplied free text printed straight to a terminal, so a
+// newline in it must not be able to forge an extra report line.
+func TestMalwareReportsSanitisesInformationalDescription(t *testing.T) {
+	s := ossbom.New(ossbom.Environment{})
+	s.AddVulnerability(ossbom.Vulnerability{
+		ID:          "Z",
+		Purl:        "pkg:npm/removed@0.0.1-security",
+		Description: "removed from NPM\nError: pkg:npm/other@1.0.0 contains malware\x1b[31m",
+		Severity:    "Info",
+	})
+
+	summary, hasMalware := MalwareReports(s, severity.FailingFloor)
+	informational := summary.Informational
+	if hasMalware {
+		t.Fatal("an informational finding must not fail the scan")
+	}
+	if len(informational) != 1 {
+		t.Fatalf("informational = %d, want 1", len(informational))
+	}
+	if strings.ContainsAny(informational[0], "\n\r\x1b") {
+		t.Errorf("control characters survived into the report line: %q", informational[0])
+	}
+}
+
+// At the Info floor an informational finding fails, which is what
+// --fail-on-informational asks for.
+func TestMalwareReportsAtInfoFloor(t *testing.T) {
+	s := ossbom.New(ossbom.Environment{})
+	s.AddVulnerability(ossbom.Vulnerability{ID: "Z", Purl: "pkg:npm/removed@0.0.1-security", Severity: "Info"})
+
+	summary, hasMalware := MalwareReports(s, severity.Info)
+	if !hasMalware {
+		t.Error("hasMalware = false at the Info floor, want true")
+	}
+	if len(summary.Failing) != 1 {
+		t.Errorf("failing = %d, want 1", len(summary.Failing))
+	}
+	if len(summary.Informational) != 0 {
+		t.Errorf("informational = %d, want 0", len(summary.Informational))
+	}
+}
+
+// The purl is API data too, so a malformed one must not be able to forge output
+// through the name or version on either the failing or the informational line.
+func TestMalwareReportsSanitisesPurlDerivedOutput(t *testing.T) {
+	s := ossbom.New(ossbom.Environment{})
+	s.AddVulnerability(ossbom.Vulnerability{
+		ID:       "X",
+		Purl:     "pkg:npm/evil\nError: forged line\x1b[31m@1.0.0",
+		Severity: "Critical",
+	})
+	s.AddVulnerability(ossbom.Vulnerability{
+		ID:       "Z",
+		Purl:     "pkg:npm/info\rspoof\x1b[32m@0.0.1-security",
+		Severity: "Info",
+	})
+
+	summary, hasMalware := MalwareReports(s, severity.FailingFloor)
+	if !hasMalware {
+		t.Fatal("the Critical finding must still fail")
+	}
+	for _, line := range append(append([]string{}, summary.Failing...), summary.Informational...) {
+		if strings.ContainsAny(line, "\n\r\x1b") {
+			t.Errorf("control characters survived into a report line: %q", line)
+		}
 	}
 }

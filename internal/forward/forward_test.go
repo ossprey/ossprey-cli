@@ -239,7 +239,7 @@ func swap(t *testing.T, exec func(context.Context, string, []string) error, chk 
 	t.Helper()
 	oe, oc, os := execFn, checkFn, scanProjectFn
 	execFn, checkFn = exec, chk
-	scanProjectFn = func(context.Context, string, string, string) (*ossbom.SBOM, error) {
+	scanProjectFn = func(context.Context, string, string, string, bool) (*ossbom.SBOM, error) {
 		t.Error("scanProjectFn called unexpectedly")
 		return ossbom.New(ossbom.Environment{}), nil
 	}
@@ -248,7 +248,7 @@ func swap(t *testing.T, exec func(context.Context, string, []string) error, chk 
 
 // swapScan replaces the project-scan seam for tests that exercise the bare /
 // manifest-install path.
-func swapScan(t *testing.T, fn func(context.Context, string, string, string) (*ossbom.SBOM, error)) {
+func swapScan(t *testing.T, fn func(context.Context, string, string, string, bool) (*ossbom.SBOM, error)) {
 	t.Helper()
 	old := scanProjectFn
 	scanProjectFn = fn
@@ -292,7 +292,7 @@ func TestRun_BareInstall_ScansProjectManifest(t *testing.T) {
 	swap(t, ex.fn, cleanSBOM)
 	var scanCalled bool
 	var scanDir string
-	swapScan(t, func(_ context.Context, dir, _, _ string) (*ossbom.SBOM, error) {
+	swapScan(t, func(_ context.Context, dir, _, _ string, _ bool) (*ossbom.SBOM, error) {
 		scanCalled, scanDir = true, dir
 		return ossbom.New(ossbom.Environment{}), nil
 	})
@@ -317,7 +317,7 @@ func TestRun_BareInstall_ScansProjectManifest(t *testing.T) {
 func TestRun_BareInstall_MalwareInManifestBlocks(t *testing.T) {
 	ex := &stubExec{}
 	swap(t, ex.fn, cleanSBOM)
-	swapScan(t, func(_ context.Context, _, _, _ string) (*ossbom.SBOM, error) {
+	swapScan(t, func(_ context.Context, _, _, _ string, _ bool) (*ossbom.SBOM, error) {
 		s := ossbom.New(ossbom.Environment{})
 		s.AddVulnerability(ossbom.NewMalwareVulnerability("V1", "pkg:npm/evil@1.0.0", "bad"))
 		return s, nil
@@ -336,7 +336,7 @@ func TestRun_RequirementsFile_ScansProject(t *testing.T) {
 	ex := &stubExec{}
 	swap(t, ex.fn, cleanSBOM)
 	var scanCalled bool
-	swapScan(t, func(_ context.Context, _, _, _ string) (*ossbom.SBOM, error) {
+	swapScan(t, func(_ context.Context, _, _, _ string, _ bool) (*ossbom.SBOM, error) {
 		scanCalled = true
 		return ossbom.New(ossbom.Environment{}), nil
 	})
@@ -393,7 +393,7 @@ func TestRun_ManifestInstallVerbs_ScanProject(t *testing.T) {
 			ex := &stubExec{}
 			swap(t, ex.fn, cleanSBOM)
 			var scanCalled bool
-			swapScan(t, func(_ context.Context, _, _, _ string) (*ossbom.SBOM, error) {
+			swapScan(t, func(_ context.Context, _, _, _ string, _ bool) (*ossbom.SBOM, error) {
 				scanCalled = true
 				return ossbom.New(ossbom.Environment{}), nil
 			})
@@ -634,5 +634,90 @@ func TestPnpmPostVerbFilterValueIsNotAPackage(t *testing.T) {
 		if !slices.Contains(names, "lodash") {
 			t.Errorf("%v: lodash not checked, got %v", args, names)
 		}
+	}
+}
+
+func TestRun_SkipCI_ForwardsWithoutCheck(t *testing.T) {
+	ex := &stubExec{}
+	swap(t, ex.fn, func(context.Context, check.Options) (*ossbom.SBOM, error) {
+		t.Error("check must not run when SkipCI is set")
+		return ossbom.New(ossbom.Environment{}), nil
+	})
+
+	err := Run(context.Background(), Options{Bin: "npm", Args: []string{"install", "lodash@4.17.21"}, SkipCI: true})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !ex.called || !reflect.DeepEqual(ex.args, []string{"install", "lodash@4.17.21"}) {
+		t.Errorf("SkipCI must forward unchanged; got called=%v args=%v", ex.called, ex.args)
+	}
+}
+
+func TestRun_SkipCI_BareInstall_DoesNotScan(t *testing.T) {
+	ex := &stubExec{}
+	swap(t, ex.fn, cleanSBOM)
+
+	err := Run(context.Background(), Options{Bin: "npm", Args: []string{"install"}, SkipCI: true})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !ex.called {
+		t.Error("SkipCI must forward the bare install")
+	}
+}
+
+func TestRun_CacheScanOnly_NamedPackages_PostsAndForwards(t *testing.T) {
+	ex := &stubExec{}
+	var gotSubmitOnly bool
+	swap(t, ex.fn, func(_ context.Context, o check.Options) (*ossbom.SBOM, error) {
+		gotSubmitOnly = o.SubmitOnly
+		return malwareSBOM(context.Background(), o)
+	})
+
+	err := Run(context.Background(), Options{Bin: "npm", Args: []string{"install", "lodash@4.17.21"}, CacheScanOnly: true})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !gotSubmitOnly {
+		t.Error("CacheScanOnly must check with SubmitOnly set")
+	}
+	if !ex.called {
+		t.Error("CacheScanOnly must always forward, even when the SBOM carries a verdict")
+	}
+}
+
+func TestRun_CacheScanOnly_ManifestInstall_PostsAndForwards(t *testing.T) {
+	ex := &stubExec{}
+	swap(t, ex.fn, cleanSBOM)
+	var gotSubmitOnly bool
+	swapScan(t, func(_ context.Context, _, _, _ string, submitOnly bool) (*ossbom.SBOM, error) {
+		gotSubmitOnly = submitOnly
+		return ossbom.New(ossbom.Environment{}), nil
+	})
+
+	err := Run(context.Background(), Options{Bin: "npm", Args: []string{"install"}, CacheScanOnly: true})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !gotSubmitOnly {
+		t.Error("CacheScanOnly manifest install must scan with submitOnly set")
+	}
+	if !ex.called {
+		t.Error("CacheScanOnly must forward after posting the scan")
+	}
+}
+
+func TestRun_CacheScanOnly_ErrorStillForwards(t *testing.T) {
+	ex := &stubExec{}
+	swap(t, ex.fn, func(context.Context, check.Options) (*ossbom.SBOM, error) {
+		return nil, errors.New("api unreachable")
+	})
+
+	err := Run(context.Background(), Options{Bin: "npm", Args: []string{"install", "lodash@4.17.21"}, CacheScanOnly: true})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !ex.called {
+		t.Error("CacheScanOnly must fail open and forward when the post fails")
 	}
 }

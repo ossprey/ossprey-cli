@@ -20,8 +20,10 @@ import (
 
 	"github.com/ossprey/ossprey-cli/internal/check"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
+	"github.com/ossprey/ossprey-cli/internal/progress"
 	"github.com/ossprey/ossprey-cli/internal/registry"
 	"github.com/ossprey/ossprey-cli/internal/scan"
+	"github.com/ossprey/ossprey-cli/internal/severity"
 	"github.com/ossprey/ossprey-cli/internal/shim"
 	"github.com/ossprey/ossprey-cli/internal/submit"
 )
@@ -176,6 +178,8 @@ type Options struct {
 	// ResolveLatest fills a concrete version for unpinned packages. Defaults to
 	// registry.ResolveLatest; overridable in tests.
 	ResolveLatest func(ctx context.Context, ecosystem, name string) (string, error)
+	SkipCI        bool
+	CacheScanOnly bool
 }
 
 // Run executes the forwarder flow:
@@ -196,6 +200,21 @@ func Run(ctx context.Context, opts Options) error {
 		return fmt.Errorf("unsupported package manager %q", opts.Bin)
 	}
 
+	finish := func(sbom *ossbom.SBOM, err error) error {
+		if opts.CacheScanOnly {
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "ossprey: warning: could not post scan (%v); forwarding\n", err)
+			} else {
+				fmt.Fprintln(os.Stderr, "ossprey: scan posted to the Ossprey dashboard (ci-cache-scan-only); forwarding")
+			}
+			return execFn(ctx, m.Bin, opts.Args)
+		}
+		if err != nil {
+			return err
+		}
+		return reportAndForward(ctx, m, opts, sbom)
+	}
+
 	resolve := opts.ResolveLatest
 	if resolve == nil {
 		resolve = registry.ResolveLatest
@@ -204,6 +223,12 @@ func Run(ctx context.Context, opts Options) error {
 	start, isInstall := m.installAt(opts.Args)
 	if !isInstall {
 		// Not an install (e.g. `npm run`, `pip list`) — nothing to check.
+		return execFn(ctx, m.Bin, opts.Args)
+	}
+
+	if opts.SkipCI {
+		fmt.Fprintf(os.Stderr, "ossprey: skip-ci set; forwarding `%s %s` without checking\n",
+			m.Bin, strings.Join(opts.Args, " "))
 		return execFn(ctx, m.Bin, opts.Args)
 	}
 
@@ -221,11 +246,18 @@ func Run(ctx context.Context, opts Options) error {
 			fmt.Fprintln(os.Stderr, "ossprey: nothing left to check after version resolution; forwarding")
 			return execFn(ctx, m.Bin, opts.Args)
 		}
-		sbom, err := checkFn(ctx, check.Options{Specs: resolved, APIURL: opts.APIURL, APIKey: opts.APIKey})
-		if err != nil {
-			return err
-		}
-		return reportAndForward(ctx, m, opts, sbom)
+		// The scan is the one part of a forwarded install that takes visible
+		// time, and until it prints something the terminal looks hung.
+		stop := progress.Start(os.Stderr, fmt.Sprintf("ossprey: scan in progress, checking %s",
+			countPackages(len(resolved))))
+		sbom, err := checkFn(ctx, check.Options{
+			Specs:      resolved,
+			APIURL:     opts.APIURL,
+			APIKey:     opts.APIKey,
+			SubmitOnly: opts.CacheScanOnly,
+		})
+		stop()
+		return finish(sbom, err)
 
 	case manifestInstall(parsed):
 		// No packages named — the manager installs from the project manifest /
@@ -233,11 +265,12 @@ func Run(ctx context.Context, opts Options) error {
 		// than falling through unchecked.
 		fmt.Fprintf(os.Stderr, "ossprey: no packages named; scanning project manifest before `%s %s`\n",
 			m.Bin, strings.Join(opts.Args, " "))
-		sbom, err := scanProjectFn(ctx, ".", opts.APIURL, opts.APIKey)
-		if err != nil {
-			return err
-		}
-		return reportAndForward(ctx, m, opts, sbom)
+		// Cataloguing a whole project can take longer than the API scan itself
+		// (npm range resolution, uv), so the indicator wraps both.
+		stop := progress.Start(os.Stderr, "ossprey: scan in progress")
+		sbom, err := scanProjectFn(ctx, ".", opts.APIURL, opts.APIKey, opts.CacheScanOnly)
+		stop()
+		return finish(sbom, err)
 
 	default:
 		// Only un-checkable explicit targets (local paths, archives, URLs, VCS
@@ -270,8 +303,14 @@ func resolveSpecs(ctx context.Context, resolve func(context.Context, string, str
 // reportAndForward blocks (ErrBlocked) if sbom carries malware, else execs the
 // real manager with the original args.
 func reportAndForward(ctx context.Context, m *Manager, opts Options, sbom *ossbom.SBOM) error {
-	if reports, hasMalware := scan.MalwareReports(sbom); hasMalware {
-		for _, msg := range reports {
+	// The forwarders parse no flags of their own (DisableFlagParsing), so there
+	// is nowhere to opt into a stricter floor; the default applies.
+	summary, hasMalware := scan.MalwareReports(sbom, severity.FailingFloor)
+	for _, msg := range summary.Informational {
+		fmt.Fprintln(os.Stderr, "ossprey: "+msg)
+	}
+	if hasMalware {
+		for _, msg := range summary.Failing {
 			fmt.Fprintln(os.Stderr, "Error: "+msg)
 		}
 		fmt.Fprintf(os.Stderr, "ossprey: blocked `%s %s`\n", m.Bin, strings.Join(opts.Args, " "))
@@ -319,13 +358,19 @@ func manifestInstall(p installArgs) bool {
 // returns it with any vulnerabilities applied. It is the default scanProjectFn
 // seam. When the directory has no catalogable dependencies it returns the empty
 // SBOM without an API call so a bare install in a non-project dir forwards.
-func scanProject(ctx context.Context, dir, apiURL, apiKey string) (*ossbom.SBOM, error) {
+func scanProject(ctx context.Context, dir, apiURL, apiKey string, submitOnly bool) (*ossbom.SBOM, error) {
 	sbom, err := scan.Run(ctx, scan.Options{Path: dir})
 	if err != nil {
 		return nil, err
 	}
 	if len(sbom.Components) == 0 {
 		return sbom, nil // nothing declared to check
+	}
+	if submitOnly {
+		if err := submit.Post(ctx, sbom, apiURL, apiKey); err != nil {
+			return nil, err
+		}
+		return sbom, nil
 	}
 	if err := submit.Validate(ctx, sbom, apiURL, apiKey); err != nil {
 		return nil, err

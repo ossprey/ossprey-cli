@@ -33,6 +33,7 @@ type Options struct {
 	APIKey          string
 	DryRunSafe      bool // skip API; emit no vulnerabilities
 	DryRunMalicious bool // skip API; inject a test vulnerability against the first spec
+	SubmitOnly      bool
 }
 
 // Run builds a one-component-per-spec SBOM, submits it to the Ossprey API, and
@@ -75,6 +76,10 @@ func Run(ctx context.Context, opts Options) (*ossbom.SBOM, error) {
 		}
 	case opts.DryRunSafe:
 		// no-op: leave the vulnerability list empty
+	case opts.SubmitOnly:
+		if err := submit.Post(ctx, sbom, opts.APIURL, opts.APIKey); err != nil {
+			return nil, err
+		}
 	default:
 		if err := submit.Validate(ctx, sbom, opts.APIURL, opts.APIKey); err != nil {
 			return nil, err

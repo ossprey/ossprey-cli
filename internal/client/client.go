@@ -15,8 +15,10 @@ import (
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
 )
 
-// maxPollAttempts caps the number of status polls before giving up.
-const maxPollAttempts = 20
+const pollInterval = 3 * time.Second
+
+// 300 polls at pollInterval gives a ~15 minute ceiling, above the platform's 850s budget.
+const maxPollAttempts = 300
 
 // defaultBaseURL is used when New is called without an explicit URL.
 const defaultBaseURL = "https://api.ossprey.com"
@@ -42,9 +44,7 @@ type Client struct {
 	BearerToken string
 	HTTP        *http.Client
 
-	// PollBackoff returns the wait between status polls for the given attempt
-	// (1-indexed). Defaults to attempt*attempt seconds (matches v1). Override
-	// in tests for sub-second polling.
+	// PollBackoff returns the wait before poll `attempt`. Overridden in tests.
 	PollBackoff func(attempt int) time.Duration
 }
 
@@ -96,8 +96,8 @@ func (c *Client) authenticate(req *http.Request) {
 	req.Header.Set("x-api-key", c.APIKey)
 }
 
-func defaultPollBackoff(attempt int) time.Duration {
-	return time.Duration(attempt*attempt) * time.Second
+func defaultPollBackoff(int) time.Duration {
+	return pollInterval
 }
 
 type submitResponse struct {
@@ -124,44 +124,58 @@ func (e *ErrSkipped) Error() string { return "scan skipped: " + e.Message }
 // echoes a MiniBOM with vulnerabilities populated). Callers decode into a
 // MiniBOM, then re-hydrate.
 func (c *Client) Validate(ctx context.Context, mb ossbom.MiniBOM) (json.RawMessage, error) {
+	status, respBody, err := c.postScan(ctx, mb)
+	if err != nil {
+		return nil, err
+	}
+	if status == http.StatusOK {
+		return respBody, nil
+	}
+	var sr submitResponse
+	if err := json.Unmarshal(respBody, &sr); err != nil {
+		return nil, fmt.Errorf("decode 202 body: %w", err)
+	}
+	return c.waitForCompletion(ctx, sr.SBOMID, sr.ScanID)
+}
+
+func (c *Client) Submit(ctx context.Context, mb ossbom.MiniBOM) error {
+	_, _, err := c.postScan(ctx, mb)
+	return err
+}
+
+func (c *Client) postScan(ctx context.Context, mb ossbom.MiniBOM) (int, []byte, error) {
 	body, err := json.Marshal(map[string]any{"sbom": mb})
 	if err != nil {
-		return nil, fmt.Errorf("marshal sbom: %w", err)
+		return 0, nil, fmt.Errorf("marshal sbom: %w", err)
 	}
 
 	endpoint, err := url.JoinPath(c.BaseURL, c.mount(), "scans")
 	if err != nil {
-		return nil, fmt.Errorf("build url: %w", err)
+		return 0, nil, fmt.Errorf("build url: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		return 0, nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	c.authenticate(req)
 
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("submit: %w", err)
+		return 0, nil, fmt.Errorf("submit: %w", err)
 	}
 	defer resp.Body.Close()
 
 	respBody, _ := io.ReadAll(resp.Body)
 
 	switch resp.StatusCode {
-	case http.StatusOK:
-		return respBody, nil
-	case http.StatusAccepted:
-		var sr submitResponse
-		if err := json.Unmarshal(respBody, &sr); err != nil {
-			return nil, fmt.Errorf("decode 202 body: %w", err)
-		}
-		return c.waitForCompletion(ctx, sr.SBOMID, sr.ScanID)
+	case http.StatusOK, http.StatusAccepted:
+		return resp.StatusCode, respBody, nil
 	case http.StatusTooManyRequests:
-		return nil, errors.New("rate limit exceeded")
+		return 0, nil, errors.New("rate limit exceeded")
 	default:
-		return nil, fmt.Errorf("submit failed (status %d): %s", resp.StatusCode, truncate(string(respBody), 500))
+		return 0, nil, fmt.Errorf("submit failed (status %d): %s", resp.StatusCode, truncate(string(respBody), 500))
 	}
 }
 

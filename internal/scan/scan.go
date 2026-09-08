@@ -9,8 +9,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/anchore/packageurl-go"
+
+	"github.com/ossprey/ossprey-cli/internal/apitext"
 	"github.com/ossprey/ossprey-cli/internal/catalog"
+	"github.com/ossprey/ossprey-cli/internal/env"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
+	"github.com/ossprey/ossprey-cli/internal/severity"
 )
 
 type Options struct {
@@ -57,16 +62,14 @@ func Run(ctx context.Context, opts Options) (*ossbom.SBOM, error) {
 	}
 	host, _ := os.Hostname() // best-effort; empty hostname is acceptable
 
-	// Project names the scan in the dashboard. Without it the UI falls back to
-	// the machine name (the host); use the scanned directory's base name so the
-	// scan surfaces as the project rather than the host.
-	project := filepath.Base(abs)
-	sbom := ossbom.New(ossbom.Environment{
-		Path:        abs,
-		MachineName: host,
-		Project:     project,
-	})
-	sbom.Name = project
+	scanEnv := ossbom.Environment{Path: abs, MachineName: host}
+	env.Overlay(&scanEnv)
+	// Fallback only: an ADO agent checks out into ".../1/s", so CI names it instead.
+	if scanEnv.Project == "" {
+		scanEnv.Project = filepath.Base(abs)
+	}
+	sbom := ossbom.New(scanEnv)
+	sbom.Name = scanEnv.Project
 
 	for _, p := range pkgs {
 		c := ossbom.Component{
@@ -105,27 +108,71 @@ func InjectTestVulnerability(sbom *ossbom.SBOM) error {
 	return nil
 }
 
-// MalwareReports returns one v1-style report line per vulnerability and a boolean
-// indicating whether any were found.
-func MalwareReports(sbom *ossbom.SBOM) ([]string, bool) {
-	if len(sbom.Vulnerabilities) == 0 {
-		return nil, false
-	}
-	reports := make([]string, 0, len(sbom.Vulnerabilities))
-	for _, v := range sbom.Vulnerabilities {
-		name, version := splitPurl(v.Purl)
-		reports = append(reports,
-			fmt.Sprintf("WARNING: %s:%s contains malware. Remediate this immediately", name, version))
-	}
-	return reports, true
+// MalwareSummary is the human-facing rendering of a scan's findings, split by
+// whether they fail. The wording lives here rather than at the call sites so
+// the verdict text and the exit decision cannot drift apart between scan,
+// check, init and the install forwarder.
+type MalwareSummary struct {
+	// Failing is one v1-style line per finding at or above the floor.
+	Failing []string
+	// Informational is one line per finding below it, reported but not fatal.
+	Informational []string
 }
 
-// splitPurl extracts (name, version) from a PURL string like "pkg:pypi/foo@1.2.3".
-func splitPurl(purl string) (string, string) {
-	s := strings.TrimPrefix(purl, "pkg:")
-	if _, after, ok := strings.Cut(s, "/"); ok {
-		s = after
+// MalwareReports renders a scanned SBOM's findings and reports whether any of
+// them fail at the given floor.
+//
+// A finding below the floor (severity Info by default) is reported but does not
+// make the scan fail; see internal/severity. A finding the API could not grade
+// fails at every floor, so an older server that sends no severity behaves
+// exactly as before.
+func MalwareReports(sbom *ossbom.SBOM, floor severity.Level) (MalwareSummary, bool) {
+	var summary MalwareSummary
+	for _, v := range sbom.Vulnerabilities {
+		_, name, version := parsePurl(v.Purl)
+		// Sanitised here rather than at each format call: the purl is API data on
+		// every path out of this loop, including the failing one.
+		name, version = apitext.OneLine(name), apitext.OneLine(version)
+		if severity.Parse(v.Severity).FailsAt(floor) {
+			summary.Failing = append(summary.Failing,
+				fmt.Sprintf("WARNING: %s:%s contains malware. Remediate this immediately", name, version))
+			continue
+		}
+		summary.Informational = append(summary.Informational,
+			fmt.Sprintf("%s:%s was flagged for information only: %s",
+				name, version, apitext.OneLine(v.Description)))
 	}
-	name, version, _ := strings.Cut(s, "@")
-	return name, version
+	return summary, len(summary.Failing) > 0
+}
+
+// parsePurl splits a PURL like "pkg:pypi/foo@1.2.3" into its ecosystem, name
+// and version. Any part the string doesn't carry comes back empty.
+//
+// The real parser does the work: it percent-decodes (an npm scope is spelled
+// "%40scope" per the spec) and drops qualifiers and subpaths, which a
+// hand-rolled split would leave glued to the version. Our own componentPurl
+// emits neither, but the purls here come back from the API, so parsing what
+// the spec allows rather than what we happen to send is the safer side.
+func parsePurl(purl string) (ecosystem, name, version string) {
+	if p, err := packageurl.FromString(purl); err == nil && p.Name != "" {
+		name = p.Name
+		if p.Namespace != "" {
+			// npm scopes and the like live in the namespace; users know the
+			// package as the two joined ("@scope/pkg").
+			name = p.Namespace + "/" + name
+		}
+		return p.Type, name, p.Version
+	}
+	// Not a well-formed PURL. Rather than render "WARNING: : contains malware"
+	// at someone, salvage a name and version from whatever came back.
+	s := strings.TrimPrefix(purl, "pkg:")
+	if before, after, ok := strings.Cut(s, "/"); ok {
+		ecosystem, s = before, after
+	}
+	// An npm scope puts an '@' at the *start* of the name, so the version
+	// delimiter is the last '@' — and only when it isn't that leading one.
+	if i := strings.LastIndex(s, "@"); i > 0 {
+		return ecosystem, s[:i], s[i+1:]
+	}
+	return ecosystem, s, ""
 }

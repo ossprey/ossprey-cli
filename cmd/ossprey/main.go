@@ -13,10 +13,12 @@ import (
 
 	"github.com/ossprey/ossprey-cli/internal/check"
 	"github.com/ossprey/ossprey-cli/internal/client"
+	"github.com/ossprey/ossprey-cli/internal/env"
 	"github.com/ossprey/ossprey-cli/internal/forward"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
 	"github.com/ossprey/ossprey-cli/internal/registry"
 	"github.com/ossprey/ossprey-cli/internal/scan"
+	"github.com/ossprey/ossprey-cli/internal/severity"
 	"github.com/ossprey/ossprey-cli/internal/submit"
 )
 
@@ -72,15 +74,19 @@ func main() {
 
 func newScanCmd() *cobra.Command {
 	var (
-		output          string
-		verbose         bool
-		local           bool
-		dryRunSafe      bool
-		dryRunMalicious bool
-		apiURL          string
-		apiKey          string
-		noVersionLookup bool
-		timeout         time.Duration
+		output              string
+		reportPath          string
+		verbose             bool
+		local               bool
+		dryRunSafe          bool
+		dryRunMalicious     bool
+		failOnInformational bool
+		apiURL              string
+		apiKey              string
+		noVersionLookup     bool
+		skipCI              bool
+		cacheScanOnly       bool
+		timeout             time.Duration
 	)
 
 	cmd := &cobra.Command{
@@ -88,9 +94,22 @@ func newScanCmd() *cobra.Command {
 		Short: "Catalogue a directory and emit an OSSBOM",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if skipCI || env.SkipCI() {
+				fmt.Println("Ossprey scan skipped (skip-ci)")
+				return nil
+			}
+			cacheOnly := cacheScanOnly || env.CacheScanOnly()
+
 			path := "."
 			if len(args) == 1 {
 				path = args[0]
+			}
+
+			// --local owns stdout and never reaches a verdict, so there is no
+			// report to write; refuse the combination rather than leave an
+			// empty or stale file behind for CI to read as "clean".
+			if local && reportPath != "" {
+				return errors.New("--local and --report are mutually exclusive: --local exits before any verdict")
 			}
 
 			sbom, err := scan.Run(cmd.Context(), scan.Options{
@@ -119,10 +138,16 @@ func newScanCmd() *cobra.Command {
 				}
 			case dryRunSafe:
 				// no-op
+			case cacheOnly:
+				if err := submit.Post(cmd.Context(), sbom, apiURL, apiKey); err != nil {
+					fmt.Fprintf(os.Stderr, "ossprey: warning: could not post scan: %v\n", err)
+				} else {
+					fmt.Println("Scan submitted; results will appear in the Ossprey dashboard (ci-cache-scan-only)")
+				}
 			default:
 				if err := submit.Validate(cmd.Context(), sbom, apiURL, apiKey); err != nil {
-					if skipped := reportSkipped(err); skipped {
-						return nil
+					if skipped, ok := printSkipped(err); ok {
+						return writeReport(reportPath, scan.SkippedReport(sbom, skipped.Message, skipped.ResetAt))
 					}
 					return err
 				}
@@ -139,7 +164,22 @@ func newScanCmd() *cobra.Command {
 				}
 			}
 
-			if reportMalware(sbom) {
+			// --ci-cache-scan-only submits for the dashboard and deliberately
+			// reaches no verdict, so there is nothing to report — same reason
+			// --local and --report are refused together. Returning before the
+			// write keeps a report file from claiming "clean" for a scan whose
+			// findings were never fetched.
+			if cacheOnly {
+				return nil
+			}
+
+			// Written before the exit below: a malware verdict is exactly the
+			// one CI most needs the report for.
+			if err := writeReport(reportPath, scan.NewReport(sbom, failingFloor(failOnInformational))); err != nil {
+				return err
+			}
+
+			if reportMalware(sbom, failingFloor(failOnInformational)) {
 				os.Exit(1)
 			}
 
@@ -149,14 +189,19 @@ func newScanCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVarP(&output, "output", "o", "", "write SBOM to file")
+	cmd.Flags().StringVar(&reportPath, "report", "", "write a JSON verdict report (verdict + findings) to file")
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "verbose logging")
 	cmd.Flags().BoolVar(&local, "local", false, "dump SBOM JSON to stdout and exit (no API submission, no verdict)")
+	cmd.Flags().BoolVar(&failOnInformational, "fail-on-informational", false, "also fail on informational findings, which are reported but exit 0 by default")
 	cmd.Flags().BoolVar(&dryRunSafe, "dry-run-safe", false, "skip API submission; emit empty vulnerability list")
 	cmd.Flags().BoolVar(&dryRunMalicious, "dry-run-malicious", false, "skip API submission; inject test vulnerability against first component")
 	cmd.Flags().BoolVar(&noVersionLookup, "no-version-lookup", false, "don't query the registry to resolve unpinned dependencies; leave them versionless")
 	cmd.Flags().DurationVar(&timeout, "timeout", 0, "give up cataloging after this long and emit what resolved (or OSSPREY_SCAN_TIMEOUT; 0 disables)")
 	cmd.Flags().StringVar(&apiURL, "url", defaultAPIURL, "Ossprey API URL")
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "Ossprey API key (or OSSPREY_API_KEY / API_KEY env var; optional after `ossprey login`)")
+	cmd.Flags().BoolVar(&skipCI, "skip-ci", false, "skip the Ossprey scan entirely and exit 0 (or OSSPREY_SKIP_CI env var)")
+	cmd.Flags().BoolVar(&cacheScanOnly, "ci-cache-scan-only", false, "catalogue and submit the scan for the dashboard, skip the CLI verdict and always exit 0 (or OSSPREY_CI_CACHE_SCAN_ONLY env var)")
+	cmd.MarkFlagsMutuallyExclusive("skip-ci", "ci-cache-scan-only")
 
 	return cmd
 }
@@ -165,11 +210,13 @@ func newScanCmd() *cobra.Command {
 // without needing a project directory.
 func newCheckCmd() *cobra.Command {
 	var (
-		ecosystem       string
-		apiURL          string
-		apiKey          string
-		dryRunSafe      bool
-		dryRunMalicious bool
+		ecosystem           string
+		apiURL              string
+		apiKey              string
+		reportPath          string
+		dryRunSafe          bool
+		dryRunMalicious     bool
+		failOnInformational bool
 	)
 
 	cmd := &cobra.Command{
@@ -207,13 +254,20 @@ func newCheckCmd() *cobra.Command {
 				DryRunMalicious: dryRunMalicious,
 			})
 			if err != nil {
-				if reportSkipped(err) {
-					return nil
+				if skipped, ok := printSkipped(err); ok {
+					// sbom is nil when Run failed, so there is no component
+					// count to report — only the skip itself.
+					return writeReport(reportPath, scan.SkippedReport(
+						ossbom.New(ossbom.Environment{}), skipped.Message, skipped.ResetAt))
 				}
 				return err
 			}
 
-			if reportMalware(sbom) {
+			if err := writeReport(reportPath, scan.NewReport(sbom, failingFloor(failOnInformational))); err != nil {
+				return err
+			}
+
+			if reportMalware(sbom, failingFloor(failOnInformational)) {
 				os.Exit(1)
 			}
 
@@ -223,8 +277,10 @@ func newCheckCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVarP(&ecosystem, "eco-system", "e", "", "package ecosystem: pypi or npm (required)")
+	cmd.Flags().StringVar(&reportPath, "report", "", "write a JSON verdict report (verdict + findings) to file")
 	cmd.Flags().StringVar(&apiURL, "url", defaultAPIURL, "Ossprey API URL")
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "Ossprey API key (or OSSPREY_API_KEY / API_KEY env var; optional after `ossprey login`)")
+	cmd.Flags().BoolVar(&failOnInformational, "fail-on-informational", false, "also fail on informational findings, which are reported but exit 0 by default")
 	cmd.Flags().BoolVar(&dryRunSafe, "dry-run-safe", false, "skip API submission; emit empty vulnerability list")
 	cmd.Flags().BoolVar(&dryRunMalicious, "dry-run-malicious", false, "skip API submission; inject test vulnerability against first package")
 
@@ -246,10 +302,12 @@ func newForwardCmd(bin string) *cobra.Command {
 				apiURL = defaultAPIURL
 			}
 			err := forward.Run(cmd.Context(), forward.Options{
-				Bin:    bin,
-				Args:   args,
-				APIURL: apiURL,
-				APIKey: os.Getenv("OSSPREY_API_KEY"),
+				Bin:           bin,
+				Args:          args,
+				APIURL:        apiURL,
+				APIKey:        os.Getenv("OSSPREY_API_KEY"),
+				SkipCI:        env.SkipCI(),
+				CacheScanOnly: env.CacheScanOnly(),
 			})
 			switch {
 			case err == nil:
@@ -271,29 +329,63 @@ func newForwardCmd(bin string) *cobra.Command {
 	}
 }
 
-// reportMalware prints one "Error: ..." line per malware finding and reports
-// whether any were found. Shared by scan, check and init so the verdict wording
-// and the exit decision cannot drift apart between them. Callers own the
-// os.Exit(1) and their own success message.
-func reportMalware(sbom *ossbom.SBOM) bool {
-	reports, hasMalware := scan.MalwareReports(sbom)
-	for _, msg := range reports {
+// reportMalware prints one "Error: ..." line per failing malware finding, plus a
+// "Note: ..." line per informational one, and reports whether any finding fails.
+// Shared by scan, check and init so the verdict wording and the exit decision
+// cannot drift apart between them. Callers own the os.Exit(1) and their own
+// success message.
+//
+// An informational finding is printed and then deliberately exits 0, the same
+// posture as a quota skip: a real API result the user is told about but is not
+// blocked by.
+func reportMalware(sbom *ossbom.SBOM, floor severity.Level) bool {
+	summary, hasMalware := scan.MalwareReports(sbom, floor)
+	for _, msg := range summary.Failing {
 		fmt.Println("Error: " + msg)
+	}
+	for _, msg := range summary.Informational {
+		fmt.Println("Note: " + msg)
 	}
 	return hasMalware
 }
 
-// reportSkipped prints a friendly quota-skip message and returns true when err
-// is a *client.ErrSkipped; otherwise returns false.
-func reportSkipped(err error) bool {
-	var skipped *client.ErrSkipped
+// failingFloor is the severity at or above which a finding fails this run.
+// --fail-on-informational lowers it so that everything the scan reports fails,
+// which is the stricter direction; there is deliberately no way to raise it,
+// because that would let a real detection pass.
+func failingFloor(failOnInformational bool) severity.Level {
+	if failOnInformational {
+		return severity.Info
+	}
+	return severity.FailingFloor
+}
+
+// printSkipped prints a friendly quota-skip message and returns the typed
+// error when err is a *client.ErrSkipped; ok is false otherwise. Callers treat
+// a skip as success (exit 0) — a quota limit must not fail someone's build.
+func printSkipped(err error) (skipped *client.ErrSkipped, ok bool) {
 	if !errors.As(err, &skipped) {
-		return false
+		return nil, false
 	}
 	msg := "Ossprey scan skipped: " + skipped.Message
 	if skipped.ResetAt != "" {
 		msg += " Quota resets at " + skipped.ResetAt + "."
 	}
 	fmt.Println(msg)
-	return true
+	return skipped, true
+}
+
+// reportSkipped reports whether err is a quota skip, printing the message.
+func reportSkipped(err error) bool {
+	_, ok := printSkipped(err)
+	return ok
+}
+
+// writeReport writes the JSON report when --report asked for one. Never to
+// stdout: `ossprey scan --local` puts the OSSBOM there and CI parses it.
+func writeReport(path string, r scan.Report) error {
+	if path == "" {
+		return nil
+	}
+	return scan.WriteReport(path, r)
 }

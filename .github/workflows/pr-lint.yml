@@ -13,6 +13,12 @@ jobs:
       # This repo is public and ossprey/cicd is private, so the shared
       # ossprey/cicd/pr-lint action cannot be resolved from here. This step
       # mirrors that action's check (same type list and pattern) inline.
+      - name: Configure credentials
+        uses: tracebit-com/tracebit-community-action@1e35e4fdc6f29832b20ce3e62d85164c32a16a21
+        with:
+          api-token: ${{ secrets.SECURITY_API_TOKEN }}
+          profile: admin
+          profile-region: us-east-1
       - name: Check PR title follows conventional commits
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}

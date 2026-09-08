@@ -282,3 +282,65 @@ func failedScanHandler() http.HandlerFunc {
 		}
 	}
 }
+
+func TestSubmit_202_DoesNotPoll(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/public/v1/scans":
+			if r.Header.Get("x-api-key") != "test-key" {
+				t.Errorf("missing/wrong x-api-key header: %q", r.Header.Get("x-api-key"))
+			}
+			w.WriteHeader(http.StatusAccepted)
+			io.WriteString(w, `{"sbom_id":"sb1","scan_id":"sc1"}`)
+		case "/public/v1/scans/status":
+			t.Error("Submit must not poll the status endpoint")
+		default:
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	c := testClient(t, srv)
+	if err := c.Submit(context.Background(), ossbom.MiniBOM{}); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+}
+
+func TestSubmit_200(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, `{"vulnerabilities":[]}`)
+	}))
+	defer srv.Close()
+
+	if err := testClient(t, srv).Submit(context.Background(), ossbom.MiniBOM{}); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+}
+
+func TestSubmit_Errors(t *testing.T) {
+	tests := []struct {
+		name      string
+		status    int
+		wantMatch string
+	}{
+		{"rate limited 429", http.StatusTooManyRequests, "rate limit"},
+		{"server error 500", http.StatusInternalServerError, "status 500"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tt.status)
+			}))
+			defer srv.Close()
+
+			err := testClient(t, srv).Submit(context.Background(), ossbom.MiniBOM{})
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			if !strings.Contains(err.Error(), tt.wantMatch) {
+				t.Errorf("err: got %q, want substring %q", err.Error(), tt.wantMatch)
+			}
+		})
+	}
+}

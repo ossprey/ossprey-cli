@@ -40,6 +40,10 @@ type Vulnerability struct {
 	Type        string `json:"type"`
 	Description string `json:"description,omitempty"`
 	Reference   string `json:"reference"`
+	// Severity grades the finding; see internal/severity. Empty on findings the
+	// API could not grade and on responses from a server that predates it,
+	// both of which parse to severity.Unknown and therefore fail.
+	Severity string `json:"severity,omitempty"`
 }
 
 // NewMalwareVulnerability returns a Vulnerability with sensible defaults

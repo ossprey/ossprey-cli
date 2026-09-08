@@ -171,10 +171,21 @@ ossprey scan .
 
 Exit codes:
 
-- `0` — no malware found, `--local` dump, or scan skipped by the API (e.g. quota exhausted)
+- `0` — no malware found, only informational findings, `--local` dump, or scan skipped by the API (e.g. quota exhausted)
 - `1` — malware found, **or** the scan itself failed (bad path, catalog error, API/network error, missing key)
 
-If you need to distinguish "clean" from "errored" in CI, check stderr or parse the OSSBOM emitted via `-o`.
+A finding graded `Info` is reported as a `Note:` line and does not fail the
+scan. Every other grade fails, and so does a finding the API could not grade,
+so an older server that sends no grade behaves exactly as before.
+
+Pass `--fail-on-informational` to fail on those too, if you would rather your
+build stopped on anything Ossprey reports at all. It only ever makes the check
+stricter; there is deliberately no flag to raise the threshold, because that
+would let a real detection through.
+
+If you need to distinguish "clean" from "errored" in CI, pass
+[`--report report.json`](#machine-readable-verdict---report): the file exists
+with a `verdict` only when the scan actually reached one.
 
 Get an API key at [dashboard.ossprey.com](https://dashboard.ossprey.com).
 
@@ -392,8 +403,11 @@ ossprey scan [path] [flags]
 | `--timeout <dur>` | Give up cataloguing after this long and emit whatever resolved (or `OSSPREY_SCAN_TIMEOUT`). Off by default. |
 | `--url <url>` | Override the Ossprey API URL (default `https://api.ossprey.com`). |
 | `--api-key <key>` | Provide the API key on the command line instead of an env var. |
+| `--fail-on-informational` | Also fail on informational findings, which are reported but exit 0 by default. |
 | `--dry-run-safe` | Skip the API; report an empty vulnerability list. |
 | `--dry-run-malicious` | Skip the API; inject a test finding against the first component. |
+| `--skip-ci` | Skip the Ossprey scan entirely and exit 0. Also settable as `OSSPREY_SKIP_CI=1`. |
+| `--ci-cache-scan-only` | Catalogue and submit the scan so results appear in the dashboard, but print no verdict and always exit 0 — the build is never affected, even if the submission fails. Also settable as `OSSPREY_CI_CACHE_SCAN_ONLY=1`. |
 
 ### Authentication
 
@@ -467,7 +481,8 @@ registry (PyPI / npm) and checked. Both `name@version` and pip's
 | `--dry-run-safe` | Skip the API; report an empty vulnerability list. |
 | `--dry-run-malicious` | Skip the API; inject a test finding against the first package. |
 
-Exit codes match `scan`: `1` on a malware verdict or error, `0` otherwise.
+Exit codes match `scan`: `1` on a malware verdict or error, `0` otherwise
+(an `Info` finding is reported but does not fail).
 
 ## Package-manager forwarder
 
@@ -562,6 +577,11 @@ means the forwarder has no `--api-key` or `--url` of its own. It reads:
 
 - `OSSPREY_API_KEY` — API key
 - `OSSPREY_API_URL` — override the API URL (default `https://api.ossprey.com`)
+- `OSSPREY_SKIP_CI` — set to `1` to forward every command straight to the real
+  manager without any Ossprey check
+- `OSSPREY_CI_CACHE_SCAN_ONLY` — set to `1` to still gather and submit the
+  packages (results appear in the dashboard) but never block or fail the
+  install
 
 A session from `ossprey login` also counts, and takes precedence over
 `OSSPREY_API_KEY`, so on your own machine the forwarder usually needs no
@@ -620,6 +640,10 @@ ossprey: no malware found, forwarding to npm
 
 added 1 package in 525ms
 ```
+
+While the check runs, the forwarder holds a live `ossprey: scan in progress...
+4s` line on the terminal and erases it once the verdict is in; in a CI log or a
+pipe that becomes a single plain line.
 
 If a check comes back dirty you get the finding, a blocked line naming the
 command, and an exit code of `1`. The real manager never starts.
@@ -822,7 +846,24 @@ Get a key with [`ossprey init`](#init--one-command-setup) (or from the
 dashboard), store it as a secret, and add a scan step. The CLI exits non-zero on
 a malware verdict, which fails the build.
 
-The minimal GitHub Actions step:
+### GitHub Actions
+
+Use [`ossprey/gh-action`](https://github.com/ossprey/gh-action). It installs
+this CLI, scans, writes a job summary and posts the malicious packages as a
+pull-request comment:
+
+```yaml
+# Pin to the tag's commit SHA in a real workflow — see the note below.
+- uses: ossprey/gh-action@v3
+  with:
+    api-key: ${{ secrets.OSSPREY_API_KEY }}
+```
+
+This step is handed your API key, so pin it to a commit SHA rather than the
+`v3` tag: a tag can be repointed at new code after you have reviewed it, which
+is the supply-chain risk the job exists to catch.
+
+Or drive the CLI yourself. The minimal step:
 
 ```yaml
 - name: Ossprey scan
@@ -874,6 +915,22 @@ jobs:
 For other CI systems the shape is the same: install the CLI, set
 `OSSPREY_API_KEY` from your secret store, run `ossprey scan .`.
 
+Inside GitHub Actions or Azure Pipelines the scan also picks up the repository,
+organisation and branch from the runner's environment and sends them with the
+OSSBOM, so the dashboard groups runs by repository instead of minting a fresh
+asset per run. Nothing to configure; off CI those variables are unset and
+nothing is sent.
+
+Two env vars help while rolling Ossprey out across a CI estate, and both work
+for `ossprey scan` and the package-manager forwarders/shims alike:
+
+- `OSSPREY_SKIP_CI=1` — kill switch: no scan runs at all.
+- `OSSPREY_CI_CACHE_SCAN_ONLY=1` — observe-only: scans are gathered and
+  submitted so results appear in the dashboard, but the build never fails and
+  installs are never blocked.
+
+`ossprey scan` also accepts them as `--skip-ci` / `--ci-cache-scan-only` flags.
+
 ## Output
 
 `ossprey scan` prints `No malware found` on success or one `Error: WARNING:
@@ -883,6 +940,56 @@ failure.
 Pass `-o sbom.json` to also write the full OSSBOM JSON (components +
 vulnerabilities) to disk, or `--local` to emit it to stdout instead of
 calling the API.
+
+### Machine-readable verdict (`--report`)
+
+`--report report.json` writes the verdict and the malicious packages to a file,
+for CI that needs to do something with them — fail a check, open an issue,
+comment on a pull request. `scan` and `check` both take it.
+
+```sh
+ossprey scan . --report report.json
+```
+
+```json
+{
+  "verdict": "malware",
+  "project": "my-service",
+  "path": "/home/me/my-service",
+  "components": 412,
+  "findings": [
+    {
+      "purl": "pkg:npm/@acme/logger@1.4.2",
+      "ecosystem": "npm",
+      "name": "@acme/logger",
+      "version": "1.4.2",
+      "id": "OSSPREY-2026-0031",
+      "type": "Malware",
+      "description": "Exfiltrates environment variables on postinstall.",
+      "reference": "https://dashboard.ossprey.com/..."
+    }
+  ]
+}
+```
+
+`verdict` is one of:
+
+| Verdict   | Exit code | Meaning |
+|-----------|-----------|---------|
+| `clean`   | 0         | Scanned, nothing flagged. |
+| `malware` | 1         | `findings` lists every flagged package. |
+| `skipped` | 0         | Your quota was exhausted; **nothing was checked**. `skipped.message` and `skipped.reset_at` say why and until when. Do not read this as "clean". |
+
+`findings` is always present, empty on a clean scan, so
+`jq '.findings | length'` works either way. The file is written before the
+process exits non-zero, so it is there on exactly the runs you care about.
+
+No file is written when the run never reaches a verdict: `--local`, and the
+`--skip-ci` / `--ci-cache-scan-only` modes above. A consumer should treat a
+missing report as "this scan produced no verdict", never as clean.
+
+`--report` never writes to stdout, and it is rejected alongside `--local`:
+`--local` owns stdout for the OSSBOM and exits before any verdict exists.
 
 ## Status
 
