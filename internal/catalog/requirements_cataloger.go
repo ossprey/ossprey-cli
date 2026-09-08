@@ -42,6 +42,6 @@ func (c *RequirementsCataloger) Catalog(ctx context.Context, resolver file.Resol
 		args := []string{"pip", "compile", "--universal", "--no-progress", absPath}
 		return runUV(ctx, uv, cache, dir, args, loc)
 	}
-	out, err := catalogByGlob(resolver, c.root, "**/requirements.txt", "requirements", parse)
+	out, err := catalogByGlob(ctx, resolver, c.root, "**/requirements.txt", "requirements", parse)
 	return out, nil, err
 }

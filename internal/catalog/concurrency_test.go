@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"strconv"
@@ -65,12 +66,12 @@ func TestCatalogByGlob_DeterministicUnderConcurrency(t *testing.T) {
 	}
 
 	t.Setenv("OSSPREY_SCAN_CONCURRENCY", "1")
-	seq, err := catalogByGlob(resolver, dir, "**/*.dep", "test", parse)
+	seq, err := catalogByGlob(context.Background(), resolver, dir, "**/*.dep", "test", parse)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("OSSPREY_SCAN_CONCURRENCY", "8")
-	conc, err := catalogByGlob(resolver, dir, "**/*.dep", "test", parse)
+	conc, err := catalogByGlob(context.Background(), resolver, dir, "**/*.dep", "test", parse)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +97,7 @@ func TestCatalogByGlob_DedupUnderConcurrency(t *testing.T) {
 		return []pkg.Package{{Name: "dup", Version: "1.0.0", Type: pkg.NpmPkg, Locations: file.NewLocationSet(loc)}}, nil
 	}
 	t.Setenv("OSSPREY_SCAN_CONCURRENCY", "8")
-	out, err := catalogByGlob(resolver, dir, "**/*.dep", "test", parse)
+	out, err := catalogByGlob(context.Background(), resolver, dir, "**/*.dep", "test", parse)
 	if err != nil {
 		t.Fatal(err)
 	}

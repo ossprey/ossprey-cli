@@ -3,11 +3,13 @@ package catalog
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/anchore/syft/syft/artifact"
 	"github.com/anchore/syft/syft/file"
@@ -48,9 +50,12 @@ func (c *NpmResolveCataloger) Catalog(ctx context.Context, resolver file.Resolve
 		if hasNpmLockfile(dir) {
 			return nil, nil // syft's lock cataloger already resolves this project
 		}
+		if isWorkspaceMember(dir, c.root) {
+			return nil, nil // an ancestor lockfile already carries this member's full tree
+		}
 		return runNpmResolve(ctx, npm, cache, absPath, loc)
 	}
-	out, err := catalogByGlob(resolver, c.root, "**/package.json", "npm", parse)
+	out, err := catalogByGlob(ctx, resolver, c.root, "**/package.json", "npm", parse)
 	return out, nil, err
 }
 
@@ -85,6 +90,10 @@ func runNpmResolve(ctx context.Context, npm, cache, packageJSON string, loc file
 		return nil, err
 	}
 
+	budget := resolverTimeout()
+	ctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+
 	cmd := exec.CommandContext(ctx, npm, "install",
 		"--package-lock-only",
 		"--ignore-scripts",
@@ -94,12 +103,24 @@ func runNpmResolve(ctx context.Context, npm, cache, packageJSON string, loc file
 	)
 	cmd.Dir = tmp
 	cmd.Env = append(os.Environ(), "npm_config_cache="+cache)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return nil, fmt.Errorf("npm install --package-lock-only: %w: %s", err, strings.TrimSpace(string(out)))
+	cmd.WaitDelay = 5 * time.Second // the kill lands on npm, but CombinedOutput still waits on pipes a grandchild may hold
+	out, runErr := cmd.CombinedOutput()
+	if runErr != nil {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("npm install --package-lock-only: timed out after %s (raise OSSPREY_RESOLVE_TIMEOUT)", budget)
+		}
+		// ErrWaitDelay replaces a successful exit, so npm finished and only a
+		// grandchild's pipe lingered; the lock it wrote is complete.
+		if !errors.Is(runErr, exec.ErrWaitDelay) {
+			return nil, fmt.Errorf("npm install --package-lock-only: %w: %s", runErr, strings.TrimSpace(string(out)))
+		}
 	}
 
 	lock, err := os.ReadFile(filepath.Join(tmp, "package-lock.json"))
 	if err != nil {
+		if runErr != nil {
+			return nil, fmt.Errorf("npm install --package-lock-only: %w: %s", runErr, strings.TrimSpace(string(out)))
+		}
 		return nil, fmt.Errorf("npm produced no package-lock.json: %w", err)
 	}
 	return parseNpmLock(lock, loc)

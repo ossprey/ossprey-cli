@@ -25,8 +25,8 @@ func NewPyProjectCataloger(root string) *PyProjectCataloger { return &PyProjectC
 
 func (c *PyProjectCataloger) Name() string { return "ossprey-pyproject-cataloger" }
 
-func (c *PyProjectCataloger) Catalog(_ context.Context, resolver file.Resolver) ([]pkg.Package, []artifact.Relationship, error) {
-	out, err := catalogByGlob(resolver, c.root, "**/pyproject.toml", "pyproject", parsePyProjectFile)
+func (c *PyProjectCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]pkg.Package, []artifact.Relationship, error) {
+	out, err := catalogByGlob(ctx, resolver, c.root, "**/pyproject.toml", "pyproject", parsePyProjectFile)
 	return out, nil, err
 }
 

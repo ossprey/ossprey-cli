@@ -1,6 +1,11 @@
 package catalog
 
 import (
+	"context"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/anchore/syft/syft/file"
@@ -85,5 +90,67 @@ func TestHasNpmLockfile(t *testing.T) {
 	writeFile(t, withYarn, "yarn.lock", "")
 	if !hasNpmLockfile(withYarn) {
 		t.Error("dir with yarn.lock should report true")
+	}
+}
+
+// fakeNpm writes a script that stands in for npm, with the given body.
+func fakeNpm(t *testing.T, body string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell stand-in for npm is POSIX only")
+	}
+	path := filepath.Join(t.TempDir(), "npm")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+const fakeLock = `{"name":"app","lockfileVersion":3,"packages":{` +
+	`"":{"name":"app","version":"1.0.0"},` +
+	`"node_modules/bootstrap":{"version":"3.4.7","resolved":"https://registry.npmjs.org/bootstrap/-/bootstrap-3.4.7.tgz"}}}`
+
+func manifest(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "package.json")
+	if err := os.WriteFile(path, []byte(`{"name":"app","version":"1.0.0"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// A grandchild holding the output pipe open past npm's own exit trips WaitDelay,
+// which replaces the successful status with ErrWaitDelay. The lock is already
+// written, so the resolve must not be discarded.
+func TestRunNpmResolve_RecoversLockWhenPipeOutlivesNpm(t *testing.T) {
+	npm := fakeNpm(t, "cat > package-lock.json <<'JSON'\n"+fakeLock+"\nJSON\nsleep 30 &\nexit 0\n")
+
+	got, err := runNpmResolve(context.Background(), npm, t.TempDir(), manifest(t), file.NewLocation("package.json"))
+	if err != nil {
+		t.Fatalf("resolve discarded a completed npm run: %v", err)
+	}
+	if !keySet(got)["bootstrap@3.4.7"] {
+		t.Errorf("packages = %v, want bootstrap@3.4.7", keySet(got))
+	}
+}
+
+// A genuine npm failure must still be reported, and must not be masked by a
+// stale or partial lock.
+func TestRunNpmResolve_RealFailureStillErrors(t *testing.T) {
+	npm := fakeNpm(t, "echo 'npm error code E404' >&2\nexit 1\n")
+
+	if _, err := runNpmResolve(context.Background(), npm, t.TempDir(), manifest(t), file.NewLocation("package.json")); err == nil {
+		t.Fatal("expected an error for a failing npm")
+	} else if !strings.Contains(err.Error(), "E404") {
+		t.Errorf("error should carry npm's output, got: %v", err)
+	}
+}
+
+// Exiting cleanly without writing a lock is still a failure.
+func TestRunNpmResolve_NoLockIsAnError(t *testing.T) {
+	npm := fakeNpm(t, "exit 0\n")
+
+	if _, err := runNpmResolve(context.Background(), npm, t.TempDir(), manifest(t), file.NewLocation("package.json")); err == nil {
+		t.Fatal("expected an error when no package-lock.json is produced")
 	}
 }
