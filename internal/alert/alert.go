@@ -17,7 +17,6 @@ const (
 	versionCol  = 12
 	maxRows     = 8
 	shownOnOver = 6
-	dashboard   = "https://dashboard.ossprey.com"
 )
 
 type Finding struct {
@@ -55,7 +54,6 @@ func Malware(findings []Finding, outcome string, p ansi.Profile) string {
 		b.WriteString(p.Red("│") + styled + pad + p.Red("│") + "\n")
 	}
 	blank := func() { row("", "") }
-	text := func(s string) { row(indent+s, indent+s) }
 	styledText := func(s string, style func(string) string) { row(indent+s, indent+style(s)) }
 
 	edge("┌" + strings.Repeat("─", inner) + "┐")
@@ -81,11 +79,7 @@ func Malware(findings []Finding, outcome string, p ansi.Profile) string {
 	}
 	blank()
 	styledText("ADVISORY", p.Dim)
-	for _, l := range advisory(len(findings)) {
-		text(l)
-	}
-	blank()
-	text("Details: " + dashboard)
+	styledText(advisory(len(findings)), p.Red)
 	blank()
 	edge("└" + strings.Repeat("─", inner) + "┘")
 	return b.String()
@@ -98,35 +92,11 @@ func headline(n int, outcome string) string {
 	return fmt.Sprintf("Ossprey found %d malicious packages. %s", n, outcome)
 }
 
-func advisory(n int) []string {
-	subject := "These packages are"
-	object := "them"
+func advisory(n int) string {
 	if n == 1 {
-		subject = "This package is"
-		object = "it"
+		return "This package contains malware. Remediate this immediately."
 	}
-	return wrap(fmt.Sprintf("%s known to contain malware. Do not install, import or run %s. Remove %s from your dependencies, rotate any credentials on a machine where %s may already have run, and re-run the scan.",
-		subject, object, object, object), inner-2*len(indent))
-}
-
-func wrap(s string, width int) []string {
-	var out []string
-	line := ""
-	for _, w := range strings.Fields(s) {
-		switch {
-		case line == "":
-			line = w
-		case utf8.RuneCountInString(line)+1+utf8.RuneCountInString(w) > width:
-			out = append(out, line)
-			line = w
-		default:
-			line += " " + w
-		}
-	}
-	if line != "" {
-		out = append(out, line)
-	}
-	return out
+	return "These packages contain malware. Remediate this immediately."
 }
 
 func pad(s string, width int) string {

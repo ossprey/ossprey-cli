@@ -315,9 +315,10 @@ func reportAndForward(ctx context.Context, m *Manager, opts Options, sbom *ossbo
 		fmt.Fprintln(errOut, "ossprey: "+msg)
 	}
 	if hasMalware {
-		fmt.Fprint(errOut, alert.Malware(summary.Alert(), "Installation blocked.", ansi.Detect(errOut)))
+		profile := ansi.Detect(errOut)
+		fmt.Fprint(errOut, alert.Malware(summary.Alert(), "Installation blocked.", profile))
 		for _, msg := range summary.Failing {
-			fmt.Fprintln(errOut, "Error: "+msg)
+			fmt.Fprintln(errOut, profile.Red("Error: "+msg))
 		}
 		fmt.Fprintf(errOut, "ossprey: blocked `%s %s`\n", m.Bin, strings.Join(opts.Args, " "))
 		return ErrBlocked

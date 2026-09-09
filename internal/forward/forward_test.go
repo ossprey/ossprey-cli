@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ossprey/ossprey-cli/internal/ansi"
 	"github.com/ossprey/ossprey-cli/internal/check"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
 )
@@ -755,5 +756,28 @@ func TestRun_MalwareBlockPrintsBannerBeforeErrorLines(t *testing.T) {
 	}
 	if strings.Contains(out, "\x1b[") {
 		t.Errorf("a non-terminal writer must get no escape codes:\n%q", out)
+	}
+}
+
+func TestRun_MalwareBlockErrorLinesAreRedWhenColoured(t *testing.T) {
+	ex := &stubExec{}
+	swap(t, ex.fn, func(context.Context, check.Options) (*ossbom.SBOM, error) {
+		s := ossbom.New(ossbom.Environment{})
+		s.AddVulnerability(ossbom.NewMalwareVulnerability("V1", "pkg:npm/evil@1.0.0", "bad"))
+		return s, nil
+	})
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("FORCE_COLOR", "1")
+	t.Setenv("COLORTERM", "")
+	t.Setenv("TERM", "xterm")
+	var buf bytes.Buffer
+	old := errOut
+	errOut = &buf
+	t.Cleanup(func() { errOut = old })
+
+	_ = Run(context.Background(), Options{Bin: "npm", Args: []string{"install", "evil@1.0.0"}})
+	want := ansi.Basic.Red("Error: WARNING: evil:1.0.0 contains malware. Remediate this immediately")
+	if !strings.Contains(buf.String(), want) {
+		t.Errorf("error line should be red:\n%q", buf.String())
 	}
 }

@@ -958,12 +958,7 @@ forwarders and shims print the same box to stderr before their
 │    left-pad                   1.3.0        npm                       │
 │                                                                      │
 │    ADVISORY                                                          │
-│    These packages are known to contain malware. Do not install,      │
-│    import or run them. Remove them from your dependencies, rotate    │
-│    any credentials on a machine where they may already have run,     │
-│    and re-run the scan.                                              │
-│                                                                      │
-│    Details: https://dashboard.ossprey.com                            │
+│    These packages contain malware. Remediate this immediately.       │
 │                                                                      │
 └──────────────────────────────────────────────────────────────────────┘
 Error: WARNING: requests:2.31.0 contains malware. Remediate this immediately
@@ -976,7 +971,8 @@ everywhere. `FORCE_COLOR=1` (or `CLICOLOR_FORCE=1`) turns it on even when
 output is piped. Otherwise colour is used on an interactive terminal and in CI
 log viewers that render ANSI (GitHub Actions, GitLab, Azure DevOps,
 Buildkite). Truecolor terminals (`COLORTERM=truecolor`) get a red-to-orange
-gradient on the lettering; others get bold red.
+gradient on the lettering; others get bold red. The advisory and the
+`Error: WARNING:` lines are red under every colour profile.
 
 Pass `-o sbom.json` to also write the full OSSBOM JSON (components +
 vulnerabilities) to disk, or `--local` to emit it to stdout instead of

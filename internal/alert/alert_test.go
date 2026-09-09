@@ -43,12 +43,14 @@ func TestMalwareListsEachFinding(t *testing.T) {
 		"requests                   2.31.0       pypi",
 		"left-pad                   1.3.0        npm",
 		"ADVISORY",
-		"These packages are known to contain malware.",
-		"https://dashboard.ossprey.com",
+		"These packages contain malware. Remediate this immediately.",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%s", want, out)
 		}
+	}
+	if strings.Contains(out, "dashboard.ossprey.com") {
+		t.Errorf("details link should be gone:\n%s", out)
 	}
 }
 
@@ -56,13 +58,13 @@ func TestMalwareSingularWording(t *testing.T) {
 	out := Malware(two[:1], "Scan failed.", ansi.None)
 	for _, want := range []string{
 		"Ossprey found 1 malicious package. Scan failed.",
-		"This package is known to contain malware.",
+		"This package contains malware. Remediate this immediately.",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%s", want, out)
 		}
 	}
-	if strings.Contains(out, "packages are") {
+	if strings.Contains(out, "packages contain") {
 		t.Errorf("plural advisory in singular alert:\n%s", out)
 	}
 }
@@ -138,6 +140,13 @@ func TestMalwareTrueColorGradient(t *testing.T) {
 	out := Malware(two, "Installation blocked.", ansi.TrueColor)
 	if strings.Count(out, "\x1b[1;38;2;") < 6 {
 		t.Errorf("expected a distinct truecolor code per letter row:\n%q", out)
+	}
+}
+
+func TestMalwareAdvisoryIsRed(t *testing.T) {
+	out := Malware(two, "Installation blocked.", ansi.Basic)
+	if !strings.Contains(out, ansi.Basic.Red("These packages contain malware. Remediate this immediately.")) {
+		t.Errorf("advisory line should be red:\n%q", out)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ossprey/ossprey-cli/internal/ansi"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
 	"github.com/ossprey/ossprey-cli/internal/severity"
 )
@@ -36,6 +37,26 @@ func TestReportMalwarePrintsBannerThenPlainLines(t *testing.T) {
 	}
 	if strings.Contains(out, "\x1b[") {
 		t.Errorf("a non-terminal writer must get no escape codes:\n%q", out)
+	}
+}
+
+func TestReportMalwareErrorLinesAreRedWhenColoured(t *testing.T) {
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("FORCE_COLOR", "1")
+	t.Setenv("COLORTERM", "")
+	t.Setenv("TERM", "xterm")
+	var buf bytes.Buffer
+	old := verdictOut
+	verdictOut = &buf
+	t.Cleanup(func() { verdictOut = old })
+
+	sbom := ossbom.New(ossbom.Environment{})
+	sbom.AddVulnerability(ossbom.NewMalwareVulnerability("V1", "pkg:pypi/requests@2.31.0", "bad"))
+	reportMalware(sbom, severity.FailingFloor)
+
+	want := ansi.Basic.Red("Error: WARNING: requests:2.31.0 contains malware. Remediate this immediately")
+	if !strings.Contains(buf.String(), want) {
+		t.Errorf("error line should be red:\n%q", buf.String())
 	}
 }
 
