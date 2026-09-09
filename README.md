@@ -933,9 +933,50 @@ for `ossprey scan` and the package-manager forwarders/shims alike:
 
 ## Output
 
-`ossprey scan` prints `No malware found` on success or one `Error: WARNING:
-<pkg>:<ver> contains malware. Remediate this immediately` line per finding on
-failure.
+`ossprey scan` prints `No malware found` on success. On a malware verdict it
+draws an alert box naming every malicious package, followed by one
+`Error: WARNING: <pkg>:<ver> contains malware. Remediate this immediately` line
+per finding, so anything that greps the old one-line form keeps working. The
+forwarders and shims print the same box to stderr before their
+`ossprey: blocked ...` line.
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                                                                      │
+│    ███╗   ███╗ █████╗ ██╗     ██╗    ██╗ █████╗ ██████╗ ███████╗     │
+│    ████╗ ████║██╔══██╗██║     ██║    ██║██╔══██╗██╔══██╗██╔════╝     │
+│    ██╔████╔██║███████║██║     ██║ █╗ ██║███████║██████╔╝█████╗       │
+│    ██║╚██╔╝██║██╔══██║██║     ██║███╗██║██╔══██║██╔══██╗██╔══╝       │
+│    ██║ ╚═╝ ██║██║  ██║███████╗╚███╔███╔╝██║  ██║██║  ██║███████╗     │
+│    ╚═╝     ╚═╝╚═╝  ╚═╝╚══════╝ ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝     │
+│                                                                      │
+│    Ossprey found 2 malicious packages. Scan failed.                  │
+│                                                                      │
+│    PACKAGE                    VERSION      ECOSYSTEM                 │
+│    ───────────────────────────────────────────────────────────────   │
+│    requests                   2.31.0       pypi                      │
+│    left-pad                   1.3.0        npm                       │
+│                                                                      │
+│    ADVISORY                                                          │
+│    These packages are known to contain malware. Do not install,      │
+│    import or run them. Remove them from your dependencies, rotate    │
+│    any credentials on a machine where they may already have run,     │
+│    and re-run the scan.                                              │
+│                                                                      │
+│    Details: https://dashboard.ossprey.com                            │
+│                                                                      │
+└──────────────────────────────────────────────────────────────────────┘
+Error: WARNING: requests:2.31.0 contains malware. Remediate this immediately
+Error: WARNING: left-pad:1.3.0 contains malware. Remediate this immediately
+```
+
+The box is 72 columns wide and always renders in plain text; colour is added
+only where it will display. `NO_COLOR` or `TERM=dumb` turns colour off
+everywhere. `FORCE_COLOR=1` (or `CLICOLOR_FORCE=1`) turns it on even when
+output is piped. Otherwise colour is used on an interactive terminal and in CI
+log viewers that render ANSI (GitHub Actions, GitLab, Azure DevOps,
+Buildkite). Truecolor terminals (`COLORTERM=truecolor`) get a red-to-orange
+gradient on the lettering; others get bold red.
 
 Pass `-o sbom.json` to also write the full OSSBOM JSON (components +
 vulnerabilities) to disk, or `--local` to emit it to stdout instead of
