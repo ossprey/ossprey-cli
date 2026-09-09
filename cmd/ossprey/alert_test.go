@@ -27,7 +27,7 @@ func TestReportMalwarePrintsBannerThenPlainLines(t *testing.T) {
 		t.Fatal("reportMalware must report malware")
 	}
 	out := buf.String()
-	banner := strings.Index(out, "Ossprey found 2 malicious packages. Scan failed.")
+	banner := strings.Index(out, "Ossprey found 2 malicious packages.  ")
 	plain := strings.Index(out, "Error: WARNING: requests:2.31.0 contains malware. Remediate this immediately")
 	if banner < 0 || plain < 0 {
 		t.Fatalf("missing banner or plain line:\n%s", out)

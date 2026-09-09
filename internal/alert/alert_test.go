@@ -55,9 +55,9 @@ func TestMalwareListsEachFinding(t *testing.T) {
 }
 
 func TestMalwareSingularWording(t *testing.T) {
-	out := Malware(two[:1], "Scan failed.", ansi.None)
+	out := Malware(two[:1], "", ansi.None)
 	for _, want := range []string{
-		"Ossprey found 1 malicious package. Scan failed.",
+		"Ossprey found 1 malicious package.  ",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%s", want, out)
@@ -136,6 +136,16 @@ func TestMalwareTrueColorGradient(t *testing.T) {
 	out := Malware(two, "Installation blocked.", ansi.TrueColor)
 	if strings.Count(out, "\x1b[1;38;2;") < 6 {
 		t.Errorf("expected a distinct truecolor code per letter row:\n%q", out)
+	}
+}
+
+func TestMalwareEmptyOutcomeLeavesNoTrailingSpace(t *testing.T) {
+	out := Malware(two, "", ansi.None)
+	if !strings.Contains(out, "Ossprey found 2 malicious packages.  ") || strings.Contains(out, "packages. \n") {
+		t.Errorf("headline should end at the full stop:\n%s", out)
+	}
+	if strings.Contains(out, "Scan failed") {
+		t.Errorf("no outcome text expected:\n%s", out)
 	}
 }
 

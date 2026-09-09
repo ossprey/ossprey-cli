@@ -349,7 +349,7 @@ func reportMalware(sbom *ossbom.SBOM, floor severity.Level) bool {
 	summary, hasMalware := scan.MalwareReports(sbom, floor)
 	profile := ansi.Detect(verdictOut)
 	if hasMalware {
-		fmt.Fprint(verdictOut, alert.Malware(summary.Alert(), "Scan failed.", profile))
+		fmt.Fprint(verdictOut, alert.Malware(summary.Alert(), "", profile))
 	}
 	for _, msg := range summary.Failing {
 		fmt.Fprintln(verdictOut, profile.Red("Error: "+msg))

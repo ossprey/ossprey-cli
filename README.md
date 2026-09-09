@@ -950,7 +950,7 @@ forwarders and shims print the same box to stderr before their
 │    ██║ ╚═╝ ██║██║  ██║███████╗╚███╔███╔╝██║  ██║██║  ██║███████╗     │
 │    ╚═╝     ╚═╝╚═╝  ╚═╝╚══════╝ ╚══╝╚══╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝     │
 │                                                                      │
-│    Ossprey found 2 malicious packages. Scan failed.                  │
+│    Ossprey found 2 malicious packages.                               │
 │                                                                      │
 │    PACKAGE                    VERSION      ECOSYSTEM                 │
 │    ───────────────────────────────────────────────────────────────   │

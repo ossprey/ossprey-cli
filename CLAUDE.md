@@ -228,7 +228,7 @@ package/version/ecosystem table) **before** the existing
 because the smoke tests and downstream greps key on them (OSS-1981).
 `alert.Malware(findings, outcome, profile)` renders it; `scan.MalwareSummary`
 carries the structured `Detected` findings it needs. `reportMalware` in
-main.go (scan/check/init, stdout, "Scan failed.") and `reportAndForward` in
+main.go (scan/check/init, stdout, no outcome text) and `reportAndForward` in
 forward.go (forwarders, stderr, "Installation blocked.") are the two callers;
 precommit deliberately keeps its compact wording. Informational findings never
 get the banner. Both callers write through a swappable `io.Writer`

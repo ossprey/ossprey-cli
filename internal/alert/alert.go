@@ -84,9 +84,9 @@ func Malware(findings []Finding, outcome string, p ansi.Profile) string {
 
 func headline(n int, outcome string) string {
 	if n == 1 {
-		return "Ossprey found 1 malicious package. " + outcome
+		return strings.TrimSpace("Ossprey found 1 malicious package. " + outcome)
 	}
-	return fmt.Sprintf("Ossprey found %d malicious packages. %s", n, outcome)
+	return strings.TrimSpace(fmt.Sprintf("Ossprey found %d malicious packages. %s", n, outcome))
 }
 
 func pad(s string, width int) string {
