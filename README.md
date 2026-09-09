@@ -957,9 +957,6 @@ forwarders and shims print the same box to stderr before their
 │    requests                   2.31.0       pypi                      │
 │    left-pad                   1.3.0        npm                       │
 │                                                                      │
-│    ADVISORY                                                          │
-│    These packages contain malware. Remediate this immediately.       │
-│                                                                      │
 └──────────────────────────────────────────────────────────────────────┘
 Error: WARNING: requests:2.31.0 contains malware. Remediate this immediately
 Error: WARNING: left-pad:1.3.0 contains malware. Remediate this immediately
@@ -971,8 +968,8 @@ everywhere. `FORCE_COLOR=1` (or `CLICOLOR_FORCE=1`) turns it on even when
 output is piped. Otherwise colour is used on an interactive terminal and in CI
 log viewers that render ANSI (GitHub Actions, GitLab, Azure DevOps,
 Buildkite). Truecolor terminals (`COLORTERM=truecolor`) get a red-to-orange
-gradient on the lettering; others get bold red. The advisory and the
-`Error: WARNING:` lines are red under every colour profile.
+gradient on the lettering; others get bold red. The `Error: WARNING:` lines
+are red under every colour profile.
 
 Pass `-o sbom.json` to also write the full OSSBOM JSON (components +
 vulnerabilities) to disk, or `--local` to emit it to stdout instead of

@@ -78,9 +78,6 @@ func Malware(findings []Finding, outcome string, p ansi.Profile) string {
 		styledText(fmt.Sprintf("and %d more, listed below", n), p.Dim)
 	}
 	blank()
-	styledText("ADVISORY", p.Dim)
-	styledText(advisory(len(findings)), p.Red)
-	blank()
 	edge("└" + strings.Repeat("─", inner) + "┘")
 	return b.String()
 }
@@ -90,13 +87,6 @@ func headline(n int, outcome string) string {
 		return "Ossprey found 1 malicious package. " + outcome
 	}
 	return fmt.Sprintf("Ossprey found %d malicious packages. %s", n, outcome)
-}
-
-func advisory(n int) string {
-	if n == 1 {
-		return "This package contains malware. Remediate this immediately."
-	}
-	return "These packages contain malware. Remediate this immediately."
 }
 
 func pad(s string, width int) string {

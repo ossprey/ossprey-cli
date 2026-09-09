@@ -222,8 +222,8 @@ Two independent budgets, both off-by-default-safe:
 
 ### Malware alert (`internal/alert`, `internal/ansi`)
 
-A malware verdict draws a 72-column boxed banner (block-letter MALWARE, a
-package/version/ecosystem table, an advisory) **before** the existing
+A malware verdict draws a 72-column boxed banner (block-letter MALWARE and a
+package/version/ecosystem table) **before** the existing
 `Error: WARNING: <pkg>:<ver> contains malware...` lines, which stay untouched
 because the smoke tests and downstream greps key on them (OSS-1981).
 `alert.Malware(findings, outcome, profile)` renders it; `scan.MalwareSummary`
