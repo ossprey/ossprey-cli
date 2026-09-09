@@ -85,6 +85,19 @@ func TestMalwareTruncatesLongFields(t *testing.T) {
 	}
 }
 
+func TestMalwareTruncatesOversizedEcosystem(t *testing.T) {
+	f := []Finding{{Name: "pkg", Version: "1.0.0", Ecosystem: strings.Repeat("x", 500)}}
+	out := Malware(f, "Installation blocked.", ansi.None)
+	if !strings.Contains(out, strings.Repeat("x", 25)+"…") {
+		t.Errorf("ecosystem not truncated with ellipsis:\n%s", out)
+	}
+	for _, l := range lines(out) {
+		if n := utf8.RuneCountInString(l); n != Width {
+			t.Errorf("line is %d runes, want %d: %q", n, Width, l)
+		}
+	}
+}
+
 func TestMalwareCapsLongTables(t *testing.T) {
 	var many []Finding
 	for i := 0; i < 12; i++ {

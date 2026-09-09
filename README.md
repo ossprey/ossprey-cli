@@ -940,7 +940,7 @@ per finding, so anything that greps the old one-line form keeps working. The
 forwarders and shims print the same box to stderr before their
 `ossprey: blocked ...` line.
 
-```
+```text
 ┌──────────────────────────────────────────────────────────────────────┐
 │                                                                      │
 │    ███╗   ███╗ █████╗ ██╗     ██╗    ██╗ █████╗ ██████╗ ███████╗     │

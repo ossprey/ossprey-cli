@@ -15,6 +15,7 @@ const (
 	inner       = Width - 2
 	nameCol     = 26
 	versionCol  = 12
+	ecoCol      = inner - len(indent) - nameCol - versionCol - 2
 	maxRows     = 8
 	shownOnOver = 6
 )
@@ -72,7 +73,7 @@ func Malware(findings []Finding, outcome string, p ansi.Profile) string {
 		shown = findings[:shownOnOver]
 	}
 	for _, f := range shown {
-		styledText(pad(f.Name, nameCol)+" "+pad(f.Version, versionCol)+" "+f.Ecosystem, p.Bold)
+		styledText(pad(f.Name, nameCol)+" "+pad(f.Version, versionCol)+" "+pad(f.Ecosystem, ecoCol), p.Bold)
 	}
 	if n := len(findings) - len(shown); n > 0 {
 		styledText(fmt.Sprintf("and %d more, listed below", n), p.Dim)
