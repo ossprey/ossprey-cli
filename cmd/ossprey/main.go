@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"runtime/debug"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/ossprey/ossprey-cli/internal/alert"
+	"github.com/ossprey/ossprey-cli/internal/ansi"
 	"github.com/ossprey/ossprey-cli/internal/check"
 	"github.com/ossprey/ossprey-cli/internal/client"
 	"github.com/ossprey/ossprey-cli/internal/env"
@@ -39,6 +42,8 @@ func scanTimeout(flag time.Duration) time.Duration {
 }
 
 func main() {
+	ansi.Enable(os.Stdout)
+	ansi.Enable(os.Stderr)
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Fprintf(os.Stderr, "ossprey: fatal: %v\n%s\n", r, debug.Stack())
@@ -380,13 +385,19 @@ func newForwardCmd(bin string) *cobra.Command {
 // An informational finding is printed and then deliberately exits 0, the same
 // posture as a quota skip: a real API result the user is told about but is not
 // blocked by.
+var verdictOut io.Writer = os.Stdout
+
 func reportMalware(sbom *ossbom.SBOM, floor severity.Level) bool {
 	summary, hasMalware := scan.MalwareReports(sbom, floor)
+	profile := ansi.Detect(verdictOut)
+	if hasMalware {
+		fmt.Fprint(verdictOut, alert.Malware(summary.Alert(), "", profile))
+	}
 	for _, msg := range summary.Failing {
-		fmt.Println("Error: " + msg)
+		fmt.Fprintln(verdictOut, profile.Red("Error: "+msg))
 	}
 	for _, msg := range summary.Informational {
-		fmt.Println("Note: " + msg)
+		fmt.Fprintln(verdictOut, "Note: "+msg)
 	}
 	return hasMalware
 }

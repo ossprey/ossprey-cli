@@ -11,6 +11,7 @@ import (
 
 	"github.com/anchore/packageurl-go"
 
+	"github.com/ossprey/ossprey-cli/internal/alert"
 	"github.com/ossprey/ossprey-cli/internal/apitext"
 	"github.com/ossprey/ossprey-cli/internal/catalog"
 	"github.com/ossprey/ossprey-cli/internal/env"
@@ -117,7 +118,10 @@ type MalwareSummary struct {
 	Failing []string
 	// Informational is one line per finding below it, reported but not fatal.
 	Informational []string
+	Detected      []alert.Finding
 }
+
+func (s MalwareSummary) Alert() []alert.Finding { return s.Detected }
 
 // MalwareReports renders a scanned SBOM's findings and reports whether any of
 // them fail at the given floor.
@@ -129,13 +133,14 @@ type MalwareSummary struct {
 func MalwareReports(sbom *ossbom.SBOM, floor severity.Level) (MalwareSummary, bool) {
 	var summary MalwareSummary
 	for _, v := range sbom.Vulnerabilities {
-		_, name, version := parsePurl(v.Purl)
+		eco, name, version := parsePurl(v.Purl)
 		// Sanitised here rather than at each format call: the purl is API data on
 		// every path out of this loop, including the failing one.
-		name, version = apitext.OneLine(name), apitext.OneLine(version)
+		eco, name, version = apitext.OneLine(eco), apitext.OneLine(name), apitext.OneLine(version)
 		if severity.Parse(v.Severity).FailsAt(floor) {
 			summary.Failing = append(summary.Failing,
 				fmt.Sprintf("WARNING: %s:%s contains malware. Remediate this immediately", name, version))
+			summary.Detected = append(summary.Detected, alert.Finding{Name: name, Version: version, Ecosystem: eco})
 			continue
 		}
 		summary.Informational = append(summary.Informational,
