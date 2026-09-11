@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 
 	"github.com/anchore/syft/syft/artifact"
@@ -22,17 +21,16 @@ import (
 // transitive tree against PyPI.
 type SetupPyCataloger struct {
 	root string
+	uv   string
 }
 
-func NewSetupPyCataloger(root string) *SetupPyCataloger { return &SetupPyCataloger{root: root} }
+func NewSetupPyCataloger(root, uv string) *SetupPyCataloger {
+	return &SetupPyCataloger{root: root, uv: uv}
+}
 
 func (c *SetupPyCataloger) Name() string { return "ossprey-setuppy-cataloger" }
 
 func (c *SetupPyCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]pkg.Package, []artifact.Relationship, error) {
-	uv, err := exec.LookPath("uv")
-	if err != nil {
-		return nil, nil, nil // no uv on PATH — silently skip
-	}
 	cache, err := os.MkdirTemp("", "ossprey-uv-cache-")
 	if err != nil {
 		return nil, nil, fmt.Errorf("uv cache: %w", err)
@@ -48,7 +46,7 @@ func (c *SetupPyCataloger) Catalog(ctx context.Context, resolver file.Resolver) 
 			return nil, nil
 		}
 		args := []string{"pip", "compile", "--universal", "--no-progress", absPath}
-		return runUV(ctx, uv, cache, dir, args, loc)
+		return runUV(ctx, c.uv, cache, dir, args, loc)
 	}
 	out, err := catalogByGlob(ctx, resolver, c.root, "**/setup.py", "setup.py", parse)
 	return out, nil, err
