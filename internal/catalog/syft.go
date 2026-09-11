@@ -92,7 +92,7 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 		// One resolver, chosen once for the whole scan: uv where the host has
 		// it, pip otherwise. They resolve the same manifests, so running both
 		// would pay twice for identical output.
-		if uv, ok := lookupUV(); ok {
+		if uv, ok := lookupUV(ctx); ok {
 			catalogers = append(catalogers,
 				// Custom: full transitive resolution via uv (covers hatch, uv, bare
 				// pyproject without poetry.lock).

@@ -20,11 +20,22 @@ import (
 
 var uvReqLine = regexp.MustCompile(`^([A-Za-z0-9_.\-]+)==([^\s;]+)`)
 
-// lookupUV returns the path to the `uv` binary, and whether the host has one.
+// lookupUV returns the path to a *working* `uv`, and whether the host has one.
 // Called once per scan by Catalog, which picks the Python resolver from it.
-func lookupUV() (string, bool) {
+//
+// The binary is run, not just found. Choosing uv is choosing *against* pip for
+// the whole scan, so a uv that is on PATH but cannot execute — a stale shim, a
+// wrong-architecture binary, a broken install — would otherwise fail every
+// manifest with no fallback left, and leave those projects on direct
+// dependencies alone. Mirrors findPython's probe.
+func lookupUV(ctx context.Context) (string, bool) {
 	path, err := exec.LookPath("uv")
 	if err != nil {
+		return "", false
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := exec.CommandContext(ctx, path, "--version").Run(); err != nil {
 		return "", false
 	}
 	return path, true
@@ -34,8 +45,8 @@ func lookupUV() (string, bool) {
 // Prefers `uv export` against uv.lock when present, falls back to
 // `uv pip compile --universal pyproject.toml`. Mirrors v1's uv fallback.
 //
-// uv is the resolved path to the binary; Catalog only builds this cataloger
-// when the host has one (see pythonResolver).
+// uv is the resolved path to the binary; Catalog builds this cataloger only
+// when lookupUV found a working one.
 type UVCataloger struct {
 	root string
 	uv   string

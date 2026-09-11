@@ -184,6 +184,35 @@ func TestResolverChoicePrefersUV(t *testing.T) {
 	}
 }
 
+// TestResolverChoiceRejectsBrokenUV covers the other half of that choice:
+// picking uv rules pip out for the whole scan, so a uv that is on PATH but
+// cannot run must not be picked — otherwise every manifest fails with no
+// fallback left.
+func TestResolverChoiceRejectsBrokenUV(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake-binary PATH interception uses shell scripts")
+	}
+
+	binDir := t.TempDir()
+	writeScript(t, binDir, "uv", "#!/bin/sh\nexit 127\n") // on PATH, but broken
+	writeScript(t, binDir, "python3", fakePythonScript)
+	t.Setenv("PATH", binDir)
+
+	proj := t.TempDir()
+	writeFixture(t, proj, "requirements.txt", "requests\n")
+
+	pkgs, err := Catalog(context.Background(), proj, Options{SkipVersionLookup: true})
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	for _, p := range pkgs {
+		if p.Name == "idna" && p.Version == "3.6" {
+			return // pip resolved the tree
+		}
+	}
+	t.Errorf("broken uv was chosen over pip; catalog = %+v", pkgs)
+}
+
 // TestPipCatalogerResolvesTransitives drives the whole pip path against a fake
 // interpreter: no uv, no network. It is the regression for a uv-less host
 // silently reporting direct dependencies only.

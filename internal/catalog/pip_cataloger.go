@@ -44,16 +44,23 @@ func (c *PipCataloger) Name() string { return "ossprey-pip-cataloger" }
 var pipMinimum = pipVersion{major: 22, minor: 2}
 
 func (c *PipCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]pkg.Package, []artifact.Relationship, error) {
+	// Ask what the tree needs before asking what the host has: the probes below
+	// spawn processes and are bounded in seconds, which is pure latency for a
+	// repo with no Python in it at all.
+	if !hasPythonManifest(resolver) {
+		return nil, nil, nil
+	}
+
 	python, ok := findPython(ctx)
 	if !ok {
-		warnNoPythonResolver(resolver, "no Python interpreter on PATH")
+		warnNoPythonResolver("no Python interpreter on PATH")
 		return nil, nil, nil
 	}
 	if v, ok := pipReportVersion(ctx, python); !ok {
-		warnNoPythonResolver(resolver, python+" has no usable pip")
+		warnNoPythonResolver(python + " has no usable pip")
 		return nil, nil, nil
 	} else if v.olderThan(pipMinimum) {
-		warnNoPythonResolver(resolver, fmt.Sprintf("pip %s is older than %s (needs --dry-run --report)", v, pipMinimum))
+		warnNoPythonResolver(fmt.Sprintf("pip %s is older than %s (needs --dry-run --report)", v, pipMinimum))
 		return nil, nil, nil
 	}
 
@@ -166,7 +173,15 @@ func runPipResolve(ctx context.Context, python, cache, dir string, specArgs []st
 	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 
-	report := filepath.Join(cache, "report-"+strconv.FormatInt(time.Now().UnixNano(), 36)+".json")
+	// OS-allocated, not a timestamp: manifests resolve concurrently into one
+	// shared cache dir, and a clock coarse enough to repeat (Windows) would let
+	// two pip processes share a report — one overwriting what the other reads.
+	reportFile, err := os.CreateTemp(cache, "report-*.json")
+	if err != nil {
+		return nil, fmt.Errorf("pip %s: create report: %w", dir, err)
+	}
+	report := reportFile.Name()
+	reportFile.Close()
 	defer os.Remove(report)
 
 	args := append([]string{
@@ -193,7 +208,7 @@ func runPipResolve(ctx context.Context, python, cache, dir string, specArgs []st
 	)
 	cmd.WaitDelay = 5 * time.Second // the kill lands on pip, but Output still waits on pipes a PEP 517 build backend may hold
 
-	if _, err := cmd.Output(); err != nil {
+	if _, err = cmd.Output(); err != nil {
 		if ctx.Err() != nil {
 			return nil, fmt.Errorf("pip %s: timed out after %s (raise OSSPREY_RESOLVE_TIMEOUT)", dir, budget)
 		}
@@ -338,16 +353,13 @@ func parsePipVersion(out string) (pipVersion, bool) {
 var warnOnce sync.Once
 
 // warnNoPythonResolver tells the user, once, that this scan will report direct
-// dependencies only — but only when the tree actually declares Python
-// dependencies, so a pure JavaScript repo stays quiet. Silence here is what let
-// a customer's CI ship manifest-only SBOMs for weeks without noticing.
+// dependencies only. Silence here is what let a customer's CI ship
+// manifest-only SBOMs for weeks without noticing.
 //
-// Reaching this means the host had no uv either: Catalog builds this cataloger
-// only in uv's absence.
-func warnNoPythonResolver(resolver file.Resolver, reason string) {
-	if !hasPythonManifest(resolver) {
-		return
-	}
+// Only called after Catalog's hasPythonManifest guard, so a pure JavaScript repo
+// never sees it. Reaching it means the host had no uv either: Catalog builds
+// this cataloger only in uv's absence.
+func warnNoPythonResolver(reason string) {
 	warnOnce.Do(func() {
 		fmt.Fprintf(os.Stderr,
 			"ossprey: no Python resolver available (%s) — reporting direct Python dependencies only, without their transitive tree.\n"+
