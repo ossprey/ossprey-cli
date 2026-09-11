@@ -220,6 +220,30 @@ Two independent budgets, both off-by-default-safe:
   once the deadline passes, since every remaining manifest fails identically and
   `scan.Run` already says so once.
 
+### Malware alert (`internal/alert`, `internal/ansi`)
+
+A malware verdict draws a 72-column boxed banner (block-letter MALWARE and a
+package/version/ecosystem table) **before** the existing
+`Error: WARNING: <pkg>:<ver> contains malware...` lines, which stay untouched
+because the smoke tests and downstream greps key on them (OSS-1981).
+`alert.Malware(findings, outcome, profile)` renders it; `scan.MalwareSummary`
+carries the structured `Detected` findings it needs. `reportMalware` in
+main.go (scan/check/init, stdout, no outcome text) and `reportAndForward` in
+forward.go (forwarders, stderr, "Installation blocked.") are the two callers;
+precommit deliberately keeps its compact wording. Informational findings never
+get the banner. Both callers write through a swappable `io.Writer`
+(`verdictOut`, `errOut`) so tests can capture the output.
+
+`ansi.Detect(w)` picks a colour profile: `NO_COLOR`/`TERM=dumb` win, then
+`FORCE_COLOR`/`CLICOLOR_FORCE`, then known CI log viewers (GitHub Actions,
+GitLab, Azure DevOps, Buildkite) get `Basic`, else colour only if `w` is a TTY.
+Depth comes from `COLORTERM` (truecolor) and `TERM` (256color). Escapes wrap
+text only, never the box-drawing, so a leaked escape cannot misalign the box;
+`TestMalwareColourStripsToPlain` pins that stripping a coloured banner yields
+the plain one. `ansi.Enable` switches on virtual-terminal processing on
+Windows conhost and is a no-op elsewhere. Tests that assert "no escapes" on a
+`bytes.Buffer` must clear the CI env vars first, or they fail on GitHub Actions.
+
 ### OSSBOM model (`internal/ossbom`)
 
 `SBOM` is the rich internal model. `MiniBOM` (`minibom.go`) is the compressed

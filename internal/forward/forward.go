@@ -12,12 +12,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"slices"
 	"sort"
 	"strings"
 
+	"github.com/ossprey/ossprey-cli/internal/alert"
+	"github.com/ossprey/ossprey-cli/internal/ansi"
 	"github.com/ossprey/ossprey-cli/internal/check"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
 	"github.com/ossprey/ossprey-cli/internal/progress"
@@ -40,6 +43,8 @@ var (
 // blocked. Callers map it to a non-zero exit code without printing it (Run has
 // already printed the report).
 var ErrBlocked = errors.New("install blocked: malware detected")
+
+var errOut io.Writer = os.Stderr
 
 // Manager describes a supported package manager and how to recognise its
 // install command.
@@ -307,13 +312,15 @@ func reportAndForward(ctx context.Context, m *Manager, opts Options, sbom *ossbo
 	// is nowhere to opt into a stricter floor; the default applies.
 	summary, hasMalware := scan.MalwareReports(sbom, severity.FailingFloor)
 	for _, msg := range summary.Informational {
-		fmt.Fprintln(os.Stderr, "ossprey: "+msg)
+		fmt.Fprintln(errOut, "ossprey: "+msg)
 	}
 	if hasMalware {
+		profile := ansi.Detect(errOut)
+		fmt.Fprint(errOut, alert.Malware(summary.Alert(), "Installation blocked.", profile))
 		for _, msg := range summary.Failing {
-			fmt.Fprintln(os.Stderr, "Error: "+msg)
+			fmt.Fprintln(errOut, profile.Red("Error: "+msg))
 		}
-		fmt.Fprintf(os.Stderr, "ossprey: blocked `%s %s`\n", m.Bin, strings.Join(opts.Args, " "))
+		fmt.Fprintf(errOut, "ossprey: blocked `%s %s`\n", m.Bin, strings.Join(opts.Args, " "))
 		return ErrBlocked
 	}
 	// Both messages sit after the malware check, never in front of it: gating the

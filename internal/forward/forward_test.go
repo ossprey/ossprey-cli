@@ -1,12 +1,15 @@
 package forward
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
+	"github.com/ossprey/ossprey-cli/internal/ansi"
 	"github.com/ossprey/ossprey-cli/internal/check"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
 )
@@ -719,5 +722,62 @@ func TestRun_CacheScanOnly_ErrorStillForwards(t *testing.T) {
 	}
 	if !ex.called {
 		t.Error("CacheScanOnly must fail open and forward when the post fails")
+	}
+}
+
+func TestRun_MalwareBlockPrintsBannerBeforeErrorLines(t *testing.T) {
+	ex := &stubExec{}
+	swap(t, ex.fn, func(context.Context, check.Options) (*ossbom.SBOM, error) {
+		s := ossbom.New(ossbom.Environment{})
+		s.AddVulnerability(ossbom.NewMalwareVulnerability("V1", "pkg:npm/evil@1.0.0", "bad"))
+		return s, nil
+	})
+	for _, k := range []string{"FORCE_COLOR", "CLICOLOR_FORCE", "GITHUB_ACTIONS", "GITLAB_CI", "TF_BUILD", "BUILDKITE"} {
+		t.Setenv(k, "")
+	}
+	var buf bytes.Buffer
+	old := errOut
+	errOut = &buf
+	t.Cleanup(func() { errOut = old })
+
+	err := Run(context.Background(), Options{Bin: "npm", Args: []string{"install", "evil@1.0.0"}})
+	if !errors.Is(err, ErrBlocked) {
+		t.Fatalf("err: got %v, want ErrBlocked", err)
+	}
+	out := buf.String()
+	banner := strings.Index(out, "Ossprey found 1 malicious package. Installation blocked.")
+	plain := strings.Index(out, "Error: WARNING: evil:1.0.0 contains malware. Remediate this immediately")
+	blocked := strings.Index(out, "ossprey: blocked `npm install evil@1.0.0`")
+	if banner < 0 || plain < 0 || blocked < 0 {
+		t.Fatalf("missing banner, plain line or block notice:\n%s", out)
+	}
+	if !(banner < plain && plain < blocked) {
+		t.Errorf("order must be banner, plain lines, block notice:\n%s", out)
+	}
+	if strings.Contains(out, "\x1b[") {
+		t.Errorf("a non-terminal writer must get no escape codes:\n%q", out)
+	}
+}
+
+func TestRun_MalwareBlockErrorLinesAreRedWhenColoured(t *testing.T) {
+	ex := &stubExec{}
+	swap(t, ex.fn, func(context.Context, check.Options) (*ossbom.SBOM, error) {
+		s := ossbom.New(ossbom.Environment{})
+		s.AddVulnerability(ossbom.NewMalwareVulnerability("V1", "pkg:npm/evil@1.0.0", "bad"))
+		return s, nil
+	})
+	t.Setenv("NO_COLOR", "")
+	t.Setenv("FORCE_COLOR", "1")
+	t.Setenv("COLORTERM", "")
+	t.Setenv("TERM", "xterm")
+	var buf bytes.Buffer
+	old := errOut
+	errOut = &buf
+	t.Cleanup(func() { errOut = old })
+
+	_ = Run(context.Background(), Options{Bin: "npm", Args: []string{"install", "evil@1.0.0"}})
+	want := ansi.Basic.Red("Error: WARNING: evil:1.0.0 contains malware. Remediate this immediately")
+	if !strings.Contains(buf.String(), want) {
+		t.Errorf("error line should be red:\n%q", buf.String())
 	}
 }
