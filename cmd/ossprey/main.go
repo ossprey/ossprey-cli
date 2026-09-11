@@ -104,8 +104,9 @@ func newScanCmd() *cobra.Command {
 			// A monitor id names where the scan should land and cannot fetch a
 			// verdict, so it always implies passive.
 			monitor := monitorID
+			fromEnv := false
 			if monitor == "" {
-				monitor = env.MonitorID()
+				monitor, fromEnv = env.MonitorID(), env.MonitorID() != ""
 			}
 			passiveMode := passive || cacheScanOnly || env.Passive() || monitor != ""
 
@@ -114,6 +115,9 @@ func newScanCmd() *cobra.Command {
 			// error the user sees, not a warning on a scan that went nowhere.
 			if monitor != "" && !monitorpkg.ValidToken(monitor) {
 				return fmt.Errorf("invalid monitor id %q: expected ospi_ followed by 64 hex characters", monitor)
+			}
+			if monitor != "" {
+				warnMonitorInEffect(monitor, fromEnv)
 			}
 
 			path := "."
@@ -426,4 +430,33 @@ func writeReport(path string, r scan.Report) error {
 		return nil
 	}
 	return scan.WriteReport(path, r)
+}
+
+// warnMonitorInEffect says, every time, that this scan will not block.
+//
+// A monitor does two things worth announcing: it turns the malware gate off,
+// and it files the scan under whoever owns the id rather than under this
+// machine's own account. Both are the point when a person typed --monitor, and
+// both are a takeover when OSSPREY_MONITOR_ID was set by someone else -- a
+// shared runner, a workflow env: block, a stray export in an image. The two are
+// indistinguishable from here, so neither is silent: the env case names the
+// variable so an operator who did not set it can see where it came from.
+func warnMonitorInEffect(monitor string, fromEnv bool) {
+	source := "--monitor"
+	if fromEnv {
+		source = env.MonitorIDEnv
+	}
+	fmt.Fprintf(os.Stderr,
+		"ossprey: passive monitor %s (via %s): malware will NOT fail this scan, and results go to that monitor's account.\n",
+		redactMonitor(monitor), source)
+}
+
+// redactMonitor shows enough of an id to recognise it, never enough to reuse
+// it: this goes to stderr, which on CI is a log a lot of people can read.
+func redactMonitor(monitor string) string {
+	const shown = len("ospi_") + 8
+	if len(monitor) <= shown {
+		return monitor
+	}
+	return monitor[:shown] + "..."
 }

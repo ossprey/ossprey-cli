@@ -7,7 +7,10 @@ import (
 	"slices"
 	"testing"
 
+	"strings"
+
 	"github.com/ossprey/ossprey-cli/internal/check"
+	"github.com/ossprey/ossprey-cli/internal/env"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
 )
 
@@ -719,5 +722,42 @@ func TestRun_CacheScanOnly_ErrorStillForwards(t *testing.T) {
 	}
 	if !ex.called {
 		t.Error("CacheScanOnly must fail open and forward when the post fails")
+	}
+}
+
+// The monitor id is a live write credential for the owner's account, and the
+// scripts a package manager runs are exactly what this tool exists to watch.
+func TestMonitorIDIsNotHandedToThePackageManager(t *testing.T) {
+	t.Setenv(env.MonitorIDEnv, "ospi_"+strings.Repeat("a", 64))
+	t.Setenv("OSSPREY_API_KEY", "kept")
+
+	got := envWithoutMonitorID()
+
+	for _, kv := range got {
+		if strings.HasPrefix(kv, env.MonitorIDEnv+"=") {
+			t.Fatalf("monitor id reached the package manager's environment: %q", kv)
+		}
+	}
+	var keptAPIKey bool
+	for _, kv := range got {
+		if kv == "OSSPREY_API_KEY=kept" {
+			keptAPIKey = true
+		}
+	}
+	if !keptAPIKey {
+		t.Error("envWithoutMonitorID dropped more than the monitor id")
+	}
+}
+
+func TestRedactMonitorKeepsAPrefixAndDropsTheRest(t *testing.T) {
+	full := "ospi_" + strings.Repeat("a", 64)
+
+	got := redactMonitor(full)
+
+	if got == full {
+		t.Error("the full monitor id reached a log line")
+	}
+	if !strings.HasPrefix(got, "ospi_") || !strings.HasSuffix(got, "...") {
+		t.Errorf("redactMonitor(%q) = %q, want a recognisable prefix", full, got)
 	}
 }

@@ -21,9 +21,14 @@ type Options struct {
 	SkipProfiles bool
 	Home         string
 	// Mode picks blocking (default), watchdog or monitor submission. See Mode.
+	// Left unset on a re-run, an already-installed passive mode is inherited
+	// rather than silently reverted -- see resolveMode.
 	Mode Mode
 	// MonitorID is required by ModeMonitor and rejected otherwise.
 	MonitorID string
+	// ClearMode asks for blocking explicitly, overriding an installed passive
+	// mode instead of inheriting it.
+	ClearMode bool
 }
 
 // ValidateMode checks the mode/monitor-id pairing before anything is written.
@@ -70,6 +75,29 @@ type Result struct {
 	PathHint  string
 }
 
+// resolveMode keeps an installed passive mode across a re-run that names none.
+//
+// `shim install` is documented as safe to re-run, and is how you re-point shims
+// after moving the binary -- install.sh calls it on every upgrade. Taking the
+// mode from the flags alone would mean a routine upgrade silently rewrote a
+// fleet's monitor shims into blocking ones, and the next `npm install` that hit
+// a flagged transitive dependency would start failing builds everywhere. So an
+// existing mode is inherited unless the caller names a different one; asking
+// for blocking explicitly is what --no-passive is for.
+func resolveMode(o Options, dir string, managers []string) Options {
+	if o.Mode != ModeBlocking || o.ClearMode {
+		return o
+	}
+	for _, name := range managers {
+		mode, monitorID := ShimMode(filepath.Join(dir, scriptName(name)))
+		if mode != ModeBlocking {
+			o.Mode, o.MonitorID = mode, monitorID
+			return o
+		}
+	}
+	return o
+}
+
 func Plan(o Options) (*Result, error) {
 	if err := ValidateMode(o); err != nil {
 		return nil, err
@@ -83,6 +111,7 @@ func Plan(o Options) (*Result, error) {
 		return nil, err
 	}
 
+	o = resolveMode(o, dir, managers)
 	res := &Result{Dir: dir, Binary: bin, OnPath: onPath(dir), Mode: o.Mode, MonitorID: o.MonitorID}
 	for _, name := range managers {
 		real, lookErr := LookPathReal(name)
@@ -120,8 +149,8 @@ func Install(o Options) (*Result, error) {
 			Manager:   m.Name,
 			Dir:       res.Dir,
 			Binary:    res.Binary,
-			Mode:      o.Mode,
-			MonitorID: o.MonitorID,
+			Mode:      res.Mode,
+			MonitorID: res.MonitorID,
 		}
 		if err := writeShim(m.Path, opts); err != nil {
 			return nil, err

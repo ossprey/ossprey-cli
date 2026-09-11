@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	"github.com/ossprey/ossprey-cli/internal/check"
+	"github.com/ossprey/ossprey-cli/internal/env"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
 	"github.com/ossprey/ossprey-cli/internal/progress"
 	"github.com/ossprey/ossprey-cli/internal/registry"
@@ -209,10 +210,17 @@ func Run(ctx context.Context, opts Options) error {
 		// Passive mode never blocks the install, not even on a failed submission:
 		// a monitor that can break `npm install` is a monitor people rip out.
 		if opts.Passive {
+			mode := "passive"
+			if opts.MonitorID != "" {
+				// Named because a monitor also decides whose account this lands
+				// in, and the env var carrying it may not have been set by the
+				// person reading this line.
+				mode = "passive, monitor " + redactMonitor(opts.MonitorID)
+			}
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "ossprey: warning: could not post scan (%v); forwarding\n", err)
+				fmt.Fprintf(os.Stderr, "ossprey: warning: could not post scan (%v); installing anyway (%s)\n", err, mode)
 			} else {
-				fmt.Fprintln(os.Stderr, "ossprey: scan posted to the Ossprey dashboard (passive); forwarding")
+				fmt.Fprintf(os.Stderr, "ossprey: scan posted to the Ossprey dashboard; installing without blocking (%s)\n", mode)
 			}
 			return execFn(ctx, m.Bin, opts.Args)
 		}
@@ -563,8 +571,39 @@ func Exec(ctx context.Context, bin string, args []string) error {
 		return err
 	}
 	cmd := exec.CommandContext(ctx, path, args...)
+	cmd.Env = envWithoutMonitorID()
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+// envWithoutMonitorID drops the monitor id before handing control to the real
+// package manager.
+//
+// A monitor shim exports it so ossprey can read it, and the manager inherits
+// whatever ossprey has -- which would put the id in the environment of every
+// `postinstall` and `setup.py` the manager runs. Those scripts are the exact
+// thing this tool exists to watch, and the id is a live write credential
+// against the owner's account, so it stops here.
+func envWithoutMonitorID() []string {
+	full := os.Environ()
+	out := make([]string, 0, len(full))
+	for _, kv := range full {
+		if strings.HasPrefix(kv, env.MonitorIDEnv+"=") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
+}
+
+// redactMonitor shows enough of an id to recognise it, never enough to reuse
+// it: this goes to stderr, which on CI is a log a lot of people can read.
+func redactMonitor(monitor string) string {
+	const shown = len("ospi_") + 8
+	if len(monitor) <= shown {
+		return monitor
+	}
+	return monitor[:shown] + "..."
 }

@@ -38,6 +38,7 @@ func newShimInstallCmd() *cobra.Command {
 		printOnly bool
 		watchdog  bool
 		monitorID string
+		noPassive bool
 	)
 
 	cmd := &cobra.Command{
@@ -58,7 +59,11 @@ across a fleet without standing in front of anybody's work:
 
 --monitor is the one to hand out: the id only allows submitting scans, so it is
 safe to put in CI config and agent settings that you would never give a key to.
-Create one in the dashboard under Ingest tokens.`,
+Create one in the dashboard under Ingest tokens.
+
+Re-running without a mode keeps whichever mode is already installed, so an
+upgrade never silently starts blocking a fleet that chose not to. Use
+--no-passive to go back to blocking on purpose.`,
 		Example: `  # Shim every package manager found on this machine
   ossprey shim install
 
@@ -89,6 +94,7 @@ Create one in the dashboard under Ingest tokens.`,
 				SkipProfiles: noPath,
 				Mode:         mode,
 				MonitorID:    monitorID,
+				ClearMode:    noPassive,
 			}
 			if printOnly {
 				return previewInstall(opts)
@@ -112,7 +118,10 @@ Create one in the dashboard under Ingest tokens.`,
 	cmd.Flags().BoolVar(&printOnly, "dry-run", false, "print what would be installed and exit")
 	cmd.Flags().BoolVar(&watchdog, "watchdog", false, "passive mode: submit scans with this machine's login and never block an install")
 	cmd.Flags().StringVar(&monitorID, "monitor", "", "passive mode: submit scans through a monitor's id, needing no login or API key")
+	cmd.Flags().BoolVar(&noPassive, "no-passive", false, "go back to blocking installs, dropping a watchdog or monitor mode already installed")
 	cmd.MarkFlagsMutuallyExclusive("watchdog", "monitor")
+	cmd.MarkFlagsMutuallyExclusive("no-passive", "watchdog")
+	cmd.MarkFlagsMutuallyExclusive("no-passive", "monitor")
 
 	return cmd
 }

@@ -215,3 +215,91 @@ func modeFromScript(t *testing.T, script string) (Mode, string) {
 	}
 	return ShimMode(path)
 }
+
+// `shim install` is documented as safe to re-run and install.sh calls it on
+// every upgrade, so a re-run that names no mode must not silently rewrite a
+// fleet's passive shims into blocking ones.
+func TestReinstallWithoutAModeKeepsTheInstalledOne(t *testing.T) {
+	root := t.TempDir()
+	shimDir := filepath.Join(root, "shims")
+	bin := filepath.Join(root, "ossprey")
+	writeExec(t, bin, "#!/bin/sh\nexit 0\n")
+	base := Options{
+		Dir: shimDir, Binary: bin, Managers: []string{"npm"}, All: true,
+		SkipProfiles: true, Home: root,
+	}
+
+	first := base
+	first.Mode, first.MonitorID = ModeMonitor, testMonitorID
+	if _, err := Install(first); err != nil {
+		t.Fatalf("first install: %v", err)
+	}
+
+	// A plain re-run, exactly what an upgrade does.
+	res, err := Install(base)
+	if err != nil {
+		t.Fatalf("reinstall: %v", err)
+	}
+
+	if res.Mode != ModeMonitor || res.MonitorID != testMonitorID {
+		t.Errorf("reinstall reported mode %q / id %q, want the installed monitor", res.Mode, res.MonitorID)
+	}
+	mode, id := ShimMode(filepath.Join(shimDir, scriptName("npm")))
+	if mode != ModeMonitor || id != testMonitorID {
+		t.Errorf("reinstall rewrote the shim to mode %q / id %q", mode, id)
+	}
+}
+
+func TestReinstallWithADifferentModeReplacesIt(t *testing.T) {
+	root := t.TempDir()
+	shimDir := filepath.Join(root, "shims")
+	bin := filepath.Join(root, "ossprey")
+	writeExec(t, bin, "#!/bin/sh\nexit 0\n")
+	base := Options{
+		Dir: shimDir, Binary: bin, Managers: []string{"npm"}, All: true,
+		SkipProfiles: true, Home: root,
+	}
+
+	first := base
+	first.Mode, first.MonitorID = ModeMonitor, testMonitorID
+	if _, err := Install(first); err != nil {
+		t.Fatalf("first install: %v", err)
+	}
+	second := base
+	second.Mode = ModeWatchdog
+	if _, err := Install(second); err != nil {
+		t.Fatalf("second install: %v", err)
+	}
+
+	if mode, _ := ShimMode(filepath.Join(shimDir, scriptName("npm"))); mode != ModeWatchdog {
+		t.Errorf("shim mode = %q, want watchdog", mode)
+	}
+}
+
+// Going back to blocking has to be possible, but only on purpose.
+func TestNoPassiveClearsAnInstalledMode(t *testing.T) {
+	root := t.TempDir()
+	shimDir := filepath.Join(root, "shims")
+	bin := filepath.Join(root, "ossprey")
+	writeExec(t, bin, "#!/bin/sh\nexit 0\n")
+	base := Options{
+		Dir: shimDir, Binary: bin, Managers: []string{"npm"}, All: true,
+		SkipProfiles: true, Home: root,
+	}
+
+	first := base
+	first.Mode, first.MonitorID = ModeMonitor, testMonitorID
+	if _, err := Install(first); err != nil {
+		t.Fatalf("first install: %v", err)
+	}
+	cleared := base
+	cleared.ClearMode = true
+	if _, err := Install(cleared); err != nil {
+		t.Fatalf("clearing install: %v", err)
+	}
+
+	mode, id := ShimMode(filepath.Join(shimDir, scriptName("npm")))
+	if mode != ModeBlocking || id != "" {
+		t.Errorf("--no-passive left mode %q / id %q", mode, id)
+	}
+}

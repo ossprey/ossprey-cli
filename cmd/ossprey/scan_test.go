@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -193,4 +195,76 @@ func TestScanPassive_ExitsZeroOnACataloguingFailure(t *testing.T) {
 	if err := runScan(t, "/nonexistent/definitely-not-here", "--passive", "--api-key", "k"); err != nil {
 		t.Fatalf("passive must exit 0 on a bad path; got %v", err)
 	}
+}
+
+// A monitor turns the malware gate off and files the scan under whoever owns
+// the id. When OSSPREY_MONITOR_ID was set by someone else -- a shared runner, a
+// workflow env: block -- that is a silent takeover, so it is never silent.
+func TestScanMonitorFromEnvWarnsThatBlockingIsOff(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		io.WriteString(w, `{"sbom_id":"sb1","scan_id":"sc1"}`)
+	}))
+	defer srv.Close()
+
+	t.Setenv("OSSPREY_MONITOR_ID", validMonitorID)
+	stderr := captureStderr(t, func() {
+		if err := runScan(t, t.TempDir(), "--url", srv.URL); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+	})
+
+	if !strings.Contains(stderr, "will NOT fail this scan") {
+		t.Errorf("no warning that blocking is disabled:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "OSSPREY_MONITOR_ID") {
+		t.Errorf("warning did not name where the monitor came from:\n%s", stderr)
+	}
+	if strings.Contains(stderr, validMonitorID) {
+		t.Errorf("the full monitor id was written to stderr:\n%s", stderr)
+	}
+}
+
+func TestScanMonitorFlagWarnsToo(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		io.WriteString(w, `{"sbom_id":"sb1","scan_id":"sc1"}`)
+	}))
+	defer srv.Close()
+
+	stderr := captureStderr(t, func() {
+		if err := runScan(t, t.TempDir(), "--monitor", validMonitorID, "--url", srv.URL); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+	})
+
+	if !strings.Contains(stderr, "--monitor") {
+		t.Errorf("warning did not name the flag as the source:\n%s", stderr)
+	}
+}
+
+// captureStderr swaps os.Stderr for a pipe; the warning is written there
+// directly rather than through the cobra command's writer.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	done := make(chan string, 1)
+	go func() {
+		var buf bytes.Buffer
+		_, _ = io.Copy(&buf, r)
+		done <- buf.String()
+	}()
+
+	fn()
+
+	os.Stderr = orig
+	w.Close()
+	out := <-done
+	r.Close()
+	return out
 }
