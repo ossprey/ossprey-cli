@@ -14,7 +14,7 @@ func TestScriptCarriesMarkerAndBinary(t *testing.T) {
 	path := filepath.Join(dir, scriptName("npm"))
 	bin := filepath.Join(dir, "..", "ossprey")
 
-	if err := os.WriteFile(path, []byte(Script("npm", dir, bin)), 0o755); err != nil {
+	if err := os.WriteFile(path, []byte(Script(ScriptOptions{Manager: "npm", Dir: dir, Binary: bin})), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if !IsShim(path) {
@@ -55,7 +55,7 @@ func TestShimExecsOssprey(t *testing.T) {
 	writeExec(t, ossprey, "#!/bin/sh\necho \"ossprey called: $*\"\necho \"PATH=$PATH\"\n")
 	writeExec(t, filepath.Join(realDir, "npm"), "#!/bin/sh\necho \"real npm: $*\"\n")
 
-	writeExec(t, filepath.Join(shimDir, "npm"), Script("npm", shimDir, ossprey))
+	writeExec(t, filepath.Join(shimDir, "npm"), Script(ScriptOptions{Manager: "npm", Dir: shimDir, Binary: ossprey}))
 
 	out := runShim(t, shimDir, realDir, nil, "install", "left-pad")
 	if !strings.Contains(out, "ossprey called: npm install left-pad") {
@@ -75,7 +75,7 @@ func TestShimPreservesGlobbyPathEntries(t *testing.T) {
 
 	ossprey := filepath.Join(root, "ossprey")
 	writeExec(t, ossprey, "#!/bin/sh\necho \"PATH=$PATH\"\n")
-	writeExec(t, filepath.Join(shimDir, "npm"), Script("npm", shimDir, ossprey))
+	writeExec(t, filepath.Join(shimDir, "npm"), Script(ScriptOptions{Manager: "npm", Dir: shimDir, Binary: ossprey}))
 	mkdirs(t, filepath.Join(root, "match-a"), filepath.Join(root, "match-b"))
 
 	globby := filepath.Join(root, "match-*")
@@ -100,7 +100,7 @@ func TestShimBypassSkipsOssprey(t *testing.T) {
 	ossprey := filepath.Join(root, "ossprey")
 	writeExec(t, ossprey, "#!/bin/sh\necho \"ossprey called\"\n")
 	writeExec(t, filepath.Join(realDir, "npm"), "#!/bin/sh\necho \"real npm: $*\"\n")
-	writeExec(t, filepath.Join(shimDir, "npm"), Script("npm", shimDir, ossprey))
+	writeExec(t, filepath.Join(shimDir, "npm"), Script(ScriptOptions{Manager: "npm", Dir: shimDir, Binary: ossprey}))
 
 	out := runShim(t, shimDir, realDir, []string{BypassEnv + "=1"}, "install", "left-pad")
 	if strings.Contains(out, "ossprey called") {
@@ -119,7 +119,7 @@ func TestShimFailsOpen(t *testing.T) {
 	mkdirs(t, shimDir, realDir)
 
 	writeExec(t, filepath.Join(realDir, "npm"), "#!/bin/sh\necho \"real npm: $*\"\n")
-	writeExec(t, filepath.Join(shimDir, "npm"), Script("npm", shimDir, filepath.Join(root, "does-not-exist")))
+	writeExec(t, filepath.Join(shimDir, "npm"), Script(ScriptOptions{Manager: "npm", Dir: shimDir, Binary: filepath.Join(root, "does-not-exist")}))
 
 	out := runShim(t, shimDir, realDir, nil, "install", "left-pad")
 	if !strings.Contains(out, "real npm: install left-pad") {

@@ -20,6 +20,13 @@ const (
 
 	binPrefix = "ossprey-bin: "
 
+	// Header line recording a passive shim's mode, so `shim status` can report
+	// it and `shim install` can see what an existing shim was set to.
+	modePrefix = "ossprey-mode: "
+
+	passiveEnv = "OSSPREY_PASSIVE"
+	monitorEnv = "OSSPREY_MONITOR_ID"
+
 	blockStart = "# >>> ossprey shims >>>"
 	blockEnd   = "# <<< ossprey shims <<<"
 )
@@ -88,6 +95,32 @@ func ShimBinary(path string) string {
 		}
 	}
 	return ""
+}
+
+// ShimMode reads back the mode and monitor id a shim was generated with.
+// Returns ModeBlocking for a shim carrying no mode line (the default, and every
+// shim written before passive modes existed).
+func ShimMode(path string) (Mode, string) {
+	head, err := readHead(path)
+	if err != nil || !bytes.Contains(head, []byte(Marker)) {
+		return ModeBlocking, ""
+	}
+	for _, line := range strings.Split(string(head), "\n") {
+		i := strings.Index(line, modePrefix)
+		if i < 0 {
+			continue
+		}
+		fields := strings.Fields(strings.TrimSpace(line[i+len(modePrefix):]))
+		switch {
+		case len(fields) == 0:
+			return ModeBlocking, ""
+		case Mode(fields[0]) == ModeMonitor && len(fields) > 1:
+			return ModeMonitor, fields[1]
+		case Mode(fields[0]) == ModeWatchdog:
+			return ModeWatchdog, ""
+		}
+	}
+	return ModeBlocking, ""
 }
 
 func readHead(path string) ([]byte, error) {

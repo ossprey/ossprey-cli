@@ -36,6 +36,8 @@ func newShimInstallCmd() *cobra.Command {
 		dir       string
 		binary    string
 		printOnly bool
+		watchdog  bool
+		monitorID string
 	)
 
 	cmd := &cobra.Command{
@@ -45,7 +47,18 @@ func newShimInstallCmd() *cobra.Command {
 		Long: `Write the shim scripts and put their directory at the front of your PATH.
 
 By default only managers you actually have installed are shimmed. Safe to re-run:
-it is also how you re-point existing shims after moving the ossprey binary.`,
+it is also how you re-point existing shims after moving the ossprey binary.
+
+By default an install that pulls in known malware is blocked. The two passive
+modes submit the scan and let the install proceed instead, so you get visibility
+across a fleet without standing in front of anybody's work:
+
+  --watchdog          submit using this machine's own login or API key
+  --monitor <id>      submit through a monitor's id, with no credential at all
+
+--monitor is the one to hand out: the id only allows submitting scans, so it is
+safe to put in CI config and agent settings that you would never give a key to.
+Create one in the dashboard under Ingest tokens.`,
 		Example: `  # Shim every package manager found on this machine
   ossprey shim install
 
@@ -53,14 +66,29 @@ it is also how you re-point existing shims after moving the ossprey binary.`,
   ossprey shim install --managers npm,pip --no-path
 
   # Show what would be written, change nothing
-  ossprey shim install --dry-run`,
+  ossprey shim install --dry-run
+
+  # Passive monitoring using this machine's login; installs are never blocked
+  ossprey shim install --watchdog
+
+  # Passive monitoring with no credential on the machine at all
+  ossprey shim install --monitor ospi_...`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			mode := shim.ModeBlocking
+			switch {
+			case monitorID != "":
+				mode = shim.ModeMonitor
+			case watchdog:
+				mode = shim.ModeWatchdog
+			}
 			opts := shim.Options{
 				Dir:          dir,
 				Binary:       binary,
 				Managers:     managers,
 				All:          all,
 				SkipProfiles: noPath,
+				Mode:         mode,
+				MonitorID:    monitorID,
 			}
 			if printOnly {
 				return previewInstall(opts)
@@ -82,6 +110,9 @@ it is also how you re-point existing shims after moving the ossprey binary.`,
 	cmd.Flags().StringVar(&dir, "dir", "", "shim directory (default: ~/.ossprey/shims, or $"+shim.DirEnv+")")
 	cmd.Flags().StringVar(&binary, "binary", "", "ossprey binary the shims should call (default: this one)")
 	cmd.Flags().BoolVar(&printOnly, "dry-run", false, "print what would be installed and exit")
+	cmd.Flags().BoolVar(&watchdog, "watchdog", false, "passive mode: submit scans with this machine's login and never block an install")
+	cmd.Flags().StringVar(&monitorID, "monitor", "", "passive mode: submit scans through a monitor's id, needing no login or API key")
+	cmd.MarkFlagsMutuallyExclusive("watchdog", "monitor")
 
 	return cmd
 }
@@ -191,6 +222,9 @@ func printInstallResult(res *shim.Result, noPath bool) {
 	for _, m := range res.Done {
 		fmt.Printf("  %-8s → ossprey %s → %s\n", m.Name, m.Name, orDash(m.Real))
 	}
+	if line := modeSummary(res.Mode, res.MonitorID); line != "" {
+		fmt.Println("\n" + line)
+	}
 	for _, m := range res.Skipped {
 		fmt.Printf("  %-8s skipped (%s)\n", m.Name, m.Note)
 	}
@@ -240,7 +274,7 @@ func printStatus(st *shim.Status) {
 	for _, m := range st.Managers {
 		switch {
 		case m.Active:
-			fmt.Printf("  %s %-8s checked by ossprey, then run from %s\n", yes, m.Name, orDash(m.Real))
+			fmt.Printf("  %s %-8s %s, then run from %s\n", yes, m.Name, shimAction(m.Mode), orDash(m.Real))
 		case m.Shim != "" && m.Resolves == "":
 			fmt.Printf("  %s %-8s shim installed, but %s isn't on your PATH\n", meh, m.Name, m.Name)
 		case m.Shim != "":
@@ -299,4 +333,32 @@ func orDash(s string) string {
 		return "(not found)"
 	}
 	return s
+}
+
+// modeSummary says, in one line, what these shims will do to an install. Passive
+// modes change the headline behaviour -- nothing gets blocked any more -- so it
+// is worth stating outright rather than leaving to the docs.
+func modeSummary(mode shim.Mode, monitorID string) string {
+	switch mode {
+	case shim.ModeWatchdog:
+		return "Passive (watchdog): scans are submitted with this machine's login and\ninstalls are never blocked. Results appear in the Ossprey dashboard."
+	case shim.ModeMonitor:
+		return fmt.Sprintf("Passive (monitor %s): scans are submitted through that monitor and\ninstalls are never blocked. This machine needs no login or API key.", monitorID)
+	default:
+		return ""
+	}
+}
+
+// shimAction describes what one shim does to an install, since a passive shim
+// reports "checked" but blocks nothing -- a distinction worth being explicit
+// about when somebody runs status to find out whether they are protected.
+func shimAction(mode shim.Mode) string {
+	switch mode {
+	case shim.ModeWatchdog:
+		return "submitted passively by ossprey (watchdog, never blocked)"
+	case shim.ModeMonitor:
+		return "submitted passively by ossprey (monitor, never blocked)"
+	default:
+		return "checked by ossprey"
+	}
 }

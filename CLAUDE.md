@@ -118,6 +118,21 @@ Windows resolves it under `%LOCALAPPDATA%`.
 
 4. **`shim install|uninstall|status|dir`** (`cmd/ossprey/shim.go` → `internal/shim`) — writes PATH shims so `npm install` routes through `ossprey npm` with no prefix, covering scripts, CI and coding agents that a shell alias never reaches (OSS-1566). Also driven by `install.sh --override-package-managers` / `install.ps1 -OverridePackageManagers`.
 
+### Passive modes and monitor ids
+
+`--passive` submits the scan and returns without polling for a verdict, always exiting 0. It is not new behaviour: `--ci-cache-scan-only` already did exactly this (`submit.Post`, no polling, warn-don't-fail), under a name that reads as "only check the cache" when in fact it runs the full pipeline. The old flag and `OSSPREY_CI_CACHE_SCAN_ONLY` are kept working indefinitely — they are set in pipelines we do not control — but the flag is `Hidden` so there is one name to teach. One behaviour did change: `--passive --report` is now **refused** rather than silently writing nothing, because a consumer reading a stale report from an earlier run cannot tell it apart from this run's.
+
+A **monitor id** (`--monitor`, `OSSPREY_MONITOR_ID`) is a submit-only credential that travels in the URL path: `POST /ingest/<token>/scans`, no auth header at all. It exists so scanning can be rolled out to machines and CI without distributing a secret that could read the customer's data, so the asymmetry is the point and must be preserved:
+
+- `client.mount()` has a third branch for it, and `authenticate()` **returns early** rather than falling through — an empty `x-api-key` header reads as a malformed key, not as no credential.
+- `Client.Validate` **refuses** an ingest client (`ErrIngestSubmitOnly`). The ingest mount has no status route; polling it would 404 confusingly.
+- `submit.NewSubmitClient` lets a monitor id win outright with no fallback. Quietly sending under a stored login instead would file the scan against the wrong thing and hide a typo in the id.
+- The id is validated in `cmd/ossprey/main.go` **before** passive mode's fail-open can swallow it, or a typo becomes a warning on a scan that went nowhere.
+
+**The token format is a security boundary, not a convenience check.** `internal/monitor` is a dependency-free leaf holding the one definition (`^ospi_[0-9a-f]{64}$`, mirroring the service's `ingest/config.py TOKEN_PATTERN`). It is a leaf because `client` needs it for the URL path and `shim` needs it for a generated `/bin/sh` file, and `shim` must not import `client` (see below). Loosening that pattern would let a hostile flag value reach both an interpolated URL and an executable file; `shim.ValidateMode` runs in `Plan`, so `--dry-run` rejects a bad id too, and `TestValidateModeRejectsAHostileMonitorID` pins the shapes.
+
+`shim install --watchdog` / `--monitor <id>` bake `OSSPREY_PASSIVE=1` (plus `OSSPREY_MONITOR_ID`) into the generated script, which previously set no environment at all. The mode round-trips through an `ossprey-mode:` header line next to the existing `ossprey-bin:` one, so `shim status` reports it per manager — per manager, not per directory, because a partial re-install can leave a machine with a mix.
+
 ### Shims (`internal/shim`)
 
 A shim is a generated `/bin/sh` script (`.cmd` on Windows) named after the manager, in `~/.ossprey/shims`, which shell profiles prepend to PATH inside a marked block. Four invariants hold it together:
@@ -127,7 +142,7 @@ A shim is a generated `/bin/sh` script (`.cmd` on Windows) named after the manag
 - **The allowlist lives in `forward`, not the script.** Shims forward everything; `forward.Run`'s `installAt` decides what gets checked, so `npm run`/`poetry run` pass straight through. One allowlist, one language.
 - **Only our files.** `Uninstall` deletes only marker-carrying files; profile edits live between `# >>> ossprey shims >>>` markers.
 
-`shim` must stay a leaf package (`forward` imports it). `DefaultManagers()` and `forward.Managers()` are kept in agreement by an external test in `internal/shim/forward_agreement_test.go`.
+`shim` must stay a leaf package (`forward` imports it) — its only first-party dependency is `internal/monitor`, which is itself dependency-free. Do **not** reach for `internal/client` from here to validate a monitor id, which is what `internal/monitor` exists to avoid. `DefaultManagers()` and `forward.Managers()` are kept in agreement by an external test in `internal/shim/forward_agreement_test.go`.
 
 ### Core data flow (scan)
 
@@ -231,7 +246,8 @@ changes.
 ### API client (`internal/client`)
 
 `Validate` POSTs the MiniBOM to `/public/v1/scans`, then polls
-`/public/v1/scans/status` (quadratic backoff, capped at `maxPollAttempts`). A
+`/public/v1/scans/status` (quadratic backoff, capped at `maxPollAttempts`), and
+refuses outright for an ingest client (see "Passive modes and monitor ids"). A
 quota-exhausted response surfaces as a typed `*ErrSkipped` that propagates
 unwrapped so callers can detect it via `errors.As` and **exit 0** rather than
 failing the build (see `reportSkipped` in main.go). API key resolution order:

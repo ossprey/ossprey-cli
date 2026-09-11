@@ -10,14 +10,20 @@
 #   -OverridePackageManagers   Install PATH shims so npm, pnpm, yarn, pip, pip3,
 #                              poetry and uv route through ossprey without being
 #                              prefixed. Same as `ossprey shim install`.
+#   -Watchdog                  With the shims, submit scans passively using this
+#                              machine's login and never block an install.
+#   -MonitorId <id>            With the shims, submit passively through a
+#                              monitor's id, needing no credential at all.
 #
 # Env vars:
 #   OSSPREY_VERSION      Tag to install (e.g. v0.1.0). Default: latest.
 #   OSSPREY_INSTALL_DIR  Install location. Default: %LOCALAPPDATA%\Programs\ossprey
+#   OSSPREY_WATCHDOG=1                    Same as -Watchdog.
+#   OSSPREY_MONITOR_ID=<id>               Same as -MonitorId <id>.
 #   OSSPREY_OVERRIDE_PACKAGE_MANAGERS=1   Same as -OverridePackageManagers, and
 #                              the way to ask for shims through `irm ... | iex`.
 
-param([switch]$OverridePackageManagers)
+param([switch]$OverridePackageManagers, [switch]$Watchdog, [string]$MonitorId)
 
 $ErrorActionPreference = 'Stop'
 
@@ -105,10 +111,22 @@ try {
     Log "installed $installedVersion to $dest"
 
     # --- optional: PATH shims over the package managers ---
-    if ($OverridePackageManagers -or $env:OSSPREY_OVERRIDE_PACKAGE_MANAGERS) {
+    if (-not $MonitorId) { $MonitorId = $env:OSSPREY_MONITOR_ID }
+    if (-not $Watchdog -and $env:OSSPREY_WATCHDOG) { $Watchdog = $true }
+    if ($MonitorId -and $Watchdog) {
+        throw "-Watchdog and -MonitorId are mutually exclusive"
+    }
+
+    # Built as an array so an unset mode passes no argument at all. The monitor
+    # id is validated by `shim install` before it is written anywhere.
+    $modeArgs = @()
+    if ($MonitorId) { $modeArgs = @("--monitor", $MonitorId) }
+    elseif ($Watchdog) { $modeArgs = @("--watchdog") }
+
+    if ($OverridePackageManagers -or $MonitorId -or $Watchdog -or $env:OSSPREY_OVERRIDE_PACKAGE_MANAGERS) {
         Log 'installing package-manager shims'
         try {
-            & $dest shim install
+            & $dest shim install @modeArgs
         } catch {
             Log "shim install failed: $_"
             Log "ossprey itself is installed — run 'ossprey shim install' to retry"

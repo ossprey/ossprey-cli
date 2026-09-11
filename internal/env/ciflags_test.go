@@ -35,8 +35,8 @@ func TestCacheScanOnly(t *testing.T) {
 	}
 	for in, want := range tests {
 		t.Setenv(CacheScanOnlyEnv, in)
-		if got := CacheScanOnly(); got != want {
-			t.Errorf("%s=%q: CacheScanOnly() = %v, want %v", CacheScanOnlyEnv, in, got, want)
+		if got := Passive(); got != want {
+			t.Errorf("%s=%q: Passive() = %v, want %v", CacheScanOnlyEnv, in, got, want)
 		}
 	}
 }

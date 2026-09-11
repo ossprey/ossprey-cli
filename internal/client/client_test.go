@@ -344,3 +344,66 @@ func TestSubmit_Errors(t *testing.T) {
 		})
 	}
 }
+
+const testIngestToken = "ospi_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+func TestNewIngestRejectsAMalformedToken(t *testing.T) {
+	// The token lands in a URL path, so a value carrying a slash or a query
+	// character would silently retarget the request at another route.
+	for _, token := range []string{
+		"", "nope", "ospi_short",
+		testIngestToken + "/../../dashboard/v1",
+		testIngestToken + "?x=1",
+		"ospi_" + strings.Repeat("z", 64),
+	} {
+		if _, err := NewIngest("https://api.test", token); err == nil {
+			t.Errorf("NewIngest accepted %q", token)
+		}
+	}
+}
+
+func TestIngestClientPostsToTheIngestMountWithNoCredential(t *testing.T) {
+	var gotPath, gotAPIKey, gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAPIKey = r.Header.Get("x-api-key")
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusAccepted)
+		io.WriteString(w, `{"sbom_id":"sb1","scan_id":"sc1"}`)
+	}))
+	defer srv.Close()
+
+	c, err := NewIngest(srv.URL, testIngestToken)
+	if err != nil {
+		t.Fatalf("NewIngest: %v", err)
+	}
+	if err := c.Submit(context.Background(), ossbom.MiniBOM{}); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+
+	if want := "/ingest/" + testIngestToken + "/scans"; gotPath != want {
+		t.Errorf("posted to %q, want %q", gotPath, want)
+	}
+	// An empty x-api-key would read as a malformed key rather than as no
+	// credential, which is why authenticate returns early for this mode.
+	if gotAPIKey != "" || gotAuth != "" {
+		t.Errorf("ingest client sent a credential: x-api-key=%q authorization=%q", gotAPIKey, gotAuth)
+	}
+}
+
+// A monitor id is submit-only. Refusing here means the caller gets a clear
+// error instead of a 404 from a status route that was never meant to exist.
+func TestIngestClientRefusesValidate(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("Validate must not reach the network for an ingest client (path %s)", r.URL.Path)
+	}))
+	defer srv.Close()
+
+	c, err := NewIngest(srv.URL, testIngestToken)
+	if err != nil {
+		t.Fatalf("NewIngest: %v", err)
+	}
+	if _, err := c.Validate(context.Background(), ossbom.MiniBOM{}); !errors.Is(err, ErrIngestSubmitOnly) {
+		t.Fatalf("Validate() error = %v, want ErrIngestSubmitOnly", err)
+	}
+}

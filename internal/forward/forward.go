@@ -179,7 +179,12 @@ type Options struct {
 	// registry.ResolveLatest; overridable in tests.
 	ResolveLatest func(ctx context.Context, ecosystem, name string) (string, error)
 	SkipCI        bool
-	CacheScanOnly bool
+	// Passive submits the scan and forwards the install without waiting for a
+	// verdict. This is what the watchdog and monitor shims run in.
+	Passive bool
+	// MonitorID sends a passive submission through a monitor's ingest token, so
+	// the machine needs no login and no API key. Ignored unless Passive.
+	MonitorID string
 }
 
 // Run executes the forwarder flow:
@@ -201,11 +206,13 @@ func Run(ctx context.Context, opts Options) error {
 	}
 
 	finish := func(sbom *ossbom.SBOM, err error) error {
-		if opts.CacheScanOnly {
+		// Passive mode never blocks the install, not even on a failed submission:
+		// a monitor that can break `npm install` is a monitor people rip out.
+		if opts.Passive {
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "ossprey: warning: could not post scan (%v); forwarding\n", err)
 			} else {
-				fmt.Fprintln(os.Stderr, "ossprey: scan posted to the Ossprey dashboard (ci-cache-scan-only); forwarding")
+				fmt.Fprintln(os.Stderr, "ossprey: scan posted to the Ossprey dashboard (passive); forwarding")
 			}
 			return execFn(ctx, m.Bin, opts.Args)
 		}
@@ -254,7 +261,8 @@ func Run(ctx context.Context, opts Options) error {
 			Specs:      resolved,
 			APIURL:     opts.APIURL,
 			APIKey:     opts.APIKey,
-			SubmitOnly: opts.CacheScanOnly,
+			SubmitOnly: opts.Passive,
+			MonitorID:  opts.MonitorID,
 		})
 		stop()
 		return finish(sbom, err)
@@ -268,7 +276,7 @@ func Run(ctx context.Context, opts Options) error {
 		// Cataloguing a whole project can take longer than the API scan itself
 		// (npm range resolution, uv), so the indicator wraps both.
 		stop := progress.Start(os.Stderr, "ossprey: scan in progress")
-		sbom, err := scanProjectFn(ctx, ".", opts.APIURL, opts.APIKey, opts.CacheScanOnly)
+		sbom, err := scanProjectFn(ctx, ".", opts.APIURL, opts.APIKey, opts.MonitorID, opts.Passive)
 		stop()
 		return finish(sbom, err)
 
@@ -358,7 +366,7 @@ func manifestInstall(p installArgs) bool {
 // returns it with any vulnerabilities applied. It is the default scanProjectFn
 // seam. When the directory has no catalogable dependencies it returns the empty
 // SBOM without an API call so a bare install in a non-project dir forwards.
-func scanProject(ctx context.Context, dir, apiURL, apiKey string, submitOnly bool) (*ossbom.SBOM, error) {
+func scanProject(ctx context.Context, dir, apiURL, apiKey, monitorID string, submitOnly bool) (*ossbom.SBOM, error) {
 	sbom, err := scan.Run(ctx, scan.Options{Path: dir})
 	if err != nil {
 		return nil, err
@@ -367,7 +375,7 @@ func scanProject(ctx context.Context, dir, apiURL, apiKey string, submitOnly boo
 		return sbom, nil // nothing declared to check
 	}
 	if submitOnly {
-		if err := submit.Post(ctx, sbom, apiURL, apiKey); err != nil {
+		if err := submit.Post(ctx, sbom, apiURL, apiKey, monitorID); err != nil {
 			return nil, err
 		}
 		return sbom, nil

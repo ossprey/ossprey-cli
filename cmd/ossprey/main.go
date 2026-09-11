@@ -15,6 +15,7 @@ import (
 	"github.com/ossprey/ossprey-cli/internal/client"
 	"github.com/ossprey/ossprey-cli/internal/env"
 	"github.com/ossprey/ossprey-cli/internal/forward"
+	monitorpkg "github.com/ossprey/ossprey-cli/internal/monitor"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
 	"github.com/ossprey/ossprey-cli/internal/registry"
 	"github.com/ossprey/ossprey-cli/internal/scan"
@@ -85,7 +86,9 @@ func newScanCmd() *cobra.Command {
 		apiKey              string
 		noVersionLookup     bool
 		skipCI              bool
+		passive             bool
 		cacheScanOnly       bool
+		monitorID           string
 		timeout             time.Duration
 	)
 
@@ -98,7 +101,20 @@ func newScanCmd() *cobra.Command {
 				fmt.Println("Ossprey scan skipped (skip-ci)")
 				return nil
 			}
-			cacheOnly := cacheScanOnly || env.CacheScanOnly()
+			// A monitor id names where the scan should land and cannot fetch a
+			// verdict, so it always implies passive.
+			monitor := monitorID
+			if monitor == "" {
+				monitor = env.MonitorID()
+			}
+			passiveMode := passive || cacheScanOnly || env.Passive() || monitor != ""
+
+			// Validated here, before passive mode's fail-open can swallow it. A
+			// monitor id names where the scan should land, so a typo must be an
+			// error the user sees, not a warning on a scan that went nowhere.
+			if monitor != "" && !monitorpkg.ValidToken(monitor) {
+				return fmt.Errorf("invalid monitor id %q: expected ospi_ followed by 64 hex characters", monitor)
+			}
 
 			path := "."
 			if len(args) == 1 {
@@ -111,6 +127,16 @@ func newScanCmd() *cobra.Command {
 			if local && reportPath != "" {
 				return errors.New("--local and --report are mutually exclusive: --local exits before any verdict")
 			}
+			// Same reason: a passive scan submits and returns without fetching
+			// findings, so a report file would claim a verdict nobody checked.
+			// Refused rather than silently skipped, which is what the old
+			// --ci-cache-scan-only did and which left CI reading a stale file.
+			if passiveMode && reportPath != "" {
+				return errors.New("--passive and --report are mutually exclusive: a passive scan never reaches a verdict")
+			}
+			if passiveMode && local {
+				return errors.New("--passive and --local are mutually exclusive: --local never submits the scan")
+			}
 
 			sbom, err := scan.Run(cmd.Context(), scan.Options{
 				Path:              path,
@@ -119,6 +145,13 @@ func newScanCmd() *cobra.Command {
 				Timeout:           scanTimeout(timeout),
 			})
 			if err != nil {
+				// Passive monitoring runs in front of other people's work, so a
+				// cataloguing failure is reported and shrugged off rather than
+				// turned into a non-zero exit somebody has to chase.
+				if passiveMode {
+					fmt.Fprintf(os.Stderr, "ossprey: warning: could not catalogue %s: %v\n", path, err)
+					return nil
+				}
 				return err
 			}
 
@@ -138,11 +171,11 @@ func newScanCmd() *cobra.Command {
 				}
 			case dryRunSafe:
 				// no-op
-			case cacheOnly:
-				if err := submit.Post(cmd.Context(), sbom, apiURL, apiKey); err != nil {
+			case passiveMode:
+				if err := submit.Post(cmd.Context(), sbom, apiURL, apiKey, monitor); err != nil {
 					fmt.Fprintf(os.Stderr, "ossprey: warning: could not post scan: %v\n", err)
 				} else {
-					fmt.Println("Scan submitted; results will appear in the Ossprey dashboard (ci-cache-scan-only)")
+					fmt.Println("Scan submitted; results will appear in the Ossprey dashboard")
 				}
 			default:
 				if err := submit.Validate(cmd.Context(), sbom, apiURL, apiKey); err != nil {
@@ -164,12 +197,9 @@ func newScanCmd() *cobra.Command {
 				}
 			}
 
-			// --ci-cache-scan-only submits for the dashboard and deliberately
-			// reaches no verdict, so there is nothing to report — same reason
-			// --local and --report are refused together. Returning before the
-			// write keeps a report file from claiming "clean" for a scan whose
-			// findings were never fetched.
-			if cacheOnly {
+			// A passive scan deliberately reaches no verdict, so there is nothing
+			// to report and nothing to exit non-zero over.
+			if passiveMode {
 				return nil
 			}
 
@@ -200,8 +230,15 @@ func newScanCmd() *cobra.Command {
 	cmd.Flags().StringVar(&apiURL, "url", defaultAPIURL, "Ossprey API URL")
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "Ossprey API key (or OSSPREY_API_KEY / API_KEY env var; optional after `ossprey login`)")
 	cmd.Flags().BoolVar(&skipCI, "skip-ci", false, "skip the Ossprey scan entirely and exit 0 (or OSSPREY_SKIP_CI env var)")
-	cmd.Flags().BoolVar(&cacheScanOnly, "ci-cache-scan-only", false, "catalogue and submit the scan for the dashboard, skip the CLI verdict and always exit 0 (or OSSPREY_CI_CACHE_SCAN_ONLY env var)")
-	cmd.MarkFlagsMutuallyExclusive("skip-ci", "ci-cache-scan-only")
+	cmd.Flags().BoolVar(&passive, "passive", false, "submit the scan for the dashboard without waiting for a verdict; always exits 0 (or OSSPREY_PASSIVE env var)")
+	cmd.Flags().StringVar(&monitorID, "monitor", "", "submit passively through a monitor's id, with no login or API key (or OSSPREY_MONITOR_ID env var)")
+	// The original CI-facing spelling of --passive. Hidden rather than removed:
+	// it is set in pipelines we do not control, so it keeps working, but there
+	// is only one name left to teach.
+	cmd.Flags().BoolVar(&cacheScanOnly, "ci-cache-scan-only", false, "deprecated alias for --passive")
+	_ = cmd.Flags().MarkHidden("ci-cache-scan-only")
+	cmd.MarkFlagsMutuallyExclusive("skip-ci", "passive", "ci-cache-scan-only")
+	cmd.MarkFlagsMutuallyExclusive("skip-ci", "monitor")
 
 	return cmd
 }
@@ -302,12 +339,13 @@ func newForwardCmd(bin string) *cobra.Command {
 				apiURL = defaultAPIURL
 			}
 			err := forward.Run(cmd.Context(), forward.Options{
-				Bin:           bin,
-				Args:          args,
-				APIURL:        apiURL,
-				APIKey:        os.Getenv("OSSPREY_API_KEY"),
-				SkipCI:        env.SkipCI(),
-				CacheScanOnly: env.CacheScanOnly(),
+				Bin:       bin,
+				Args:      args,
+				APIURL:    apiURL,
+				APIKey:    os.Getenv("OSSPREY_API_KEY"),
+				SkipCI:    env.SkipCI(),
+				Passive:   env.Passive() || env.MonitorID() != "",
+				MonitorID: env.MonitorID(),
 			})
 			switch {
 			case err == nil:

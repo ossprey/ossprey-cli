@@ -31,7 +31,7 @@ func TestScanSkipCIEnv(t *testing.T) {
 	}
 }
 
-func TestScanCacheScanOnly_PostsWithoutPolling(t *testing.T) {
+func TestScanPassive_PostsWithoutPolling(t *testing.T) {
 	var posted bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -40,7 +40,7 @@ func TestScanCacheScanOnly_PostsWithoutPolling(t *testing.T) {
 			w.WriteHeader(http.StatusAccepted)
 			io.WriteString(w, `{"sbom_id":"sb1","scan_id":"sc1"}`)
 		case "/public/v1/scans/status":
-			t.Error("ci-cache-scan-only must not poll the status endpoint")
+			t.Error("passive must not poll the status endpoint")
 		default:
 			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
@@ -48,64 +48,149 @@ func TestScanCacheScanOnly_PostsWithoutPolling(t *testing.T) {
 	defer srv.Close()
 
 	dir := t.TempDir()
-	if err := runScan(t, dir, "--ci-cache-scan-only", "--url", srv.URL, "--api-key", "test-key"); err != nil {
-		t.Fatalf("scan --ci-cache-scan-only: %v", err)
+	if err := runScan(t, dir, "--passive", "--url", srv.URL, "--api-key", "test-key"); err != nil {
+		t.Fatalf("scan --passive: %v", err)
 	}
 	if !posted {
-		t.Error("ci-cache-scan-only never posted the scan")
+		t.Error("passive never posted the scan")
 	}
 }
 
-func TestScanCacheScanOnly_SubmitErrorFailsOpen(t *testing.T) {
+func TestScanPassive_SubmitErrorFailsOpen(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer srv.Close()
 
 	dir := t.TempDir()
-	if err := runScan(t, dir, "--ci-cache-scan-only", "--url", srv.URL, "--api-key", "test-key"); err != nil {
-		t.Fatalf("ci-cache-scan-only must not fail the build on a submit error; got %v", err)
+	if err := runScan(t, dir, "--passive", "--url", srv.URL, "--api-key", "test-key"); err != nil {
+		t.Fatalf("passive must not fail the build on a submit error; got %v", err)
 	}
 }
 
 func TestScanFlagsMutuallyExclusive(t *testing.T) {
-	if err := runScan(t, t.TempDir(), "--skip-ci", "--ci-cache-scan-only"); err == nil {
-		t.Fatal("expected an error combining --skip-ci and --ci-cache-scan-only")
+	if err := runScan(t, t.TempDir(), "--skip-ci", "--passive"); err == nil {
+		t.Fatal("expected an error combining --skip-ci and --passive")
+	}
+	if err := runScan(t, t.TempDir(), "--skip-ci", "--monitor", validMonitorID); err == nil {
+		t.Fatal("expected an error combining --skip-ci and --monitor")
 	}
 }
 
-// The no-verdict modes must not leave a report behind. A report file says a
-// verdict was reached; --ci-cache-scan-only never fetches findings and
-// --skip-ci never scans, so a "clean" report from either would tell CI that
-// nothing was found when in fact nothing was looked at.
-func TestScanCacheScanOnly_WritesNoReport(t *testing.T) {
+// A report file says a verdict was reached. A passive scan never fetches
+// findings, so a "clean" report from one would tell CI that nothing was found
+// when in fact nothing was looked at. The combination is refused outright
+// rather than silently ignored, which is what the old --ci-cache-scan-only did
+// and which left a stale report from an earlier run readable as this run's.
+func TestScanPassive_RefusesReport(t *testing.T) {
+	dir := t.TempDir()
+	report := filepath.Join(dir, "report.json")
+
+	err := runScan(t, dir, "--passive", "--report", report, "--api-key", "test-key")
+
+	if err == nil {
+		t.Fatal("expected --passive --report to be refused")
+	}
+	if _, statErr := os.Stat(report); !os.IsNotExist(statErr) {
+		t.Fatalf("expected no report file, stat returned %v", statErr)
+	}
+}
+
+func TestScanPassive_RefusesLocal(t *testing.T) {
+	if err := runScan(t, t.TempDir(), "--passive", "--local"); err == nil {
+		t.Fatal("expected --passive --local to be refused")
+	}
+}
+
+// The original CI-facing spelling still works: it is set in pipelines we do not
+// control, so it must keep behaving exactly like --passive.
+func TestScanCacheScanOnly_IsAnAliasForPassive(t *testing.T) {
+	var posted bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/public/v1/scans/status" {
-			t.Error("ci-cache-scan-only must not poll the status endpoint")
+			t.Error("the alias must not poll the status endpoint")
 		}
+		posted = true
 		w.WriteHeader(http.StatusAccepted)
 		io.WriteString(w, `{"sbom_id":"sb1","scan_id":"sc1"}`)
 	}))
 	defer srv.Close()
 
-	dir := t.TempDir()
-	report := filepath.Join(dir, "report.json")
-	if err := runScan(t, dir, "--ci-cache-scan-only", "--report", report,
-		"--url", srv.URL, "--api-key", "test-key"); err != nil {
-		t.Fatalf("scan --ci-cache-scan-only --report: %v", err)
+	if err := runScan(t, t.TempDir(), "--ci-cache-scan-only", "--url", srv.URL, "--api-key", "test-key"); err != nil {
+		t.Fatalf("scan --ci-cache-scan-only: %v", err)
 	}
-	if _, err := os.Stat(report); !os.IsNotExist(err) {
-		t.Fatalf("expected no report file, stat returned %v", err)
+	if !posted {
+		t.Error("the alias never posted the scan")
 	}
 }
 
-func TestScanSkipCI_WritesNoReport(t *testing.T) {
-	dir := t.TempDir()
-	report := filepath.Join(dir, "report.json")
-	if err := runScan(t, dir, "--skip-ci", "--report", report); err != nil {
-		t.Fatalf("scan --skip-ci --report: %v", err)
+func TestScanPassiveEnv_PostsWithoutPolling(t *testing.T) {
+	var posted bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/public/v1/scans/status" {
+			t.Error("OSSPREY_PASSIVE must not poll the status endpoint")
+		}
+		posted = true
+		w.WriteHeader(http.StatusAccepted)
+		io.WriteString(w, `{"sbom_id":"sb1","scan_id":"sc1"}`)
+	}))
+	defer srv.Close()
+
+	t.Setenv("OSSPREY_PASSIVE", "1")
+	if err := runScan(t, t.TempDir(), "--url", srv.URL, "--api-key", "test-key"); err != nil {
+		t.Fatalf("scan with OSSPREY_PASSIVE=1: %v", err)
 	}
-	if _, err := os.Stat(report); !os.IsNotExist(err) {
-		t.Fatalf("expected no report file, stat returned %v", err)
+	if !posted {
+		t.Error("OSSPREY_PASSIVE never posted the scan")
+	}
+}
+
+const validMonitorID = "ospi_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+// A monitor submits through its own unauthenticated route and sends no
+// credential header, which is the whole reason it is safe to hand out.
+func TestScanMonitor_PostsToTheIngestRouteWithNoCredential(t *testing.T) {
+	var gotPath, gotAPIKey, gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAPIKey = r.Header.Get("x-api-key")
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusAccepted)
+		io.WriteString(w, `{"sbom_id":"sb1","scan_id":"sc1"}`)
+	}))
+	defer srv.Close()
+
+	if err := runScan(t, t.TempDir(), "--monitor", validMonitorID, "--url", srv.URL); err != nil {
+		t.Fatalf("scan --monitor: %v", err)
+	}
+
+	if want := "/ingest/" + validMonitorID + "/scans"; gotPath != want {
+		t.Errorf("posted to %q, want %q", gotPath, want)
+	}
+	if gotAPIKey != "" || gotAuth != "" {
+		t.Errorf("monitor submission sent a credential: x-api-key=%q authorization=%q", gotAPIKey, gotAuth)
+	}
+}
+
+// A monitor id names where the scan should land. Falling back to a stored
+// credential on a typo would file it against the wrong thing and hide the typo.
+func TestScanMonitor_RejectsAMalformedID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("a malformed monitor id must not reach the network (path %s)", r.URL.Path)
+	}))
+	defer srv.Close()
+
+	for _, id := range []string{"nope", "ospi_short", "ospi_zzzz", validMonitorID + "extra"} {
+		if err := runScan(t, t.TempDir(), "--monitor", id, "--url", srv.URL); err == nil {
+			t.Errorf("monitor id %q was accepted", id)
+		}
+	}
+}
+
+// Passive mode runs in front of other people's work, so it must not turn a
+// cataloguing failure into an exit code somebody has to chase.
+func TestScanPassive_ExitsZeroOnACataloguingFailure(t *testing.T) {
+	if err := runScan(t, "/nonexistent/definitely-not-here", "--passive", "--api-key", "k"); err != nil {
+		t.Fatalf("passive must exit 0 on a bad path; got %v", err)
 	}
 }

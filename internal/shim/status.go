@@ -23,6 +23,11 @@ type ManagerStatus struct {
 	Resolves string
 	Real     string
 	Active   bool
+	// Mode and MonitorID are read back from the shim's own header, per manager:
+	// a partial re-install can leave a machine with a mix, and reporting one
+	// mode for the whole directory would hide that.
+	Mode      Mode
+	MonitorID string
 }
 
 type ProfileStatus struct {
@@ -54,6 +59,7 @@ func Load(o Options) (*Status, error) {
 		shimPath := filepath.Join(dir, scriptName(name))
 		if IsShim(shimPath) {
 			m.Shim = shimPath
+			m.Mode, m.MonitorID = ShimMode(shimPath)
 			if st.Binary == "" {
 				st.Binary = ShimBinary(shimPath)
 			}

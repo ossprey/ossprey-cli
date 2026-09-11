@@ -249,7 +249,7 @@ func TestPost_SubmitsWithoutPolling(t *testing.T) {
 	defer srv.Close()
 
 	sbom := newSBOM()
-	if err := Post(context.Background(), sbom, srv.URL, "test-key"); err != nil {
+	if err := Post(context.Background(), sbom, srv.URL, "test-key", ""); err != nil {
 		t.Fatalf("Post: %v", err)
 	}
 	if !posted {
@@ -266,7 +266,7 @@ func TestPost_ServerError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := Post(context.Background(), newSBOM(), srv.URL, "test-key"); err == nil {
+	if err := Post(context.Background(), newSBOM(), srv.URL, "test-key", ""); err == nil {
 		t.Fatal("expected error, got nil")
 	}
 }

@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+
+	"github.com/ossprey/ossprey-cli/internal/monitor"
 )
 
 type Options struct {
@@ -18,6 +20,35 @@ type Options struct {
 	All          bool
 	SkipProfiles bool
 	Home         string
+	// Mode picks blocking (default), watchdog or monitor submission. See Mode.
+	Mode Mode
+	// MonitorID is required by ModeMonitor and rejected otherwise.
+	MonitorID string
+}
+
+// ValidateMode checks the mode/monitor-id pairing before anything is written.
+//
+// The monitor id is interpolated into a generated shell script, so this is the
+// gate that keeps a hostile flag value out of an executable file. It runs in
+// Plan, which means `--dry-run` rejects a bad id too.
+func ValidateMode(o Options) error {
+	switch o.Mode {
+	case ModeBlocking:
+		if o.MonitorID != "" {
+			return errors.New("a monitor id needs --monitor; it has no meaning without it")
+		}
+	case ModeWatchdog:
+		if o.MonitorID != "" {
+			return errors.New("--watchdog and --monitor are mutually exclusive: --watchdog submits with this machine's own login")
+		}
+	case ModeMonitor:
+		if !monitor.ValidToken(o.MonitorID) {
+			return fmt.Errorf("invalid monitor id %q: expected ospi_ followed by 64 hex characters", o.MonitorID)
+		}
+	default:
+		return fmt.Errorf("unknown shim mode %q", o.Mode)
+	}
+	return nil
 }
 
 type ManagerResult struct {
@@ -28,16 +59,21 @@ type ManagerResult struct {
 }
 
 type Result struct {
-	Dir      string
-	Binary   string
-	Done     []ManagerResult
-	Skipped  []ManagerResult
-	Profiles []string
-	OnPath   bool
-	PathHint string
+	Dir       string
+	Binary    string
+	Mode      Mode
+	MonitorID string
+	Done      []ManagerResult
+	Skipped   []ManagerResult
+	Profiles  []string
+	OnPath    bool
+	PathHint  string
 }
 
 func Plan(o Options) (*Result, error) {
+	if err := ValidateMode(o); err != nil {
+		return nil, err
+	}
 	dir, bin, err := resolve(o)
 	if err != nil {
 		return nil, err
@@ -47,7 +83,7 @@ func Plan(o Options) (*Result, error) {
 		return nil, err
 	}
 
-	res := &Result{Dir: dir, Binary: bin, OnPath: onPath(dir)}
+	res := &Result{Dir: dir, Binary: bin, OnPath: onPath(dir), Mode: o.Mode, MonitorID: o.MonitorID}
 	for _, name := range managers {
 		real, lookErr := LookPathReal(name)
 		if lookErr != nil && !o.All && !explicit {
@@ -80,7 +116,14 @@ func Install(o Options) (*Result, error) {
 		return nil, fmt.Errorf("create shim directory %s: %w", res.Dir, err)
 	}
 	for _, m := range res.Done {
-		if err := writeShim(m.Path, m.Name, res.Dir, res.Binary); err != nil {
+		opts := ScriptOptions{
+			Manager:   m.Name,
+			Dir:       res.Dir,
+			Binary:    res.Binary,
+			Mode:      o.Mode,
+			MonitorID: o.MonitorID,
+		}
+		if err := writeShim(m.Path, opts); err != nil {
 			return nil, err
 		}
 	}
@@ -155,12 +198,12 @@ func Uninstall(o Options) (*Result, error) {
 	return res, nil
 }
 
-func writeShim(path, manager, dir, bin string) error {
+func writeShim(path string, o ScriptOptions) error {
 	if _, err := os.Stat(path); err == nil && !IsShim(path) {
 		return fmt.Errorf("%s already exists and was not created by ossprey; move it aside or choose another shim directory with %s", path, DirEnv)
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(Script(manager, dir, bin)), 0o755); err != nil {
+	if err := os.WriteFile(tmp, []byte(Script(o)), 0o755); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
