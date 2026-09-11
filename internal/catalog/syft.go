@@ -89,17 +89,27 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 		javascript.NewLockCataloger(jsCfg),
 	}
 	if !opts.NoExec {
-		catalogers = append(catalogers,
-			// Custom: full transitive resolution via uv (covers hatch, uv, bare
-			// pyproject without poetry.lock).
-			NewUVCataloger(absRoot),
-			// Custom: resolve transitives from setup.py when pyproject is absent
-			// or lacks a [project] table (legacy setuptools projects).
-			NewSetupPyCataloger(absRoot),
-			// Custom: resolve transitives from requirements.txt via uv (syft's
-			// built-in reads the file literally — direct deps only).
-			NewRequirementsCataloger(absRoot),
-		)
+		// One resolver, chosen once for the whole scan: uv where the host has
+		// it, pip otherwise. They resolve the same manifests, so running both
+		// would pay twice for identical output.
+		if uv, ok := lookupUV(); ok {
+			catalogers = append(catalogers,
+				// Custom: full transitive resolution via uv (covers hatch, uv, bare
+				// pyproject without poetry.lock).
+				NewUVCataloger(absRoot, uv),
+				// Custom: resolve transitives from setup.py when pyproject is absent
+				// or lacks a [project] table (legacy setuptools projects).
+				NewSetupPyCataloger(absRoot, uv),
+				// Custom: resolve transitives from requirements.txt via uv (syft's
+				// built-in reads the file literally — direct deps only).
+				NewRequirementsCataloger(absRoot, uv),
+			)
+		} else {
+			// Custom: the same resolution via pip, which ships with essentially
+			// every Python install. Without it a uv-less host degrades silently
+			// to the direct-deps fallback below.
+			catalogers = append(catalogers, NewPipCataloger(absRoot))
+		}
 	}
 	// Custom: direct-deps fallback for pyproject.toml when uv is missing.
 	catalogers = append(catalogers, NewPyProjectCataloger(absRoot))
@@ -329,6 +339,7 @@ func isOspreyCataloger(name string) bool {
 	case "ossprey-uv-cataloger",
 		"ossprey-setuppy-cataloger",
 		"ossprey-requirements-cataloger",
+		"ossprey-pip-cataloger",
 		"ossprey-pyproject-cataloger",
 		"ossprey-npm-cataloger",
 		"ossprey-packagejson-cataloger":

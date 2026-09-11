@@ -18,28 +18,34 @@ import (
 	"github.com/anchore/syft/syft/pkg"
 )
 
-// ErrUVNotAvailable signals the `uv` binary is missing.
-var ErrUVNotAvailable = errors.New("uv binary not found on PATH")
-
 var uvReqLine = regexp.MustCompile(`^([A-Za-z0-9_.\-]+)==([^\s;]+)`)
+
+// lookupUV returns the path to the `uv` binary, and whether the host has one.
+// Called once per scan by Catalog, which picks the Python resolver from it.
+func lookupUV() (string, bool) {
+	path, err := exec.LookPath("uv")
+	if err != nil {
+		return "", false
+	}
+	return path, true
+}
 
 // UVCataloger resolves transitive Python deps by invoking the `uv` CLI.
 // Prefers `uv export` against uv.lock when present, falls back to
 // `uv pip compile --universal pyproject.toml`. Mirrors v1's uv fallback.
+//
+// uv is the resolved path to the binary; Catalog only builds this cataloger
+// when the host has one (see pythonResolver).
 type UVCataloger struct {
 	root string
+	uv   string
 }
 
-func NewUVCataloger(root string) *UVCataloger { return &UVCataloger{root: root} }
+func NewUVCataloger(root, uv string) *UVCataloger { return &UVCataloger{root: root, uv: uv} }
 
 func (c *UVCataloger) Name() string { return "ossprey-uv-cataloger" }
 
 func (c *UVCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]pkg.Package, []artifact.Relationship, error) {
-	uv, err := exec.LookPath("uv")
-	if err != nil {
-		return nil, nil, nil // no uv on PATH — silently skip
-	}
-
 	cache, err := os.MkdirTemp("", "ossprey-uv-cache-")
 	if err != nil {
 		return nil, nil, fmt.Errorf("uv cache: %w", err)
@@ -49,7 +55,7 @@ func (c *UVCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]pk
 	parse := func(absPath string, loc file.Location) ([]pkg.Package, error) {
 		dir := filepath.Dir(absPath)
 		args := uvArgsForPyProject(dir)
-		return runUV(ctx, uv, cache, dir, args, loc)
+		return runUV(ctx, c.uv, cache, dir, args, loc)
 	}
 	out, err := catalogByGlob(ctx, resolver, c.root, "**/pyproject.toml", "uv", parse)
 	return out, nil, err

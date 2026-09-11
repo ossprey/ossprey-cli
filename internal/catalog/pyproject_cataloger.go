@@ -46,7 +46,9 @@ type pyproject struct {
 
 var pep508 = regexp.MustCompile(`^([A-Za-z0-9_.\-]+)(?:\[[^\]]+\])?\s*(.*)$`)
 
-func parsePyProjectFile(path string, loc file.Location) ([]pkg.Package, error) {
+// readPyProject parses one pyproject.toml. A file that has vanished since the
+// resolver globbed it yields (nil, nil) rather than an error.
+func readPyProject(path string) (*pyproject, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -56,6 +58,14 @@ func parsePyProjectFile(path string, loc file.Location) ([]pkg.Package, error) {
 	}
 	var pp pyproject
 	if err := toml.Unmarshal(data, &pp); err != nil {
+		return nil, err
+	}
+	return &pp, nil
+}
+
+func parsePyProjectFile(path string, loc file.Location) ([]pkg.Package, error) {
+	pp, err := readPyProject(path)
+	if err != nil || pp == nil {
 		return nil, err
 	}
 
@@ -186,12 +196,8 @@ func normalizeName(s string) string {
 // with a non-empty [project] table (name OR dependencies). Used by other
 // catalogers to skip work UVCataloger already covered.
 func hasPEP621Project(path string) bool {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return false
-	}
-	var pp pyproject
-	if err := toml.Unmarshal(data, &pp); err != nil {
+	pp, err := readPyProject(path)
+	if err != nil || pp == nil {
 		return false
 	}
 	return pp.Project.Name != "" || len(pp.Project.Dependencies) > 0

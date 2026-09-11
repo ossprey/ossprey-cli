@@ -20,7 +20,9 @@ func TestCatalogNoExecNeverShellsOut(t *testing.T) {
 	sentinel := filepath.Join(t.TempDir(), "invoked")
 	binDir := t.TempDir()
 	script := "#!/bin/sh\necho ran >> " + sentinel + "\nexit 0\n"
-	for _, name := range []string{"npm", "uv"} {
+	// python/pip are here too: the pip cataloger is the uv fallback, so a run
+	// that skipped uv but shelled out to pip would be just as wrong.
+	for _, name := range []string{"npm", "uv", "python", "python3", "pip", "pip3"} {
 		if err := os.WriteFile(filepath.Join(binDir, name), []byte(script), 0o755); err != nil {
 			t.Fatalf("write fake %s: %v", name, err)
 		}
