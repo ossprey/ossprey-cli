@@ -141,7 +141,11 @@ func Install(o Options) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(res.Dir, 0o755); err != nil {
+	dirPerm := os.FileMode(0o755)
+	if res.Mode == ModeMonitor {
+		dirPerm = 0o700
+	}
+	if err := os.MkdirAll(res.Dir, dirPerm); err != nil {
 		return nil, fmt.Errorf("create shim directory %s: %w", res.Dir, err)
 	}
 	for _, m := range res.Done {
@@ -231,8 +235,17 @@ func writeShim(path string, o ScriptOptions) error {
 	if _, err := os.Stat(path); err == nil && !IsShim(path) {
 		return fmt.Errorf("%s already exists and was not created by ossprey; move it aside or choose another shim directory with %s", path, DirEnv)
 	}
+	// A monitor shim embeds the monitor id, which is a live submit credential,
+	// so the file is only readable by its owner. World-readable would hand it to
+	// every local account. Written exclusively at 0o700 rather than via
+	// os.WriteFile, so the predictable .tmp path cannot be pre-created by
+	// somebody else and left readable.
+	perm := os.FileMode(0o755)
+	if o.Mode == ModeMonitor {
+		perm = 0o700
+	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(Script(o)), 0o755); err != nil {
+	if err := writeExclusive(tmp, Script(o), perm); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
@@ -240,6 +253,22 @@ func writeShim(path string, o ScriptOptions) error {
 		return fmt.Errorf("install %s: %w", path, err)
 	}
 	return nil
+}
+
+// writeExclusive creates path with O_EXCL so an existing file, symlink or
+// pre-created temp path is an error rather than something we write through.
+func writeExclusive(path, content string, perm os.FileMode) error {
+	_ = os.Remove(path)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := f.WriteString(content); err != nil {
+		f.Close()
+		_ = os.Remove(path)
+		return err
+	}
+	return f.Close()
 }
 
 func resolve(o Options) (dir, bin string, err error) {

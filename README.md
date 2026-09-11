@@ -1059,8 +1059,12 @@ ossprey scan . --report report.json
 `jq '.findings | length'` works either way. The file is written before the
 process exits non-zero, so it is there on exactly the runs you care about.
 
+`--report` is refused alongside `--passive` (and `--monitor`, which implies it):
+a passive scan submits without fetching findings, so a report file would claim a
+verdict nobody checked.
+
 No file is written when the run never reaches a verdict: `--local`, and the
-`--skip-ci` / `--ci-cache-scan-only` modes above. A consumer should treat a
+`--skip-ci` mode above. A consumer should treat a
 missing report as "this scan produced no verdict", never as clean.
 
 `--report` never writes to stdout, and it is rejected alongside `--local`:

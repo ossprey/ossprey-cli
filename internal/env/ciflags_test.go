@@ -26,6 +26,9 @@ func TestSkipCI(t *testing.T) {
 }
 
 func TestCacheScanOnly(t *testing.T) {
+	// Passive() reads both variables, so an inherited OSSPREY_PASSIVE would
+	// make every false case pass regardless of the legacy one.
+	t.Setenv(PassiveEnv, "")
 	tests := map[string]bool{
 		"":      false,
 		"0":     false,

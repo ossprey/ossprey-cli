@@ -127,6 +127,11 @@ try {
         Log 'installing package-manager shims'
         try {
             & $dest shim install @modeArgs
+            # Windows PowerShell 5.1 does not turn a native non-zero exit into a
+            # terminating error, so the catch below never runs without this.
+            if ($LASTEXITCODE -ne 0) {
+                throw "shim install failed with exit code $LASTEXITCODE"
+            }
         } catch {
             Log "shim install failed: $_"
             Log "ossprey itself is installed — run 'ossprey shim install' to retry"

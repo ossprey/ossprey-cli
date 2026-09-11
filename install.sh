@@ -69,8 +69,17 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --override-package-managers|--shims) OVERRIDE=1 ;;
     --watchdog) WATCHDOG=1; OVERRIDE=1 ;;
-    --monitor) shift; [ $# -gt 0 ] || err "--monitor needs an id"; MONITOR_ID="$1"; OVERRIDE=1 ;;
-    --monitor=*) MONITOR_ID="${1#--monitor=}"; OVERRIDE=1 ;;
+    --monitor)
+      shift
+      { [ $# -gt 0 ] && [ -n "$1" ]; } || err "--monitor needs an id"
+      MONITOR_ID="$1"
+      OVERRIDE=1
+      ;;
+    --monitor=*)
+      MONITOR_ID="${1#--monitor=}"
+      [ -n "$MONITOR_ID" ] || err "--monitor needs an id"
+      OVERRIDE=1
+      ;;
     -h|--help) usage ;;
     *) err "unknown option: $1 (try --help)" ;;
   esac

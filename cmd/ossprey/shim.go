@@ -231,7 +231,7 @@ func printInstallResult(res *shim.Result, noPath bool) {
 	for _, m := range res.Done {
 		fmt.Printf("  %-8s → ossprey %s → %s\n", m.Name, m.Name, orDash(m.Real))
 	}
-	if line := modeSummary(res.Mode, res.MonitorID); line != "" {
+	if line := modeSummary(res.Mode); line != "" {
 		fmt.Println("\n" + line)
 	}
 	for _, m := range res.Skipped {
@@ -347,12 +347,14 @@ func orDash(s string) string {
 // modeSummary says, in one line, what these shims will do to an install. Passive
 // modes change the headline behaviour -- nothing gets blocked any more -- so it
 // is worth stating outright rather than leaving to the docs.
-func modeSummary(mode shim.Mode, monitorID string) string {
+func modeSummary(mode shim.Mode) string {
 	switch mode {
 	case shim.ModeWatchdog:
 		return "Passive (watchdog): scans are submitted with this machine's login and\ninstalls are never blocked. Results appear in the Ossprey dashboard."
 	case shim.ModeMonitor:
-		return fmt.Sprintf("Passive (monitor %s): scans are submitted through that monitor and\ninstalls are never blocked. This machine needs no login or API key.", monitorID)
+		// The id itself is not echoed: it is the whole credential, and install
+		// output lands in terminal scrollback and CI logs.
+		return "Passive (monitor): scans are submitted through that monitor and\ninstalls are never blocked. This machine needs no login or API key."
 	default:
 		return ""
 	}

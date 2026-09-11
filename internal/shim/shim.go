@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+
+	"github.com/ossprey/ossprey-cli/internal/monitor"
 )
 
 const (
@@ -114,7 +116,10 @@ func ShimMode(path string) (Mode, string) {
 		switch {
 		case len(fields) == 0:
 			return ModeBlocking, ""
-		case Mode(fields[0]) == ModeMonitor && len(fields) > 1:
+		// Exactly two fields and a well-formed id: a header naming monitor mode
+		// with anything else is a shim we cannot honour, and reporting it as a
+		// monitor would claim installs are passive when they are not.
+		case Mode(fields[0]) == ModeMonitor && len(fields) == 2 && monitor.ValidToken(fields[1]):
 			return ModeMonitor, fields[1]
 		case Mode(fields[0]) == ModeWatchdog:
 			return ModeWatchdog, ""

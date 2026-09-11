@@ -303,3 +303,80 @@ func TestNoPassiveClearsAnInstalledMode(t *testing.T) {
 		t.Errorf("--no-passive left mode %q / id %q", mode, id)
 	}
 }
+
+// A monitor shim embeds a live submit credential, so the file must not be
+// readable by other local accounts.
+func TestMonitorShimIsNotWorldReadable(t *testing.T) {
+	requirePOSIX(t)
+	root := t.TempDir()
+	shimDir := filepath.Join(root, "shims")
+	bin := filepath.Join(root, "ossprey")
+	writeExec(t, bin, "#!/bin/sh\nexit 0\n")
+
+	if _, err := Install(Options{
+		Dir: shimDir, Binary: bin, Managers: []string{"npm"}, All: true,
+		SkipProfiles: true, Mode: ModeMonitor, MonitorID: testMonitorID, Home: root,
+	}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	info, err := os.Stat(filepath.Join(shimDir, scriptName("npm")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		t.Errorf("monitor shim mode = %o, want no group/other access", perm)
+	}
+	dirInfo, err := os.Stat(shimDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := dirInfo.Mode().Perm(); perm&0o077 != 0 {
+		t.Errorf("monitor shim dir mode = %o, want no group/other access", perm)
+	}
+}
+
+// A blocking shim carries no secret, so it keeps the usual permissions.
+func TestBlockingShimKeepsNormalPermissions(t *testing.T) {
+	requirePOSIX(t)
+	root := t.TempDir()
+	shimDir := filepath.Join(root, "shims")
+	bin := filepath.Join(root, "ossprey")
+	writeExec(t, bin, "#!/bin/sh\nexit 0\n")
+
+	if _, err := Install(Options{
+		Dir: shimDir, Binary: bin, Managers: []string{"npm"}, All: true,
+		SkipProfiles: true, Home: root,
+	}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	info, err := os.Stat(filepath.Join(shimDir, scriptName("npm")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm&0o100 == 0 {
+		t.Errorf("blocking shim mode = %o, want owner-executable", perm)
+	}
+}
+
+// A header naming monitor mode without a usable id must not report a monitor:
+// that would claim installs are passive when the shim cannot submit.
+func TestMalformedMonitorHeaderReadsAsBlocking(t *testing.T) {
+	for _, header := range []string{
+		"ossprey-mode: monitor",
+		"ossprey-mode: monitor not-a-token",
+		"ossprey-mode: monitor " + testMonitorID + " extra",
+		"ossprey-mode: nonsense",
+	} {
+		path := filepath.Join(t.TempDir(), scriptName("npm"))
+		script := "#!/bin/sh\n# " + Marker + "\n# " + binPrefix + "/bin/ossprey\n# " + header + "\n"
+		if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+			t.Fatal(err)
+		}
+
+		if mode, id := ShimMode(path); mode != ModeBlocking || id != "" {
+			t.Errorf("header %q read as mode %q / id %q, want blocking", header, mode, id)
+		}
+	}
+}
