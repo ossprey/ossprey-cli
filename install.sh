@@ -13,11 +13,17 @@
 #                                pip3, poetry and uv route through ossprey
 #                                without being prefixed. Equivalent to running
 #                                `ossprey shim install` afterwards.
+#   --watchdog                   With the shims, submit scans passively using
+#                                this machine's login and never block installs.
+#   --monitor <id>               With the shims, submit passively through a
+#                                monitor's id, needing no credential at all.
 #
 # Env vars:
 #   OSSPREY_VERSION      Tag to install (e.g. v0.1.0). Default: latest.
 #   OSSPREY_INSTALL_DIR  Install location. Default: /usr/local/bin.
 #   OSSPREY_OVERRIDE_PACKAGE_MANAGERS=1   Same as --override-package-managers.
+#   OSSPREY_WATCHDOG=1                    Same as --watchdog.
+#   OSSPREY_MONITOR_ID=<id>               Same as --monitor <id>.
 
 set -eu
 
@@ -26,6 +32,8 @@ BIN="ossprey"
 VERSION="${OSSPREY_VERSION:-latest}"
 INSTALL_DIR="${OSSPREY_INSTALL_DIR:-/usr/local/bin}"
 OVERRIDE="${OSSPREY_OVERRIDE_PACKAGE_MANAGERS:-}"
+WATCHDOG="${OSSPREY_WATCHDOG:-}"
+MONITOR_ID="${OSSPREY_MONITOR_ID:-}"
 
 log()  { printf '==> %s\n' "$*" >&2; }
 err()  { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -41,12 +49,18 @@ Flags:
   --override-package-managers   Install PATH shims so npm, pnpm, yarn, pip,
                                 pip3, poetry and uv route through ossprey
                                 without being prefixed (`ossprey shim install`).
+  --watchdog                    Passive mode for the shims: submit scans with
+                                this machine's login, never block an install.
+  --monitor <id>                Passive mode for the shims using a monitor's
+                                id, so the machine needs no credential.
   -h, --help                    Show this help.
 
 Env vars:
   OSSPREY_VERSION               Tag to install (e.g. v0.1.0). Default: latest.
   OSSPREY_INSTALL_DIR           Install location. Default: /usr/local/bin.
   OSSPREY_OVERRIDE_PACKAGE_MANAGERS=1   Same as --override-package-managers.
+  OSSPREY_WATCHDOG=1            Same as --watchdog.
+  OSSPREY_MONITOR_ID=<id>       Same as --monitor <id>.
 EOF
   exit 0
 }
@@ -54,6 +68,18 @@ EOF
 while [ $# -gt 0 ]; do
   case "$1" in
     --override-package-managers|--shims) OVERRIDE=1 ;;
+    --watchdog) WATCHDOG=1; OVERRIDE=1 ;;
+    --monitor)
+      shift
+      { [ $# -gt 0 ] && [ -n "$1" ]; } || err "--monitor needs an id"
+      MONITOR_ID="$1"
+      OVERRIDE=1
+      ;;
+    --monitor=*)
+      MONITOR_ID="${1#--monitor=}"
+      [ -n "$MONITOR_ID" ] || err "--monitor needs an id"
+      OVERRIDE=1
+      ;;
     -h|--help) usage ;;
     *) err "unknown option: $1 (try --help)" ;;
   esac
@@ -144,13 +170,28 @@ fi
 log "installed $($INSTALL_DIR/$BIN --version 2>/dev/null || echo "$BIN") to $INSTALL_DIR/$BIN"
 
 # --- optional: PATH shims over the package managers ---
+if [ -n "$MONITOR_ID" ] && [ -n "$WATCHDOG" ]; then
+  err "--watchdog and --monitor are mutually exclusive"
+fi
+
+# Passed through unquoted on purpose: "set --" builds the argument list so an
+# empty MODE_ARGS adds no argument at all, and the monitor id is validated by
+# `shim install` before it is written anywhere.
+if [ -n "$MONITOR_ID" ]; then
+  set -- --monitor "$MONITOR_ID"
+elif [ -n "$WATCHDOG" ]; then
+  set -- --watchdog
+else
+  set --
+fi
+
 if [ -n "$OVERRIDE" ]; then
   log "installing package-manager shims"
   if [ "$(id -u)" = 0 ] && [ -n "${SUDO_USER:-}" ]; then
-    sudo -u "$SUDO_USER" -H "$INSTALL_DIR/$BIN" shim install \
+    sudo -u "$SUDO_USER" -H "$INSTALL_DIR/$BIN" shim install "$@" \
       || log "shim install failed; ossprey itself is installed — run 'ossprey shim install' to retry"
   else
-    "$INSTALL_DIR/$BIN" shim install \
+    "$INSTALL_DIR/$BIN" shim install "$@" \
       || log "shim install failed; ossprey itself is installed — run 'ossprey shim install' to retry"
   fi
 fi

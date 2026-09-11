@@ -33,12 +33,32 @@ func Validate(ctx context.Context, sbom *ossbom.SBOM, apiURL, apiKey string) err
 	return sbom.ApplyAPIResponse(raw)
 }
 
-func Post(ctx context.Context, sbom *ossbom.SBOM, apiURL, apiKey string) error {
-	c, err := NewClient(ctx, apiURL, apiKey)
+// Post submits the SBOM and returns as soon as the API has accepted it, without
+// waiting for a verdict. This is what `--passive` and the watchdog/monitor shims
+// use: results appear in the dashboard rather than gating the caller.
+//
+// A non-empty monitorID selects the unauthenticated ingest route and no other
+// credential is consulted, so a passive monitor works on a machine with no login
+// and no API key.
+func Post(ctx context.Context, sbom *ossbom.SBOM, apiURL, apiKey, monitorID string) error {
+	c, err := NewSubmitClient(ctx, apiURL, apiKey, monitorID)
 	if err != nil {
 		return err
 	}
 	return c.Submit(ctx, sbom.ToMiniBOM())
+}
+
+// NewSubmitClient picks the client for a submit-only send: a monitor's ingest
+// token when one is given, otherwise the ordinary credential chain.
+//
+// The monitor id wins outright rather than falling back when it fails. A monitor
+// names where the scan should land, so quietly sending it under a stored login
+// instead would file it against the wrong thing and hide a typo in the id.
+func NewSubmitClient(ctx context.Context, apiURL, apiKey, monitorID string) (*client.Client, error) {
+	if monitorID != "" {
+		return client.NewIngest(apiURL, monitorID)
+	}
+	return NewClient(ctx, apiURL, apiKey)
 }
 
 // NewClient picks the credential and builds the matching client. The stored

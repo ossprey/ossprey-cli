@@ -5,24 +5,81 @@ import (
 	"strings"
 )
 
-func Script(manager, dir, binPath string) string {
-	if runtime.GOOS == "windows" {
-		return windowsScript(manager, dir, binPath)
-	}
-	return posixScript(manager, dir, binPath)
+// Mode is how a shim submits: blocking by default, or one of the two passive
+// modes that submit and get out of the way.
+type Mode string
+
+const (
+	// ModeBlocking checks the install and refuses it on malware. The default.
+	ModeBlocking Mode = ""
+	// ModeWatchdog submits a passive scan using the machine's own login or API
+	// key and forwards the install without waiting for a verdict.
+	ModeWatchdog Mode = "watchdog"
+	// ModeMonitor submits through a monitor's ingest token, so the machine needs
+	// no credential of its own. Carries MonitorID.
+	ModeMonitor Mode = "monitor"
+)
+
+// ScriptOptions describes one shim to generate.
+type ScriptOptions struct {
+	Manager   string
+	Dir       string
+	Binary    string
+	Mode      Mode
+	MonitorID string
 }
 
-func posixScript(manager, dir, binPath string) string {
+// Script renders the shim for one package manager.
+func Script(o ScriptOptions) string {
+	if runtime.GOOS == "windows" {
+		return windowsScript(o)
+	}
+	return posixScript(o)
+}
+
+// modeEnv renders the env-var block a passive shim exports before exec'ing.
+//
+// The monitor id reaches here already validated (`client.ValidIngestToken`, via
+// ValidateMode) and is shell-quoted on top: it is attacker-shaped input being
+// written into an executable file, so neither guard is the only one.
+func modeEnv(o ScriptOptions, quote func(string) string, assign func(k, v string) string) string {
+	switch o.Mode {
+	case ModeWatchdog:
+		return assign(passiveEnv, "1")
+	case ModeMonitor:
+		return assign(passiveEnv, "1") + assign(monitorEnv, quote(o.MonitorID))
+	default:
+		return ""
+	}
+}
+
+func posixScript(o ScriptOptions) string {
 	r := strings.NewReplacer(
-		"{{MANAGER}}", manager,
-		"{{DIR}}", shellQuote(dir),
-		"{{BIN}}", shellQuote(binPath),
-		"{{BINRAW}}", binPath,
+		"{{MANAGER}}", o.Manager,
+		"{{DIR}}", shellQuote(o.Dir),
+		"{{BIN}}", shellQuote(o.Binary),
+		"{{BINRAW}}", o.Binary,
 		"{{MARKER}}", Marker,
 		"{{BINPREFIX}}", binPrefix,
 		"{{BYPASS}}", BypassEnv,
+		"{{MODELINE}}", modeHeader(o),
+		"{{MODEENV}}", modeEnv(o, shellQuote, func(k, v string) string {
+			return k + "=" + v + "\nexport " + k + "\n"
+		}),
 	)
 	return r.Replace(posixTemplate)
+}
+
+// modeHeader records the mode in the shim's own header, so `shim status` can
+// report it and a re-run of `shim install` can see what it is replacing.
+func modeHeader(o ScriptOptions) string {
+	if o.Mode == ModeBlocking {
+		return ""
+	}
+	if o.Mode == ModeMonitor {
+		return modePrefix + string(o.Mode) + " " + o.MonitorID
+	}
+	return modePrefix + string(o.Mode)
 }
 
 const posixTemplate = `#!/bin/sh
@@ -30,6 +87,7 @@ const posixTemplate = `#!/bin/sh
 #
 # {{MARKER}}
 # {{BINPREFIX}}{{BINRAW}}
+# {{MODELINE}}
 #
 # Why does {{MANAGER}} behave differently here? This script sits earlier on your
 # PATH than the real {{MANAGER}}, so that installs are checked for malware before
@@ -80,18 +138,22 @@ if [ ! -x "$ossprey_bin" ]; then
 	exec {{MANAGER}} "$@"
 fi
 
-exec "$ossprey_bin" {{MANAGER}} "$@"
+{{MODEENV}}exec "$ossprey_bin" {{MANAGER}} "$@"
 `
 
-func windowsScript(manager, dir, binPath string) string {
+func windowsScript(o ScriptOptions) string {
 	r := strings.NewReplacer(
-		"{{MANAGER}}", manager,
-		"{{DIR}}", strings.TrimSuffix(dir, `\`),
-		"{{BIN}}", binPath,
-		"{{BINRAW}}", binPath,
+		"{{MANAGER}}", o.Manager,
+		"{{DIR}}", strings.TrimSuffix(o.Dir, `\`),
+		"{{BIN}}", o.Binary,
+		"{{BINRAW}}", o.Binary,
 		"{{MARKER}}", Marker,
 		"{{BINPREFIX}}", binPrefix,
 		"{{BYPASS}}", BypassEnv,
+		"{{MODELINE}}", modeHeader(o),
+		"{{MODEENV}}", modeEnv(o, func(v string) string { return v }, func(k, v string) string {
+			return "set \"" + k + "=" + v + "\"\n"
+		}),
 	)
 	return r.Replace(windowsTemplate)
 }
@@ -101,6 +163,7 @@ const windowsTemplate = `@echo off
 ::
 :: {{MARKER}}
 :: {{BINPREFIX}}{{BINRAW}}
+:: {{MODELINE}}
 ::
 :: Why does {{MANAGER}} behave differently here? This script sits earlier on your
 :: PATH than the real {{MANAGER}}, so that installs are checked for malware before
@@ -122,7 +185,7 @@ if not exist "{{BIN}}" (
 	goto ossprey_bypass
 )
 
-"{{BIN}}" {{MANAGER}} %*
+{{MODEENV}}"{{BIN}}" {{MANAGER}} %*
 exit /b %ERRORLEVEL%
 
 :ossprey_bypass

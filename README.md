@@ -26,6 +26,7 @@ sandbox, no virtualenv.
 - [Package-manager forwarder](#package-manager-forwarder) — check before install for `npm` / `pnpm` / `yarn` / `pip` / `poetry` / `uv`
 - [How to make Ossprey scan on all package manager commands](#how-to-make-ossprey-scan-on-all-package-manager-commands) — shell aliases so you don't type `ossprey` first
 - [PATH shims](#path-shims--drop-the-ossprey-prefix) — intercept installs in scripts, CI and agents too
+- [Passive monitoring](#passive-monitoring--see-everything-block-nothing) — watchdog and monitor modes, for rolling out across a fleet
 - [Pre-commit hook](#pre-commit-hook--block-known-malware-at-commit-time) — check staged dependency changes on every `git commit`
 - [Supported ecosystems](#supported-ecosystems)
 - [CI usage](#ci-usage)
@@ -407,7 +408,8 @@ ossprey scan [path] [flags]
 | `--dry-run-safe` | Skip the API; report an empty vulnerability list. |
 | `--dry-run-malicious` | Skip the API; inject a test finding against the first component. |
 | `--skip-ci` | Skip the Ossprey scan entirely and exit 0. Also settable as `OSSPREY_SKIP_CI=1`. |
-| `--ci-cache-scan-only` | Catalogue and submit the scan so results appear in the dashboard, but print no verdict and always exit 0 — the build is never affected, even if the submission fails. Also settable as `OSSPREY_CI_CACHE_SCAN_ONLY=1`. |
+| `--passive` | Submit the scan for the dashboard and return immediately, without waiting for a verdict. Always exits 0, even if the submission fails. Also settable as `OSSPREY_PASSIVE=1`. |
+| `--monitor <id>` | Submit passively through a monitor's id, needing no login and no API key. Implies `--passive`. Also settable as `OSSPREY_MONITOR_ID`. |
 
 ### Authentication
 
@@ -701,6 +703,8 @@ added 1 package in 412ms
 | `ossprey shim status` | Which managers are intercepted right now, and what they run |
 | `ossprey shim uninstall` | Remove the shims and the PATH entry |
 | `ossprey shim dir` | Print the shim directory (for `ENV PATH=…` in a Dockerfile) |
+| `ossprey shim install --watchdog` | Passive: submit scans with this machine's login, never block an install |
+| `ossprey shim install --monitor <id>` | Passive: submit through a monitor's id, with no credential on the machine |
 
 Useful flags: `--managers npm,pip` to shim a subset, `--all` to shim managers
 you have not installed yet, `--no-path` to write the shims but manage PATH
@@ -738,6 +742,75 @@ ENV PATH="/root/.ossprey/shims:${PATH}"
 > **Note on latency:** a package Ossprey has never seen before takes a scan to
 > come back, so the first install of a brand-new version is slower than an
 > unprotected one. Subsequent installs hit a cached verdict.
+
+## Passive monitoring — see everything, block nothing
+
+Everything above *gates*: a bad package stops the install. That is right for
+CI and for your own machine, and wrong for rolling out across a fleet, where
+you want visibility first and nobody's work interrupted.
+
+Passive mode submits the scan and gets out of the way. It never waits for a
+verdict, never blocks an install, and always exits 0 — even if the submission
+itself fails. Results show up in the dashboard.
+
+There are two ways to run it, and the difference is where the credential lives.
+
+### Watchdog — passive, using this machine's own login
+
+```sh
+ossprey shim install --watchdog
+```
+
+Every `npm install`, `pip install` and friend on this machine now submits a
+scan and proceeds. It uses the same credentials as any other scan, so the
+machine needs `ossprey login` or `OSSPREY_API_KEY`.
+
+Good for your own laptop, or any machine that is already authenticated.
+
+### Monitor — passive, with no credential at all
+
+```sh
+ossprey shim install --monitor ospi_...
+```
+
+A **monitor id** is a submit-only credential. It can create a scan and do
+nothing else: it cannot read your results, list your scans, or touch anything
+in your account. That is what makes it safe to put somewhere an API key should
+never go — a shared CI config, a Dockerfile, a coding agent's settings, a
+dotfiles repo.
+
+Create one in the dashboard under **Ingest tokens**, then hand it out. Machines
+using it need no login, no API key, and nothing to rotate.
+
+```sh
+# In CI, or a Dockerfile, or an agent's config
+ossprey shim install --monitor ospi_... --no-path --all
+ENV PATH="/root/.ossprey/shims:${PATH}"
+
+# Or a one-off scan, no shims involved
+ossprey scan . --monitor ospi_...
+```
+
+You can also set it during install:
+
+```sh
+curl -fsSL https://github.com/ossprey/ossprey-cli/releases/latest/download/install.sh \
+  | sh -s -- --monitor ospi_...
+```
+
+`ossprey shim status` says which mode each shim is in, so you can tell a
+blocking install from a passive one at a glance.
+
+### What passive mode costs you
+
+- **Nothing is blocked.** A passive shim reports malware to the dashboard; it
+  does not stop the install. If you want the gate, use the default mode.
+- **The scan still takes time.** The catalogue and the submission happen before
+  the install proceeds, so a large monorepo still pays for cataloguing. Passive
+  mode removes the *verdict* wait, not the scan itself.
+- **A monitor id is a capability.** Anyone holding it can submit scans to your
+  account, which spends quota. It cannot read anything, but revoke it in the
+  dashboard if it leaks — deletion takes effect immediately.
 
 ## Pre-commit hook — block known malware at commit time
 
@@ -925,11 +998,13 @@ Two env vars help while rolling Ossprey out across a CI estate, and both work
 for `ossprey scan` and the package-manager forwarders/shims alike:
 
 - `OSSPREY_SKIP_CI=1` — kill switch: no scan runs at all.
-- `OSSPREY_CI_CACHE_SCAN_ONLY=1` — observe-only: scans are gathered and
-  submitted so results appear in the dashboard, but the build never fails and
-  installs are never blocked.
+- `OSSPREY_PASSIVE=1` — observe-only: scans are gathered and submitted so
+  results appear in the dashboard, but the build never fails and installs are
+  never blocked. See [passive monitoring](#passive-monitoring--see-everything-block-nothing).
 
-`ossprey scan` also accepts them as `--skip-ci` / `--ci-cache-scan-only` flags.
+`ossprey scan` also accepts them as `--skip-ci` / `--passive` flags.
+`OSSPREY_CI_CACHE_SCAN_ONLY=1` and `--ci-cache-scan-only` are the original
+spelling of `--passive` and keep working unchanged.
 
 ## Output
 
@@ -1018,8 +1093,12 @@ ossprey scan . --report report.json
 `jq '.findings | length'` works either way. The file is written before the
 process exits non-zero, so it is there on exactly the runs you care about.
 
+`--report` is refused alongside `--passive` (and `--monitor`, which implies it):
+a passive scan submits without fetching findings, so a report file would claim a
+verdict nobody checked.
+
 No file is written when the run never reaches a verdict: `--local`, and the
-`--skip-ci` / `--ci-cache-scan-only` modes above. A consumer should treat a
+`--skip-ci` mode above. A consumer should treat a
 missing report as "this scan produced no verdict", never as clean.
 
 `--report` never writes to stdout, and it is rejected alongside `--local`:

@@ -12,6 +12,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/ossprey/ossprey-cli/internal/monitor"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
 )
 
@@ -35,13 +36,21 @@ func APIKeyFromEnv() string {
 }
 
 // Client speaks to the Ossprey scans API. Mirrors ossprey/ossprey.py from v1.
-// Exactly one of APIKey or BearerToken is set: API keys go to the /public/v1
-// mount as x-api-key, Auth0 JWTs (from `ossprey login`) go to the /dashboard/v1
-// mount as Authorization: Bearer. Both mounts are served by the same backend.
+// Exactly one credential field is set, and it picks both the route mount and the
+// auth header:
+//
+//	APIKey      -> /public/v1     , x-api-key
+//	BearerToken -> /dashboard/v1  , Authorization: Bearer  (from `ossprey login`)
+//	IngestToken -> /ingest/<token>, no header at all
+//
+// All three are served by the same backend. The ingest mount is submit-only: it
+// has no status endpoint, so Validate refuses an ingest client rather than
+// polling a route that does not exist.
 type Client struct {
 	BaseURL     string
 	APIKey      string
 	BearerToken string
+	IngestToken string
 	HTTP        *http.Client
 
 	// PollBackoff returns the wait before poll `attempt`. Overridden in tests.
@@ -68,6 +77,27 @@ func NewBearer(baseURL, token string) (*Client, error) {
 	return c, nil
 }
 
+// NewIngest constructs a submit-only Client for a monitor's ingest token.
+//
+// The token is validated here rather than at the call site because it lands in
+// a URL path: a value carrying a slash or a query character would silently
+// retarget the request at a different route.
+func NewIngest(baseURL, token string) (*Client, error) {
+	if !ValidIngestToken(token) {
+		return nil, fmt.Errorf("invalid monitor id: expected %s followed by 64 hex characters", monitor.Prefix)
+	}
+	c := newClient(baseURL)
+	c.IngestToken = token
+	return c, nil
+}
+
+// ValidIngestToken reports whether a string is shaped like an ingest token the
+// service could have issued.
+//
+// A thin re-export of monitor.ValidToken, kept so callers already holding a
+// client package do not need a second import for it.
+func ValidIngestToken(token string) bool { return monitor.ValidToken(token) }
+
 func newClient(baseURL string) *Client {
 	if baseURL == "" {
 		baseURL = defaultBaseURL
@@ -81,19 +111,30 @@ func newClient(baseURL string) *Client {
 
 // mount returns the API route prefix matching the auth method.
 func (c *Client) mount() string {
-	if c.BearerToken != "" {
+	switch {
+	case c.IngestToken != "":
+		return "/ingest/" + c.IngestToken
+	case c.BearerToken != "":
 		return "/dashboard/v1"
+	default:
+		return "/public/v1"
 	}
-	return "/public/v1"
 }
 
 // authenticate sets the auth header matching the client's credential.
+//
+// An ingest client sends none: its credential is the path. Returning early
+// matters -- falling through would send an empty x-api-key header, which reads
+// as a malformed API key rather than as no credential at all.
 func (c *Client) authenticate(req *http.Request) {
-	if c.BearerToken != "" {
-		req.Header.Set("Authorization", "Bearer "+c.BearerToken)
+	switch {
+	case c.IngestToken != "":
 		return
+	case c.BearerToken != "":
+		req.Header.Set("Authorization", "Bearer "+c.BearerToken)
+	default:
+		req.Header.Set("x-api-key", c.APIKey)
 	}
-	req.Header.Set("x-api-key", c.APIKey)
 }
 
 func defaultPollBackoff(int) time.Duration {
@@ -112,6 +153,11 @@ type statusResponse struct {
 	ResetAt string          `json:"reset_at"`
 }
 
+// ErrIngestSubmitOnly is returned when a verdict is asked of a monitor id.
+// A monitor submits scans and reads nothing back; results are viewed in the
+// dashboard.
+var ErrIngestSubmitOnly = errors.New("a monitor id can submit scans but cannot fetch a verdict; results appear in the Ossprey dashboard")
+
 // ErrSkipped indicates the scan was skipped (quota exhausted).
 type ErrSkipped struct {
 	Message string
@@ -124,6 +170,12 @@ func (e *ErrSkipped) Error() string { return "scan skipped: " + e.Message }
 // echoes a MiniBOM with vulnerabilities populated). Callers decode into a
 // MiniBOM, then re-hydrate.
 func (c *Client) Validate(ctx context.Context, mb ossbom.MiniBOM) (json.RawMessage, error) {
+	// The ingest mount deliberately has no status endpoint: a monitor id is a
+	// submit-only credential. Refuse here so the caller gets this instead of a
+	// 404 from a route that was never meant to exist.
+	if c.IngestToken != "" {
+		return nil, ErrIngestSubmitOnly
+	}
 	status, respBody, err := c.postScan(ctx, mb)
 	if err != nil {
 		return nil, err
