@@ -823,36 +823,9 @@ Python and JavaScript, via syft's static catalogers.
 | Python | `requirements.txt`, `Pipfile.lock`, `poetry.lock`, `uv.lock`, `pdm.lock`, `setup.py`, `pyproject.toml`, wheel / egg metadata |
 | JavaScript | `package.json`, `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml` |
 
-### Resolving a project with no lockfile
-
-A lockfile already names every transitive dependency at a concrete version, so a
-repo that commits one is fully covered by static parsing alone.
-
-Without a lockfile, a manifest carries direct dependencies only, and often as
-ranges (`^1.2.3`, `>=3,<4`) rather than concrete versions. To work out what would
-actually be installed, the scan asks a resolver — so **have one of these on
-`PATH` when you scan**:
-
-| Ecosystem | Resolver | What it runs |
-|-----------|----------|--------------|
-| Python | `uv` (preferred) | `uv pip compile --universal` / `uv export` — the full transitive closure, resolved across platforms and Python versions. |
-| Python | `pip` 22.2+ (fallback) | `pip install --dry-run --report` — the same closure, for the running interpreter and platform. Used only when `uv` is absent. |
-| JavaScript | `npm` | `npm install --package-lock-only` — generates a lockfile in a temp directory and reads the resolved versions back. |
-
-None of them install anything into your project: resolution runs against a
-throwaway cache and temp directory, `node_modules` is never created, install
-scripts never run (`--ignore-scripts`), and your working tree is untouched. pip
-is invoked as `python -m pip` against the parsed dependency list, never against
-the project directory, so your build backend is never executed either.
-
-With no resolver at all the scan still succeeds, but falls back to direct
-dependencies only — it says so on stderr, and any unpinned dependency then
-defaults to its latest published release (below) rather than the version your
-project would install.
-
-Packages that only exist in a private registry, or as in-repo workspace members
-(a monorepo's own packages), can't be resolved from the public registries and
-stay unversioned regardless.
+The CLI never executes your package manager. If your repo has only a manifest
+and no lockfile, expect direct deps only — supply a lockfile for full
+transitive coverage.
 
 When a dependency's version can't be determined — an unpinned range in a
 manifest (`click = "^8"`) with no lockfile or resolver to pin it against — the
