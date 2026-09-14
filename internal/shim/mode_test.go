@@ -380,3 +380,82 @@ func TestMalformedMonitorHeaderReadsAsBlocking(t *testing.T) {
 		}
 	}
 }
+
+// A flagless re-install -- what install.sh runs on every upgrade -- must not
+// take one shim's passive mode and apply it to the rest. Doing so turned the
+// malware gate off for managers the user had deliberately left blocking.
+func TestReinstallInheritsEachManagersOwnMode(t *testing.T) {
+	requirePOSIX(t)
+	root := t.TempDir()
+	shimDir := filepath.Join(root, "shims")
+	bin := filepath.Join(root, "ossprey")
+	writeExec(t, bin, "#!/bin/sh\nexit 0\n")
+
+	base := Options{Dir: shimDir, Binary: bin, All: true, SkipProfiles: true, Home: root}
+	blocking := base
+	blocking.Managers = []string{"npm"}
+	if _, err := Install(blocking); err != nil {
+		t.Fatalf("install npm: %v", err)
+	}
+	monitored := base
+	monitored.Managers = []string{"pip"}
+	monitored.Mode, monitored.MonitorID = ModeMonitor, testMonitorID
+	if _, err := Install(monitored); err != nil {
+		t.Fatalf("install pip: %v", err)
+	}
+
+	both := base
+	both.Managers = []string{"npm", "pip"}
+	if _, err := Install(both); err != nil {
+		t.Fatalf("re-install: %v", err)
+	}
+
+	if mode, id := ShimMode(filepath.Join(shimDir, scriptName("npm"))); mode != ModeBlocking || id != "" {
+		t.Errorf("npm went from blocking to mode %q / id %q: a re-install disabled the malware gate", mode, id)
+	}
+	if mode, id := ShimMode(filepath.Join(shimDir, scriptName("pip"))); mode != ModeMonitor || id != testMonitorID {
+		t.Errorf("pip lost its monitor: mode %q / id %q", mode, id)
+	}
+}
+
+// os.MkdirAll leaves an existing directory's permissions alone, so the lockdown
+// only ever fired on a first install -- never on the upgrade path.
+func TestMonitorInstallLocksDownAnExistingShimDirectory(t *testing.T) {
+	requirePOSIX(t)
+	root := t.TempDir()
+	shimDir := filepath.Join(root, "shims")
+	bin := filepath.Join(root, "ossprey")
+	writeExec(t, bin, "#!/bin/sh\nexit 0\n")
+	if err := os.MkdirAll(shimDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Install(Options{
+		Dir: shimDir, Binary: bin, Managers: []string{"npm"}, All: true,
+		SkipProfiles: true, Mode: ModeMonitor, MonitorID: testMonitorID, Home: root,
+	}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	info, err := os.Stat(shimDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		t.Errorf("shim dir mode = %o, want no group/other access", perm)
+	}
+}
+
+// A blocking shim has no mode to record, and the header line it was given
+// instead was a bare comment marker with trailing whitespace.
+func TestBlockingShimHasNoEmptyModeLine(t *testing.T) {
+	script := Script(ScriptOptions{Manager: "npm", Dir: "/tmp/s", Binary: "/b", Mode: ModeBlocking})
+	for _, bad := range []string{"# \n", ":: \n"} {
+		if strings.Contains(script, bad) {
+			t.Errorf("blocking shim carries a bare comment line %q:\n%s", bad, script)
+		}
+	}
+	if strings.Contains(script, modePrefix) {
+		t.Error("blocking shim records a mode it does not have")
+	}
+}

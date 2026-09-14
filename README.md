@@ -1095,7 +1095,10 @@ process exits non-zero, so it is there on exactly the runs you care about.
 
 `--report` is refused alongside `--passive` (and `--monitor`, which implies it):
 a passive scan submits without fetching findings, so a report file would claim a
-verdict nobody checked.
+verdict nobody checked. Passive mode coming from the *environment* only warns
+and skips the report, because `OSSPREY_PASSIVE` and `OSSPREY_CI_CACHE_SCAN_ONLY`
+are set in pipelines that also pass `--report`, and an upgrade must not start
+failing their builds.
 
 No file is written when the run never reaches a verdict: `--local`, and the
 `--skip-ci` mode above. A consumer should treat a

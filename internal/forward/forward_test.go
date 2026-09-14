@@ -750,19 +750,6 @@ func TestMonitorIDIsNotHandedToThePackageManager(t *testing.T) {
 	}
 }
 
-func TestRedactMonitorKeepsAPrefixAndDropsTheRest(t *testing.T) {
-	full := "ospi_" + strings.Repeat("a", 64)
-
-	got := redactMonitor(full)
-
-	if got == full {
-		t.Error("the full monitor id reached a log line")
-	}
-	if !strings.HasPrefix(got, "ospi_") || !strings.HasSuffix(got, "...") {
-		t.Errorf("redactMonitor(%q) = %q, want a recognisable prefix", full, got)
-	}
-}
-
 func TestRun_MalwareBlockPrintsBannerBeforeErrorLines(t *testing.T) {
 	ex := &stubExec{}
 	swap(t, ex.fn, func(context.Context, check.Options) (*ossbom.SBOM, error) {

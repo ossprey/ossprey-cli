@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ossprey/ossprey-cli/internal/monitor"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
 )
 
@@ -405,5 +406,28 @@ func TestIngestClientRefusesValidate(t *testing.T) {
 	}
 	if _, err := c.Validate(context.Background(), ossbom.MiniBOM{}); !errors.Is(err, ErrIngestSubmitOnly) {
 		t.Fatalf("Validate() error = %v, want ErrIngestSubmitOnly", err)
+	}
+}
+
+// The token is the whole credential and it travels in the URL path, so every
+// *url.Error carries it -- into terminal scrollback and CI logs, on every
+// install a proxy, DNS or TLS failure touches.
+func TestIngestTransportErrorDoesNotCarryTheToken(t *testing.T) {
+	// A port nothing listens on: a refused connection is the common case.
+	c, err := NewIngest("http://127.0.0.1:1", testIngestToken)
+	if err != nil {
+		t.Fatalf("NewIngest: %v", err)
+	}
+
+	postErr := c.Submit(context.Background(), ossbom.MiniBOM{})
+
+	if postErr == nil {
+		t.Fatal("Post to a closed port returned no error")
+	}
+	if strings.Contains(postErr.Error(), testIngestToken) {
+		t.Errorf("the monitor id reached an error message: %v", postErr)
+	}
+	if !strings.Contains(postErr.Error(), monitor.Prefix) {
+		t.Errorf("the error names no monitor at all, so it cannot be debugged: %v", postErr)
 	}
 }

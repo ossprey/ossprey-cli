@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/ossprey/ossprey-cli/internal/monitor"
@@ -83,20 +84,13 @@ func NewBearer(baseURL, token string) (*Client, error) {
 // a URL path: a value carrying a slash or a query character would silently
 // retarget the request at a different route.
 func NewIngest(baseURL, token string) (*Client, error) {
-	if !ValidIngestToken(token) {
+	if !monitor.ValidToken(token) {
 		return nil, fmt.Errorf("invalid monitor id: expected %s followed by 64 hex characters", monitor.Prefix)
 	}
 	c := newClient(baseURL)
 	c.IngestToken = token
 	return c, nil
 }
-
-// ValidIngestToken reports whether a string is shaped like an ingest token the
-// service could have issued.
-//
-// A thin re-export of monitor.ValidToken, kept so callers already holding a
-// client package do not need a second import for it.
-func ValidIngestToken(token string) bool { return monitor.ValidToken(token) }
 
 func newClient(baseURL string) *Client {
 	if baseURL == "" {
@@ -195,6 +189,31 @@ func (c *Client) Submit(ctx context.Context, mb ossbom.MiniBOM) error {
 	return err
 }
 
+// redact strips the ingest token from an error before it can be printed.
+//
+// The token is the whole credential and it travels in the URL path, so every
+// *url.Error Go builds for a refused connection, a DNS failure or a TLS problem
+// carries it in full -- into terminal scrollback and CI logs, on every install.
+// The wrapper keeps errors.As and errors.Is working on what it replaced.
+func (c *Client) redact(err error) error {
+	if err == nil || c.IngestToken == "" {
+		return err
+	}
+	msg := strings.ReplaceAll(err.Error(), c.IngestToken, monitor.Redact(c.IngestToken))
+	if msg == err.Error() {
+		return err
+	}
+	return &redactedError{err: err, msg: msg}
+}
+
+type redactedError struct {
+	err error
+	msg string
+}
+
+func (e *redactedError) Error() string { return e.msg }
+func (e *redactedError) Unwrap() error { return e.err }
+
 func (c *Client) postScan(ctx context.Context, mb ossbom.MiniBOM) (int, []byte, error) {
 	body, err := json.Marshal(map[string]any{"sbom": mb})
 	if err != nil {
@@ -203,7 +222,7 @@ func (c *Client) postScan(ctx context.Context, mb ossbom.MiniBOM) (int, []byte, 
 
 	endpoint, err := url.JoinPath(c.BaseURL, c.mount(), "scans")
 	if err != nil {
-		return 0, nil, fmt.Errorf("build url: %w", err)
+		return 0, nil, fmt.Errorf("build url: %w", c.redact(err))
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
@@ -215,7 +234,7 @@ func (c *Client) postScan(ctx context.Context, mb ossbom.MiniBOM) (int, []byte, 
 
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return 0, nil, fmt.Errorf("submit: %w", err)
+		return 0, nil, fmt.Errorf("submit: %w", c.redact(err))
 	}
 	defer resp.Body.Close()
 

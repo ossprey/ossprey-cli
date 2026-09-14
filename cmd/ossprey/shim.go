@@ -7,6 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	monitorpkg "github.com/ossprey/ossprey-cli/internal/monitor"
 	"github.com/ossprey/ossprey-cli/internal/shim"
 )
 
@@ -212,6 +213,9 @@ func previewInstall(opts shim.Options) error {
 	for _, m := range res.Skipped {
 		fmt.Printf("  %-8s skipped (%s)\n", m.Name, m.Note)
 	}
+	if line := modeSummary(res.Mode); line != "" {
+		fmt.Println("\n" + line)
+	}
 	if !opts.SkipProfiles {
 		for _, p := range res.Profiles {
 			fmt.Println("Would add the PATH entry to " + p)
@@ -283,7 +287,7 @@ func printStatus(st *shim.Status) {
 	for _, m := range st.Managers {
 		switch {
 		case m.Active:
-			fmt.Printf("  %s %-8s %s, then run from %s\n", yes, m.Name, shimAction(m.Mode), orDash(m.Real))
+			fmt.Printf("  %s %-8s %s, then run from %s%s\n", yes, m.Name, shimAction(m.Mode), orDash(m.Real), monitorNote(m.MonitorID))
 		case m.Shim != "" && m.Resolves == "":
 			fmt.Printf("  %s %-8s shim installed, but %s isn't on your PATH\n", meh, m.Name, m.Name)
 		case m.Shim != "":
@@ -358,6 +362,16 @@ func modeSummary(mode shim.Mode) string {
 	default:
 		return ""
 	}
+}
+
+// monitorNote names the monitor a shim reports to, redacted. On a machine you
+// inherited, "monitor mode" without the id is the half of the answer you did
+// not need.
+func monitorNote(id string) string {
+	if id == "" {
+		return ""
+	}
+	return " (monitor " + monitorpkg.Redact(id) + ")"
 }
 
 // shimAction describes what one shim does to an install, since a passive shim

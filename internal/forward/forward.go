@@ -23,6 +23,7 @@ import (
 	"github.com/ossprey/ossprey-cli/internal/ansi"
 	"github.com/ossprey/ossprey-cli/internal/check"
 	"github.com/ossprey/ossprey-cli/internal/env"
+	"github.com/ossprey/ossprey-cli/internal/monitor"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
 	"github.com/ossprey/ossprey-cli/internal/progress"
 	"github.com/ossprey/ossprey-cli/internal/registry"
@@ -220,7 +221,7 @@ func Run(ctx context.Context, opts Options) error {
 				// Named because a monitor also decides whose account this lands
 				// in, and the env var carrying it may not have been set by the
 				// person reading this line.
-				mode = "passive, monitor " + redactMonitor(opts.MonitorID)
+				mode = "passive, monitor " + monitor.Redact(opts.MonitorID)
 			}
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "ossprey: warning: could not post scan (%v); installing anyway (%s)\n", err, mode)
@@ -603,14 +604,4 @@ func envWithoutMonitorID() []string {
 		out = append(out, kv)
 	}
 	return out
-}
-
-// redactMonitor shows enough of an id to recognise it, never enough to reuse
-// it: this goes to stderr, which on CI is a log a lot of people can read.
-func redactMonitor(monitor string) string {
-	const shown = len("ospi_") + 8
-	if len(monitor) <= shown {
-		return monitor
-	}
-	return monitor[:shown] + "..."
 }

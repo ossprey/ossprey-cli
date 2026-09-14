@@ -174,9 +174,16 @@ if [ -n "$MONITOR_ID" ] && [ -n "$WATCHDOG" ]; then
   err "--watchdog and --monitor are mutually exclusive"
 fi
 
-# Passed through unquoted on purpose: "set --" builds the argument list so an
-# empty MODE_ARGS adds no argument at all, and the monitor id is validated by
-# `shim install` before it is written anywhere.
+# Asking for a mode is asking for the shims: the flags set OVERRIDE themselves,
+# so without this the env-var spelling installs no shims at all and says nothing
+# about it, leaving an operator believing a fleet reports when it does not.
+if [ -n "$MONITOR_ID" ] || [ -n "$WATCHDOG" ]; then
+  OVERRIDE=1
+fi
+
+# "set --" builds the argument list so an empty mode adds no argument at all,
+# and the monitor id is validated by `shim install` before it is written
+# anywhere.
 if [ -n "$MONITOR_ID" ]; then
   set -- --monitor "$MONITOR_ID"
 elif [ -n "$WATCHDOG" ]; then

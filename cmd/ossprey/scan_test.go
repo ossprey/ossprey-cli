@@ -268,3 +268,62 @@ func captureStderr(t *testing.T, fn func()) string {
 	r.Close()
 	return out
 }
+
+// OSSPREY_CI_CACHE_SCAN_ONLY is set in pipelines we do not control, and those
+// pipelines pass --report and --local. Refusing the combination there turns a
+// CLI upgrade into a wave of failing builds, which is the one thing passive
+// mode exists to never do.
+func TestScanPassiveFromEnv_DoesNotFailOnReportOrLocal(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		io.WriteString(w, `{"sbom_id":"sb1","scan_id":"sc1"}`)
+	}))
+	defer srv.Close()
+
+	for _, envVar := range []string{"OSSPREY_CI_CACHE_SCAN_ONLY", "OSSPREY_PASSIVE"} {
+		t.Run(envVar, func(t *testing.T) {
+			t.Setenv(envVar, "1")
+			report := filepath.Join(t.TempDir(), "report.json")
+			if err := runScan(t, t.TempDir(), "--url", srv.URL, "--api-key", "k", "--report", report); err != nil {
+				t.Errorf("%s with --report: %v", envVar, err)
+			}
+			if _, err := os.Stat(report); err == nil {
+				t.Error("a passive scan wrote a report file claiming a verdict nobody fetched")
+			}
+			if err := runScan(t, t.TempDir(), "--url", srv.URL, "--api-key", "k", "--local"); err != nil {
+				t.Errorf("%s with --local: %v", envVar, err)
+			}
+		})
+	}
+}
+
+// Typing both is a contradiction the user can see and fix, so it stays refused.
+func TestScanPassiveFlag_StillRefusesReportAndLocal(t *testing.T) {
+	report := filepath.Join(t.TempDir(), "report.json")
+	if err := runScan(t, t.TempDir(), "--passive", "--report", report); err == nil {
+		t.Error("--passive --report was accepted")
+	}
+	if err := runScan(t, t.TempDir(), "--passive", "--local"); err == nil {
+		t.Error("--passive --local was accepted")
+	}
+}
+
+// The forwarder is how monitor ids actually reach machines, and it never
+// validated one: past this point passive mode's fail-open turns a typo into a
+// warning, so a fleet reports nothing forever while every install exits 0.
+func TestForwardCmd_RejectsAMalformedMonitorID(t *testing.T) {
+	t.Setenv("OSSPREY_MONITOR_ID", "ospi_TYPO")
+	cmd := newForwardCmd("npm")
+	cmd.SetArgs([]string{"install", "left-pad"})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
+
+	err := cmd.Execute()
+
+	if err == nil {
+		t.Fatal("a malformed OSSPREY_MONITOR_ID was accepted")
+	}
+	if strings.Contains(err.Error(), "TYPO") {
+		t.Errorf("the id was echoed unredacted: %v", err)
+	}
+}

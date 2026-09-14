@@ -39,7 +39,7 @@ func Script(o ScriptOptions) string {
 
 // modeEnv renders the env-var block a passive shim exports before exec'ing.
 //
-// The monitor id reaches here already validated (`client.ValidIngestToken`, via
+// The monitor id reaches here already validated (`monitor.ValidToken`, via
 // ValidateMode) and is shell-quoted on top: it is attacker-shaped input being
 // written into an executable file, so neither guard is the only one.
 func modeEnv(o ScriptOptions, quote func(string) string, assign func(k, v string) string) string {
@@ -62,7 +62,7 @@ func posixScript(o ScriptOptions) string {
 		"{{MARKER}}", Marker,
 		"{{BINPREFIX}}", binPrefix,
 		"{{BYPASS}}", BypassEnv,
-		"{{MODELINE}}", modeHeader(o),
+		"{{MODELINE}}", modeHeader(o, "# "),
 		"{{MODEENV}}", modeEnv(o, shellQuote, func(k, v string) string {
 			return k + "=" + v + "\nexport " + k + "\n"
 		}),
@@ -72,14 +72,19 @@ func posixScript(o ScriptOptions) string {
 
 // modeHeader records the mode in the shim's own header, so `shim status` can
 // report it and a re-run of `shim install` can see what it is replacing.
-func modeHeader(o ScriptOptions) string {
+//
+// It carries its own comment marker and newline: a blocking shim has no mode to
+// record, and an empty line left behind by the template is a stray comment with
+// trailing whitespace in the majority of installed shims.
+func modeHeader(o ScriptOptions, comment string) string {
 	if o.Mode == ModeBlocking {
 		return ""
 	}
+	line := comment + modePrefix + string(o.Mode)
 	if o.Mode == ModeMonitor {
-		return modePrefix + string(o.Mode) + " " + o.MonitorID
+		line += " " + o.MonitorID
 	}
-	return modePrefix + string(o.Mode)
+	return line + "\n"
 }
 
 const posixTemplate = `#!/bin/sh
@@ -87,8 +92,7 @@ const posixTemplate = `#!/bin/sh
 #
 # {{MARKER}}
 # {{BINPREFIX}}{{BINRAW}}
-# {{MODELINE}}
-#
+{{MODELINE}}#
 # Why does {{MANAGER}} behave differently here? This script sits earlier on your
 # PATH than the real {{MANAGER}}, so that installs are checked for malware before
 # they run. Everything else (` + "`{{MANAGER}} run`" + `, version queries, ...) is passed
@@ -150,7 +154,7 @@ func windowsScript(o ScriptOptions) string {
 		"{{MARKER}}", Marker,
 		"{{BINPREFIX}}", binPrefix,
 		"{{BYPASS}}", BypassEnv,
-		"{{MODELINE}}", modeHeader(o),
+		"{{MODELINE}}", modeHeader(o, ":: "),
 		"{{MODEENV}}", modeEnv(o, func(v string) string { return v }, func(k, v string) string {
 			return "set \"" + k + "=" + v + "\"\n"
 		}),
@@ -163,8 +167,7 @@ const windowsTemplate = `@echo off
 ::
 :: {{MARKER}}
 :: {{BINPREFIX}}{{BINRAW}}
-:: {{MODELINE}}
-::
+{{MODELINE}}::
 :: Why does {{MANAGER}} behave differently here? This script sits earlier on your
 :: PATH than the real {{MANAGER}}, so that installs are checked for malware before
 :: they run. Everything else is passed straight through untouched.
