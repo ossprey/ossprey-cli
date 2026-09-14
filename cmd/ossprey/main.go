@@ -18,6 +18,7 @@ import (
 	"github.com/ossprey/ossprey-cli/internal/client"
 	"github.com/ossprey/ossprey-cli/internal/env"
 	"github.com/ossprey/ossprey-cli/internal/forward"
+	monitorpkg "github.com/ossprey/ossprey-cli/internal/monitor"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
 	"github.com/ossprey/ossprey-cli/internal/registry"
 	"github.com/ossprey/ossprey-cli/internal/scan"
@@ -90,7 +91,9 @@ func newScanCmd() *cobra.Command {
 		apiKey              string
 		noVersionLookup     bool
 		skipCI              bool
+		passive             bool
 		cacheScanOnly       bool
+		monitorID           string
 		timeout             time.Duration
 	)
 
@@ -103,7 +106,30 @@ func newScanCmd() *cobra.Command {
 				fmt.Println("Ossprey scan skipped (skip-ci)")
 				return nil
 			}
-			cacheOnly := cacheScanOnly || env.CacheScanOnly()
+			// A monitor id names where the scan should land and cannot fetch a
+			// verdict, so it always implies passive.
+			monitor := monitorID
+			fromEnv := false
+			if monitor == "" {
+				monitor = env.MonitorID()
+				fromEnv = monitor != ""
+			}
+			// Passive asked for on the command line is a choice; passive
+			// inherited from the environment is a pipeline setting somebody
+			// else made, possibly years ago. They are refused differently
+			// below, so keep them apart.
+			passiveTyped := passive || cacheScanOnly || monitorID != ""
+			passiveMode := passiveTyped || env.Passive() || monitor != ""
+
+			// Validated here, before passive mode's fail-open can swallow it. A
+			// monitor id names where the scan should land, so a typo must be an
+			// error the user sees, not a warning on a scan that went nowhere.
+			if monitor != "" && !monitorpkg.ValidToken(monitor) {
+				return invalidMonitorErr(monitor)
+			}
+			if monitor != "" {
+				warnMonitorInEffect(monitor, fromEnv)
+			}
 
 			path := "."
 			if len(args) == 1 {
@@ -116,6 +142,25 @@ func newScanCmd() *cobra.Command {
 			if local && reportPath != "" {
 				return errors.New("--local and --report are mutually exclusive: --local exits before any verdict")
 			}
+			// Same reason: a passive scan submits and returns without fetching
+			// findings, so a report file would claim a verdict nobody checked.
+			// Refused when the user typed both -- but only then. The env vars
+			// are set in pipelines we do not control, and an upgrade that
+			// starts failing their builds is the one thing passive mode exists
+			// to never do, so there the older flag wins with a warning.
+			if reportPath != "" && passiveMode {
+				if passiveTyped {
+					return errors.New("--passive and --report are mutually exclusive: a passive scan never reaches a verdict")
+				}
+				fmt.Fprintf(os.Stderr, "ossprey: warning: passive mode is set in the environment, so no report was written to %s: a passive scan never reaches a verdict.\n", reportPath)
+				reportPath = ""
+			}
+			if local && passiveMode {
+				if passiveTyped {
+					return errors.New("--passive and --local are mutually exclusive: --local never submits the scan")
+				}
+				fmt.Fprintln(os.Stderr, "ossprey: warning: passive mode is set in the environment, but --local never submits a scan; nothing was sent.")
+			}
 
 			sbom, err := scan.Run(cmd.Context(), scan.Options{
 				Path:              path,
@@ -124,6 +169,13 @@ func newScanCmd() *cobra.Command {
 				Timeout:           scanTimeout(timeout),
 			})
 			if err != nil {
+				// Passive monitoring runs in front of other people's work, so a
+				// cataloguing failure is reported and shrugged off rather than
+				// turned into a non-zero exit somebody has to chase.
+				if passiveMode {
+					fmt.Fprintf(os.Stderr, "ossprey: warning: could not catalogue %s: %v\n", path, err)
+					return nil
+				}
 				return err
 			}
 
@@ -136,6 +188,9 @@ func newScanCmd() *cobra.Command {
 			//  --dry-run-malicious: inject fake vuln locally
 			//  --dry-run-safe:      no vulns
 			//  default:             submit to API, copy returned vulns onto sbom
+			if (dryRunMalicious || dryRunSafe) && passiveMode {
+				fmt.Fprintln(os.Stderr, "ossprey: warning: dry run, so no scan was submitted; passive mode had no effect.")
+			}
 			switch {
 			case dryRunMalicious:
 				if err := scan.InjectTestVulnerability(sbom); err != nil {
@@ -143,11 +198,11 @@ func newScanCmd() *cobra.Command {
 				}
 			case dryRunSafe:
 				// no-op
-			case cacheOnly:
-				if err := submit.Post(cmd.Context(), sbom, apiURL, apiKey); err != nil {
+			case passiveMode:
+				if err := submit.Post(cmd.Context(), sbom, apiURL, apiKey, monitor); err != nil {
 					fmt.Fprintf(os.Stderr, "ossprey: warning: could not post scan: %v\n", err)
 				} else {
-					fmt.Println("Scan submitted; results will appear in the Ossprey dashboard (ci-cache-scan-only)")
+					fmt.Println("Scan submitted; results will appear in the Ossprey dashboard")
 				}
 			default:
 				if err := submit.Validate(cmd.Context(), sbom, apiURL, apiKey); err != nil {
@@ -169,12 +224,9 @@ func newScanCmd() *cobra.Command {
 				}
 			}
 
-			// --ci-cache-scan-only submits for the dashboard and deliberately
-			// reaches no verdict, so there is nothing to report — same reason
-			// --local and --report are refused together. Returning before the
-			// write keeps a report file from claiming "clean" for a scan whose
-			// findings were never fetched.
-			if cacheOnly {
+			// A passive scan deliberately reaches no verdict, so there is nothing
+			// to report and nothing to exit non-zero over.
+			if passiveMode {
 				return nil
 			}
 
@@ -205,8 +257,15 @@ func newScanCmd() *cobra.Command {
 	cmd.Flags().StringVar(&apiURL, "url", defaultAPIURL, "Ossprey API URL")
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "Ossprey API key (or OSSPREY_API_KEY / API_KEY env var; optional after `ossprey login`)")
 	cmd.Flags().BoolVar(&skipCI, "skip-ci", false, "skip the Ossprey scan entirely and exit 0 (or OSSPREY_SKIP_CI env var)")
-	cmd.Flags().BoolVar(&cacheScanOnly, "ci-cache-scan-only", false, "catalogue and submit the scan for the dashboard, skip the CLI verdict and always exit 0 (or OSSPREY_CI_CACHE_SCAN_ONLY env var)")
-	cmd.MarkFlagsMutuallyExclusive("skip-ci", "ci-cache-scan-only")
+	cmd.Flags().BoolVar(&passive, "passive", false, "submit the scan for the dashboard without waiting for a verdict; always exits 0 (or OSSPREY_PASSIVE env var)")
+	cmd.Flags().StringVar(&monitorID, "monitor", "", "submit passively through a monitor's id, with no login or API key (or OSSPREY_MONITOR_ID env var)")
+	// The original CI-facing spelling of --passive. Hidden rather than removed:
+	// it is set in pipelines we do not control, so it keeps working, but there
+	// is only one name left to teach.
+	cmd.Flags().BoolVar(&cacheScanOnly, "ci-cache-scan-only", false, "deprecated alias for --passive")
+	_ = cmd.Flags().MarkHidden("ci-cache-scan-only")
+	cmd.MarkFlagsMutuallyExclusive("skip-ci", "passive", "ci-cache-scan-only")
+	cmd.MarkFlagsMutuallyExclusive("skip-ci", "monitor")
 
 	return cmd
 }
@@ -306,13 +365,22 @@ func newForwardCmd(bin string) *cobra.Command {
 			if apiURL == "" {
 				apiURL = defaultAPIURL
 			}
+			// Validated here for the same reason `scan` validates it: past this
+			// point passive mode's fail-open turns a typo into a warning, and a
+			// fleet reports nothing forever while every install exits 0. A
+			// malformed id is a configuration error, not a failed scan.
+			monitor := env.MonitorID()
+			if monitor != "" && !monitorpkg.ValidToken(monitor) {
+				return invalidMonitorErr(monitor)
+			}
 			err := forward.Run(cmd.Context(), forward.Options{
-				Bin:           bin,
-				Args:          args,
-				APIURL:        apiURL,
-				APIKey:        os.Getenv("OSSPREY_API_KEY"),
-				SkipCI:        env.SkipCI(),
-				CacheScanOnly: env.CacheScanOnly(),
+				Bin:       bin,
+				Args:      args,
+				APIURL:    apiURL,
+				APIKey:    os.Getenv("OSSPREY_API_KEY"),
+				SkipCI:    env.SkipCI(),
+				Passive:   env.Passive() || monitor != "",
+				MonitorID: monitor,
 			})
 			switch {
 			case err == nil:
@@ -399,4 +467,30 @@ func writeReport(path string, r scan.Report) error {
 		return nil
 	}
 	return scan.WriteReport(path, r)
+}
+
+// warnMonitorInEffect says, every time, that this scan will not block.
+//
+// A monitor does two things worth announcing: it turns the malware gate off,
+// and it files the scan under whoever owns the id rather than under this
+// machine's own account. Both are the point when a person typed --monitor, and
+// both are a takeover when OSSPREY_MONITOR_ID was set by someone else -- a
+// shared runner, a workflow env: block, a stray export in an image. The two are
+// indistinguishable from here, so neither is silent: the env case names the
+// variable so an operator who did not set it can see where it came from.
+func warnMonitorInEffect(monitor string, fromEnv bool) {
+	source := "--monitor"
+	if fromEnv {
+		source = env.MonitorIDEnv
+	}
+	fmt.Fprintf(os.Stderr,
+		"ossprey: passive monitor %s (via %s): malware will NOT fail this scan, and results go to that monitor's account.\n",
+		monitorpkg.Redact(monitor), source)
+}
+
+// invalidMonitorErr is the one wording for a malformed id, built from the
+// prefix it names so the message cannot outlive a change to the format.
+func invalidMonitorErr(monitor string) error {
+	return fmt.Errorf("invalid monitor id %q: expected %s followed by 64 hex characters",
+		monitorpkg.Redact(monitor), monitorpkg.Prefix)
 }
