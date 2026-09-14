@@ -168,10 +168,26 @@ directory `FileResolver` and runs them all unconditionally:
   - `NpmResolveCataloger` — runs `npm install --package-lock-only` to resolve ranges when no lockfile is committed (npm analogue of uv). **This is the one place the CLI shells out to a package manager.**
   - `PackageJSONCataloger` — direct-deps fallback for `package.json`.
 
-Custom catalogers shell out via `exec.LookPath`; if the tool is missing they
-**silently skip** (return nil) rather than error. Custom catalogers named via
-`isOspreyCataloger` parse deps only; syft's manifest catalogers also emit the
-root project itself, which is dropped via `isRootManifestPackage`.
+Custom catalogers shell out via `lookTool`/`toolEnv` (`toolpath.go`), **never
+`exec.LookPath`**; if the tool is missing they **silently skip** (return nil)
+rather than error. Custom catalogers named via `isOspreyCataloger` parse deps
+only; syft's manifest catalogers also emit the root project itself, which is
+dropped via `isRootManifestPackage`.
+
+**Why not `exec.LookPath`:** `ossprey shim install` puts the shim directory at
+the *front* of PATH, so on a machine with shims installed `exec.LookPath("npm")`
+returns a script whose whole job is to run `ossprey npm ...`. A cataloger that
+executes it re-enters ossprey — the forwarder sees no packages named, scans the
+temp manifest the cataloger just wrote, and shells out to the shim again, one
+process per level. A plain `ossprey scan .` fork-bombed itself (3000+ processes
+in one measured run) until `OSSPREY_RESOLVE_TIMEOUT` fired, then emitted a whole
+nested scan's output — its own warnings, verdict and `blocked` line — inside one
+cataloger warning, and fell back to the versionless direct-deps cataloger, so
+transitive dependencies went unscanned (OSS-1993). `lookTool` is
+`shim.LookPathReal`, which skips marker-carrying candidates; `toolEnv` also sets
+`OSSPREY_SHIM_BYPASS=1`, the same belt-and-braces pairing as the shim script's
+own PATH-stripping guard, for shims reached by a route PATH scanning cannot see.
+`TestCatalogNeverInvokesAnOssprevShim` pins it.
 
 A cataloger's error is **not** a reason to drop its packages: syft's generic
 cataloger returns everything it parsed alongside an `unknown` error naming the

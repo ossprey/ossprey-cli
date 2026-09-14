@@ -34,9 +34,9 @@ func NewNpmResolveCataloger(root string) *NpmResolveCataloger {
 func (c *NpmResolveCataloger) Name() string { return "ossprey-npm-cataloger" }
 
 func (c *NpmResolveCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]pkg.Package, []artifact.Relationship, error) {
-	npm, err := exec.LookPath("npm")
+	npm, err := lookTool("npm")
 	if err != nil {
-		return nil, nil, nil // no npm on PATH — silently skip
+		return nil, nil, nil // no real npm on PATH — silently skip
 	}
 	// One shared cache for the whole scan
 	cache, err := os.MkdirTemp("", "ossprey-npm-cache-")
@@ -102,7 +102,7 @@ func runNpmResolve(ctx context.Context, npm, cache, packageJSON string, loc file
 		"--no-update-notifier",
 	)
 	cmd.Dir = tmp
-	cmd.Env = append(os.Environ(), "npm_config_cache="+cache)
+	cmd.Env = toolEnv("npm_config_cache=" + cache)
 	cmd.WaitDelay = 5 * time.Second // the kill lands on npm, but CombinedOutput still waits on pipes a grandchild may hold
 	out, runErr := cmd.CombinedOutput()
 	if runErr != nil {
