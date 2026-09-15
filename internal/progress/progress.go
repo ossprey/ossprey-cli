@@ -37,6 +37,8 @@ func Scan(w io.Writer, n int) (stop func()) {
 	return Start(w, fmt.Sprintf("ossprey: scan in progress, checking %s", packages(n)))
 }
 
+// packages renders a count for the message above. Split out only so that the
+// singular case is impossible to lose in a future edit of the sentence.
 func packages(n int) string {
 	if n == 1 {
 		return "1 package"

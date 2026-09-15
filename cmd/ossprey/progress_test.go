@@ -43,6 +43,9 @@ func scanAPI(t *testing.T) *httptest.Server {
 	return srv
 }
 
+// runCheck drives the check command the way runScan drives scan: cobra's own
+// streams are discarded, so what a test observes is only what the command chose
+// to write to a real destination of its own.
 func runCheck(t *testing.T, args ...string) error {
 	t.Helper()
 	cmd := newCheckCmd()
@@ -82,6 +85,8 @@ func TestCheckDryRunAnnouncesNothing(t *testing.T) {
 	}
 }
 
+// The same wait as check's, reached the other way: `scan` catalogs a directory
+// first, so the count comes from the SBOM rather than from the command line.
 func TestScanAnnouncesTheWaitForAVerdict(t *testing.T) {
 	buf := captureProgress(t)
 	srv := scanAPI(t)
