@@ -37,7 +37,21 @@ func Scan(w io.Writer, n int) (stop func()) {
 	return Start(w, fmt.Sprintf("ossprey: scan in progress, checking %s", packages(n)))
 }
 
-// packages renders a count for the message above. Split out only so that the
+// Submit announces a submit-only send of n packages: passive mode posts the
+// SBOM and returns without polling, so there is a wait but never a verdict.
+//
+// Its own wording rather than Scan's, because "checking" promises a result that
+// passive mode deliberately never fetches — a forwarded install that said it
+// was checking packages and then installed them regardless would read as a
+// scanner that had passed them.
+func Submit(w io.Writer, n int) (stop func()) {
+	if n <= 0 {
+		return Start(w, "ossprey: submitting scan")
+	}
+	return Start(w, fmt.Sprintf("ossprey: submitting scan of %s", packages(n)))
+}
+
+// packages renders a count for the messages above. Split out only so that the
 // singular case is impossible to lose in a future edit of the sentence.
 func packages(n int) string {
 	if n == 1 {

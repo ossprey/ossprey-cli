@@ -109,3 +109,26 @@ func TestScanWordsTheCount(t *testing.T) {
 		}
 	}
 }
+
+// Submit must not borrow Scan's "checking" wording: passive mode posts the SBOM
+// and returns, so a message promising a check would describe a verdict nobody
+// waits for.
+func TestSubmitDoesNotClaimToCheck(t *testing.T) {
+	for _, tc := range []struct {
+		n    int
+		want string
+	}{
+		{1, "ossprey: submitting scan of 1 package...\n"},
+		{3, "ossprey: submitting scan of 3 packages...\n"},
+		{0, "ossprey: submitting scan...\n"},
+	} {
+		var buf bytes.Buffer
+		Submit(&buf, tc.n)()
+		if got := buf.String(); got != tc.want {
+			t.Errorf("Submit(w, %d) = %q, want %q", tc.n, got, tc.want)
+		}
+		if strings.Contains(buf.String(), "checking") {
+			t.Errorf("Submit(w, %d) claims to check: %q", tc.n, buf.String())
+		}
+	}
+}

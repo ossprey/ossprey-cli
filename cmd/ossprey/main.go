@@ -200,7 +200,7 @@ func newScanCmd() *cobra.Command {
 			case dryRunSafe:
 				// no-op
 			case passiveMode:
-				stop := progress.Start(progressOut, "ossprey: submitting scan")
+				stop := progress.Submit(progressOut, len(sbom.Components))
 				err := submit.Post(cmd.Context(), sbom, apiURL, apiKey, monitor)
 				stop()
 				if err != nil {
