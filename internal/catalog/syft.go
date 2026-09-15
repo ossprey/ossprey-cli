@@ -15,6 +15,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/ossprey/ossprey-cli/internal/registry"
+	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
 type Package struct {
@@ -127,7 +128,10 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 		// away a whole ecosystem over one unparseable line — a single
 		// `flask>2.0` in requirements.txt emptied the SBOM of every Python
 		// package, silently scanning nothing.
-		pkgs, _, _ := c.Catalog(ctx, resolver)
+		pkgs, _, err := c.Catalog(ctx, resolver)
+		if err != nil && ctx.Err() == nil {
+			warn.Add(ctx, parseEntry(c.Name(), err))
+		}
 		// Syft's manifest catalogers emit the root project itself from
 		// package.json / pyproject.toml — drop those. Our custom catalogers
 		// parse deps only, so the rule does not apply.
@@ -212,8 +216,14 @@ func resolveVersionless(ctx context.Context, pkgs []Package, opts Options) {
 		g.Go(func() error {
 			v, err := resolveLatestFn(ctx, pkgs[i].Type, pkgs[i].Name)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "ossprey: could not resolve latest version of %s/%s (%v); leaving it unversioned\n",
-					pkgs[i].Type, pkgs[i].Name, err)
+				// Past the deadline every remaining lookup fails on the expired
+				// context, not on the registry. Reporting those as "registry
+				// unreachable" would blame an outage for our own timeout;
+				// scan.Run already says the deadline was hit, once.
+				if ctx.Err() == nil {
+					warn.Add(ctx, registry.UnresolvedEntry(pkgs[i].Type, pkgs[i].Name, err,
+						"left unversioned"))
+				}
 				return nil
 			}
 			// Each goroutine writes a distinct index — safe without a lock.

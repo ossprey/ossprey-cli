@@ -21,6 +21,7 @@ import (
 	"github.com/ossprey/ossprey-cli/internal/scan"
 	"github.com/ossprey/ossprey-cli/internal/severity"
 	"github.com/ossprey/ossprey-cli/internal/submit"
+	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
 // keyNameAttempts caps how many fresh random key names init tries when the
@@ -409,6 +410,8 @@ func printNextStepsTo(out io.Writer, haveKey bool) {
 // proof the credential works. Empty falls back to the stored login.
 func runFirstScan(ctx context.Context, path, apiURL, apiKey string) error {
 	sbom, err := scan.Run(ctx, scan.Options{Path: path})
+	// Ahead of the verdict, not deferred behind it.
+	fmt.Fprint(os.Stderr, warn.Drain(ctx))
 	if err != nil {
 		return err
 	}

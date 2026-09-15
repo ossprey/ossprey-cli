@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +15,8 @@ import (
 	"github.com/anchore/syft/syft/file"
 	"github.com/anchore/syft/syft/pkg"
 	"golang.org/x/sync/errgroup"
+
+	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
 func catalogConcurrency() int {
@@ -86,7 +89,7 @@ func catalogByGlob(ctx context.Context, resolver file.Resolver, root, glob, labe
 				// goes to stdout, so this never corrupts --local output.
 				// Past the deadline every remaining manifest fails the same way, and scan.Run reports that once.
 				if ctx.Err() == nil {
-					fmt.Fprintf(os.Stderr, "ossprey: %s cataloger: %v\n", label, err)
+					warn.Add(ctx, catalogerEntry(label, err))
 				}
 				return nil
 			}
@@ -115,4 +118,41 @@ func catalogByGlob(ctx context.Context, resolver file.Resolver, root, glob, labe
 		}
 	}
 	return out, nil
+}
+
+// catalogerEntry turns one manifest's failure into a warning. A subprocess
+// failure contributes its one actionable line to the headline and keeps the
+// rest for a verbose run; anything else is already a single sentence.
+func catalogerEntry(label string, err error) warn.Entry {
+	e := warn.Entry{
+		Class: "cataloger:" + label,
+		Many:  label + ": could not resolve %d manifests",
+	}
+	var te *toolError
+	if errors.As(err, &te) {
+		e.One = fmt.Sprintf("%s: could not resolve %s (%s)", label, te.dir, te.summary)
+		e.Item = fmt.Sprintf("%s (%s)", te.dir, te.summary)
+		e.Detail = te.detail
+		e.DetailLabel = label
+		return e
+	}
+	e.One = fmt.Sprintf("%s: %v", label, err)
+	e.Item = err.Error()
+	return e
+}
+
+// parseEntry reports entries a cataloger could not read. Syft's catalogers
+// return everything they did parse alongside an error naming the rest; that
+// error used to be discarded, so a malformed requirement went missing from the
+// SBOM in silence — the one genuinely quiet failure in the catalog path.
+func parseEntry(name string, err error) warn.Entry {
+	detail := newToolError(name, "", err.Error()).detail
+	return warn.Entry{
+		Class:       "parse:" + name,
+		One:         fmt.Sprintf("%s: some entries could not be parsed (%s)", name, summarize(detail)),
+		Many:        name + ": entries could not be parsed in %d passes",
+		Item:        summarize(detail),
+		Detail:      detail,
+		DetailLabel: name,
+	}
 }

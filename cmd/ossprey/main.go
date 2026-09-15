@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -24,6 +25,7 @@ import (
 	"github.com/ossprey/ossprey-cli/internal/scan"
 	"github.com/ossprey/ossprey-cli/internal/severity"
 	"github.com/ossprey/ossprey-cli/internal/submit"
+	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
 var version = "0.0.0-dev"
@@ -72,7 +74,21 @@ func main() {
 		root.AddCommand(newForwardCmd(bin))
 	}
 
-	if err := root.Execute(); err != nil {
+	// One collector for the whole run. It is built before cobra parses -v, so
+	// PersistentPreRun raises it once the flag is known.
+	ctx := warn.NewContext(context.Background(), false)
+	root.PersistentPreRun = func(cmd *cobra.Command, _ []string) {
+		if f := cmd.Flags().Lookup("verbose"); f != nil && f.Changed {
+			warn.SetVerbose(cmd.Context())
+		}
+	}
+
+	err := root.ExecuteContext(ctx)
+	// Safety net. Every path that reaches a verdict drains first, so this
+	// normally prints nothing; it exists so a path that forgot cannot swallow a
+	// warning outright.
+	fmt.Fprint(os.Stderr, warn.Drain(ctx))
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
@@ -178,6 +194,7 @@ func newScanCmd() *cobra.Command {
 				}
 				return err
 			}
+			flushWarnings(cmd.Context())
 
 			// --local: dump SBOM JSON to stdout and exit. Nothing else.
 			if local {
@@ -232,6 +249,8 @@ func newScanCmd() *cobra.Command {
 
 			// Written before the exit below: a malware verdict is exactly the
 			// one CI most needs the report for.
+			flushWarnings(cmd.Context())
+
 			if err := writeReport(reportPath, scan.NewReport(sbom, failingFloor(failOnInformational))); err != nil {
 				return err
 			}
@@ -247,7 +266,7 @@ func newScanCmd() *cobra.Command {
 
 	cmd.Flags().StringVarP(&output, "output", "o", "", "write SBOM to file")
 	cmd.Flags().StringVar(&reportPath, "report", "", "write a JSON verdict report (verdict + findings) to file")
-	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "verbose logging")
+	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "list every warned package and manifest, and the full output of any resolver that failed (or OSSPREY_VERBOSE=1)")
 	cmd.Flags().BoolVar(&local, "local", false, "dump SBOM JSON to stdout and exit (no API submission, no verdict)")
 	cmd.Flags().BoolVar(&failOnInformational, "fail-on-informational", false, "also fail on informational findings, which are reported but exit 0 by default")
 	cmd.Flags().BoolVar(&dryRunSafe, "dry-run-safe", false, "skip API submission; emit empty vulnerability list")
@@ -326,6 +345,8 @@ func newCheckCmd() *cobra.Command {
 				}
 				return err
 			}
+
+			flushWarnings(cmd.Context())
 
 			if err := writeReport(reportPath, scan.NewReport(sbom, failingFloor(failOnInformational))); err != nil {
 				return err
@@ -493,4 +514,11 @@ func warnMonitorInEffect(monitor string, fromEnv bool) {
 func invalidMonitorErr(monitor string) error {
 	return fmt.Errorf("invalid monitor id %q: expected %s followed by 64 hex characters",
 		monitorpkg.Redact(monitor), monitorpkg.Prefix)
+}
+
+// flushWarnings prints the run's collected warnings. Called once the catalogue
+// is done and before anything that counts as a verdict, so the thing a
+// developer has to act on is the last thing on screen.
+func flushWarnings(ctx context.Context) {
+	fmt.Fprint(os.Stderr, warn.Drain(ctx))
 }

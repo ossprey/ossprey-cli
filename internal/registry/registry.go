@@ -6,11 +6,14 @@ package registry
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"time"
+
+	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
 // DefaultHTTP is the client used by ResolveLatest. Overridable in tests.
@@ -71,6 +74,11 @@ func resolvePyPI(ctx context.Context, name string) (string, error) {
 	return body.Info.Version, nil
 }
 
+// ErrNotFound reports that the registry has no such package. A private or
+// internal package answers this way, so callers grade it apart from an outage:
+// one is expected, the other means the scan resolved almost nothing.
+var ErrNotFound = errors.New("not on the public registry")
+
 func getJSON(ctx context.Context, endpoint string, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
@@ -83,6 +91,10 @@ func getJSON(ctx context.Context, endpoint string, out any) error {
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusNotFound {
+		// Not an outage: the normal answer for a private or internal package.
+		return fmt.Errorf("%w (registry returned status 404)", ErrNotFound)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("registry returned status %d", resp.StatusCode)
 	}
@@ -90,4 +102,28 @@ func getJSON(ctx context.Context, endpoint string, out any) error {
 		return fmt.Errorf("decode registry response: %w", err)
 	}
 	return nil
+}
+
+// UnresolvedEntry grades a failed registry lookup. A 404 is the expected answer
+// for a private or internal package; anything else is an outage, and the two
+// must never share a count — 400 packages "not on the public registry" is
+// normal for a monorepo, 400 packages behind an unreachable registry means the
+// scan resolved almost nothing. outcome names the consequence, which differs
+// between the scan path (submitted unversioned) and the forward path (not
+// checked at all).
+func UnresolvedEntry(ecosystem, name string, err error, outcome string) warn.Entry {
+	if errors.Is(err, ErrNotFound) {
+		return warn.Entry{
+			Class: "registry-missing:" + outcome,
+			One:   "1 package not on the public registry; " + outcome,
+			Many:  "%d packages not on the public registry; " + outcome,
+			Item:  fmt.Sprintf("%s/%s (404)", ecosystem, name),
+		}
+	}
+	return warn.Entry{
+		Class: "registry-down:" + outcome,
+		One:   "1 package could not be resolved (registry unreachable); " + outcome,
+		Many:  "%d packages could not be resolved (registry unreachable); " + outcome,
+		Item:  fmt.Sprintf("%s/%s (%v)", ecosystem, name, err),
+	}
 }

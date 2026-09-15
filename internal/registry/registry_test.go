@@ -2,6 +2,7 @@ package registry
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -87,4 +88,37 @@ func TestResolveLatest_Errors(t *testing.T) {
 			t.Fatal("expected error when latest is empty")
 		}
 	})
+}
+
+// A 404 means the package is not on the public registry — the normal answer for
+// a private or internal package. Callers grade that differently from an outage,
+// so it must be distinguishable without string-matching the message.
+func TestResolveLatestNotFoundIsTyped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+	npmBaseURL = srv.URL + "/"
+
+	_, err := ResolveLatest(context.Background(), "npm", "@wayflyer/flyui")
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("ResolveLatest() error = %v, want one matching ErrNotFound", err)
+	}
+}
+
+// An outage must NOT look like a missing package.
+func TestResolveLatestServerErrorIsNotNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	npmBaseURL = srv.URL + "/"
+
+	_, err := ResolveLatest(context.Background(), "npm", "lodash")
+	if err == nil {
+		t.Fatal("expected an error on 500")
+	}
+	if errors.Is(err, ErrNotFound) {
+		t.Errorf("ResolveLatest() error = %v, want it NOT to match ErrNotFound", err)
+	}
 }

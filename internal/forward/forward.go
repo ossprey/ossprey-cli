@@ -31,6 +31,7 @@ import (
 	"github.com/ossprey/ossprey-cli/internal/severity"
 	"github.com/ossprey/ossprey-cli/internal/shim"
 	"github.com/ossprey/ossprey-cli/internal/submit"
+	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
 // Test seams: overridable in tests so Run's decision logic can be exercised
@@ -212,6 +213,16 @@ func Run(ctx context.Context, opts Options) error {
 		return fmt.Errorf("unsupported package manager %q", opts.Bin)
 	}
 
+	// Every exit that hands control to the real manager goes through forwardTo,
+	// so no path can exec without first flushing what we gathered. The real
+	// manager's output starts immediately after this and never stops, and the
+	// forwarder exits via os.Exit on a non-zero code, so a warning not printed
+	// here is either buried or lost outright (OSS-2001).
+	forwardTo := func() error {
+		fmt.Fprint(errOut, warn.Drain(ctx))
+		return execFn(ctx, m.Bin, opts.Args)
+	}
+
 	finish := func(sbom *ossbom.SBOM, err error) error {
 		// Passive mode never blocks the install, not even on a failed submission:
 		// a monitor that can break `npm install` is a monitor people rip out.
@@ -224,11 +235,11 @@ func Run(ctx context.Context, opts Options) error {
 				mode = "passive, monitor " + monitor.Redact(opts.MonitorID)
 			}
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "ossprey: warning: could not post scan (%v); installing anyway (%s)\n", err, mode)
+				fmt.Fprintf(errOut, "ossprey: warning: could not post scan (%v); installing anyway (%s)\n", err, mode)
 			} else {
-				fmt.Fprintf(os.Stderr, "ossprey: scan posted to the Ossprey dashboard; installing without blocking (%s)\n", mode)
+				fmt.Fprintf(errOut, "ossprey: scan posted to the Ossprey dashboard; installing without blocking (%s)\n", mode)
 			}
-			return execFn(ctx, m.Bin, opts.Args)
+			return forwardTo()
 		}
 		if err != nil {
 			return err
@@ -244,13 +255,13 @@ func Run(ctx context.Context, opts Options) error {
 	start, isInstall := m.installAt(opts.Args)
 	if !isInstall {
 		// Not an install (e.g. `npm run`, `pip list`) — nothing to check.
-		return execFn(ctx, m.Bin, opts.Args)
+		return forwardTo()
 	}
 
 	if opts.SkipCI {
-		fmt.Fprintf(os.Stderr, "ossprey: skip-ci set; forwarding `%s %s` without checking\n",
+		fmt.Fprintf(errOut, "ossprey: skip-ci set; forwarding `%s %s` without checking\n",
 			m.Bin, strings.Join(opts.Args, " "))
-		return execFn(ctx, m.Bin, opts.Args)
+		return forwardTo()
 	}
 
 	parsed := ParseSpecs(m, opts.Args[start:])
@@ -259,13 +270,13 @@ func Run(ctx context.Context, opts Options) error {
 	case len(parsed.Specs) > 0:
 		// Explicit packages named — check exactly those.
 		if other := slices.Concat(parsed.NonPackages, parsed.ReqFiles); len(other) > 0 {
-			fmt.Fprintf(os.Stderr, "ossprey: not checking non-registry install targets: %s (run `ossprey scan` for full coverage)\n",
+			fmt.Fprintf(errOut, "ossprey: not checking non-registry install targets: %s (run `ossprey scan` for full coverage)\n",
 				strings.Join(other, ", "))
 		}
 		resolved := resolveSpecs(ctx, resolve, parsed.Specs)
 		if len(resolved) == 0 {
-			fmt.Fprintln(os.Stderr, "ossprey: nothing left to check after version resolution; forwarding")
-			return execFn(ctx, m.Bin, opts.Args)
+			fmt.Fprintln(errOut, "ossprey: nothing left to check after version resolution; forwarding")
+			return forwardTo()
 		}
 		// The scan is the one part of a forwarded install that takes visible
 		// time, and until it prints something the terminal looks hung.
@@ -285,7 +296,7 @@ func Run(ctx context.Context, opts Options) error {
 		// No packages named — the manager installs from the project manifest /
 		// lockfile. Scan the project and check every declared dependency rather
 		// than falling through unchecked.
-		fmt.Fprintf(os.Stderr, "ossprey: no packages named; scanning project manifest before `%s %s`\n",
+		fmt.Fprintf(errOut, "ossprey: no packages named; scanning project manifest before `%s %s`\n",
 			m.Bin, strings.Join(opts.Args, " "))
 		// Cataloguing a whole project can take longer than the API scan itself
 		// (npm range resolution, uv), so the indicator wraps both.
@@ -297,9 +308,9 @@ func Run(ctx context.Context, opts Options) error {
 	default:
 		// Only un-checkable explicit targets (local paths, archives, URLs, VCS
 		// refs). Can't verify them against a registry — forward with a warning.
-		fmt.Fprintf(os.Stderr, "ossprey: not checking non-registry install targets: %s; forwarding (run `ossprey scan` after install)\n",
+		fmt.Fprintf(errOut, "ossprey: not checking non-registry install targets: %s; forwarding (run `ossprey scan` after install)\n",
 			strings.Join(parsed.NonPackages, ", "))
-		return execFn(ctx, m.Bin, opts.Args)
+		return forwardTo()
 	}
 }
 
@@ -311,8 +322,11 @@ func resolveSpecs(ctx context.Context, resolve func(context.Context, string, str
 		if s.Version == "" {
 			v, err := resolve(ctx, s.Ecosystem, s.Name)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "ossprey: could not resolve latest version of %s/%s (%v); skipping its check\n",
-					s.Ecosystem, s.Name, err)
+				// Different consequence from the scan path, so a different
+				// class: here the package is not checked at all, which is
+				// worse than being submitted unversioned.
+				warn.Add(ctx, registry.UnresolvedEntry(s.Ecosystem, s.Name, err,
+					"skipping its check"))
 				continue
 			}
 			s.Version = v
@@ -325,6 +339,11 @@ func resolveSpecs(ctx context.Context, resolve func(context.Context, string, str
 // reportAndForward blocks (ErrBlocked) if sbom carries malware, else execs the
 // real manager with the original args.
 func reportAndForward(ctx context.Context, m *Manager, opts Options, sbom *ossbom.SBOM) error {
+	// Warnings gathered while cataloguing and resolving go out first, so the
+	// verdict is the last thing on screen rather than the first thing scrolled
+	// past (OSS-2001).
+	fmt.Fprint(errOut, warn.Drain(ctx))
+
 	// The forwarders parse no flags of their own (DisableFlagParsing), so there
 	// is nowhere to opt into a stricter floor; the default applies.
 	summary, hasMalware := scan.MalwareReports(sbom, severity.FailingFloor)
@@ -347,14 +366,15 @@ func reportAndForward(ctx context.Context, m *Manager, opts Options, sbom *ossbo
 		// Nothing catalogued means nothing verified, whether the project declares
 		// nothing or every cataloger failed. "No malware found" would read as a
 		// clean bill of health for an install that was never checked.
-		fmt.Fprintf(os.Stderr, "ossprey: found no dependencies to check; forwarding `%s %s` unchecked\n",
+		fmt.Fprintf(errOut, "ossprey: found no dependencies to check; forwarding `%s %s` unchecked\n",
 			m.Bin, strings.Join(opts.Args, " "))
 	} else {
 		// The count is load-bearing: "no malware found" alone read the same
 		// whether 40 packages were checked or none were.
-		fmt.Fprintf(os.Stderr, "ossprey: no malware found in %s, forwarding to %s\n",
+		fmt.Fprintf(errOut, "ossprey: no malware found in %s, forwarding to %s\n",
 			countPackages(n), m.Bin)
 	}
+	// Already drained at the top of this function, ahead of the verdict.
 	return execFn(ctx, m.Bin, opts.Args)
 }
 

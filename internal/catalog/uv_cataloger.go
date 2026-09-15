@@ -92,7 +92,7 @@ func runUV(ctx context.Context, uv, cache, dir string, args []string, loc file.L
 		}
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
-			return nil, fmt.Errorf("uv %s: %s", dir, strings.TrimSpace(string(ee.Stderr)))
+			return nil, newToolError("uv", dir, string(ee.Stderr))
 		}
 		return nil, fmt.Errorf("uv %s: %w", dir, err)
 	}
