@@ -20,6 +20,7 @@ import (
 	"github.com/ossprey/ossprey-cli/internal/forward"
 	monitorpkg "github.com/ossprey/ossprey-cli/internal/monitor"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
+	"github.com/ossprey/ossprey-cli/internal/progress"
 	"github.com/ossprey/ossprey-cli/internal/registry"
 	"github.com/ossprey/ossprey-cli/internal/scan"
 	"github.com/ossprey/ossprey-cli/internal/severity"
@@ -199,13 +200,19 @@ func newScanCmd() *cobra.Command {
 			case dryRunSafe:
 				// no-op
 			case passiveMode:
-				if err := submit.Post(cmd.Context(), sbom, apiURL, apiKey, monitor); err != nil {
+				stop := progress.Start(progressOut, "ossprey: submitting scan")
+				err := submit.Post(cmd.Context(), sbom, apiURL, apiKey, monitor)
+				stop()
+				if err != nil {
 					fmt.Fprintf(os.Stderr, "ossprey: warning: could not post scan: %v\n", err)
 				} else {
 					fmt.Println("Scan submitted; results will appear in the Ossprey dashboard")
 				}
 			default:
-				if err := submit.Validate(cmd.Context(), sbom, apiURL, apiKey); err != nil {
+				stop := progress.Scan(progressOut, len(sbom.Components))
+				err := submit.Validate(cmd.Context(), sbom, apiURL, apiKey)
+				stop()
+				if err != nil {
 					if skipped, ok := printSkipped(err); ok {
 						return writeReport(reportPath, scan.SkippedReport(sbom, skipped.Message, skipped.ResetAt))
 					}
@@ -310,6 +317,12 @@ func newCheckCmd() *cobra.Command {
 				specs = append(specs, s)
 			}
 
+			// Only the real thing gets an indicator: a dry run reaches its
+			// verdict locally and returns before there is anything to wait for.
+			stop := func() {}
+			if !dryRunSafe && !dryRunMalicious {
+				stop = progress.Scan(progressOut, len(specs))
+			}
 			sbom, err := check.Run(cmd.Context(), check.Options{
 				Specs:           specs,
 				APIURL:          apiURL,
@@ -317,6 +330,7 @@ func newCheckCmd() *cobra.Command {
 				DryRunSafe:      dryRunSafe,
 				DryRunMalicious: dryRunMalicious,
 			})
+			stop()
 			if err != nil {
 				if skipped, ok := printSkipped(err); ok {
 					// sbom is nil when Run failed, so there is no component
@@ -401,6 +415,12 @@ func newForwardCmd(bin string) *cobra.Command {
 		},
 	}
 }
+
+// progressOut is where the "still working" indicator is drawn: stderr, never
+// stdout. --local owns stdout for the OSSBOM and CI greps the verdict lines
+// there, so an indicator that landed on either would corrupt a machine-readable
+// stream to fix a human-readable one. Swappable for tests.
+var progressOut io.Writer = os.Stderr
 
 // reportMalware prints one "Error: ..." line per failing malware finding, plus a
 // "Note: ..." line per informational one, and reports whether any finding fails.

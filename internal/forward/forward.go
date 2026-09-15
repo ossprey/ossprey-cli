@@ -269,8 +269,7 @@ func Run(ctx context.Context, opts Options) error {
 		}
 		// The scan is the one part of a forwarded install that takes visible
 		// time, and until it prints something the terminal looks hung.
-		stop := progress.Start(os.Stderr, fmt.Sprintf("ossprey: scan in progress, checking %s",
-			countPackages(len(resolved))))
+		stop := progress.Scan(os.Stderr, len(resolved))
 		sbom, err := checkFn(ctx, check.Options{
 			Specs:      resolved,
 			APIURL:     opts.APIURL,
