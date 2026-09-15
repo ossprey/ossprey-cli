@@ -851,18 +851,15 @@ func TestForwardWarningsAreCountedAndPrecedeTheVerdict(t *testing.T) {
 	counted := strings.Index(out, "ossprey: 3 packages not on the public registry; skipping its check")
 	verdict := strings.Index(out, "Error: WARNING: evil:1.0.0 contains malware")
 	if counted < 0 {
-		t.Fatalf("want one counted warning line, got:
-%s", out)
+		t.Fatalf("want one counted warning line, got:\n%s", out)
 	}
 	if verdict < 0 || counted > verdict {
-		t.Errorf("warnings must precede the verdict:
-%s", out)
+		t.Errorf("warnings must precede the verdict:\n%s", out)
 	}
 	// The blocked line echoes the original argv, so look for the indented item
 	// line specifically rather than the package name anywhere.
 	if strings.Contains(out, "ossprey:   npm/@acme/one") {
-		t.Errorf("per-package detail must stay behind OSSPREY_VERBOSE:
-%s", out)
+		t.Errorf("per-package detail must stay behind OSSPREY_VERBOSE:\n%s", out)
 	}
 }
 
@@ -898,8 +895,7 @@ func TestPassiveInstallDoesNotClaimToCheck(t *testing.T) {
 	if !gotSubmitOnly {
 		t.Fatal("passive must pass SubmitOnly; the wording below depends on it")
 	}
-	if got, want := buf.String(), "ossprey: submitting scan of 1 package...
-"; got != want {
+	if got, want := buf.String(), "ossprey: submitting scan of 1 package...\n"; got != want {
 		t.Errorf("progress = %q, want %q", got, want)
 	}
 }
@@ -916,8 +912,7 @@ func TestNonPassiveInstallAnnouncesTheCheck(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if got, want := buf.String(), "ossprey: scan in progress, checking 1 package...
-"; got != want {
+	if got, want := buf.String(), "ossprey: scan in progress, checking 1 package...\n"; got != want {
 		t.Errorf("progress = %q, want %q", got, want)
 	}
 }
@@ -960,11 +955,9 @@ func TestPassiveFlushesWarningsBeforeForwarding(t *testing.T) {
 	warning := strings.Index(out, "not on the public registry")
 	manager := strings.Index(out, "<the real npm runs here>")
 	if warning < 0 {
-		t.Fatalf("the warning was dropped entirely:
-%s", out)
+		t.Fatalf("the warning was dropped entirely:\n%s", out)
 	}
 	if manager < 0 || warning > manager {
-		t.Errorf("warnings must be flushed before the real manager runs:
-%s", out)
+		t.Errorf("warnings must be flushed before the real manager runs:\n%s", out)
 	}
 }
