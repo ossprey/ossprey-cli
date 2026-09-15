@@ -88,3 +88,47 @@ func (d *drawSignaller) Write(p []byte) (int, error) {
 	}
 	return len(p), nil
 }
+
+// The count is the whole reason Scan exists as its own constructor: "scan in
+// progress" alone reads the same whether one package is being checked or four
+// hundred, and the pluralisation is the kind of thing that rots silently.
+func TestScanWordsTheCount(t *testing.T) {
+	for _, tc := range []struct {
+		n    int
+		want string
+	}{
+		{1, "ossprey: scan in progress, checking 1 package...\n"},
+		{2, "ossprey: scan in progress, checking 2 packages...\n"},
+		// No count at all rather than "checking 0 packages".
+		{0, "ossprey: scan in progress...\n"},
+	} {
+		var buf bytes.Buffer
+		Scan(&buf, tc.n)()
+		if got := buf.String(); got != tc.want {
+			t.Errorf("Scan(w, %d) = %q, want %q", tc.n, got, tc.want)
+		}
+	}
+}
+
+// Submit must not borrow Scan's "checking" wording: passive mode posts the SBOM
+// and returns, so a message promising a check would describe a verdict nobody
+// waits for.
+func TestSubmitDoesNotClaimToCheck(t *testing.T) {
+	for _, tc := range []struct {
+		n    int
+		want string
+	}{
+		{1, "ossprey: submitting scan of 1 package...\n"},
+		{3, "ossprey: submitting scan of 3 packages...\n"},
+		{0, "ossprey: submitting scan...\n"},
+	} {
+		var buf bytes.Buffer
+		Submit(&buf, tc.n)()
+		if got := buf.String(); got != tc.want {
+			t.Errorf("Submit(w, %d) = %q, want %q", tc.n, got, tc.want)
+		}
+		if strings.Contains(buf.String(), "checking") {
+			t.Errorf("Submit(w, %d) claims to check: %q", tc.n, buf.String())
+		}
+	}
+}
