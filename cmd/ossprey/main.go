@@ -78,7 +78,7 @@ func main() {
 	// PersistentPreRun raises it once the flag is known.
 	ctx := warn.NewContext(context.Background(), false)
 	root.PersistentPreRun = func(cmd *cobra.Command, _ []string) {
-		if f := cmd.Flags().Lookup("verbose"); f != nil && f.Changed {
+		if verboseRequested(cmd) {
 			warn.SetVerbose(cmd.Context())
 		}
 	}
@@ -514,6 +514,17 @@ func warnMonitorInEffect(monitor string, fromEnv bool) {
 func invalidMonitorErr(monitor string) error {
 	return fmt.Errorf("invalid monitor id %q: expected %s followed by 64 hex characters",
 		monitorpkg.Redact(monitor), monitorpkg.Prefix)
+}
+
+// verboseRequested reports whether this command was asked for verbose output.
+//
+// It reads the flag's value, not just whether it was set: cobra marks
+// `--verbose=false` as changed too, so keying on Changed alone turned detail on
+// for someone explicitly turning it off. Commands with no such flag say no, and
+// the collector still honours OSSPREY_VERBOSE on its own.
+func verboseRequested(cmd *cobra.Command) bool {
+	verbose, err := cmd.Flags().GetBool("verbose")
+	return err == nil && verbose
 }
 
 // flushWarnings prints the run's collected warnings. Called once the catalogue
