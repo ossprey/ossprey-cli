@@ -35,9 +35,9 @@ func NewUVCataloger(root string) *UVCataloger { return &UVCataloger{root: root} 
 func (c *UVCataloger) Name() string { return "ossprey-uv-cataloger" }
 
 func (c *UVCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]pkg.Package, []artifact.Relationship, error) {
-	uv, err := exec.LookPath("uv")
+	uv, err := lookTool("uv")
 	if err != nil {
-		return nil, nil, nil // no uv on PATH — silently skip
+		return nil, nil, nil // no real uv on PATH — silently skip
 	}
 
 	cache, err := os.MkdirTemp("", "ossprey-uv-cache-")
@@ -83,7 +83,7 @@ func runUV(ctx context.Context, uv, cache, dir string, args []string, loc file.L
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, uv, args...)
-	cmd.Env = append(os.Environ(), "UV_CACHE_DIR="+cache)
+	cmd.Env = toolEnv("UV_CACHE_DIR=" + cache)
 	cmd.WaitDelay = 5 * time.Second // the kill lands on uv, but Output still waits on pipes a PEP 517 build backend may hold
 	stdout, err := cmd.Output()
 	if err != nil {

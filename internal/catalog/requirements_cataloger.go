@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 
 	"github.com/anchore/syft/syft/artifact"
@@ -27,9 +26,9 @@ func NewRequirementsCataloger(root string) *RequirementsCataloger {
 func (c *RequirementsCataloger) Name() string { return "ossprey-requirements-cataloger" }
 
 func (c *RequirementsCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]pkg.Package, []artifact.Relationship, error) {
-	uv, err := exec.LookPath("uv")
+	uv, err := lookTool("uv")
 	if err != nil {
-		return nil, nil, nil // no uv on PATH — silently skip
+		return nil, nil, nil // no real uv on PATH — silently skip
 	}
 	cache, err := os.MkdirTemp("", "ossprey-uv-cache-")
 	if err != nil {
