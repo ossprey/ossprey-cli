@@ -851,15 +851,74 @@ func TestForwardWarningsAreCountedAndPrecedeTheVerdict(t *testing.T) {
 	counted := strings.Index(out, "ossprey: 3 packages not on the public registry; skipping its check")
 	verdict := strings.Index(out, "Error: WARNING: evil:1.0.0 contains malware")
 	if counted < 0 {
-		t.Fatalf("want one counted warning line, got:\n%s", out)
+		t.Fatalf("want one counted warning line, got:
+%s", out)
 	}
 	if verdict < 0 || counted > verdict {
-		t.Errorf("warnings must precede the verdict:\n%s", out)
+		t.Errorf("warnings must precede the verdict:
+%s", out)
 	}
 	// The blocked line echoes the original argv, so look for the indented item
 	// line specifically rather than the package name anywhere.
 	if strings.Contains(out, "ossprey:   npm/@acme/one") {
-		t.Errorf("per-package detail must stay behind OSSPREY_VERBOSE:\n%s", out)
+		t.Errorf("per-package detail must stay behind OSSPREY_VERBOSE:
+%s", out)
+	}
+}
+
+// captureProgress swaps the indicator's writer for a buffer. Not a terminal, so
+// progress.Start takes its plain-line branch and the test reads one stable line.
+func captureProgress(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	old := progressOut
+	progressOut = &buf
+	t.Cleanup(func() { progressOut = old })
+	return &buf
+}
+
+// A passive forwarded install passes SubmitOnly, so it posts the SBOM and
+// installs regardless of any verdict. Saying it was "checking" the packages
+// would describe a gate that is not there.
+func TestPassiveInstallDoesNotClaimToCheck(t *testing.T) {
+	ex := &stubExec{}
+	var gotSubmitOnly bool
+	swap(t, ex.fn, func(ctx context.Context, o check.Options) (*ossbom.SBOM, error) {
+		gotSubmitOnly = o.SubmitOnly
+		return cleanSBOM(ctx, o)
+	})
+	buf := captureProgress(t)
+
+	err := Run(context.Background(), Options{
+		Bin: "npm", Args: []string{"install", "lodash@4.17.21"}, Passive: true,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !gotSubmitOnly {
+		t.Fatal("passive must pass SubmitOnly; the wording below depends on it")
+	}
+	if got, want := buf.String(), "ossprey: submitting scan of 1 package...
+"; got != want {
+		t.Errorf("progress = %q, want %q", got, want)
+	}
+}
+
+// The non-passive install does wait for a verdict, so it keeps the checking
+// wording — the two must not collapse into one message.
+func TestNonPassiveInstallAnnouncesTheCheck(t *testing.T) {
+	ex := &stubExec{}
+	swap(t, ex.fn, cleanSBOM)
+	buf := captureProgress(t)
+
+	if err := Run(context.Background(), Options{
+		Bin: "npm", Args: []string{"install", "lodash@4.17.21"},
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got, want := buf.String(), "ossprey: scan in progress, checking 1 package...
+"; got != want {
+		t.Errorf("progress = %q, want %q", got, want)
 	}
 }
 
@@ -901,9 +960,11 @@ func TestPassiveFlushesWarningsBeforeForwarding(t *testing.T) {
 	warning := strings.Index(out, "not on the public registry")
 	manager := strings.Index(out, "<the real npm runs here>")
 	if warning < 0 {
-		t.Fatalf("the warning was dropped entirely:\n%s", out)
+		t.Fatalf("the warning was dropped entirely:
+%s", out)
 	}
 	if manager < 0 || warning > manager {
-		t.Errorf("warnings must be flushed before the real manager runs:\n%s", out)
+		t.Errorf("warnings must be flushed before the real manager runs:
+%s", out)
 	}
 }

@@ -168,10 +168,26 @@ directory `FileResolver` and runs them all unconditionally:
   - `NpmResolveCataloger` — runs `npm install --package-lock-only` to resolve ranges when no lockfile is committed (npm analogue of uv). **This is the one place the CLI shells out to a package manager.**
   - `PackageJSONCataloger` — direct-deps fallback for `package.json`.
 
-Custom catalogers shell out via `exec.LookPath`; if the tool is missing they
-**silently skip** (return nil) rather than error. Custom catalogers named via
-`isOspreyCataloger` parse deps only; syft's manifest catalogers also emit the
-root project itself, which is dropped via `isRootManifestPackage`.
+Custom catalogers shell out via `lookTool`/`toolEnv` (`toolpath.go`), **never
+`exec.LookPath`**; if the tool is missing they **silently skip** (return nil)
+rather than error. Custom catalogers named via `isOspreyCataloger` parse deps
+only; syft's manifest catalogers also emit the root project itself, which is
+dropped via `isRootManifestPackage`.
+
+**Why not `exec.LookPath`:** `ossprey shim install` puts the shim directory at
+the *front* of PATH, so on a machine with shims installed `exec.LookPath("npm")`
+returns a script whose whole job is to run `ossprey npm ...`. A cataloger that
+executes it re-enters ossprey — the forwarder sees no packages named, scans the
+temp manifest the cataloger just wrote, and shells out to the shim again, one
+process per level. A plain `ossprey scan .` fork-bombed itself (3000+ processes
+in one measured run) until `OSSPREY_RESOLVE_TIMEOUT` fired, then emitted a whole
+nested scan's output — its own warnings, verdict and `blocked` line — inside one
+cataloger warning, and fell back to the versionless direct-deps cataloger, so
+transitive dependencies went unscanned (OSS-1993). `lookTool` is
+`shim.LookPathReal`, which skips marker-carrying candidates; `toolEnv` also sets
+`OSSPREY_SHIM_BYPASS=1`, the same belt-and-braces pairing as the shim script's
+own PATH-stripping guard, for shims reached by a route PATH scanning cannot see.
+`TestCatalogNeverInvokesAnOssprevShim` pins it.
 
 A cataloger's error is **not** a reason to drop its packages: syft's generic
 cataloger returns everything it parsed alongside an `unknown` error naming the
@@ -340,6 +356,7 @@ failing the build (see `reportSkipped` in main.go). API key resolution order:
   stderr. `OSSPREY_VERBOSE=1` (or `scan -v`) lists the individuals and any
   resolver's full output. Never `Fprintf(os.Stderr, ...)` a per-package or
   per-manifest diagnostic directly — that is what OSS-2001 was.
+- **The wait is announced** (`internal/progress`): submitting an SBOM and polling for a verdict prints nothing until the verdict arrives, so a healthy multi-second wait reads as a hang. `progress.Scan(w, n)` owns the one sentence every caller uses — `scan`, `check` and the forwarders — so the same wait cannot start describing itself differently depending on where it was started from. Passive waits get `progress.Submit(w, n)` instead, and the split is the point rather than a wording preference: passive posts the SBOM and returns, so a message that said it was *checking* packages would promise a verdict nobody waits for, in front of an install that proceeds regardless. Both `scan --passive` and a passive forwarded install go through it; `TestPassiveInstallDoesNotClaimToCheck` pins that the two never collapse into one message. Three rules hold it up. It draws to **stderr** (`progressOut` in both main.go and `forward`, kept apart from `forward`'s `errOut` so a test capturing verdict lines is not handed the animation), never stdout, which `--local` owns for the OSSBOM and CI greps for the verdict: an indicator that corrupted a machine-readable stream to fix a human-readable one is a bad trade. And it animates **only on a terminal** — `progress.Start` falls back to one plain line into a pipe, a file or a CI log, where a carriage-returned line is noise rather than motion. Nothing is announced for a path that does no waiting: a dry run, or `--local`.
 - **API text is untrusted for display** (`internal/apitext`): finding justifications and descriptions are free text from the wire, printed straight to a developer's terminal. `apitext.OneLine` collapses control and formatting characters so a newline cannot forge an extra report line, a carriage return cannot overwrite one, and an ESC cannot start an ANSI sequence. Run any API-supplied string through it before interpolating it into terminal output.
 - **Fail-open vs fail-closed:** the `check`/forward path fails *closed* for unpinned packages it can pin (resolves latest via `internal/registry`), but fails *open* (skips with a warning) when the registry is unreachable or a token has no parseable package name — a registry outage must never block development.
 - **Dry-run flags** (`--dry-run-safe`, `--dry-run-malicious`) and `--local` skip the API entirely and need no key — useful for testing catalog output without a live backend.

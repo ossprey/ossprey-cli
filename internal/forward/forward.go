@@ -49,6 +49,11 @@ var ErrBlocked = errors.New("install blocked: malware detected")
 
 var errOut io.Writer = os.Stderr
 
+// progressOut is where the "still working" indicator is drawn. Kept apart from
+// errOut so a test capturing the verdict lines is not also handed the
+// animation; both default to stderr.
+var progressOut io.Writer = os.Stderr
+
 // Manager describes a supported package manager and how to recognise its
 // install command.
 type Manager struct {
@@ -279,9 +284,15 @@ func Run(ctx context.Context, opts Options) error {
 			return forwardTo()
 		}
 		// The scan is the one part of a forwarded install that takes visible
-		// time, and until it prints something the terminal looks hung.
-		stop := progress.Start(os.Stderr, fmt.Sprintf("ossprey: scan in progress, checking %s",
-			countPackages(len(resolved))))
+		// time, and until it prints something the terminal looks hung. Passive
+		// passes SubmitOnly below, so it gets the submit wording: "checking"
+		// would promise a verdict this install never waits for.
+		var stop func()
+		if opts.Passive {
+			stop = progress.Submit(progressOut, len(resolved))
+		} else {
+			stop = progress.Scan(progressOut, len(resolved))
+		}
 		sbom, err := checkFn(ctx, check.Options{
 			Specs:      resolved,
 			APIURL:     opts.APIURL,
@@ -300,7 +311,7 @@ func Run(ctx context.Context, opts Options) error {
 			m.Bin, strings.Join(opts.Args, " "))
 		// Cataloguing a whole project can take longer than the API scan itself
 		// (npm range resolution, uv), so the indicator wraps both.
-		stop := progress.Start(os.Stderr, "ossprey: scan in progress")
+		stop := progress.Start(progressOut, "ossprey: scan in progress")
 		sbom, err := scanProjectFn(ctx, ".", opts.APIURL, opts.APIKey, opts.MonitorID, opts.Passive)
 		stop()
 		return finish(sbom, err)
