@@ -191,7 +191,10 @@ hook keeps the compiled-in `Low`.
 Pass `--fail-on <level>` to use a different floor for one run. It overrides the
 account setting in either direction, so `--fail-on Critical` lets a High finding
 through and `--fail-on Info` stops on everything Ossprey reports at all.
-`--fail-on-informational` is the shorthand for the latter.
+
+`--fail-on-informational` is the deprecated spelling of `--fail-on Info`. It
+still works and warns; move to `--fail-on`, which says the same thing on the
+same scale as every other level.
 
 If you need to distinguish "clean" from "errored" in CI, pass
 [`--report report.json`](#machine-readable-verdict---report): the file exists
@@ -414,7 +417,7 @@ ossprey scan [path] [flags]
 | `--url <url>` | Override the Ossprey API URL (default `https://api.ossprey.com`). |
 | `--api-key <key>` | Provide the API key on the command line instead of an env var. |
 | `--fail-on <level>` | Fail on findings at or above this severity (`Info`, `Low`, `Medium`, `High`, `Critical`), overriding your account's floor for this run. |
-| `--fail-on-informational` | Shorthand for `--fail-on Info`: fail on every finding, including those the floor would otherwise only report. |
+| `--fail-on-informational` | Deprecated alias for `--fail-on Info`. Still works, warns. |
 | `--dry-run-safe` | Skip the API; report an empty vulnerability list. |
 | `--dry-run-malicious` | Skip the API; inject a test finding against the first component. |
 | `--skip-ci` | Skip the Ossprey scan entirely and exit 0. Also settable as `OSSPREY_SKIP_CI=1`. |
@@ -492,7 +495,7 @@ registry (PyPI / npm) and checked. Both `name@version` and pip's
 | `--api-key <key>` | API key (or env var). |
 | `--report <file>` | Write the JSON verdict report to `<file>`. |
 | `--fail-on <level>` | Fail on findings at or above this severity, overriding your account's floor for this run. |
-| `--fail-on-informational` | Shorthand for `--fail-on Info`. |
+| `--fail-on-informational` | Deprecated alias for `--fail-on Info`. |
 | `--dry-run-safe` | Skip the API; report an empty vulnerability list. |
 | `--dry-run-malicious` | Skip the API; inject a test finding against the first package. |
 

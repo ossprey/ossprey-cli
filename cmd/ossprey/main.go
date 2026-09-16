@@ -276,7 +276,12 @@ func newScanCmd() *cobra.Command {
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "verbose logging")
 	cmd.Flags().BoolVar(&local, "local", false, "dump SBOM JSON to stdout and exit (no API submission, no verdict)")
 	cmd.Flags().StringVar(&failOn, "fail-on", "", "fail on findings at or above this severity (Info, Low, Medium, High, Critical), overriding the account's floor for this run")
-	cmd.Flags().BoolVar(&failOnInformational, "fail-on-informational", false, "shorthand for --fail-on Info: fail on every finding, including those the floor would otherwise only report")
+	// Deprecated by --fail-on Info, which says the same thing on the same scale.
+	// Deprecated rather than removed, the same call --ci-cache-scan-only got: it
+	// is set in pipelines we do not control, so it keeps working and warns, but
+	// there is only one way left to teach.
+	cmd.Flags().BoolVar(&failOnInformational, "fail-on-informational", false, "deprecated alias for --fail-on Info")
+	_ = cmd.Flags().MarkDeprecated("fail-on-informational", "use --fail-on Info")
 	cmd.Flags().BoolVar(&dryRunSafe, "dry-run-safe", false, "skip API submission; emit empty vulnerability list")
 	cmd.Flags().BoolVar(&dryRunMalicious, "dry-run-malicious", false, "skip API submission; inject test vulnerability against first component")
 	cmd.Flags().BoolVar(&noVersionLookup, "no-version-lookup", false, "don't query the registry to resolve unpinned dependencies; leave them versionless")
@@ -387,7 +392,12 @@ func newCheckCmd() *cobra.Command {
 	cmd.Flags().StringVar(&apiURL, "url", defaultAPIURL, "Ossprey API URL")
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "Ossprey API key (or OSSPREY_API_KEY / API_KEY env var; optional after `ossprey login`)")
 	cmd.Flags().StringVar(&failOn, "fail-on", "", "fail on findings at or above this severity (Info, Low, Medium, High, Critical), overriding the account's floor for this run")
-	cmd.Flags().BoolVar(&failOnInformational, "fail-on-informational", false, "shorthand for --fail-on Info: fail on every finding, including those the floor would otherwise only report")
+	// Deprecated by --fail-on Info, which says the same thing on the same scale.
+	// Deprecated rather than removed, the same call --ci-cache-scan-only got: it
+	// is set in pipelines we do not control, so it keeps working and warns, but
+	// there is only one way left to teach.
+	cmd.Flags().BoolVar(&failOnInformational, "fail-on-informational", false, "deprecated alias for --fail-on Info")
+	_ = cmd.Flags().MarkDeprecated("fail-on-informational", "use --fail-on Info")
 	cmd.Flags().BoolVar(&dryRunSafe, "dry-run-safe", false, "skip API submission; emit empty vulnerability list")
 	cmd.Flags().BoolVar(&dryRunMalicious, "dry-run-malicious", false, "skip API submission; inject test vulnerability against first package")
 
