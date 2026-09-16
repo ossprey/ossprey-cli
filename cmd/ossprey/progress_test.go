@@ -174,3 +174,28 @@ func TestScanLocalAnnouncesNothing(t *testing.T) {
 		t.Errorf("--local should announce nothing, got %q", got)
 	}
 }
+
+// init's third step is a scan, and it is the first thing a new user watches
+// this tool do, so both of its waits are announced the same way `ossprey scan`
+// announces them.
+func TestInitFirstScanAnnouncesBothWaits(t *testing.T) {
+	buf := captureProgress(t)
+	srv := scanAPI(t)
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "requirements.txt"), []byte("flask==2.0.0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runFirstScan(t.Context(), dir, srv.URL, "test-key"); err != nil {
+		t.Fatalf("runFirstScan: %v", err)
+	}
+
+	got := buf.String()
+	if !strings.HasPrefix(got, "ossprey: cataloguing dependencies...\n") {
+		t.Errorf("progress output = %q, want it to start with the cataloguing announcement", got)
+	}
+	if !strings.Contains(got, "ossprey: scan in progress, checking ") {
+		t.Errorf("progress output = %q, want a scan-in-progress announcement", got)
+	}
+}
