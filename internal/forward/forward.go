@@ -338,7 +338,7 @@ func resolveSpecs(ctx context.Context, resolve func(context.Context, string, str
 func reportAndForward(ctx context.Context, m *Manager, opts Options, sbom *ossbom.SBOM) error {
 	// The forwarders parse no flags of their own (DisableFlagParsing), so there
 	// is nowhere to override the floor for one install; the account's setting
-	// applies, and the compiled-in default only where the API served none.
+	// applies, and the compiled-in default where the API served no usable one.
 	summary, hasMalware := scan.MalwareReports(sbom, severity.ParseFloor(sbom.FailingSeverityFloor))
 	for _, msg := range summary.Informational {
 		fmt.Fprintln(errOut, "ossprey: "+msg)

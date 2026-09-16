@@ -183,7 +183,10 @@ sends no grade behaves exactly as before. The floor is your account's unless
 
 The floor is your account's setting, served with the scan: change it once in
 the dashboard and every integration follows. It defaults to `Low`, which makes
-`Info` the only grade that is reported without failing.
+`Info` the only grade that is reported without failing. `scan`, `check`, the
+first scan `init` runs and the package-manager forwarders all apply it; the
+pre-commit hook does not, because `/malware/check` does not serve it, so that
+hook keeps the compiled-in `Low`.
 
 Pass `--fail-on <level>` to use a different floor for one run. It overrides the
 account setting in either direction, so `--fail-on Critical` lets a High finding
