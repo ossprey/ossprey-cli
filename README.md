@@ -172,7 +172,7 @@ ossprey scan .
 
 Exit codes:
 
-- `0` — no malware found, only informational findings, `--local` dump, or scan skipped by the API (e.g. quota exhausted)
+- `0` — no malware found, only findings below the floor this run grades at, `--local` dump, or scan skipped by the API (e.g. quota exhausted)
 - `1` — malware found, **or** the scan itself failed (bad path, catalog error, API/network error, missing key)
 
 A finding below your account's failing severity floor is reported as a `Note:`
@@ -410,7 +410,7 @@ ossprey scan [path] [flags]
 | `--url <url>` | Override the Ossprey API URL (default `https://api.ossprey.com`). |
 | `--api-key <key>` | Provide the API key on the command line instead of an env var. |
 | `--fail-on <level>` | Fail on findings at or above this severity (`Info`, `Low`, `Medium`, `High`, `Critical`), overriding your account's floor for this run. |
-| `--fail-on-informational` | Shorthand for `--fail-on Info`: also fail on informational findings, which are reported but exit 0 by default. |
+| `--fail-on-informational` | Shorthand for `--fail-on Info`: fail on every finding, including those the floor would otherwise only report. |
 | `--dry-run-safe` | Skip the API; report an empty vulnerability list. |
 | `--dry-run-malicious` | Skip the API; inject a test finding against the first component. |
 | `--skip-ci` | Skip the Ossprey scan entirely and exit 0. Also settable as `OSSPREY_SKIP_CI=1`. |
@@ -493,7 +493,7 @@ registry (PyPI / npm) and checked. Both `name@version` and pip's
 | `--dry-run-malicious` | Skip the API; inject a test finding against the first package. |
 
 Exit codes match `scan`: `1` on a malware verdict or error, `0` otherwise
-(a finding below your account's floor is reported but does not fail).
+(a finding below the floor this run grades at is reported but does not fail).
 
 ## Package-manager forwarder
 
@@ -1096,7 +1096,7 @@ ossprey scan . --report report.json
 |-----------|-----------|---------|
 | `clean`   | 0         | Scanned, nothing flagged. |
 | `malware` | 1         | `findings` lists every flagged package. |
-| `informational` | 0   | Everything found sits below your account's failing severity floor. `informational` lists them. Reported, not blocking, and **not** a clean scan. |
+| `informational` | 0   | Everything found sits below the floor this run graded at. `informational` lists them. Reported, not blocking, and **not** a clean scan. |
 | `skipped` | 0         | Your quota was exhausted; **nothing was checked**. `skipped.message` and `skipped.reset_at` say why and until when. Do not read this as "clean". |
 
 `findings` is always present, empty on a clean scan, so
