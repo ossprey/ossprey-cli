@@ -301,7 +301,10 @@ existing attempt budget rather than adding sleeps of its own. `retryable` is
 deliberately narrow — only 502/503/504. A 4xx is a real answer about the
 request, and a 500 means the backend already took the SBOM, so retrying it risks
 a duplicate scan against the user's quota for no better odds. Never widen that
-set to "any 5xx" for symmetry. Retries wait via `sleepOrDone` so a cancelled
+set to "any 5xx" for symmetry. The submit endpoint has no idempotency key, so a
+retry the backend had already accepted spends a second unit of quota; that is
+accepted deliberately, because quota exhaustion fails **open** (`ErrSkipped`,
+exit 0) and the failure it prevents fails **closed** and reads as malware. Retries wait via `sleepOrDone` so a cancelled
 scan is never held open by a backoff, and `RetryBackoff` is overridable for the
 same reason `PollBackoff` is: no test should sleep.
 

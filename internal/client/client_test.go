@@ -551,11 +551,18 @@ func TestPostScan_RetryRespectsContext(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := testClient(t, srv)
-	c.RetryBackoff = func(int) time.Duration { return time.Hour }
-
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	defer cancel()
+
+	c := testClient(t, srv)
+	// Cancel from inside the backoff, not before the first request: cancelling
+	// up front makes the very first Do fail and postScan never reaches the
+	// sleep this test is about.
+	c.RetryBackoff = func(int) time.Duration {
+		cancel()
+		return time.Hour
+	}
+
 	done := make(chan error, 1)
 	go func() {
 		_, err := c.Validate(ctx, ossbom.MiniBOM{})
@@ -758,6 +765,83 @@ func TestPostScan_RetriesTransportError(t *testing.T) {
 				return
 			}
 			conn.Close()
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, `{"vulnerabilities":[]}`)
+	}))
+	defer srv.Close()
+
+	c := testRetryClient(t, srv)
+	if _, err := c.Validate(context.Background(), ossbom.MiniBOM{}); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if got := hits.Load(); got != 2 {
+		t.Errorf("attempts: got %d, want 2", got)
+	}
+}
+
+// truncatedBodyHandler writes a Content-Length it does not satisfy and then
+// drops the connection, so the client's io.ReadAll fails partway through a
+// 200. Needed because httptest cannot otherwise produce a half-read response.
+func truncatedBodyHandler(t *testing.T) func(http.ResponseWriter) {
+	t.Helper()
+	return func(w http.ResponseWriter) {
+		conn, buf, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		defer conn.Close()
+		buf.WriteString("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 200\r\n\r\n")
+		buf.WriteString(`{"status":"SUCC`)
+		buf.Flush()
+	}
+}
+
+// TestPoll_TruncatedBodyIsTransient pins that a status response that dies
+// mid-body costs a poll rather than the verdict. Ignoring the io.ReadAll error
+// turned it into a decode failure, which is a definite error the transient
+// allowance deliberately does not cover.
+func TestPoll_TruncatedBodyIsTransient(t *testing.T) {
+	truncate := truncatedBodyHandler(t)
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/public/v1/scans" {
+			w.WriteHeader(http.StatusAccepted)
+			io.WriteString(w, `{"sbom_id":"sb1","scan_id":"sc1"}`)
+			return
+		}
+		if hits.Add(1) == 1 {
+			truncate(w)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, `{"status":"SUCCEEDED","output":{"vulnerabilities":[]}}`)
+	}))
+	defer srv.Close()
+
+	c := testRetryClient(t, srv)
+	raw, err := c.Validate(context.Background(), ossbom.MiniBOM{})
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if !strings.Contains(string(raw), `"vulnerabilities"`) {
+		t.Errorf("output: %s", raw)
+	}
+	if got := hits.Load(); got != 2 {
+		t.Errorf("polls: got %d, want 2", got)
+	}
+}
+
+// TestPostScan_TruncatedBodyIsRetried is the submit-side counterpart: a body
+// that dies mid-read must not reach the caller as a decode error.
+func TestPostScan_TruncatedBodyIsRetried(t *testing.T) {
+	truncate := truncatedBodyHandler(t)
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hits.Add(1) == 1 {
+			truncate(w)
 			return
 		}
 		w.WriteHeader(http.StatusOK)

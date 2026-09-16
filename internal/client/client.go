@@ -303,6 +303,14 @@ func (c *Client) postScan(ctx context.Context, mb ossbom.MiniBOM) (int, []byte, 
 	// the same exit code as "malware found", so a network blip in CI read as a
 	// detection. Retry the transport and gateway failures that say nothing
 	// about the SBOM; everything else is an answer and is returned as one.
+	//
+	// The submit endpoint has no idempotency key, so a retry after a failure
+	// the backend had already accepted enqueues a second scan and spends a
+	// second unit of quota. That is the accepted cost: quota exhaustion fails
+	// open (ErrSkipped, exit 0) while the failure being fixed here fails closed
+	// and looks like malware, and a user whose scan died would re-run the
+	// command by hand anyway. Bounded at maxSubmitAttempts so the waste cannot
+	// compound. Revisit if the API grows an idempotency key.
 	var lastErr error
 	for attempt := 1; attempt <= maxSubmitAttempts; attempt++ {
 		if attempt > 1 {
@@ -356,7 +364,29 @@ func (c *Client) doSubmit(req *http.Request) (int, []byte, error) {
 		return 0, nil, fmt.Errorf("submit: %w", c.redact(err))
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	// A truncated body is as transient as a refused connection, and swallowing
+	// the read error here would surface it as a decode failure on a 202 -- a
+	// definite-looking error the retry loop would not touch.
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, nil, fmt.Errorf("submit: read response: %w", c.redact(err))
+	}
+	return resp.StatusCode, body, nil
+}
+
+// doPoll sends one status poll and reads its body. A failure to read the body
+// is returned as an error rather than ignored, so the caller counts it against
+// the transient allowance instead of decoding a half-received response.
+func (c *Client) doPoll(req *http.Request) (int, []byte, error) {
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return 0, nil, fmt.Errorf("poll status: %w", c.redact(err))
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, nil, fmt.Errorf("poll status: read response: %w", c.redact(err))
+	}
 	return resp.StatusCode, body, nil
 }
 
@@ -397,27 +427,25 @@ func (c *Client) waitForCompletion(ctx context.Context, sbomID, scanID string) (
 		// existing attempt budget rather than adding sleeps of its own: it is
 		// already a loop with a wait in it. The scan is running server-side
 		// either way, so a blip here should cost a poll, not the verdict.
-		resp, err := c.HTTP.Do(req)
+		status, body, err := c.doPoll(req)
 		if err != nil {
 			if ctx.Err() != nil {
-				return nil, fmt.Errorf("poll status: %w", err)
+				return nil, err
 			}
-			lastErr = fmt.Errorf("poll status: %w", err)
+			lastErr = err
 			if transient++; transient >= maxTransientPolls {
 				return nil, lastErr
 			}
 			continue
 		}
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
 
-		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-			return nil, c.authError(resp.StatusCode)
+		if status == http.StatusUnauthorized || status == http.StatusForbidden {
+			return nil, c.authError(status)
 		}
 
-		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
-			err := fmt.Errorf("status poll failed (%d): %s", resp.StatusCode, truncate(string(body), 500))
-			if !retryable(resp.StatusCode) {
+		if status != http.StatusOK && status != http.StatusAccepted {
+			err := fmt.Errorf("status poll failed (%d): %s", status, truncate(string(body), 500))
+			if !retryable(status) {
 				return nil, err
 			}
 			lastErr = err
