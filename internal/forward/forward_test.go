@@ -1275,3 +1275,70 @@ func TestQuietForwarder_FailedCheckDrainsWarnings(t *testing.T) {
 		t.Errorf("collector not drained; main's safety net would print:\n%s", left)
 	}
 }
+
+// The forwarders parse no flags, so before the served floor they could only
+// ever grade at the compiled-in default. A raised account floor now reaches
+// them, which is the point: an install is not blocked by a finding the account
+// asked not to be stopped by.
+func TestRun_BareInstall_HonoursTheServedFloor(t *testing.T) {
+	ex := &stubExec{}
+	swap(t, ex.fn, cleanSBOM)
+	swapScan(t, func(_ context.Context, _ scanRequest) (*ossbom.SBOM, error) {
+		s := ossbom.New(ossbom.Environment{})
+		s.FailingSeverityFloor = "Critical"
+		s.AddVulnerability(ossbom.Vulnerability{ID: "V1", Purl: "pkg:npm/mid@1.0.0", Severity: "High"})
+		return s, nil
+	})
+
+	if err := Run(context.Background(), Options{Bin: "npm", Args: []string{"install"}}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !ex.called {
+		t.Error("a finding below the account's floor must not block the install")
+	}
+}
+
+// Whatever the account asked for, a finding we could not grade still blocks.
+
+// Whatever the account asked for, a finding we could not grade still blocks.
+func TestRun_BareInstall_UngradedFindingBlocksAtARaisedFloor(t *testing.T) {
+	ex := &stubExec{}
+	swap(t, ex.fn, cleanSBOM)
+	swapScan(t, func(_ context.Context, _ scanRequest) (*ossbom.SBOM, error) {
+		s := ossbom.New(ossbom.Environment{})
+		s.FailingSeverityFloor = "Critical"
+		s.AddVulnerability(ossbom.NewMalwareVulnerability("V1", "pkg:npm/evil@1.0.0", "bad"))
+		return s, nil
+	})
+
+	err := Run(context.Background(), Options{Bin: "npm", Args: []string{"install"}})
+	if !errors.Is(err, ErrBlocked) {
+		t.Fatalf("err: got %v, want ErrBlocked", err)
+	}
+	if ex.called {
+		t.Error("an ungraded finding must block whatever the floor")
+	}
+}
+
+// Passive reaches no verdict, so a malicious SBOM must not stop the install:
+// the scan is posted for the record and the manager runs either way.
+func TestRun_CacheScanOnly_NamedPackages_PostsAndForwards(t *testing.T) {
+	ex := &stubExec{}
+	swap(t, ex.fn, cleanSBOM)
+	var gotSubmitOnly bool
+	swapScan(t, func(ctx context.Context, req scanRequest) (*ossbom.SBOM, error) {
+		gotSubmitOnly = req.SubmitOnly
+		return malwareSBOM(ctx, check.Options{})
+	})
+
+	err := Run(context.Background(), Options{Bin: "npm", Args: []string{"install", "lodash@4.17.21"}, Passive: true})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !gotSubmitOnly {
+		t.Error("passive must post without polling")
+	}
+	if !ex.called {
+		t.Error("passive must always forward, even when the SBOM carries a verdict")
+	}
+}
