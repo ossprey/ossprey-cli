@@ -52,18 +52,22 @@ func componentPurl(c Component) string {
 	return "pkg:" + c.Type + "/" + c.Name + "@" + c.Version
 }
 
-// ApplyAPIResponse copies vulnerabilities and findings from a MiniBOM-shaped
-// API response into this SBOM. Returns nil on parse failure with an error context.
+// ApplyAPIResponse copies the vulnerabilities, the findings and the account's
+// failing severity floor from a MiniBOM-shaped API response into this SBOM. It
+// is the one seam where the response meets the local SBOM, so anything a client
+// needs from the server lands here and rides into the -o output for free.
 // Findings name the components the scan did not check.
 func (s *SBOM) ApplyAPIResponse(raw json.RawMessage) error {
 	var resp struct {
-		Vulnerabilities []Vulnerability `json:"vulnerabilities"`
-		Findings        []Finding       `json:"findings"`
+		Vulnerabilities      []Vulnerability `json:"vulnerabilities"`
+		Findings             []Finding       `json:"findings"`
+		FailingSeverityFloor string          `json:"failing_severity_floor"`
 	}
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return err
 	}
 	s.Vulnerabilities = append(s.Vulnerabilities, resp.Vulnerabilities...)
 	s.Findings = append(s.Findings, resp.Findings...)
+	s.FailingSeverityFloor = resp.FailingSeverityFloor
 	return nil
 }
