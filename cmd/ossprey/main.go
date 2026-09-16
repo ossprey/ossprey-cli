@@ -170,12 +170,22 @@ func newScanCmd() *cobra.Command {
 				return err
 			}
 
+			// Cataloguing is the other long silent stretch of a scan, and on a
+			// project whose ranges have to be resolved through uv or npm it is
+			// the longer one. --local is left silent: it is the machine-facing
+			// mode, and the invariant that it announces nothing is worth more
+			// than an indicator on a run whose output is being piped anyway.
+			catalogued := func() {}
+			if !local {
+				catalogued = progress.Catalog(progressOut)
+			}
 			sbom, err := scan.Run(cmd.Context(), scan.Options{
 				Path:              path,
 				Verbose:           verbose,
 				SkipVersionLookup: noVersionLookup,
 				Timeout:           scanTimeout(timeout),
 			})
+			catalogued()
 			if err != nil {
 				// Passive monitoring runs in front of other people's work, so a
 				// cataloguing failure is reported and shrugged off rather than

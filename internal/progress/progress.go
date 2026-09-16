@@ -60,6 +60,19 @@ func packages(n int) string {
 	return fmt.Sprintf("%d packages", n)
 }
 
+// Catalog announces the cataloguing phase of a scan: reading the project's
+// manifests and, where a lockfile is missing, resolving ranges through uv or
+// npm. On a monorepo that resolution is the longest stretch of the whole
+// command — minutes of network round trips with nothing printed — and it runs
+// before there is any component count to report, so the message carries none.
+//
+// Its own sentence rather than Scan's: nothing has been submitted yet, and a
+// line claiming a scan was in progress would put the wait in the wrong place
+// for anyone reading a log to find out where the time went.
+func Catalog(w io.Writer) (stop func()) {
+	return Start(w, "ossprey: cataloguing dependencies")
+}
+
 // Start announces msg on w and returns a function that ends the announcement.
 //
 // On an interactive terminal the line is redrawn in place with a spinner and an
