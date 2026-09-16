@@ -336,7 +336,7 @@ func newScanCmd() *cobra.Command {
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "list every warned package and manifest, and the full output of any resolver that failed (or OSSPREY_VERBOSE=1)")
 	cmd.Flags().BoolVar(&local, "local", false, "dump SBOM JSON to stdout and exit (no API submission, no verdict)")
 	cmd.Flags().StringVar(&failOn, "fail-on", "", "fail on findings at or above this severity (Info, Low, Medium, High, Critical), overriding the account's floor for this run")
-	cmd.Flags().BoolVar(&failOnInformational, "fail-on-informational", false, "shorthand for --fail-on Info: also fail on informational findings, which are reported but exit 0 by default")
+	cmd.Flags().BoolVar(&failOnInformational, "fail-on-informational", false, "shorthand for --fail-on Info: fail on every finding, including those the floor would otherwise only report")
 	cmd.Flags().BoolVar(&dryRunSafe, "dry-run-safe", false, "skip API submission; emit empty vulnerability list")
 	cmd.Flags().BoolVar(&dryRunMalicious, "dry-run-malicious", false, "skip API submission; inject test vulnerability against first component")
 	cmd.Flags().BoolVar(&noVersionLookup, "no-version-lookup", false, "don't query the registry to resolve unpinned dependencies; leave them versionless")
@@ -453,7 +453,7 @@ func newCheckCmd() *cobra.Command {
 	cmd.Flags().StringVar(&apiURL, "url", defaultAPIURL, "Ossprey API URL")
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "Ossprey API key (or OSSPREY_API_KEY / API_KEY env var; optional after `ossprey login`)")
 	cmd.Flags().StringVar(&failOn, "fail-on", "", "fail on findings at or above this severity (Info, Low, Medium, High, Critical), overriding the account's floor for this run")
-	cmd.Flags().BoolVar(&failOnInformational, "fail-on-informational", false, "shorthand for --fail-on Info: also fail on informational findings, which are reported but exit 0 by default")
+	cmd.Flags().BoolVar(&failOnInformational, "fail-on-informational", false, "shorthand for --fail-on Info: fail on every finding, including those the floor would otherwise only report")
 	cmd.Flags().BoolVar(&dryRunSafe, "dry-run-safe", false, "skip API submission; emit empty vulnerability list")
 	cmd.Flags().BoolVar(&dryRunMalicious, "dry-run-malicious", false, "skip API submission; inject test vulnerability against first package")
 	// Same reason as scan: malicious wins the switch, so the pair is a silently
