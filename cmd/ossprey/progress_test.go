@@ -100,8 +100,31 @@ func TestScanAnnouncesTheWaitForAVerdict(t *testing.T) {
 		t.Fatalf("scan: %v", err)
 	}
 
-	if got := buf.String(); !strings.HasPrefix(got, "ossprey: scan in progress, checking ") {
+	// Contains, not HasPrefix: cataloguing is announced first, and what this
+	// test pins is that the wait for a verdict is announced at all.
+	if got := buf.String(); !strings.Contains(got, "ossprey: scan in progress, checking ") {
 		t.Errorf("progress output = %q, want a scan-in-progress announcement", got)
+	}
+}
+
+// Cataloguing is the first long silence of a scan and, where ranges have to be
+// resolved through uv or npm, the longest one — so it is announced before the
+// wait for a verdict rather than left as a silent pause on an empty terminal.
+func TestScanAnnouncesCataloguing(t *testing.T) {
+	buf := captureProgress(t)
+	srv := scanAPI(t)
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "requirements.txt"), []byte("flask==2.0.0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runScan(t, dir, "--url", srv.URL, "--api-key", "test-key"); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+
+	if got, want := buf.String(), "ossprey: cataloguing dependencies...\n"; !strings.HasPrefix(got, want) {
+		t.Errorf("progress output = %q, want it to start with %q", got, want)
 	}
 }
 
@@ -123,8 +146,10 @@ func TestScanPassiveAnnouncesTheSubmission(t *testing.T) {
 		t.Fatalf("scan --passive: %v", err)
 	}
 
-	if got, want := buf.String(), "ossprey: submitting scan...\n"; got != want {
-		t.Errorf("progress output = %q, want %q", got, want)
+	// The submission's own wording is what matters here; the cataloguing line
+	// that precedes it has its own test.
+	if got, want := buf.String(), "ossprey: submitting scan...\n"; !strings.HasSuffix(got, want) {
+		t.Errorf("progress output = %q, want it to end with %q", got, want)
 	}
 }
 
