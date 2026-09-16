@@ -143,7 +143,10 @@ func readNoticeCache(cachePath string, now time.Time, interval time.Duration) (s
 		return "", false
 	}
 	var cache noticeCache
-	if json.Unmarshal(data, &cache) != nil || cache.Latest == "" || now.Sub(cache.CheckedAt) >= interval {
+	if json.Unmarshal(data, &cache) != nil ||
+		cache.Latest == "" ||
+		cache.CheckedAt.After(now) ||
+		now.Sub(cache.CheckedAt) >= interval {
 		return "", false
 	}
 	return cache.Latest, true

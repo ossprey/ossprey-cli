@@ -262,6 +262,39 @@ func TestNoticeRefreshesStaleCache(t *testing.T) {
 	}
 }
 
+func TestNoticeRefreshesFutureDatedCache(t *testing.T) {
+	now := time.Date(2026, 9, 16, 9, 0, 0, 0, time.UTC)
+	cachePath := filepath.Join(t.TempDir(), "update-check.json")
+	if err := writeNoticeCache(cachePath, noticeCache{
+		Latest:    "v9.0.0",
+		CheckedAt: now.Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var requests atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.Redirect(w, r, "/tag/v1.2.0", http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	err := Notice(context.Background(), NoticeOptions{
+		Current:   "1.0.0",
+		BaseURL:   srv.URL,
+		CachePath: cachePath,
+		Now:       func() time.Time { return now },
+		Out:       &out,
+	})
+	if err != nil {
+		t.Fatalf("Notice: %v", err)
+	}
+	if requests.Load() != 1 || !strings.Contains(out.String(), "1.0.0 -> 1.2.0") {
+		t.Errorf("future-dated cache was not refreshed: requests=%d output=%q", requests.Load(), out.String())
+	}
+}
+
 func TestRunExplicitTarget(t *testing.T) {
 	// Target versions are accepted with or without the "v" prefix and skip
 	// the latest-tag lookup entirely.
