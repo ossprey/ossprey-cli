@@ -175,10 +175,11 @@ Exit codes:
 - `0` — no malware found, only findings below the floor this run grades at, `--local` dump, or scan skipped by the API (e.g. quota exhausted)
 - `1` — malware found, **or** the scan itself failed (bad path, catalog error, API/network error, missing key)
 
-A finding below your account's failing severity floor is reported as a `Note:`
-line and does not fail the scan. Everything at or above it fails, and so does a
-finding the API could not grade, whatever the floor is set to, so an older
-server that sends no grade behaves exactly as before.
+A finding below the floor this run grades at is reported as a `Note:` line and
+does not fail the scan. Everything at or above it fails, and so does a finding
+the API could not grade, whatever the floor is set to, so an older server that
+sends no grade behaves exactly as before. The floor is your account's unless
+`--fail-on` overrode it for this run.
 
 The floor is your account's setting, served with the scan: change it once in
 the dashboard and every integration follows. It defaults to `Low`, which makes
