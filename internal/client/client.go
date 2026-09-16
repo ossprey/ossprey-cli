@@ -329,6 +329,11 @@ func (c *Client) postScan(ctx context.Context, mb ossbom.MiniBOM) (int, []byte, 
 		c.authenticate(req)
 
 		status, respBody, err := c.doSubmit(req)
+		// Graded before err, so a rejected credential is named even when its
+		// response body never finished arriving.
+		if status == http.StatusUnauthorized || status == http.StatusForbidden {
+			return 0, nil, c.authError(status)
+		}
 		if err != nil {
 			// A cancelled or expired context is not transient: retrying would
 			// only fail the same way, once per remaining attempt.
@@ -342,8 +347,6 @@ func (c *Client) postScan(ctx context.Context, mb ossbom.MiniBOM) (int, []byte, 
 		switch {
 		case status == http.StatusOK || status == http.StatusAccepted:
 			return status, respBody, nil
-		case status == http.StatusUnauthorized || status == http.StatusForbidden:
-			return 0, nil, c.authError(status)
 		case status == http.StatusTooManyRequests:
 			return 0, nil, errors.New("rate limit exceeded")
 		case retryable(status):
@@ -369,7 +372,10 @@ func (c *Client) doSubmit(req *http.Request) (int, []byte, error) {
 	// definite-looking error the retry loop would not touch.
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return 0, nil, fmt.Errorf("submit: read response: %w", c.redact(err))
+		// The status is returned alongside the error: it is the one thing that
+		// did arrive, and a 401 whose body failed to read is still a rejected
+		// credential, not a blip to retry.
+		return resp.StatusCode, nil, fmt.Errorf("submit: read response: %w", c.redact(err))
 	}
 	return resp.StatusCode, body, nil
 }
@@ -385,7 +391,7 @@ func (c *Client) doPoll(req *http.Request) (int, []byte, error) {
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return 0, nil, fmt.Errorf("poll status: read response: %w", c.redact(err))
+		return resp.StatusCode, nil, fmt.Errorf("poll status: read response: %w", c.redact(err))
 	}
 	return resp.StatusCode, body, nil
 }
@@ -428,6 +434,9 @@ func (c *Client) waitForCompletion(ctx context.Context, sbomID, scanID string) (
 		// already a loop with a wait in it. The scan is running server-side
 		// either way, so a blip here should cost a poll, not the verdict.
 		status, body, err := c.doPoll(req)
+		if status == http.StatusUnauthorized || status == http.StatusForbidden {
+			return nil, c.authError(status)
+		}
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, err
@@ -437,10 +446,6 @@ func (c *Client) waitForCompletion(ctx context.Context, sbomID, scanID string) (
 				return nil, lastErr
 			}
 			continue
-		}
-
-		if status == http.StatusUnauthorized || status == http.StatusForbidden {
-			return nil, c.authError(status)
 		}
 
 		if status != http.StatusOK && status != http.StatusAccepted {

@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -786,6 +787,11 @@ func TestPostScan_RetriesTransportError(t *testing.T) {
 // 200. Needed because httptest cannot otherwise produce a half-read response.
 func truncatedBodyHandler(t *testing.T) func(http.ResponseWriter) {
 	t.Helper()
+	return truncatedStatusHandler(t, http.StatusOK)
+}
+
+func truncatedStatusHandler(t *testing.T, status int) func(http.ResponseWriter) {
+	t.Helper()
 	return func(w http.ResponseWriter) {
 		conn, buf, err := w.(http.Hijacker).Hijack()
 		if err != nil {
@@ -793,10 +799,53 @@ func truncatedBodyHandler(t *testing.T) func(http.ResponseWriter) {
 			return
 		}
 		defer conn.Close()
-		buf.WriteString("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 200\r\n\r\n")
+		fmt.Fprintf(buf, "HTTP/1.1 %d %s\r\nContent-Type: application/json\r\nContent-Length: 200\r\n\r\n", status, http.StatusText(status))
 		buf.WriteString(`{"status":"SUCC`)
 		buf.Flush()
 	}
+}
+
+// TestAuthError_SurvivesTruncatedBody pins that the status outranks the body
+// read: a 401 whose body never finished arriving is still a rejected
+// credential, so it must not be retried as a blip or reported as a read error.
+func TestAuthError_SurvivesTruncatedBody(t *testing.T) {
+	t.Run("submit", func(t *testing.T) {
+		truncate := truncatedStatusHandler(t, http.StatusUnauthorized)
+		var hits atomic.Int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hits.Add(1)
+			truncate(w)
+		}))
+		defer srv.Close()
+
+		c := testRetryClient(t, srv)
+		_, err := c.Validate(context.Background(), ossbom.MiniBOM{})
+		if err == nil || !strings.Contains(err.Error(), "API key rejected") {
+			t.Fatalf("err: got %v, want the API key message", err)
+		}
+		if got := hits.Load(); got != 1 {
+			t.Errorf("attempts: got %d, want 1", got)
+		}
+	})
+
+	t.Run("poll", func(t *testing.T) {
+		truncate := truncatedStatusHandler(t, http.StatusForbidden)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/public/v1/scans" {
+				w.WriteHeader(http.StatusAccepted)
+				io.WriteString(w, `{"sbom_id":"sb1","scan_id":"sc1"}`)
+				return
+			}
+			truncate(w)
+		}))
+		defer srv.Close()
+
+		c := testRetryClient(t, srv)
+		_, err := c.Validate(context.Background(), ossbom.MiniBOM{})
+		if err == nil || !strings.Contains(err.Error(), "API key rejected (status 403)") {
+			t.Fatalf("err: got %v, want the API key message", err)
+		}
+	})
 }
 
 // TestPoll_TruncatedBodyIsTransient pins that a status response that dies
