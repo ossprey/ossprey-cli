@@ -151,6 +151,10 @@ lives in a root-owned directory (the `/usr/local/bin` default on Linux/macOS),
 run `sudo ossprey update`; the Windows default (`%LOCALAPPDATA%\Programs\ossprey`)
 is user-writable, so no elevation is needed.
 
+After a successful command, ossprey checks for a newer release at most once per
+day. When one is available, it prints a short upgrade notice to stderr; update
+check failures never affect the command.
+
 ## Quick start
 
 ```sh
