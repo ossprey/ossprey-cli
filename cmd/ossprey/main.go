@@ -273,6 +273,10 @@ func newScanCmd() *cobra.Command {
 	_ = cmd.Flags().MarkHidden("ci-cache-scan-only")
 	cmd.MarkFlagsMutuallyExclusive("skip-ci", "passive", "ci-cache-scan-only")
 	cmd.MarkFlagsMutuallyExclusive("skip-ci", "monitor")
+	// The two dry-run flags name different outcomes, and the switch below picks
+	// malicious first: passing both silently ran the opposite of what
+	// --dry-run-safe asked for.
+	cmd.MarkFlagsMutuallyExclusive("dry-run-safe", "dry-run-malicious")
 
 	return cmd
 }
@@ -361,6 +365,9 @@ func newCheckCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&failOnInformational, "fail-on-informational", false, "also fail on informational findings, which are reported but exit 0 by default")
 	cmd.Flags().BoolVar(&dryRunSafe, "dry-run-safe", false, "skip API submission; emit empty vulnerability list")
 	cmd.Flags().BoolVar(&dryRunMalicious, "dry-run-malicious", false, "skip API submission; inject test vulnerability against first package")
+	// Same reason as scan: malicious wins the switch, so the pair is a silently
+	// wrong run rather than a no-op.
+	cmd.MarkFlagsMutuallyExclusive("dry-run-safe", "dry-run-malicious")
 
 	return cmd
 }
