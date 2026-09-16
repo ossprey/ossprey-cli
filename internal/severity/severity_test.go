@@ -69,8 +69,8 @@ func TestString(t *testing.T) {
 	}
 }
 
-// A caller may opt into a stricter floor; it must never be able to loosen past
-// the point where something we could not grade would pass.
+// A floor may sit anywhere on the scale; wherever it sits, something we could
+// not grade must still fail.
 func TestFailsAt(t *testing.T) {
 	if !Info.FailsAt(Info) {
 		t.Error("Info.FailsAt(Info) = false, want true")
@@ -92,5 +92,33 @@ func TestFailsAt(t *testing.T) {
 	}
 	if !Low.FailsAt(Unknown) {
 		t.Error("Low.FailsAt(Unknown) = false, want true")
+	}
+}
+
+// The acceptance an account raising its floor rests on: a raised floor lets a
+// graded finding through, and never an ungraded one.
+func TestARaisedFloorStillFailsAnUngradedFinding(t *testing.T) {
+	if High.FailsAt(Critical) {
+		t.Error("High.FailsAt(Critical) = true, want false")
+	}
+	if !Parse("").FailsAt(Critical) {
+		t.Error("an ungraded finding passed at a Critical floor")
+	}
+}
+
+func TestParseFloorFallsBackInsteadOfFailingEverything(t *testing.T) {
+	for _, in := range []string{"", "   ", "Banana", "severe"} {
+		if got := ParseFloor(in); got != FailingFloor {
+			t.Errorf("ParseFloor(%q) = %v, want %v", in, got, FailingFloor)
+		}
+	}
+	for in, want := range map[string]Level{
+		"Info":     Info,
+		"critical": Critical,
+		" High ":   High,
+	} {
+		if got := ParseFloor(in); got != want {
+			t.Errorf("ParseFloor(%q) = %v, want %v", in, got, want)
+		}
 	}
 }

@@ -126,10 +126,9 @@ func (s MalwareSummary) Alert() []alert.Finding { return s.Detected }
 // MalwareReports renders a scanned SBOM's findings and reports whether any of
 // them fail at the given floor.
 //
-// A finding below the floor (severity Info by default) is reported but does not
-// make the scan fail; see internal/severity. A finding the API could not grade
-// fails at every floor, so an older server that sends no severity behaves
-// exactly as before.
+// A finding below the floor is reported but does not make the scan fail; see
+// internal/severity. A finding the API could not grade fails at every floor, so
+// an older server that sends no severity behaves exactly as before.
 func MalwareReports(sbom *ossbom.SBOM, floor severity.Level) (MalwareSummary, bool) {
 	var summary MalwareSummary
 	for _, v := range sbom.Vulnerabilities {

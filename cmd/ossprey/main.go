@@ -87,6 +87,7 @@ func newScanCmd() *cobra.Command {
 		local               bool
 		dryRunSafe          bool
 		dryRunMalicious     bool
+		failOn              string
 		failOnInformational bool
 		apiURL              string
 		apiKey              string
@@ -143,6 +144,7 @@ func newScanCmd() *cobra.Command {
 			if local && reportPath != "" {
 				return errors.New("--local and --report are mutually exclusive: --local exits before any verdict")
 			}
+
 			// Same reason: a passive scan submits and returns without fetching
 			// findings, so a report file would claim a verdict nobody checked.
 			// Refused when the user typed both -- but only then. The env vars
@@ -161,6 +163,11 @@ func newScanCmd() *cobra.Command {
 					return errors.New("--passive and --local are mutually exclusive: --local never submits the scan")
 				}
 				fmt.Fprintln(os.Stderr, "ossprey: warning: passive mode is set in the environment, but --local never submits a scan; nothing was sent.")
+			}
+
+			override, err := parseFloorOverride(failOn, failOnInformational)
+			if err != nil {
+				return err
 			}
 
 			sbom, err := scan.Run(cmd.Context(), scan.Options{
@@ -237,13 +244,15 @@ func newScanCmd() *cobra.Command {
 				return nil
 			}
 
+			floor := resolveFloor(sbom.FailingSeverityFloor, override)
+
 			// Written before the exit below: a malware verdict is exactly the
 			// one CI most needs the report for.
-			if err := writeReport(reportPath, scan.NewReport(sbom, failingFloor(failOnInformational))); err != nil {
+			if err := writeReport(reportPath, scan.NewReport(sbom, floor)); err != nil {
 				return err
 			}
 
-			if reportMalware(sbom, failingFloor(failOnInformational)) {
+			if reportMalware(sbom, floor) {
 				os.Exit(1)
 			}
 
@@ -256,7 +265,8 @@ func newScanCmd() *cobra.Command {
 	cmd.Flags().StringVar(&reportPath, "report", "", "write a JSON verdict report (verdict + findings) to file")
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "verbose logging")
 	cmd.Flags().BoolVar(&local, "local", false, "dump SBOM JSON to stdout and exit (no API submission, no verdict)")
-	cmd.Flags().BoolVar(&failOnInformational, "fail-on-informational", false, "also fail on informational findings, which are reported but exit 0 by default")
+	cmd.Flags().StringVar(&failOn, "fail-on", "", "fail on findings at or above this severity (Info, Low, Medium, High, Critical), overriding the account's floor for this run")
+	cmd.Flags().BoolVar(&failOnInformational, "fail-on-informational", false, "shorthand for --fail-on Info: also fail on informational findings, which are reported but exit 0 by default")
 	cmd.Flags().BoolVar(&dryRunSafe, "dry-run-safe", false, "skip API submission; emit empty vulnerability list")
 	cmd.Flags().BoolVar(&dryRunMalicious, "dry-run-malicious", false, "skip API submission; inject test vulnerability against first component")
 	cmd.Flags().BoolVar(&noVersionLookup, "no-version-lookup", false, "don't query the registry to resolve unpinned dependencies; leave them versionless")
@@ -287,6 +297,7 @@ func newCheckCmd() *cobra.Command {
 		reportPath          string
 		dryRunSafe          bool
 		dryRunMalicious     bool
+		failOn              string
 		failOnInformational bool
 	)
 
@@ -297,6 +308,11 @@ func newCheckCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if ecosystem == "" {
 				return errors.New("--eco-system is required (pypi or npm)")
+			}
+
+			override, err := parseFloorOverride(failOn, failOnInformational)
+			if err != nil {
+				return err
 			}
 
 			specs := make([]check.Spec, 0, len(args))
@@ -341,11 +357,13 @@ func newCheckCmd() *cobra.Command {
 				return err
 			}
 
-			if err := writeReport(reportPath, scan.NewReport(sbom, failingFloor(failOnInformational))); err != nil {
+			floor := resolveFloor(sbom.FailingSeverityFloor, override)
+
+			if err := writeReport(reportPath, scan.NewReport(sbom, floor)); err != nil {
 				return err
 			}
 
-			if reportMalware(sbom, failingFloor(failOnInformational)) {
+			if reportMalware(sbom, floor) {
 				os.Exit(1)
 			}
 
@@ -358,7 +376,8 @@ func newCheckCmd() *cobra.Command {
 	cmd.Flags().StringVar(&reportPath, "report", "", "write a JSON verdict report (verdict + findings) to file")
 	cmd.Flags().StringVar(&apiURL, "url", defaultAPIURL, "Ossprey API URL")
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "Ossprey API key (or OSSPREY_API_KEY / API_KEY env var; optional after `ossprey login`)")
-	cmd.Flags().BoolVar(&failOnInformational, "fail-on-informational", false, "also fail on informational findings, which are reported but exit 0 by default")
+	cmd.Flags().StringVar(&failOn, "fail-on", "", "fail on findings at or above this severity (Info, Low, Medium, High, Critical), overriding the account's floor for this run")
+	cmd.Flags().BoolVar(&failOnInformational, "fail-on-informational", false, "shorthand for --fail-on Info: also fail on informational findings, which are reported but exit 0 by default")
 	cmd.Flags().BoolVar(&dryRunSafe, "dry-run-safe", false, "skip API submission; emit empty vulnerability list")
 	cmd.Flags().BoolVar(&dryRunMalicious, "dry-run-malicious", false, "skip API submission; inject test vulnerability against first package")
 
@@ -448,15 +467,40 @@ func reportMalware(sbom *ossbom.SBOM, floor severity.Level) bool {
 	return hasMalware
 }
 
-// failingFloor is the severity at or above which a finding fails this run.
-// --fail-on-informational lowers it so that everything the scan reports fails,
-// which is the stricter direction; there is deliberately no way to raise it,
-// because that would let a real detection pass.
-func failingFloor(failOnInformational bool) severity.Level {
-	if failOnInformational {
-		return severity.Info
+// parseFloorOverride reads the per-run floor from the flags, or Unknown when
+// this run sets none. --fail-on-informational is the shorthand for the bottom
+// of the scale and predates --fail-on, so an explicit level wins and says so.
+// Validated before the scan runs: a typo should cost a second, not a full
+// catalogue and submit.
+func parseFloorOverride(failOn string, failOnInformational bool) (severity.Level, error) {
+	if failOn == "" {
+		if failOnInformational {
+			return severity.Info, nil
+		}
+		return severity.Unknown, nil
 	}
-	return severity.FailingFloor
+	lvl := severity.Parse(failOn)
+	if lvl == severity.Unknown {
+		return severity.Unknown, fmt.Errorf("--fail-on %q is not a severity level (want Info, Low, Medium, High or Critical)", failOn)
+	}
+	if failOnInformational && lvl != severity.Info {
+		fmt.Fprintf(os.Stderr, "ossprey: --fail-on %s wins over --fail-on-informational\n", lvl)
+	}
+	return lvl, nil
+}
+
+// resolveFloor is the severity at or above which a finding fails this run: the
+// per-run override when there is one, else the floor the account is configured
+// with, else the compiled-in default.
+//
+// Most specific wins, not strictest. Taking the lower of the two would quietly
+// discard an override raised for one run, which is the commonest reason to set
+// one; the account's own floor is the customer's choice either way.
+func resolveFloor(served string, override severity.Level) severity.Level {
+	if override != severity.Unknown {
+		return override
+	}
+	return severity.ParseFloor(served)
 }
 
 // printSkipped prints a friendly quota-skip message and returns the typed

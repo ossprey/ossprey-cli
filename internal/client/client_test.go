@@ -431,3 +431,35 @@ func TestIngestTransportErrorDoesNotCarryTheToken(t *testing.T) {
 		t.Errorf("the error names no monitor at all, so it cannot be debugged: %v", postErr)
 	}
 }
+
+// The floor rides inside the SBOM rather than beside it, so it survives the
+// poll path that discards the status envelope.
+func TestValidate_202_CarriesTheFloorThroughThePoll(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/public/v1/scans":
+			w.WriteHeader(http.StatusAccepted)
+			io.WriteString(w, `{"sbom_id":"sb1","scan_id":"sc1"}`)
+		case "/public/v1/scans/status":
+			w.WriteHeader(http.StatusOK)
+			io.WriteString(w, `{"status":"SUCCEEDED","failing_severity_floor":"High","output":{"vulnerabilities":[],"failing_severity_floor":"High"}}`)
+		default:
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	c := testClient(t, srv)
+	c.PollBackoff = func(int) time.Duration { return time.Millisecond }
+	raw, err := c.Validate(context.Background(), ossbom.MiniBOM{})
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	sbom := ossbom.New(ossbom.Environment{})
+	if err := sbom.ApplyAPIResponse(raw); err != nil {
+		t.Fatalf("ApplyAPIResponse: %v", err)
+	}
+	if sbom.FailingSeverityFloor != "High" {
+		t.Errorf("floor: got %q, want High", sbom.FailingSeverityFloor)
+	}
+}

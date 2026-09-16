@@ -419,7 +419,7 @@ func runFirstScan(ctx context.Context, path, apiURL, apiKey string) error {
 		return err
 	}
 
-	if reportMalware(sbom, severity.FailingFloor) {
+	if reportMalware(sbom, severity.ParseFloor(sbom.FailingSeverityFloor)) {
 		os.Exit(1)
 	}
 	fmt.Println("No malware found. See your scans at https://dashboard.ossprey.com")

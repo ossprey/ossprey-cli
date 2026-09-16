@@ -46,8 +46,8 @@ type Finding struct {
 	ID        string `json:"id,omitempty"`
 	Type      string `json:"type,omitempty"`
 	// Severity grades the finding (Info, Low, Medium, High, Critical). Empty
-	// when the API could not grade it, which counts as failing. Only Info is
-	// below the failing floor.
+	// when the API could not grade it, which counts as failing. Which levels sit
+	// below the floor depends on the account's setting, not on this list.
 	Severity    string `json:"severity,omitempty"`
 	Description string `json:"description,omitempty"`
 	Reference   string `json:"reference,omitempty"`
@@ -125,7 +125,7 @@ func NewReport(sbom *ossbom.SBOM, floor severity.Level) Report {
 // The verdict is deliberately neither clean nor malware: nothing was checked,
 // and a consumer must not report "no malware found" off the back of it.
 func SkippedReport(sbom *ossbom.SBOM, message, resetAt string) Report {
-	r := NewReport(sbom, severity.FailingFloor)
+	r := NewReport(sbom, severity.ParseFloor(sbom.FailingSeverityFloor))
 	r.Verdict = VerdictSkipped
 	r.Skipped = &Skip{Message: message, ResetAt: resetAt}
 	return r
