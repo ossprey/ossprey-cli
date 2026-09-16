@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -17,10 +18,16 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
+
+	goversion "github.com/hashicorp/go-version"
 )
 
 // DefaultBaseURL is the release area binaries are published to.
 const DefaultBaseURL = "https://github.com/ossprey/ossprey-cli/releases"
+
+// DefaultCheckInterval limits automatic release checks to once per day.
+const DefaultCheckInterval = 24 * time.Hour
 
 // errNotFound marks a 404 so callers can distinguish "asset missing"
 // from transport failures.
@@ -35,6 +42,125 @@ type Options struct {
 	BaseURL   string // release base URL; empty means DefaultBaseURL
 	ExePath   string // binary to replace; empty means the running executable
 	Out       io.Writer
+}
+
+// NoticeOptions configures the lightweight automatic update notice.
+type NoticeOptions struct {
+	Current       string
+	BaseURL       string
+	CachePath     string
+	CheckInterval time.Duration
+	Now           func() time.Time
+	Out           io.Writer
+}
+
+type noticeCache struct {
+	Latest    string    `json:"latest"`
+	CheckedAt time.Time `json:"checked_at"`
+}
+
+// Notice checks for a newer release at most once per CheckInterval and tells
+// the user how to install it. Callers should treat errors as non-fatal.
+func Notice(ctx context.Context, opts NoticeOptions) error {
+	now := time.Now
+	if opts.Now != nil {
+		now = opts.Now
+	}
+	interval := opts.CheckInterval
+	if interval <= 0 {
+		interval = DefaultCheckInterval
+	}
+	cachePath := opts.CachePath
+	if cachePath == "" {
+		var err error
+		cachePath, err = defaultNoticeCachePath()
+		if err != nil {
+			return err
+		}
+	}
+
+	current, err := parseVersion(opts.Current)
+	if err != nil {
+		return fmt.Errorf("parse current version: %w", err)
+	}
+
+	latest := ""
+	fetched := false
+	if cached, ok := readNoticeCache(cachePath, now(), interval); ok {
+		if _, err := parseVersion(cached); err == nil {
+			latest = cached
+		}
+	}
+	if latest == "" {
+		base := opts.BaseURL
+		if base == "" {
+			base = DefaultBaseURL
+		}
+		latest, err = latestTag(ctx, strings.TrimRight(base, "/"))
+		if err != nil {
+			return fmt.Errorf("resolve latest release: %w", err)
+		}
+		fetched = true
+	}
+
+	latestVersion, err := parseVersion(latest)
+	if err != nil {
+		return fmt.Errorf("parse latest version: %w", err)
+	}
+	var cacheErr error
+	if fetched {
+		cacheErr = writeNoticeCache(cachePath, noticeCache{
+			Latest:    latest,
+			CheckedAt: now().UTC(),
+		})
+	}
+	if latestVersion.GreaterThan(current) {
+		out := opts.Out
+		if out == nil {
+			out = io.Discard
+		}
+		fmt.Fprintf(out, "A newer ossprey version is available: %s -> %s. Run `ossprey update` to upgrade.\n",
+			strings.TrimPrefix(opts.Current, "v"), strings.TrimPrefix(latest, "v"))
+	}
+	return cacheErr
+}
+
+func parseVersion(v string) (*goversion.Version, error) {
+	return goversion.NewSemver(strings.TrimPrefix(strings.TrimSpace(v), "v"))
+}
+
+func defaultNoticeCachePath() (string, error) {
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve user cache dir: %w", err)
+	}
+	return filepath.Join(dir, "ossprey", "update-check.json"), nil
+}
+
+func readNoticeCache(cachePath string, now time.Time, interval time.Duration) (string, bool) {
+	data, err := os.ReadFile(cachePath)
+	if err != nil {
+		return "", false
+	}
+	var cache noticeCache
+	if json.Unmarshal(data, &cache) != nil || cache.Latest == "" || now.Sub(cache.CheckedAt) >= interval {
+		return "", false
+	}
+	return cache.Latest, true
+}
+
+func writeNoticeCache(cachePath string, cache noticeCache) error {
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o700); err != nil {
+		return fmt.Errorf("create update cache dir: %w", err)
+	}
+	data, err := json.Marshal(cache)
+	if err != nil {
+		return fmt.Errorf("encode update cache: %w", err)
+	}
+	if err := os.WriteFile(cachePath, data, 0o600); err != nil {
+		return fmt.Errorf("write update cache: %w", err)
+	}
+	return nil
 }
 
 // Run checks for (and unless CheckOnly, installs) a new release.

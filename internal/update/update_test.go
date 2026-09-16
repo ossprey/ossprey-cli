@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // newReleaseServer serves a fake GitHub release area: /latest redirects to
@@ -162,6 +163,102 @@ func TestRunCheckOnly(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "update available: 1.0.0 -> 2.0.0") {
 		t.Errorf("missing update-available message: %q", out.String())
+	}
+}
+
+func TestNoticeReportsNewerReleaseAndCachesCheck(t *testing.T) {
+	var requests atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.Redirect(w, r, "/tag/v2.0.0", http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	now := time.Date(2026, 9, 16, 9, 0, 0, 0, time.UTC)
+	cachePath := filepath.Join(t.TempDir(), "update-check.json")
+	var out bytes.Buffer
+	opts := NoticeOptions{
+		Current:   "1.5.0",
+		BaseURL:   srv.URL,
+		CachePath: cachePath,
+		Now:       func() time.Time { return now },
+		Out:       &out,
+	}
+	if err := Notice(context.Background(), opts); err != nil {
+		t.Fatalf("Notice: %v", err)
+	}
+	if got := out.String(); !strings.Contains(got, "1.5.0 -> 2.0.0") ||
+		!strings.Contains(got, "`ossprey update`") {
+		t.Errorf("unexpected notice: %q", got)
+	}
+
+	out.Reset()
+	if err := Notice(context.Background(), opts); err != nil {
+		t.Fatalf("cached Notice: %v", err)
+	}
+	if requests.Load() != 1 {
+		t.Errorf("release checks = %d, want 1", requests.Load())
+	}
+	if !strings.Contains(out.String(), "1.5.0 -> 2.0.0") {
+		t.Errorf("cached check did not retain notice: %q", out.String())
+	}
+}
+
+func TestNoticeOnlyReportsNewerRelease(t *testing.T) {
+	for _, current := range []string{"2.0.0", "3.0.0"} {
+		t.Run(current, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, "/tag/v2.0.0", http.StatusFound)
+			}))
+			t.Cleanup(srv.Close)
+
+			var out bytes.Buffer
+			err := Notice(context.Background(), NoticeOptions{
+				Current:   current,
+				BaseURL:   srv.URL,
+				CachePath: filepath.Join(t.TempDir(), "update-check.json"),
+				Out:       &out,
+			})
+			if err != nil {
+				t.Fatalf("Notice: %v", err)
+			}
+			if out.Len() != 0 {
+				t.Errorf("unexpected notice for current %s: %q", current, out.String())
+			}
+		})
+	}
+}
+
+func TestNoticeRefreshesStaleCache(t *testing.T) {
+	now := time.Date(2026, 9, 16, 9, 0, 0, 0, time.UTC)
+	cachePath := filepath.Join(t.TempDir(), "update-check.json")
+	if err := writeNoticeCache(cachePath, noticeCache{
+		Latest:    "v1.1.0",
+		CheckedAt: now.Add(-DefaultCheckInterval),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var requests atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		http.Redirect(w, r, "/tag/v1.2.0", http.StatusFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	var out bytes.Buffer
+	err := Notice(context.Background(), NoticeOptions{
+		Current:   "1.0.0",
+		BaseURL:   srv.URL,
+		CachePath: cachePath,
+		Now:       func() time.Time { return now },
+		Out:       &out,
+	})
+	if err != nil {
+		t.Fatalf("Notice: %v", err)
+	}
+	if requests.Load() != 1 || !strings.Contains(out.String(), "1.0.0 -> 1.2.0") {
+		t.Errorf("stale cache was not refreshed: requests=%d output=%q", requests.Load(), out.String())
 	}
 }
 

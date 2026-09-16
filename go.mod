@@ -8,6 +8,7 @@ require (
 	github.com/anchore/syft v1.44.0
 	github.com/bmatcuk/doublestar/v4 v4.10.0
 	github.com/goccy/go-yaml v1.19.2
+	github.com/hashicorp/go-version v1.8.0
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/sync v0.21.0
 	golang.org/x/sys v0.44.0

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -25,6 +26,7 @@ import (
 	"github.com/ossprey/ossprey-cli/internal/scan"
 	"github.com/ossprey/ossprey-cli/internal/severity"
 	"github.com/ossprey/ossprey-cli/internal/submit"
+	"github.com/ossprey/ossprey-cli/internal/update"
 )
 
 var version = "0.0.0-dev"
@@ -52,12 +54,23 @@ func main() {
 		}
 	}()
 
+	root := newRootCmd()
+	if err := root.Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+}
+
+func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:           "ossprey",
 		Short:         "Ossprey supply-chain scanner",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Version:       version,
+		PersistentPostRun: func(cmd *cobra.Command, _ []string) {
+			notifyLatestVersion(cmd)
+		},
 	}
 
 	root.AddCommand(newInitCmd())
@@ -73,10 +86,21 @@ func main() {
 		root.AddCommand(newForwardCmd(bin))
 	}
 
-	if err := root.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
-		os.Exit(1)
+	return root
+}
+
+var updateNoticeFn = update.Notice
+
+func notifyLatestVersion(cmd *cobra.Command) {
+	if cmd.Name() == "update" {
+		return
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = updateNoticeFn(ctx, update.NoticeOptions{
+		Current: version,
+		Out:     os.Stderr,
+	})
 }
 
 func newScanCmd() *cobra.Command {
