@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
 
 func runScan(t *testing.T, dir string, extra ...string) error {
@@ -325,5 +327,33 @@ func TestForwardCmd_RejectsAMalformedMonitorID(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "TYPO") {
 		t.Errorf("the id was echoed unredacted: %v", err)
+	}
+}
+
+// The two dry-run flags ask for opposite outcomes and the RunE switch picks
+// malicious first, so passing both used to run the opposite of what
+// --dry-run-safe asked for, silently. Both commands must refuse the pair.
+func TestDryRunFlagsAreMutuallyExclusive(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cmd  func() *cobra.Command
+		args []string
+	}{
+		{"scan", newScanCmd, []string{t.TempDir(), "--dry-run-safe", "--dry-run-malicious"}},
+		{"check", newCheckCmd, []string{"-e", "npm", "left-pad@1.3.0", "--dry-run-safe", "--dry-run-malicious"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := tc.cmd()
+			cmd.SetArgs(tc.args)
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+			err := cmd.Execute()
+			if err == nil {
+				t.Fatal("expected an error, got none")
+			}
+			if !strings.Contains(err.Error(), "dry-run-safe") || !strings.Contains(err.Error(), "dry-run-malicious") {
+				t.Fatalf("error should name both flags, got: %v", err)
+			}
+		})
 	}
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -25,6 +26,8 @@ import (
 	"github.com/ossprey/ossprey-cli/internal/scan"
 	"github.com/ossprey/ossprey-cli/internal/severity"
 	"github.com/ossprey/ossprey-cli/internal/submit"
+	"github.com/ossprey/ossprey-cli/internal/update"
+	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
 var version = "0.0.0-dev"
@@ -52,12 +55,37 @@ func main() {
 		}
 	}()
 
+	// One collector for the whole run. It is built before cobra parses -v, so
+	// the root's PersistentPreRun raises it once the flag is known.
+	ctx := warn.NewContext(context.Background(), false)
+
+	root := newRootCmd()
+	err := root.ExecuteContext(ctx)
+	// Safety net. Every path that reaches a verdict drains first, so this
+	// normally prints nothing; it exists so a path that forgot cannot swallow a
+	// warning outright.
+	fmt.Fprint(os.Stderr, warn.Drain(ctx))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+}
+
+func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:           "ossprey",
 		Short:         "Ossprey supply-chain scanner",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Version:       version,
+		PersistentPreRun: func(cmd *cobra.Command, _ []string) {
+			if verboseRequested(cmd) {
+				warn.SetVerbose(cmd.Context())
+			}
+		},
+		PersistentPostRun: func(cmd *cobra.Command, _ []string) {
+			notifyLatestVersion(cmd)
+		},
 	}
 
 	root.AddCommand(newInitCmd())
@@ -73,10 +101,21 @@ func main() {
 		root.AddCommand(newForwardCmd(bin))
 	}
 
-	if err := root.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
-		os.Exit(1)
+	return root
+}
+
+var updateNoticeFn = update.Notice
+
+func notifyLatestVersion(cmd *cobra.Command) {
+	if cmd.Name() == "update" {
+		return
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = updateNoticeFn(ctx, update.NoticeOptions{
+		Current: version,
+		Out:     os.Stderr,
+	})
 }
 
 func newScanCmd() *cobra.Command {
@@ -196,6 +235,7 @@ func newScanCmd() *cobra.Command {
 				}
 				return err
 			}
+			flushWarnings(cmd.Context())
 
 			// --local: dump SBOM JSON to stdout and exit. Nothing else.
 			if local {
@@ -258,6 +298,8 @@ func newScanCmd() *cobra.Command {
 
 			// Written before the exit below: a malware verdict is exactly the
 			// one CI most needs the report for.
+			flushWarnings(cmd.Context())
+
 			if err := writeReport(reportPath, scan.NewReport(sbom, floor)); err != nil {
 				return err
 			}
@@ -273,7 +315,7 @@ func newScanCmd() *cobra.Command {
 
 	cmd.Flags().StringVarP(&output, "output", "o", "", "write SBOM to file")
 	cmd.Flags().StringVar(&reportPath, "report", "", "write a JSON verdict report (verdict + findings) to file")
-	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "verbose logging")
+	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "list every warned package and manifest, and the full output of any resolver that failed (or OSSPREY_VERBOSE=1)")
 	cmd.Flags().BoolVar(&local, "local", false, "dump SBOM JSON to stdout and exit (no API submission, no verdict)")
 	cmd.Flags().StringVar(&failOn, "fail-on", "", "fail on findings at or above this severity (Info, Low, Medium, High, Critical), overriding the account's floor for this run")
 	// Deprecated by --fail-on Info, which says the same thing on the same scale.
@@ -298,6 +340,10 @@ func newScanCmd() *cobra.Command {
 	_ = cmd.Flags().MarkHidden("ci-cache-scan-only")
 	cmd.MarkFlagsMutuallyExclusive("skip-ci", "passive", "ci-cache-scan-only")
 	cmd.MarkFlagsMutuallyExclusive("skip-ci", "monitor")
+	// The two dry-run flags name different outcomes, and the switch below picks
+	// malicious first: passing both silently ran the opposite of what
+	// --dry-run-safe asked for.
+	cmd.MarkFlagsMutuallyExclusive("dry-run-safe", "dry-run-malicious")
 
 	return cmd
 }
@@ -374,6 +420,8 @@ func newCheckCmd() *cobra.Command {
 
 			floor := resolveFloor(sbom.FailingSeverityFloor, override)
 
+			flushWarnings(cmd.Context())
+
 			if err := writeReport(reportPath, scan.NewReport(sbom, floor)); err != nil {
 				return err
 			}
@@ -400,6 +448,9 @@ func newCheckCmd() *cobra.Command {
 	_ = cmd.Flags().MarkDeprecated("fail-on-informational", "use --fail-on Info")
 	cmd.Flags().BoolVar(&dryRunSafe, "dry-run-safe", false, "skip API submission; emit empty vulnerability list")
 	cmd.Flags().BoolVar(&dryRunMalicious, "dry-run-malicious", false, "skip API submission; inject test vulnerability against first package")
+	// Same reason as scan: malicious wins the switch, so the pair is a silently
+	// wrong run rather than a no-op.
+	cmd.MarkFlagsMutuallyExclusive("dry-run-safe", "dry-run-malicious")
 
 	return cmd
 }
@@ -577,4 +628,22 @@ func warnMonitorInEffect(monitor string, fromEnv bool) {
 func invalidMonitorErr(monitor string) error {
 	return fmt.Errorf("invalid monitor id %q: expected %s followed by 64 hex characters",
 		monitorpkg.Redact(monitor), monitorpkg.Prefix)
+}
+
+// verboseRequested reports whether this command was asked for verbose output.
+//
+// It reads the flag's value, not just whether it was set: cobra marks
+// `--verbose=false` as changed too, so keying on Changed alone turned detail on
+// for someone explicitly turning it off. Commands with no such flag say no, and
+// the collector still honours OSSPREY_VERBOSE on its own.
+func verboseRequested(cmd *cobra.Command) bool {
+	verbose, err := cmd.Flags().GetBool("verbose")
+	return err == nil && verbose
+}
+
+// flushWarnings prints the run's collected warnings. Called once the catalogue
+// is done and before anything that counts as a verdict, so the thing a
+// developer has to act on is the last thing on screen.
+func flushWarnings(ctx context.Context) {
+	fmt.Fprint(os.Stderr, warn.Drain(ctx))
 }

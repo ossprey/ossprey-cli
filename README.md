@@ -30,7 +30,7 @@ sandbox, no virtualenv.
 - [Pre-commit hook](#pre-commit-hook--block-known-malware-at-commit-time) — check staged dependency changes on every `git commit`
 - [Supported ecosystems](#supported-ecosystems)
 - [CI usage](#ci-usage)
-- [Output](#output)
+- [Output](#output) — [warnings](#warnings) · [machine-readable verdict](#machine-readable-verdict---report)
 - [Status](#status)
 - [Support](#support)
 
@@ -150,6 +150,10 @@ its sha256, and atomically replaces the running executable. If the binary
 lives in a root-owned directory (the `/usr/local/bin` default on Linux/macOS),
 run `sudo ossprey update`; the Windows default (`%LOCALAPPDATA%\Programs\ossprey`)
 is user-writable, so no elevation is needed.
+
+After a successful command, ossprey checks for a newer release at most once per
+day. When one is available, it prints a short upgrade notice to stderr; update
+check failures never affect the command.
 
 ## Quick start
 
@@ -410,7 +414,7 @@ ossprey scan [path] [flags]
 | Flag | Description |
 |------|-------------|
 | `-o, --output <file>` | Write the OSSBOM JSON to `<file>` (in addition to running the scan). |
-| `-v, --verbose` | Verbose logging. |
+| `-v, --verbose` | List every warned package and manifest, and the full output of any resolver that failed. Also settable as `OSSPREY_VERBOSE=1`, which works on the forwarders and shims too. |
 | `--local` | Catalogue only. Dump the OSSBOM to stdout and exit — no API submission, no malware verdict. |
 | `--no-version-lookup` | Don't query the registry to resolve unpinned dependencies; leave them versionless. |
 | `--timeout <dur>` | Give up cataloguing after this long and emit whatever resolved (or `OSSPREY_SCAN_TIMEOUT`). Off by default. |
@@ -1065,6 +1069,49 @@ are red under every colour profile.
 Pass `-o sbom.json` to also write the full OSSBOM JSON (components +
 vulnerabilities) to disk, or `--local` to emit it to stdout instead of
 calling the API.
+
+### Warnings
+
+Some dependencies cannot be resolved, and some manifests cannot be read. None
+of that fails the scan — it is reported and the scan continues. Warnings go to
+**stderr** (stdout belongs to `--local` and `-o`), and they are printed before
+the verdict so the verdict is the last thing on screen.
+
+Repeated warnings of the same kind arrive as one counted line rather than one
+line per package:
+
+```text
+ossprey: 4 packages not on the public registry; left unversioned
+ossprey: 2 packages could not be resolved (registry unreachable); left unversioned
+ossprey: uv: could not resolve /repo (the build backend returned an error)
+ossprey: npm: could not resolve 3 manifests
+```
+
+The two registry lines are deliberately separate. A private or internal package
+answering 404 is expected; an unreachable registry means the scan resolved
+almost nothing, and folding the two into one count would hide that.
+
+Set `OSSPREY_VERBOSE=1` (or pass `-v` to `scan`) to list the individual packages
+and manifests, along with the full output of any resolver that failed. That
+output is quoted behind a gutter so a tool's own `error:` lines are never
+mistaken for Ossprey's:
+
+```text
+ossprey: 4 packages not on the public registry; left unversioned
+ossprey:   npm/@acme/dev-utils (404)
+ossprey:   npm/@acme/flyui (404)
+ossprey: uv: could not resolve /repo (the build backend returned an error)
+ossprey: | error: The build backend returned an error
+ossprey: |   Caused by: Call to `setuptools.build_meta:__legacy__.build_wheel` failed
+ossprey: (end of uv output)
+```
+
+`OSSPREY_VERBOSE` works on every path, including the forwarders and shims,
+which parse no flags of their own.
+
+A package left unversioned is still submitted and still checked against what
+the registry knows; one dropped by a forwarder (`skipping its check`) is not
+checked at all. The wording differs for that reason.
 
 ### Machine-readable verdict (`--report`)
 

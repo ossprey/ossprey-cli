@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"slices"
 	"strings"
@@ -13,6 +14,8 @@ import (
 	"github.com/ossprey/ossprey-cli/internal/check"
 	"github.com/ossprey/ossprey-cli/internal/env"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
+	"github.com/ossprey/ossprey-cli/internal/registry"
+	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
 func TestLookup(t *testing.T) {
@@ -807,6 +810,59 @@ func TestRun_MalwareBlockErrorLinesAreRedWhenColoured(t *testing.T) {
 	}
 }
 
+// OSS-2001: the verdict is what a developer has to act on, so warnings gathered
+// while resolving must land before it, not be scrolled past above it — and the
+// repeated ones must arrive as a single counted line.
+//
+// Ordering is asserted against the `Error: WARNING:` line rather than the alert
+// itself, because that line is the stable contract; the alert's shape is free
+// to change.
+func TestForwardWarningsAreCountedAndPrecedeTheVerdict(t *testing.T) {
+	ex := &stubExec{}
+	swap(t, ex.fn, func(context.Context, check.Options) (*ossbom.SBOM, error) {
+		s := ossbom.New(ossbom.Environment{})
+		s.AddVulnerability(ossbom.NewMalwareVulnerability("V1", "pkg:npm/evil@1.0.0", "bad"))
+		return s, nil
+	})
+	for _, k := range []string{"FORCE_COLOR", "CLICOLOR_FORCE", "GITHUB_ACTIONS", "GITLAB_CI", "TF_BUILD", "BUILDKITE", "OSSPREY_VERBOSE"} {
+		t.Setenv(k, "")
+	}
+	var buf bytes.Buffer
+	old := errOut
+	errOut = &buf
+	t.Cleanup(func() { errOut = old })
+
+	ctx := warn.NewContext(context.Background(), false)
+	err := Run(ctx, Options{
+		Bin:  "npm",
+		Args: []string{"install", "evil@1.0.0", "@acme/one", "@acme/two", "@acme/three"},
+		ResolveLatest: func(_ context.Context, _, name string) (string, error) {
+			if strings.HasPrefix(name, "@acme/") {
+				return "", fmt.Errorf("%w (registry returned status 404)", registry.ErrNotFound)
+			}
+			return "1.0.0", nil
+		},
+	})
+	if !errors.Is(err, ErrBlocked) {
+		t.Fatalf("err: got %v, want ErrBlocked", err)
+	}
+
+	out := buf.String()
+	counted := strings.Index(out, "ossprey: 3 packages not on the public registry; skipping its check")
+	verdict := strings.Index(out, "Error: WARNING: evil:1.0.0 contains malware")
+	if counted < 0 {
+		t.Fatalf("want one counted warning line, got:\n%s", out)
+	}
+	if verdict < 0 || counted > verdict {
+		t.Errorf("warnings must precede the verdict:\n%s", out)
+	}
+	// The blocked line echoes the original argv, so look for the indented item
+	// line specifically rather than the package name anywhere.
+	if strings.Contains(out, "ossprey:   npm/@acme/one") {
+		t.Errorf("per-package detail must stay behind OSSPREY_VERBOSE:\n%s", out)
+	}
+}
+
 // captureProgress swaps the indicator's writer for a buffer. Not a terminal, so
 // progress.Start takes its plain-line branch and the test reads one stable line.
 func captureProgress(t *testing.T) *bytes.Buffer {
@@ -900,5 +956,50 @@ func TestRun_BareInstall_UngradedFindingBlocksAtARaisedFloor(t *testing.T) {
 	}
 	if ex.called {
 		t.Error("an ungraded finding must block whatever the floor")
+	}
+}
+
+// Passive mode forwards without ever reaching a verdict. It still has to flush
+// warnings first: the real manager's output starts the moment it execs, and a
+// non-zero exit there leaves the process via os.Exit, so anything not printed
+// by now is buried at best and lost at worst.
+func TestPassiveFlushesWarningsBeforeForwarding(t *testing.T) {
+	var buf bytes.Buffer
+	old := errOut
+	errOut = &buf
+	t.Cleanup(func() { errOut = old })
+	t.Setenv("OSSPREY_VERBOSE", "")
+
+	swap(t, func(_ context.Context, bin string, _ []string) error {
+		fmt.Fprintln(&buf, "<the real "+bin+" runs here>")
+		return nil
+	}, func(context.Context, check.Options) (*ossbom.SBOM, error) {
+		return ossbom.New(ossbom.Environment{}), nil
+	})
+
+	ctx := warn.NewContext(context.Background(), false)
+	err := Run(ctx, Options{
+		Bin:     "npm",
+		Args:    []string{"install", "lodash@4.17.21", "@acme/private"},
+		Passive: true,
+		ResolveLatest: func(_ context.Context, _, name string) (string, error) {
+			if name == "@acme/private" {
+				return "", fmt.Errorf("%w (registry returned status 404)", registry.ErrNotFound)
+			}
+			return "1.0.0", nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	out := buf.String()
+	warning := strings.Index(out, "not on the public registry")
+	manager := strings.Index(out, "<the real npm runs here>")
+	if warning < 0 {
+		t.Fatalf("the warning was dropped entirely:\n%s", out)
+	}
+	if manager < 0 || warning > manager {
+		t.Errorf("warnings must be flushed before the real manager runs:\n%s", out)
 	}
 }
