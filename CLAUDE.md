@@ -293,6 +293,26 @@ unwrapped so callers can detect it via `errors.As` and **exit 0** rather than
 failing the build (see `reportSkipped` in main.go). API key resolution order:
 `--api-key` flag → `OSSPREY_API_KEY` → `API_KEY`.
 
+**Transient failures are retried, definite ones are not.** A scan error and a
+malware verdict share exit code `1`, so a dropped connection in CI reads as a
+detection. `postScan` retries `maxSubmitAttempts` times over `RetryBackoff`, and
+the status poll tolerates `maxTransientPolls` consecutive failures within its
+existing attempt budget rather than adding sleeps of its own. `retryable` is
+deliberately narrow — only 502/503/504. A 4xx is a real answer about the
+request, and a 500 means the backend already took the SBOM, so retrying it risks
+a duplicate scan against the user's quota for no better odds. Never widen that
+set to "any 5xx" for symmetry. The submit endpoint has no idempotency key, so a
+retry the backend had already accepted spends a second unit of quota; that is
+accepted deliberately, because quota exhaustion fails **open** (`ErrSkipped`,
+exit 0) and the failure it prevents fails **closed** and reads as malware. Retries wait via `sleepOrDone` so a cancelled
+scan is never held open by a backoff, and `RetryBackoff` is overridable for the
+same reason `PollBackoff` is: no test should sleep.
+
+`401`/`403` become `authError`, which names the credential the client actually
+used (`--api-key`/env, a stored login, or a monitor id — see
+`submit.NewClient`). The raw body is a JSON blob naming no fix, so printing it
+told a user with an expired key nothing about how to recover.
+
 ## Conventions worth knowing
 
 - **Exit codes:** `0` = clean / informational-only / `--local` dump / quota-skipped; `1` = malware found OR scan errored; `2` = panic (recovered in main). "Clean" and "errored" are not distinguishable by exit code alone — that is what `--report` is for (below).
