@@ -275,6 +275,58 @@ the plain one. `ansi.Enable` switches on virtual-terminal processing on
 Windows conhost and is a no-op elsewhere. Tests that assert "no escapes" on a
 `bytes.Buffer` must clear the CI env vars first, or they fail on GitHub Actions.
 
+### Warnings (`internal/warn`)
+
+Non-fatal diagnostics are collected, not printed where they happen. A real
+customer scan (OSS-2001) buried its malware verdict under twenty-five lines of
+uv's raw stderr plus one line per private package; nothing in that output was
+wrong and none of it was readable. `warn.Add(ctx, Entry)` records an occurrence,
+`warn.Drain(ctx)` renders and clears.
+
+Five things hold it together:
+
+- **Grouping is by `Class`, never by message.** A private package that 404s and
+  an unreachable registry both leave a component unversioned, but one is
+  expected and the other means the scan resolved almost nothing, so they must
+  never share a count. `registry.ErrNotFound` is what separates them — grade the
+  error, don't string-match the status. The same split applies to the
+  consequence: `left unversioned` (scan path, still submitted and checked) and
+  `skipping its check` (forward path, not checked at all) are different classes
+  because they are different outcomes.
+- **A subprocess's output never prints at the default level, and never
+  unprefixed.** `newToolError` (`internal/catalog/toolerror.go`) splits a uv/npm
+  failure into the one actionable line — skipping the tool's own leading
+  `warning:` advisories — and the rest, which only `OSSPREY_VERBOSE` shows,
+  behind an `ossprey: | ` gutter. The gutter is the point: uv's own `error:`
+  lines read as ossprey's in the report that prompted this.
+- **A warning is never lost.** `Add` outside a collector context falls back to
+  stderr, and every drain point sits *before* a verdict, never in a `defer`
+  behind one. In `forward.Run` that is enforced by a single `forwardTo` closure:
+  **nothing execs the real manager without draining first**. Do not call
+  `execFn` directly from `Run` — the manager's output starts immediately and
+  never stops, and `newForwardCmd` leaves via `os.Exit(ee.ExitCode())` on a
+  non-zero exit, so `main`'s post-`Execute` safety-net drain never runs. An
+  earlier revision forwarded the passive/cache-only path straight to `execFn`
+  and dropped its warnings outright.
+- **A headline is one readable line.** `warn.MaxLine` caps it, and
+  `catalog.maxSummary` caps the cause a subprocess contributes: both a manifest
+  path and a malformed line can be arbitrarily long, and an unbounded headline
+  would rebuild the wall of text this removes. Detail is never truncated.
+- **The collector rides on `ctx`** because the catalogers it serves sit behind
+  syft's `Catalog(ctx, resolver)` signature, which has nowhere to return one.
+  `warn` must stay a leaf (only `internal/env`); `registry.UnresolvedEntry` and
+  `catalog.catalogerEntry`/`parseEntry` are where domain wording lives.
+
+Verbosity is an env var (`OSSPREY_VERBOSE`) as well as `scan -v`, because the
+forwarders run with `DisableFlagParsing` and cannot accept a `-v` that npm would
+not also see. `warn.SetVerbose` exists so cobra can raise a collector built
+before flags were parsed; verbosity only ever goes up.
+
+`parseEntry` closes a pre-existing hole: syft's per-cataloger errors were read
+as `pkgs, _, _` and discarded, so a malformed requirement went missing from the
+SBOM in silence. Those errors are partial by design (OSS-1869) — keep taking the
+packages, and now report the rest.
+
 ### OSSBOM model (`internal/ossbom`)
 
 `SBOM` is the rich internal model. `MiniBOM` (`minibom.go`) is the compressed
@@ -299,8 +351,12 @@ failing the build (see `reportSkipped` in main.go). API key resolution order:
 - **Severity** (`internal/severity`) grades a finding `Info < Low < Medium < High < Critical`, and `FailingFloor` is `Low`. `Info` is the only level below it: the finding is printed as a `Note:` line and the scan still exits 0 (OSS-1432). `--fail-on-informational` on `scan`/`check` lowers the floor to `Info` so those fail too, and it lowers it for the `--report` verdict at the same time so the file cannot disagree with the exit status. The floor can only ever be lowered — there is no flag to raise it, since that would let a real detection pass. The forwarders parse no flags of their own (`DisableFlagParsing`), so they always use the default floor. Parsing is deliberately **fail-closed** — an empty or unrecognised grade is `Unknown`, and `Unknown.Fails()` is true, so an older API that sends no severity and an OSV-sourced finding that carries none both behave exactly as they did before. Never invert that default for convenience; it is the one thing standing between "we could not grade it" and "we passed it".
 - **`--report <file>`** (`internal/scan/report.go`, on `scan` and `check`) writes the machine-readable verdict — `clean` / `malware` / `informational` / `skipped` plus per-finding name, version, ecosystem, severity and description — for CI to act on. `findings` holds only what **fails**, so a consumer counting it to say "N malicious packages" stays correct without knowing what a severity is; anything below the failing floor goes in `informational`, which is omitted when empty; `ossprey/gh-action` renders its PR comment from it. Three rules hold it together. It never touches **stdout**, which `--local` owns for the OSSBOM (the two flags are rejected together, because `--local` returns before any verdict exists). It is written **before** the `os.Exit(1)`, since a malware run is the one CI most needs it on. And `skipped` is its own verdict, not a flavour of clean: a quota-exhausted scan checked nothing, and a consumer that renders it as "no malware found" is lying. `informational` exists for the same reason: that scan *did* find something and said so, so folding it into `clean` would hide a finding we deliberately surfaced. A consumer that only knows the older three should treat it as non-failing. The JSON keys are a contract with the action — `test/smoke/report_smoke_test.go` redeclares the struct so a rename breaks a test instead of the action.
 - **Where the CLI stops.** `--report` states the verdict; that is the whole of what the CLI owes CI. Rendering it (Markdown tables, pull-request comments, job summaries, `::error::` annotations) belongs in the consumer — `ossprey/gh-action` does its own, in bash. Do not move that back here, even when a `--report-format markdown` or a `render` subcommand would delete a hundred lines of someone's shell: every such feature is dead weight to the users installing this CLI for `scan`, `check` and the forwarders, and it makes the CLI's release cadence a dependency of one CI vendor's UI. The test for a new flag is whether a GitLab or Jenkins user would reach for it too.
+- **Warnings are collected, not printed inline** (`internal/warn`): repeated
+  diagnostics arrive as one counted line per cause, before the verdict, on
+  stderr. `OSSPREY_VERBOSE=1` (or `scan -v`) lists the individuals and any
+  resolver's full output. Never `Fprintf(os.Stderr, ...)` a per-package or
+  per-manifest diagnostic directly — that is what OSS-2001 was.
 - **The wait is announced** (`internal/progress`): submitting an SBOM and polling for a verdict prints nothing until the verdict arrives, so a healthy multi-second wait reads as a hang. `progress.Scan(w, n)` owns the one sentence every caller uses — `scan`, `check` and the forwarders — so the same wait cannot start describing itself differently depending on where it was started from. Passive waits get `progress.Submit(w, n)` instead, and the split is the point rather than a wording preference: passive posts the SBOM and returns, so a message that said it was *checking* packages would promise a verdict nobody waits for, in front of an install that proceeds regardless. Both `scan --passive` and a passive forwarded install go through it; `TestPassiveInstallDoesNotClaimToCheck` pins that the two never collapse into one message. Three rules hold it up. It draws to **stderr** (`progressOut` in both main.go and `forward`, kept apart from `forward`'s `errOut` so a test capturing verdict lines is not handed the animation), never stdout, which `--local` owns for the OSSBOM and CI greps for the verdict: an indicator that corrupted a machine-readable stream to fix a human-readable one is a bad trade. And it animates **only on a terminal** — `progress.Start` falls back to one plain line into a pipe, a file or a CI log, where a carriage-returned line is noise rather than motion. Nothing is announced for a path that does no waiting: a dry run, or `--local`.
-
 - **API text is untrusted for display** (`internal/apitext`): finding justifications and descriptions are free text from the wire, printed straight to a developer's terminal. `apitext.OneLine` collapses control and formatting characters so a newline cannot forge an extra report line, a carriage return cannot overwrite one, and an ESC cannot start an ANSI sequence. Run any API-supplied string through it before interpolating it into terminal output.
 - **Fail-open vs fail-closed:** the `check`/forward path fails *closed* for unpinned packages it can pin (resolves latest via `internal/registry`), but fails *open* (skips with a warning) when the registry is unreachable or a token has no parseable package name — a registry outage must never block development.
 - **Dry-run flags** (`--dry-run-safe`, `--dry-run-malicious`) and `--local` skip the API entirely and need no key — useful for testing catalog output without a live backend.

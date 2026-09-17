@@ -112,14 +112,14 @@ func runNpmResolve(ctx context.Context, npm, cache, packageJSON string, loc file
 		// ErrWaitDelay replaces a successful exit, so npm finished and only a
 		// grandchild's pipe lingered; the lock it wrote is complete.
 		if !errors.Is(runErr, exec.ErrWaitDelay) {
-			return nil, fmt.Errorf("npm install --package-lock-only: %w: %s", runErr, strings.TrimSpace(string(out)))
+			return nil, newToolError("npm", filepath.Dir(packageJSON), string(out))
 		}
 	}
 
 	lock, err := os.ReadFile(filepath.Join(tmp, "package-lock.json"))
 	if err != nil {
 		if runErr != nil {
-			return nil, fmt.Errorf("npm install --package-lock-only: %w: %s", runErr, strings.TrimSpace(string(out)))
+			return nil, newToolError("npm", filepath.Dir(packageJSON), string(out))
 		}
 		return nil, fmt.Errorf("npm produced no package-lock.json: %w", err)
 	}
