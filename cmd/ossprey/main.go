@@ -26,6 +26,7 @@ import (
 	"github.com/ossprey/ossprey-cli/internal/scan"
 	"github.com/ossprey/ossprey-cli/internal/severity"
 	"github.com/ossprey/ossprey-cli/internal/submit"
+	"github.com/ossprey/ossprey-cli/internal/update"
 	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
@@ -54,12 +55,37 @@ func main() {
 		}
 	}()
 
+	// One collector for the whole run. It is built before cobra parses -v, so
+	// the root's PersistentPreRun raises it once the flag is known.
+	ctx := warn.NewContext(context.Background(), false)
+
+	root := newRootCmd()
+	err := root.ExecuteContext(ctx)
+	// Safety net. Every path that reaches a verdict drains first, so this
+	// normally prints nothing; it exists so a path that forgot cannot swallow a
+	// warning outright.
+	fmt.Fprint(os.Stderr, warn.Drain(ctx))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+}
+
+func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:           "ossprey",
 		Short:         "Ossprey supply-chain scanner",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Version:       version,
+		PersistentPreRun: func(cmd *cobra.Command, _ []string) {
+			if verboseRequested(cmd) {
+				warn.SetVerbose(cmd.Context())
+			}
+		},
+		PersistentPostRun: func(cmd *cobra.Command, _ []string) {
+			notifyLatestVersion(cmd)
+		},
 	}
 
 	root.AddCommand(newInitCmd())
@@ -75,24 +101,21 @@ func main() {
 		root.AddCommand(newForwardCmd(bin))
 	}
 
-	// One collector for the whole run. It is built before cobra parses -v, so
-	// PersistentPreRun raises it once the flag is known.
-	ctx := warn.NewContext(context.Background(), false)
-	root.PersistentPreRun = func(cmd *cobra.Command, _ []string) {
-		if verboseRequested(cmd) {
-			warn.SetVerbose(cmd.Context())
-		}
-	}
+	return root
+}
 
-	err := root.ExecuteContext(ctx)
-	// Safety net. Every path that reaches a verdict drains first, so this
-	// normally prints nothing; it exists so a path that forgot cannot swallow a
-	// warning outright.
-	fmt.Fprint(os.Stderr, warn.Drain(ctx))
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
-		os.Exit(1)
+var updateNoticeFn = update.Notice
+
+func notifyLatestVersion(cmd *cobra.Command) {
+	if cmd.Name() == "update" {
+		return
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = updateNoticeFn(ctx, update.NoticeOptions{
+		Current: version,
+		Out:     os.Stderr,
+	})
 }
 
 func newScanCmd() *cobra.Command {
@@ -179,12 +202,22 @@ func newScanCmd() *cobra.Command {
 				fmt.Fprintln(os.Stderr, "ossprey: warning: passive mode is set in the environment, but --local never submits a scan; nothing was sent.")
 			}
 
+			// Cataloguing is the other long silent stretch of a scan, and on a
+			// project whose ranges have to be resolved through uv or npm it is
+			// the longer one. --local is left silent: it is the machine-facing
+			// mode, and the invariant that it announces nothing is worth more
+			// than an indicator on a run whose output is being piped anyway.
+			catalogued := func() {}
+			if !local {
+				catalogued = progress.Catalog(progressOut)
+			}
 			sbom, err := scan.Run(cmd.Context(), scan.Options{
 				Path:              path,
 				Verbose:           verbose,
 				SkipVersionLookup: noVersionLookup,
 				Timeout:           scanTimeout(timeout),
 			})
+			catalogued()
 			if err != nil {
 				// Passive monitoring runs in front of other people's work, so a
 				// cataloguing failure is reported and shrugged off rather than
@@ -292,6 +325,10 @@ func newScanCmd() *cobra.Command {
 	_ = cmd.Flags().MarkHidden("ci-cache-scan-only")
 	cmd.MarkFlagsMutuallyExclusive("skip-ci", "passive", "ci-cache-scan-only")
 	cmd.MarkFlagsMutuallyExclusive("skip-ci", "monitor")
+	// The two dry-run flags name different outcomes, and the switch below picks
+	// malicious first: passing both silently ran the opposite of what
+	// --dry-run-safe asked for.
+	cmd.MarkFlagsMutuallyExclusive("dry-run-safe", "dry-run-malicious")
 
 	return cmd
 }
@@ -382,6 +419,9 @@ func newCheckCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&failOnInformational, "fail-on-informational", false, "also fail on informational findings, which are reported but exit 0 by default")
 	cmd.Flags().BoolVar(&dryRunSafe, "dry-run-safe", false, "skip API submission; emit empty vulnerability list")
 	cmd.Flags().BoolVar(&dryRunMalicious, "dry-run-malicious", false, "skip API submission; inject test vulnerability against first package")
+	// Same reason as scan: malicious wins the switch, so the pair is a silently
+	// wrong run rather than a no-op.
+	cmd.MarkFlagsMutuallyExclusive("dry-run-safe", "dry-run-malicious")
 
 	return cmd
 }

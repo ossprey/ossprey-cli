@@ -18,6 +18,7 @@ import (
 
 	"github.com/ossprey/ossprey-cli/internal/auth"
 	"github.com/ossprey/ossprey-cli/internal/client"
+	"github.com/ossprey/ossprey-cli/internal/progress"
 	"github.com/ossprey/ossprey-cli/internal/scan"
 	"github.com/ossprey/ossprey-cli/internal/severity"
 	"github.com/ossprey/ossprey-cli/internal/submit"
@@ -409,13 +410,21 @@ func printNextStepsTo(out io.Writer, haveKey bool) {
 // `ossprey scan`. apiKey is the key just minted: passing it makes a clean scan
 // proof the credential works. Empty falls back to the stored login.
 func runFirstScan(ctx context.Context, path, apiURL, apiKey string) error {
+	// Announced the same way `ossprey scan` announces them: init's third step
+	// is that scan, and it is the first thing a new user ever watches this tool
+	// do, so it is the last place that should sit silent for a minute.
+	catalogued := progress.Catalog(progressOut)
 	sbom, err := scan.Run(ctx, scan.Options{Path: path})
+	catalogued()
 	// Ahead of the verdict, not deferred behind it.
 	fmt.Fprint(os.Stderr, warn.Drain(ctx))
 	if err != nil {
 		return err
 	}
-	if err := submit.Validate(ctx, sbom, apiURL, apiKey); err != nil {
+	scanned := progress.Scan(progressOut, len(sbom.Components))
+	err = submit.Validate(ctx, sbom, apiURL, apiKey)
+	scanned()
+	if err != nil {
 		if reportSkipped(err) {
 			return nil
 		}
