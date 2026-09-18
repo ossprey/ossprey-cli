@@ -96,7 +96,7 @@ func TestValidate_Bearer(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	raw, err := c.Validate(ctx, ossbom.MiniBOM{})
+	raw, _, err := c.Validate(ctx, ossbom.MiniBOM{})
 	if err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestValidate_200(t *testing.T) {
 	defer srv.Close()
 
 	c := testClient(t, srv)
-	raw, err := c.Validate(context.Background(), ossbom.MiniBOM{})
+	raw, _, err := c.Validate(context.Background(), ossbom.MiniBOM{})
 	if err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
@@ -170,7 +170,7 @@ func TestValidate_202_Polling(t *testing.T) {
 	// schedules first poll at 1s; we live with that small wait.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	raw, err := c.Validate(ctx, ossbom.MiniBOM{})
+	raw, _, err := c.Validate(ctx, ossbom.MiniBOM{})
 	if err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
@@ -224,7 +224,7 @@ func TestValidate_Errors(t *testing.T) {
 			c := testClient(t, srv)
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			_, err := c.Validate(ctx, ossbom.MiniBOM{})
+			_, _, err := c.Validate(ctx, ossbom.MiniBOM{})
 			if err == nil {
 				t.Fatal("expected error, got nil")
 			}
@@ -242,7 +242,7 @@ func TestValidate_Skipped_TypedError(t *testing.T) {
 	c := testClient(t, srv)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	_, err := c.Validate(ctx, ossbom.MiniBOM{})
+	_, _, err := c.Validate(ctx, ossbom.MiniBOM{})
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -404,7 +404,7 @@ func TestIngestClientRefusesValidate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewIngest: %v", err)
 	}
-	if _, err := c.Validate(context.Background(), ossbom.MiniBOM{}); !errors.Is(err, ErrIngestSubmitOnly) {
+	if _, _, err := c.Validate(context.Background(), ossbom.MiniBOM{}); !errors.Is(err, ErrIngestSubmitOnly) {
 		t.Fatalf("Validate() error = %v, want ErrIngestSubmitOnly", err)
 	}
 }
@@ -429,5 +429,79 @@ func TestIngestTransportErrorDoesNotCarryTheToken(t *testing.T) {
 	}
 	if !strings.Contains(postErr.Error(), monitor.Prefix) {
 		t.Errorf("the error names no monitor at all, so it cannot be debugged: %v", postErr)
+	}
+}
+
+// The floor comes back from the status envelope, beside the SBOM rather than
+// inside it: it is a property of the scan, not of the document.
+func TestValidate_202_CarriesTheFloorThroughThePoll(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/public/v1/scans":
+			w.WriteHeader(http.StatusAccepted)
+			io.WriteString(w, `{"sbom_id":"sb1","scan_id":"sc1"}`)
+		case "/public/v1/scans/status":
+			w.WriteHeader(http.StatusOK)
+			io.WriteString(w, `{"status":"SUCCEEDED","failing_severity_floor":"High","output":{"vulnerabilities":[]}}`)
+		default:
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	c := testClient(t, srv)
+	c.PollBackoff = func(int) time.Duration { return time.Millisecond }
+	_, floor, err := c.Validate(context.Background(), ossbom.MiniBOM{})
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if floor != "High" {
+		t.Errorf("floor: got %q, want High", floor)
+	}
+}
+
+// An older server puts the floor nowhere. Empty is not a floor of Low; it is
+// "the API did not say", which severity.ParseFloor turns into the default.
+func TestValidate_202_NoFloorServed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/public/v1/scans":
+			w.WriteHeader(http.StatusAccepted)
+			io.WriteString(w, `{"sbom_id":"sb1","scan_id":"sc1"}`)
+		case "/public/v1/scans/status":
+			w.WriteHeader(http.StatusOK)
+			io.WriteString(w, `{"status":"SUCCEEDED","output":{"vulnerabilities":[]}}`)
+		default:
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	c := testClient(t, srv)
+	c.PollBackoff = func(int) time.Duration { return time.Millisecond }
+	_, floor, err := c.Validate(context.Background(), ossbom.MiniBOM{})
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if floor != "" {
+		t.Errorf("floor: got %q, want empty", floor)
+	}
+}
+
+// The documented 200 is a bare SBOM with no components and no envelope, so it
+// carries no floor and nothing needs grading.
+func TestValidate_200_HasNoFloor(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, `{"format":"OSSBOM","components":[],"vulnerabilities":[]}`)
+	}))
+	defer srv.Close()
+
+	_, floor, err := testClient(t, srv).Validate(context.Background(), ossbom.MiniBOM{})
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if floor != "" {
+		t.Errorf("floor: got %q, want empty", floor)
 	}
 }
