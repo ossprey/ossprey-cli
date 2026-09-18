@@ -270,3 +270,28 @@ func TestPost_ServerError(t *testing.T) {
 		t.Fatal("expected error, got nil")
 	}
 }
+
+// The envelope is where the floor comes from now. The SBOM body carried a copy
+// for one release, so it is still read as a fallback: a server that has not yet
+// dropped it must not end up with no floor at all.
+func TestValidate_TakesTheFloorFromTheEnvelope(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/public/v1/scans":
+			w.WriteHeader(http.StatusAccepted)
+			io.WriteString(w, `{"sbom_id":"sb1","scan_id":"sc1"}`)
+		default:
+			w.WriteHeader(http.StatusOK)
+			io.WriteString(w, `{"status":"SUCCEEDED","failing_severity_floor":"Critical","output":{"vulnerabilities":[]}}`)
+		}
+	}))
+	defer srv.Close()
+
+	sbom := ossbom.New(ossbom.Environment{})
+	if err := Validate(context.Background(), sbom, srv.URL, "k"); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if sbom.FailingSeverityFloor != "Critical" {
+		t.Errorf("floor: got %q, want Critical", sbom.FailingSeverityFloor)
+	}
+}

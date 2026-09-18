@@ -144,21 +144,12 @@ func TestApplyAPIResponse(t *testing.T) {
 	}
 }
 
-func TestApplyAPIResponseCarriesTheFloor(t *testing.T) {
+// The floor is not part of the document. A body that carries one anyway, from a
+// server still sending the old shape, must not be read back in: the envelope is
+// the only source, so the two can never disagree.
+func TestApplyAPIResponseIgnoresAFloorInTheBody(t *testing.T) {
 	s := New(Environment{})
 	if err := s.ApplyAPIResponse(json.RawMessage(`{"vulnerabilities":[],"failing_severity_floor":"High"}`)); err != nil {
-		t.Fatalf("ApplyAPIResponse: %v", err)
-	}
-	if s.FailingSeverityFloor != "High" {
-		t.Errorf("floor: got %q, want High", s.FailingSeverityFloor)
-	}
-}
-
-// A server that predates the field leaves it empty rather than erroring, which
-// is what keeps an old server behaving exactly as it does today.
-func TestApplyAPIResponseWithoutAFloor(t *testing.T) {
-	s := New(Environment{})
-	if err := s.ApplyAPIResponse(json.RawMessage(`{"vulnerabilities":[]}`)); err != nil {
 		t.Fatalf("ApplyAPIResponse: %v", err)
 	}
 	if s.FailingSeverityFloor != "" {

@@ -52,19 +52,20 @@ func componentPurl(c Component) string {
 	return "pkg:" + c.Type + "/" + c.Name + "@" + c.Version
 }
 
-// ApplyAPIResponse copies the vulnerabilities and the account's failing
-// severity floor from a MiniBOM-shaped API response into this SBOM. It is the
-// one seam where the response meets the local SBOM, so anything a client needs
-// from the server lands here and rides into the -o output for free.
+// ApplyAPIResponse copies the vulnerabilities from a MiniBOM-shaped API response
+// into this SBOM.
+//
+// Deliberately not the failing severity floor: that is a property of the scan,
+// not of the document, so it travels on the response envelope and submit.Validate
+// sets it. An SBOM other formats have to be able to carry is the wrong place to
+// put a per-account policy value.
 func (s *SBOM) ApplyAPIResponse(raw json.RawMessage) error {
 	var resp struct {
-		Vulnerabilities      []Vulnerability `json:"vulnerabilities"`
-		FailingSeverityFloor string          `json:"failing_severity_floor"`
+		Vulnerabilities []Vulnerability `json:"vulnerabilities"`
 	}
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return err
 	}
 	s.Vulnerabilities = append(s.Vulnerabilities, resp.Vulnerabilities...)
-	s.FailingSeverityFloor = resp.FailingSeverityFloor
 	return nil
 }
