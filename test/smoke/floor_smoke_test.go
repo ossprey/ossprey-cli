@@ -15,14 +15,34 @@ import (
 	"testing"
 )
 
-// floorServer answers a scan synchronously with one finding at the given grade
-// and the account floor the API would have applied. floor is omitted entirely
-// when empty, which is what a server predating the field looks like.
+// floorServer answers a scan with one finding at the given grade and the account
+// floor the API would have applied, published on the status envelope where the
+// service puts it. floor is omitted entirely when empty, which is what a server
+// predating the field looks like.
 func floorServer(t *testing.T, findingSeverity, floor string) *httptest.Server {
 	t.Helper()
-	body := map[string]any{"vulnerabilities": []any{}}
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/public/v1/scans":
+			w.WriteHeader(http.StatusAccepted)
+			io.WriteString(w, `{"sbom_id":"sb1","scan_id":"sc1"}`)
+		case "/public/v1/scans/status":
+			w.WriteHeader(http.StatusOK)
+			w.Write(statusBody(t, findingSeverity, floor))
+		default:
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+}
+
+// The production shape: 202 then poll, with the floor on the envelope beside the
+// SBOM. A floor of "" is omitted entirely, which is what a server that serves
+// none looks like.
+func statusBody(t *testing.T, findingSeverity, floor string) []byte {
+	t.Helper()
+	sbom := map[string]any{"vulnerabilities": []any{}}
 	if findingSeverity != "" {
-		body["vulnerabilities"] = []any{map[string]any{
+		sbom["vulnerabilities"] = []any{map[string]any{
 			"id":        "OSSPREY-1",
 			"purl":      "pkg:pypi/simple-math@0.0.1",
 			"type":      "Malware",
@@ -30,20 +50,15 @@ func floorServer(t *testing.T, findingSeverity, floor string) *httptest.Server {
 			"severity":  findingSeverity,
 		}}
 	}
+	envelope := map[string]any{"status": "SUCCEEDED", "output": sbom}
 	if floor != "" {
-		body["failing_severity_floor"] = floor
+		envelope["failing_severity_floor"] = floor
 	}
-	raw, err := json.Marshal(body)
+	raw, err := json.Marshal(envelope)
 	if err != nil {
 		t.Fatalf("marshal stub response: %v", err)
 	}
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/public/v1/scans" {
-			t.Errorf("unexpected path: %s", r.URL.Path)
-		}
-		w.WriteHeader(http.StatusOK)
-		w.Write(raw)
-	}))
+	return raw
 }
 
 func runAgainst(t *testing.T, srv *httptest.Server, args ...string) (runResult, report) {
@@ -133,9 +148,14 @@ func TestAnUngradedFindingFailsARaisedFloor(t *testing.T) {
 	// Built by hand rather than through floorServer: the finding needs no
 	// severity key at all, which is what every row written before grades
 	// existed looks like.
-	raw := `{"failing_severity_floor":"Critical","vulnerabilities":[` +
-		`{"id":"OSSPREY-1","purl":"pkg:pypi/simple-math@0.0.1","type":"Malware","reference":"Unknown"}]}`
+	raw := `{"status":"SUCCEEDED","failing_severity_floor":"Critical","output":{"vulnerabilities":[` +
+		`{"id":"OSSPREY-1","purl":"pkg:pypi/simple-math@0.0.1","type":"Malware","reference":"Unknown"}]}}`
 	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/public/v1/scans" {
+			w.WriteHeader(http.StatusAccepted)
+			io.WriteString(w, `{"sbom_id":"sb1","scan_id":"sc1"}`)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 		io.WriteString(w, raw)
 	}))

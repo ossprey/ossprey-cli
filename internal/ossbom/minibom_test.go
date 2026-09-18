@@ -144,6 +144,41 @@ func TestApplyAPIResponse(t *testing.T) {
 	}
 }
 
+// The floor is not part of the document. A body that carries one anyway, from a
+// server still sending the old shape, must not be read back in: the envelope is
+// the only source, so the two can never disagree.
+func TestApplyAPIResponseIgnoresAFloorInTheBody(t *testing.T) {
+	s := New(Environment{})
+	if err := s.ApplyAPIResponse(json.RawMessage(`{"vulnerabilities":[],"failing_severity_floor":"High"}`)); err != nil {
+		t.Fatalf("ApplyAPIResponse: %v", err)
+	}
+	if s.FailingSeverityFloor != "" {
+		t.Errorf("floor: got %q, want empty", s.FailingSeverityFloor)
+	}
+}
+
+// The -o SBOM is what the Azure DevOps task reads, and --local is the one that
+// must stay byte-identical for a scan that never reached the API.
+func TestEncodeOmitsAnAbsentFloor(t *testing.T) {
+	s := New(Environment{})
+	var buf bytes.Buffer
+	if err := s.Encode(&buf); err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	if strings.Contains(buf.String(), "failing_severity_floor") {
+		t.Errorf("an ungraded SBOM carried a floor key:\n%s", buf.String())
+	}
+
+	s.FailingSeverityFloor = "Critical"
+	buf.Reset()
+	if err := s.Encode(&buf); err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	if !strings.Contains(buf.String(), `"failing_severity_floor": "Critical"`) {
+		t.Errorf("served floor missing from the encoded SBOM:\n%s", buf.String())
+	}
+}
+
 func TestApplyAPIResponseReadsFindings(t *testing.T) {
 	s := New(Environment{})
 	// Findings name components the CLI submitted, so the SBOM holds them too.
@@ -212,55 +247,5 @@ func TestUnscannedNeverExceedsComponents(t *testing.T) {
 	}
 	if got := s.Unscanned(); got != 1 {
 		t.Errorf("Unscanned: got %d, want 1 (clamped to the component count)", got)
-	}
-}
-
-func TestApplyAPIResponseCarriesTheFloor(t *testing.T) {
-	s := New(Environment{})
-	if err := s.ApplyAPIResponse(json.RawMessage(`{"vulnerabilities":[],"failing_severity_floor":"High"}`)); err != nil {
-		t.Fatalf("ApplyAPIResponse: %v", err)
-	}
-	if s.FailingSeverityFloor != "High" {
-		t.Errorf("floor: got %q, want High", s.FailingSeverityFloor)
-	}
-}
-
-// A server that predates the field leaves it empty rather than erroring, which
-// is what keeps an old server behaving exactly as it does today.
-
-// A server that predates the field leaves it empty rather than erroring, which
-// is what keeps an old server behaving exactly as it does today.
-func TestApplyAPIResponseWithoutAFloor(t *testing.T) {
-	s := New(Environment{})
-	if err := s.ApplyAPIResponse(json.RawMessage(`{"vulnerabilities":[]}`)); err != nil {
-		t.Fatalf("ApplyAPIResponse: %v", err)
-	}
-	if s.FailingSeverityFloor != "" {
-		t.Errorf("floor: got %q, want empty", s.FailingSeverityFloor)
-	}
-}
-
-// The -o SBOM is what the Azure DevOps task reads, and --local is the one that
-// must stay byte-identical for a scan that never reached the API.
-
-// The -o SBOM is what the Azure DevOps task reads, and --local is the one that
-// must stay byte-identical for a scan that never reached the API.
-func TestEncodeOmitsAnAbsentFloor(t *testing.T) {
-	s := New(Environment{})
-	var buf bytes.Buffer
-	if err := s.Encode(&buf); err != nil {
-		t.Fatalf("Encode: %v", err)
-	}
-	if strings.Contains(buf.String(), "failing_severity_floor") {
-		t.Errorf("an ungraded SBOM carried a floor key:\n%s", buf.String())
-	}
-
-	s.FailingSeverityFloor = "Critical"
-	buf.Reset()
-	if err := s.Encode(&buf); err != nil {
-		t.Fatalf("Encode: %v", err)
-	}
-	if !strings.Contains(buf.String(), `"failing_severity_floor": "Critical"`) {
-		t.Errorf("served floor missing from the encoded SBOM:\n%s", buf.String())
 	}
 }

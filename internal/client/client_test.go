@@ -97,7 +97,7 @@ func TestValidate_Bearer(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	raw, err := c.Validate(ctx, ossbom.MiniBOM{})
+	raw, _, err := c.Validate(ctx, ossbom.MiniBOM{})
 	if err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestValidate_200(t *testing.T) {
 	defer srv.Close()
 
 	c := testClient(t, srv)
-	raw, err := c.Validate(context.Background(), ossbom.MiniBOM{})
+	raw, _, err := c.Validate(context.Background(), ossbom.MiniBOM{})
 	if err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestValidate_202_Polling(t *testing.T) {
 	// schedules first poll at 1s; we live with that small wait.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	raw, err := c.Validate(ctx, ossbom.MiniBOM{})
+	raw, _, err := c.Validate(ctx, ossbom.MiniBOM{})
 	if err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
@@ -225,7 +225,7 @@ func TestValidate_Errors(t *testing.T) {
 			c := testClient(t, srv)
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			_, err := c.Validate(ctx, ossbom.MiniBOM{})
+			_, _, err := c.Validate(ctx, ossbom.MiniBOM{})
 			if err == nil {
 				t.Fatal("expected error, got nil")
 			}
@@ -243,7 +243,7 @@ func TestValidate_Skipped_TypedError(t *testing.T) {
 	c := testClient(t, srv)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	_, err := c.Validate(ctx, ossbom.MiniBOM{})
+	_, _, err := c.Validate(ctx, ossbom.MiniBOM{})
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -405,7 +405,7 @@ func TestIngestClientRefusesValidate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewIngest: %v", err)
 	}
-	if _, err := c.Validate(context.Background(), ossbom.MiniBOM{}); !errors.Is(err, ErrIngestSubmitOnly) {
+	if _, _, err := c.Validate(context.Background(), ossbom.MiniBOM{}); !errors.Is(err, ErrIngestSubmitOnly) {
 		t.Fatalf("Validate() error = %v, want ErrIngestSubmitOnly", err)
 	}
 }
@@ -433,149 +433,77 @@ func TestIngestTransportErrorDoesNotCarryTheToken(t *testing.T) {
 	}
 }
 
-// testRetryClient is testClient with the submit backoff shortened too, so the
-// retry tests never spend a real half-second asleep.
-func testRetryClient(t *testing.T, srv *httptest.Server) *Client {
-	t.Helper()
-	c := testClient(t, srv)
-	c.RetryBackoff = func(int) time.Duration { return time.Millisecond }
-	return c
-}
-
-// TestPostScan_RetriesTransient checks that a gateway failure and a dropped
-// connection are both retried rather than failing the scan with the same exit
-// code as a malware detection.
-func TestPostScan_RetriesTransient(t *testing.T) {
-	for _, status := range []int{http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout} {
-		t.Run(http.StatusText(status), func(t *testing.T) {
-			var hits atomic.Int32
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if hits.Add(1) == 1 {
-					w.WriteHeader(status)
-					return
-				}
-				w.WriteHeader(http.StatusOK)
-				io.WriteString(w, `{"vulnerabilities":[]}`)
-			}))
-			defer srv.Close()
-
-			c := testRetryClient(t, srv)
-			if _, err := c.Validate(context.Background(), ossbom.MiniBOM{}); err != nil {
-				t.Fatalf("Validate: %v", err)
-			}
-			if got := hits.Load(); got != 2 {
-				t.Errorf("attempts: got %d, want 2", got)
-			}
-		})
-	}
-}
-
-// TestPostScan_RetrySendsBodyAgain pins that the retried request carries the
-// SBOM: bytes.NewReader is consumed by the first attempt, so a reader built
-// once outside the loop would POST an empty body on every retry.
-func TestPostScan_RetrySendsBodyAgain(t *testing.T) {
-	var hits atomic.Int32
-	var second string
+// The floor comes back from the status envelope, beside the SBOM rather than
+// inside it: it is a property of the scan, not of the document.
+func TestValidate_202_CarriesTheFloorThroughThePoll(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		if hits.Add(1) == 1 {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			return
+		switch r.URL.Path {
+		case "/public/v1/scans":
+			w.WriteHeader(http.StatusAccepted)
+			io.WriteString(w, `{"sbom_id":"sb1","scan_id":"sc1"}`)
+		case "/public/v1/scans/status":
+			w.WriteHeader(http.StatusOK)
+			io.WriteString(w, `{"status":"SUCCEEDED","failing_severity_floor":"High","output":{"vulnerabilities":[]}}`)
+		default:
+			t.Errorf("unexpected path: %s", r.URL.Path)
 		}
-		second = string(body)
-		w.WriteHeader(http.StatusOK)
-		io.WriteString(w, `{"vulnerabilities":[]}`)
 	}))
 	defer srv.Close()
 
-	c := testRetryClient(t, srv)
-	if _, err := c.Validate(context.Background(), ossbom.MiniBOM{}); err != nil {
+	c := testClient(t, srv)
+	c.PollBackoff = func(int) time.Duration { return time.Millisecond }
+	_, floor, err := c.Validate(context.Background(), ossbom.MiniBOM{})
+	if err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
-	if !strings.Contains(second, `"sbom"`) {
-		t.Errorf("retry body: got %q, want the sbom payload", second)
+	if floor != "High" {
+		t.Errorf("floor: got %q, want High", floor)
 	}
 }
 
-// TestPostScan_RetryGivesUp checks the attempt budget is bounded and the last
-// error survives.
-func TestPostScan_RetryGivesUp(t *testing.T) {
-	var hits atomic.Int32
+// An older server puts the floor nowhere. Empty is not a floor of Low; it is
+// "the API did not say", which severity.ParseFloor turns into the default.
+func TestValidate_202_NoFloorServed(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits.Add(1)
-		w.WriteHeader(http.StatusBadGateway)
+		switch r.URL.Path {
+		case "/public/v1/scans":
+			w.WriteHeader(http.StatusAccepted)
+			io.WriteString(w, `{"sbom_id":"sb1","scan_id":"sc1"}`)
+		case "/public/v1/scans/status":
+			w.WriteHeader(http.StatusOK)
+			io.WriteString(w, `{"status":"SUCCEEDED","output":{"vulnerabilities":[]}}`)
+		default:
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
 	}))
 	defer srv.Close()
-
-	c := testRetryClient(t, srv)
-	_, err := c.Validate(context.Background(), ossbom.MiniBOM{})
-	if err == nil {
-		t.Fatal("expected error")
-	}
-	if !strings.Contains(err.Error(), "status 502") {
-		t.Errorf("err: got %q, want the 502 to survive", err)
-	}
-	if got := hits.Load(); got != maxSubmitAttempts {
-		t.Errorf("attempts: got %d, want %d", got, maxSubmitAttempts)
-	}
-}
-
-// TestPostScan_DoesNotRetryDefiniteAnswers pins the fail-fast half: a 4xx, a
-// 429 and a 500 are answers about the request, not blips, so repeating them
-// only delays the same failure (and a 500 risks a duplicate scan on quota).
-func TestPostScan_DoesNotRetryDefiniteAnswers(t *testing.T) {
-	for _, status := range []int{http.StatusBadRequest, http.StatusTooManyRequests, http.StatusInternalServerError} {
-		t.Run(http.StatusText(status), func(t *testing.T) {
-			var hits atomic.Int32
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				hits.Add(1)
-				w.WriteHeader(status)
-			}))
-			defer srv.Close()
-
-			c := testRetryClient(t, srv)
-			if _, err := c.Validate(context.Background(), ossbom.MiniBOM{}); err == nil {
-				t.Fatal("expected error")
-			}
-			if got := hits.Load(); got != 1 {
-				t.Errorf("attempts: got %d, want 1", got)
-			}
-		})
-	}
-}
-
-// TestPostScan_RetryRespectsContext checks a cancelled scan is not held alive
-// by the backoff.
-func TestPostScan_RetryRespectsContext(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusBadGateway)
-	}))
-	defer srv.Close()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	c := testClient(t, srv)
-	// Cancel from inside the backoff, not before the first request: cancelling
-	// up front makes the very first Do fail and postScan never reaches the
-	// sleep this test is about.
-	c.RetryBackoff = func(int) time.Duration {
-		cancel()
-		return time.Hour
+	c.PollBackoff = func(int) time.Duration { return time.Millisecond }
+	_, floor, err := c.Validate(context.Background(), ossbom.MiniBOM{})
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
 	}
+	if floor != "" {
+		t.Errorf("floor: got %q, want empty", floor)
+	}
+}
 
-	done := make(chan error, 1)
-	go func() {
-		_, err := c.Validate(ctx, ossbom.MiniBOM{})
-		done <- err
-	}()
-	select {
-	case err := <-done:
-		if err == nil {
-			t.Fatal("expected error")
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Validate slept past context cancellation")
+// The documented 200 is a bare SBOM with no components and no envelope, so it
+// carries no floor and nothing needs grading.
+func TestValidate_200_HasNoFloor(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, `{"format":"OSSBOM","components":[],"vulnerabilities":[]}`)
+	}))
+	defer srv.Close()
+
+	_, floor, err := testClient(t, srv).Validate(context.Background(), ossbom.MiniBOM{})
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if floor != "" {
+		t.Errorf("floor: got %q, want empty", floor)
 	}
 }
 
@@ -618,7 +546,7 @@ func TestAuthError(t *testing.T) {
 			defer srv.Close()
 
 			c := tt.build(t, srv.URL)
-			_, err := c.Validate(context.Background(), ossbom.MiniBOM{})
+			_, _, err := c.Validate(context.Background(), ossbom.MiniBOM{})
 			if err == nil {
 				t.Fatal("expected error")
 			}
@@ -631,6 +559,411 @@ func TestAuthError(t *testing.T) {
 		})
 	}
 }
+
+// TestAuthError_OnStatusPoll covers a key revoked between the submit and the
+// poll: the poll must not retry it as if it were transient.
+func TestAuthError_OnStatusPoll(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/public/v1/scans" {
+			w.WriteHeader(http.StatusAccepted)
+			io.WriteString(w, `{"sbom_id":"sb1","scan_id":"sc1"}`)
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	c := testRetryClient(t, srv)
+	_, _, err := c.Validate(context.Background(), ossbom.MiniBOM{})
+	if err == nil || !strings.Contains(err.Error(), "API key rejected") {
+		t.Fatalf("err: got %v, want the API key message", err)
+	}
+}
+
+// TestPoll_TolerAtesTransientFailures checks a blip mid-poll costs a poll, not
+// the verdict, and that the tolerance is bounded.
+
+// TestAuthError_SurvivesTruncatedBody pins that the status outranks the body
+// read: a 401 whose body never finished arriving is still a rejected
+// credential, so it must not be retried as a blip or reported as a read error.
+func TestAuthError_SurvivesTruncatedBody(t *testing.T) {
+	t.Run("submit", func(t *testing.T) {
+		truncate := truncatedStatusHandler(t, http.StatusUnauthorized)
+		var hits atomic.Int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hits.Add(1)
+			truncate(w)
+		}))
+		defer srv.Close()
+
+		c := testRetryClient(t, srv)
+		_, _, err := c.Validate(context.Background(), ossbom.MiniBOM{})
+		if err == nil || !strings.Contains(err.Error(), "API key rejected") {
+			t.Fatalf("err: got %v, want the API key message", err)
+		}
+		if got := hits.Load(); got != 1 {
+			t.Errorf("attempts: got %d, want 1", got)
+		}
+	})
+
+	t.Run("poll", func(t *testing.T) {
+		truncate := truncatedStatusHandler(t, http.StatusForbidden)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/public/v1/scans" {
+				w.WriteHeader(http.StatusAccepted)
+				io.WriteString(w, `{"sbom_id":"sb1","scan_id":"sc1"}`)
+				return
+			}
+			truncate(w)
+		}))
+		defer srv.Close()
+
+		c := testRetryClient(t, srv)
+		_, _, err := c.Validate(context.Background(), ossbom.MiniBOM{})
+		if err == nil || !strings.Contains(err.Error(), "API key rejected (status 403)") {
+			t.Fatalf("err: got %v, want the API key message", err)
+		}
+	})
+}
+
+// TestPoll_TruncatedBodyIsTransient pins that a status response that dies
+// mid-body costs a poll rather than the verdict. Ignoring the io.ReadAll error
+// turned it into a decode failure, which is a definite error the transient
+// allowance deliberately does not cover.
+
+// TestPoll_AttemptBudget pins that maxPollAttempts polls actually happen. The
+// loop used to stop at maxPollAttempts-1, so the documented 300 was really 299.
+func TestPoll_AttemptBudget(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/public/v1/scans" {
+			w.WriteHeader(http.StatusAccepted)
+			io.WriteString(w, `{"sbom_id":"sb1","scan_id":"sc1"}`)
+			return
+		}
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, `{"status":"RUNNING"}`)
+	}))
+	defer srv.Close()
+
+	c := testRetryClient(t, srv)
+	c.PollBackoff = func(int) time.Duration { return 0 }
+	_, _, err := c.Validate(context.Background(), ossbom.MiniBOM{})
+	if err == nil || !strings.Contains(err.Error(), "took too long") {
+		t.Fatalf("err: got %v, want the poll ceiling", err)
+	}
+	if got := hits.Load(); got != maxPollAttempts {
+		t.Errorf("polls: got %d, want %d", got, maxPollAttempts)
+	}
+}
+
+func TestPoll_GivesUpAfterRepeatedTransientFailures(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/public/v1/scans" {
+			w.WriteHeader(http.StatusAccepted)
+			io.WriteString(w, `{"sbom_id":"sb1","scan_id":"sc1"}`)
+			return
+		}
+		hits.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	c := testRetryClient(t, srv)
+	_, _, err := c.Validate(context.Background(), ossbom.MiniBOM{})
+	if err == nil || !strings.Contains(err.Error(), "status poll failed (503)") {
+		t.Fatalf("err: got %v, want the 503 to survive", err)
+	}
+	if got := hits.Load(); got != maxTransientPolls {
+		t.Errorf("polls: got %d, want %d", got, maxTransientPolls)
+	}
+}
+
+// TestPoll_AttemptBudget pins that maxPollAttempts polls actually happen. The
+// loop used to stop at maxPollAttempts-1, so the documented 300 was really 299.
+
+// TestPoll_TolerAtesTransientFailures checks a blip mid-poll costs a poll, not
+// the verdict, and that the tolerance is bounded.
+func TestPoll_ToleratesTransientFailures(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/public/v1/scans" {
+			w.WriteHeader(http.StatusAccepted)
+			io.WriteString(w, `{"sbom_id":"sb1","scan_id":"sc1"}`)
+			return
+		}
+		if hits.Add(1) <= 2 {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, `{"status":"SUCCEEDED","output":{"vulnerabilities":[]}}`)
+	}))
+	defer srv.Close()
+
+	c := testRetryClient(t, srv)
+	raw, _, err := c.Validate(context.Background(), ossbom.MiniBOM{})
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if !strings.Contains(string(raw), `"vulnerabilities"`) {
+		t.Errorf("output: %s", raw)
+	}
+}
+
+// TestPoll_TruncatedBodyIsTransient pins that a status response that dies
+// mid-body costs a poll rather than the verdict. Ignoring the io.ReadAll error
+// turned it into a decode failure, which is a definite error the transient
+// allowance deliberately does not cover.
+func TestPoll_TruncatedBodyIsTransient(t *testing.T) {
+	truncate := truncatedBodyHandler(t)
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/public/v1/scans" {
+			w.WriteHeader(http.StatusAccepted)
+			io.WriteString(w, `{"sbom_id":"sb1","scan_id":"sc1"}`)
+			return
+		}
+		if hits.Add(1) == 1 {
+			truncate(w)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, `{"status":"SUCCEEDED","output":{"vulnerabilities":[]}}`)
+	}))
+	defer srv.Close()
+
+	c := testRetryClient(t, srv)
+	raw, _, err := c.Validate(context.Background(), ossbom.MiniBOM{})
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if !strings.Contains(string(raw), `"vulnerabilities"`) {
+		t.Errorf("output: %s", raw)
+	}
+	if got := hits.Load(); got != 2 {
+		t.Errorf("polls: got %d, want 2", got)
+	}
+}
+
+// TestPostScan_TruncatedBodyIsRetried is the submit-side counterpart: a body
+// that dies mid-read must not reach the caller as a decode error.
+
+// TestPostScan_DoesNotRetryDefiniteAnswers pins the fail-fast half: a 4xx, a
+// 429 and a 500 are answers about the request, not blips, so repeating them
+// only delays the same failure (and a 500 risks a duplicate scan on quota).
+func TestPostScan_DoesNotRetryDefiniteAnswers(t *testing.T) {
+	for _, status := range []int{http.StatusBadRequest, http.StatusTooManyRequests, http.StatusInternalServerError} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			var hits atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hits.Add(1)
+				w.WriteHeader(status)
+			}))
+			defer srv.Close()
+
+			c := testRetryClient(t, srv)
+			if _, _, err := c.Validate(context.Background(), ossbom.MiniBOM{}); err == nil {
+				t.Fatal("expected error")
+			}
+			if got := hits.Load(); got != 1 {
+				t.Errorf("attempts: got %d, want 1", got)
+			}
+		})
+	}
+}
+
+// TestPostScan_RetryRespectsContext checks a cancelled scan is not held alive
+// by the backoff.
+
+// TestPostScan_RetriesTransient checks that a gateway failure and a dropped
+// connection are both retried rather than failing the scan with the same exit
+// code as a malware detection.
+func TestPostScan_RetriesTransient(t *testing.T) {
+	for _, status := range []int{http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			var hits atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if hits.Add(1) == 1 {
+					w.WriteHeader(status)
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+				io.WriteString(w, `{"vulnerabilities":[]}`)
+			}))
+			defer srv.Close()
+
+			c := testRetryClient(t, srv)
+			if _, _, err := c.Validate(context.Background(), ossbom.MiniBOM{}); err != nil {
+				t.Fatalf("Validate: %v", err)
+			}
+			if got := hits.Load(); got != 2 {
+				t.Errorf("attempts: got %d, want 2", got)
+			}
+		})
+	}
+}
+
+// TestPostScan_RetrySendsBodyAgain pins that the retried request carries the
+// SBOM: bytes.NewReader is consumed by the first attempt, so a reader built
+// once outside the loop would POST an empty body on every retry.
+
+// TestPostScan_RetriesTransportError covers the other half of "transient": the
+// connection dropping before any status arrives, which is what a flaky network
+// in CI actually looks like.
+func TestPostScan_RetriesTransportError(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hits.Add(1) == 1 {
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Errorf("hijack: %v", err)
+				return
+			}
+			conn.Close()
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, `{"vulnerabilities":[]}`)
+	}))
+	defer srv.Close()
+
+	c := testRetryClient(t, srv)
+	if _, _, err := c.Validate(context.Background(), ossbom.MiniBOM{}); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if got := hits.Load(); got != 2 {
+		t.Errorf("attempts: got %d, want 2", got)
+	}
+}
+
+// truncatedBodyHandler writes a Content-Length it does not satisfy and then
+// drops the connection, so the client's io.ReadAll fails partway through a
+// 200. Needed because httptest cannot otherwise produce a half-read response.
+
+// TestPostScan_RetryGivesUp checks the attempt budget is bounded and the last
+// error survives.
+func TestPostScan_RetryGivesUp(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer srv.Close()
+
+	c := testRetryClient(t, srv)
+	_, _, err := c.Validate(context.Background(), ossbom.MiniBOM{})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "status 502") {
+		t.Errorf("err: got %q, want the 502 to survive", err)
+	}
+	if got := hits.Load(); got != maxSubmitAttempts {
+		t.Errorf("attempts: got %d, want %d", got, maxSubmitAttempts)
+	}
+}
+
+// TestPostScan_DoesNotRetryDefiniteAnswers pins the fail-fast half: a 4xx, a
+// 429 and a 500 are answers about the request, not blips, so repeating them
+// only delays the same failure (and a 500 risks a duplicate scan on quota).
+
+// TestPostScan_RetryRespectsContext checks a cancelled scan is not held alive
+// by the backoff.
+func TestPostScan_RetryRespectsContext(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	c := testClient(t, srv)
+	// Cancel from inside the backoff, not before the first request: cancelling
+	// up front makes the very first Do fail and postScan never reaches the
+	// sleep this test is about.
+	c.RetryBackoff = func(int) time.Duration {
+		cancel()
+		return time.Hour
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := c.Validate(ctx, ossbom.MiniBOM{})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected error")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Validate slept past context cancellation")
+	}
+}
+
+// TestAuthError checks 401 and 403 become an actionable message rather than a
+// raw JSON body, on both the submit and the status poll, and that the wording
+// names the credential the client actually used.
+
+// TestPostScan_RetrySendsBodyAgain pins that the retried request carries the
+// SBOM: bytes.NewReader is consumed by the first attempt, so a reader built
+// once outside the loop would POST an empty body on every retry.
+func TestPostScan_RetrySendsBodyAgain(t *testing.T) {
+	var hits atomic.Int32
+	var second string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if hits.Add(1) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		second = string(body)
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, `{"vulnerabilities":[]}`)
+	}))
+	defer srv.Close()
+
+	c := testRetryClient(t, srv)
+	if _, _, err := c.Validate(context.Background(), ossbom.MiniBOM{}); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if !strings.Contains(second, `"sbom"`) {
+		t.Errorf("retry body: got %q, want the sbom payload", second)
+	}
+}
+
+// TestPostScan_RetryGivesUp checks the attempt budget is bounded and the last
+// error survives.
+
+// TestPostScan_TruncatedBodyIsRetried is the submit-side counterpart: a body
+// that dies mid-read must not reach the caller as a decode error.
+func TestPostScan_TruncatedBodyIsRetried(t *testing.T) {
+	truncate := truncatedBodyHandler(t)
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hits.Add(1) == 1 {
+			truncate(w)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, `{"vulnerabilities":[]}`)
+	}))
+	defer srv.Close()
+
+	c := testRetryClient(t, srv)
+	if _, _, err := c.Validate(context.Background(), ossbom.MiniBOM{}); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if got := hits.Load(); got != 2 {
+		t.Errorf("attempts: got %d, want 2", got)
+	}
+}
+
+// acceptServer captures the client-identity headers of the submission it serves.
 
 func TestSkipMessage(t *testing.T) {
 	tests := []struct {
@@ -670,310 +1003,6 @@ func TestSkipMessage(t *testing.T) {
 
 // TestAuthError_OnStatusPoll covers a key revoked between the submit and the
 // poll: the poll must not retry it as if it were transient.
-func TestAuthError_OnStatusPoll(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/public/v1/scans" {
-			w.WriteHeader(http.StatusAccepted)
-			io.WriteString(w, `{"sbom_id":"sb1","scan_id":"sc1"}`)
-			return
-		}
-		w.WriteHeader(http.StatusUnauthorized)
-	}))
-	defer srv.Close()
-
-	c := testRetryClient(t, srv)
-	_, err := c.Validate(context.Background(), ossbom.MiniBOM{})
-	if err == nil || !strings.Contains(err.Error(), "API key rejected") {
-		t.Fatalf("err: got %v, want the API key message", err)
-	}
-}
-
-// TestPoll_TolerAtesTransientFailures checks a blip mid-poll costs a poll, not
-// the verdict, and that the tolerance is bounded.
-func TestPoll_ToleratesTransientFailures(t *testing.T) {
-	var hits atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/public/v1/scans" {
-			w.WriteHeader(http.StatusAccepted)
-			io.WriteString(w, `{"sbom_id":"sb1","scan_id":"sc1"}`)
-			return
-		}
-		if hits.Add(1) <= 2 {
-			w.WriteHeader(http.StatusBadGateway)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		io.WriteString(w, `{"status":"SUCCEEDED","output":{"vulnerabilities":[]}}`)
-	}))
-	defer srv.Close()
-
-	c := testRetryClient(t, srv)
-	raw, err := c.Validate(context.Background(), ossbom.MiniBOM{})
-	if err != nil {
-		t.Fatalf("Validate: %v", err)
-	}
-	if !strings.Contains(string(raw), `"vulnerabilities"`) {
-		t.Errorf("output: %s", raw)
-	}
-}
-
-func TestPoll_GivesUpAfterRepeatedTransientFailures(t *testing.T) {
-	var hits atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/public/v1/scans" {
-			w.WriteHeader(http.StatusAccepted)
-			io.WriteString(w, `{"sbom_id":"sb1","scan_id":"sc1"}`)
-			return
-		}
-		hits.Add(1)
-		w.WriteHeader(http.StatusServiceUnavailable)
-	}))
-	defer srv.Close()
-
-	c := testRetryClient(t, srv)
-	_, err := c.Validate(context.Background(), ossbom.MiniBOM{})
-	if err == nil || !strings.Contains(err.Error(), "status poll failed (503)") {
-		t.Fatalf("err: got %v, want the 503 to survive", err)
-	}
-	if got := hits.Load(); got != maxTransientPolls {
-		t.Errorf("polls: got %d, want %d", got, maxTransientPolls)
-	}
-}
-
-// TestPoll_AttemptBudget pins that maxPollAttempts polls actually happen. The
-// loop used to stop at maxPollAttempts-1, so the documented 300 was really 299.
-func TestPoll_AttemptBudget(t *testing.T) {
-	var hits atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/public/v1/scans" {
-			w.WriteHeader(http.StatusAccepted)
-			io.WriteString(w, `{"sbom_id":"sb1","scan_id":"sc1"}`)
-			return
-		}
-		hits.Add(1)
-		w.WriteHeader(http.StatusOK)
-		io.WriteString(w, `{"status":"RUNNING"}`)
-	}))
-	defer srv.Close()
-
-	c := testRetryClient(t, srv)
-	c.PollBackoff = func(int) time.Duration { return 0 }
-	_, err := c.Validate(context.Background(), ossbom.MiniBOM{})
-	if err == nil || !strings.Contains(err.Error(), "took too long") {
-		t.Fatalf("err: got %v, want the poll ceiling", err)
-	}
-	if got := hits.Load(); got != maxPollAttempts {
-		t.Errorf("polls: got %d, want %d", got, maxPollAttempts)
-	}
-}
-
-func mustNew(t *testing.T, baseURL, key string) *Client {
-	t.Helper()
-	c, err := New(baseURL, key)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	c.PollBackoff = func(int) time.Duration { return time.Millisecond }
-	c.RetryBackoff = func(int) time.Duration { return time.Millisecond }
-	return c
-}
-
-func mustNewBearer(t *testing.T, baseURL, token string) *Client {
-	t.Helper()
-	c, err := NewBearer(baseURL, token)
-	if err != nil {
-		t.Fatalf("NewBearer: %v", err)
-	}
-	c.PollBackoff = func(int) time.Duration { return time.Millisecond }
-	c.RetryBackoff = func(int) time.Duration { return time.Millisecond }
-	return c
-}
-
-// TestPostScan_RetriesTransportError covers the other half of "transient": the
-// connection dropping before any status arrives, which is what a flaky network
-// in CI actually looks like.
-func TestPostScan_RetriesTransportError(t *testing.T) {
-	var hits atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if hits.Add(1) == 1 {
-			conn, _, err := w.(http.Hijacker).Hijack()
-			if err != nil {
-				t.Errorf("hijack: %v", err)
-				return
-			}
-			conn.Close()
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		io.WriteString(w, `{"vulnerabilities":[]}`)
-	}))
-	defer srv.Close()
-
-	c := testRetryClient(t, srv)
-	if _, err := c.Validate(context.Background(), ossbom.MiniBOM{}); err != nil {
-		t.Fatalf("Validate: %v", err)
-	}
-	if got := hits.Load(); got != 2 {
-		t.Errorf("attempts: got %d, want 2", got)
-	}
-}
-
-// truncatedBodyHandler writes a Content-Length it does not satisfy and then
-// drops the connection, so the client's io.ReadAll fails partway through a
-// 200. Needed because httptest cannot otherwise produce a half-read response.
-func truncatedBodyHandler(t *testing.T) func(http.ResponseWriter) {
-	t.Helper()
-	return truncatedStatusHandler(t, http.StatusOK)
-}
-
-func truncatedStatusHandler(t *testing.T, status int) func(http.ResponseWriter) {
-	t.Helper()
-	return func(w http.ResponseWriter) {
-		conn, buf, err := w.(http.Hijacker).Hijack()
-		if err != nil {
-			t.Errorf("hijack: %v", err)
-			return
-		}
-		defer conn.Close()
-		fmt.Fprintf(buf, "HTTP/1.1 %d %s\r\nContent-Type: application/json\r\nContent-Length: 200\r\n\r\n", status, http.StatusText(status))
-		buf.WriteString(`{"status":"SUCC`)
-		buf.Flush()
-	}
-}
-
-// TestAuthError_SurvivesTruncatedBody pins that the status outranks the body
-// read: a 401 whose body never finished arriving is still a rejected
-// credential, so it must not be retried as a blip or reported as a read error.
-func TestAuthError_SurvivesTruncatedBody(t *testing.T) {
-	t.Run("submit", func(t *testing.T) {
-		truncate := truncatedStatusHandler(t, http.StatusUnauthorized)
-		var hits atomic.Int32
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			hits.Add(1)
-			truncate(w)
-		}))
-		defer srv.Close()
-
-		c := testRetryClient(t, srv)
-		_, err := c.Validate(context.Background(), ossbom.MiniBOM{})
-		if err == nil || !strings.Contains(err.Error(), "API key rejected") {
-			t.Fatalf("err: got %v, want the API key message", err)
-		}
-		if got := hits.Load(); got != 1 {
-			t.Errorf("attempts: got %d, want 1", got)
-		}
-	})
-
-	t.Run("poll", func(t *testing.T) {
-		truncate := truncatedStatusHandler(t, http.StatusForbidden)
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path == "/public/v1/scans" {
-				w.WriteHeader(http.StatusAccepted)
-				io.WriteString(w, `{"sbom_id":"sb1","scan_id":"sc1"}`)
-				return
-			}
-			truncate(w)
-		}))
-		defer srv.Close()
-
-		c := testRetryClient(t, srv)
-		_, err := c.Validate(context.Background(), ossbom.MiniBOM{})
-		if err == nil || !strings.Contains(err.Error(), "API key rejected (status 403)") {
-			t.Fatalf("err: got %v, want the API key message", err)
-		}
-	})
-}
-
-// TestPoll_TruncatedBodyIsTransient pins that a status response that dies
-// mid-body costs a poll rather than the verdict. Ignoring the io.ReadAll error
-// turned it into a decode failure, which is a definite error the transient
-// allowance deliberately does not cover.
-func TestPoll_TruncatedBodyIsTransient(t *testing.T) {
-	truncate := truncatedBodyHandler(t)
-	var hits atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/public/v1/scans" {
-			w.WriteHeader(http.StatusAccepted)
-			io.WriteString(w, `{"sbom_id":"sb1","scan_id":"sc1"}`)
-			return
-		}
-		if hits.Add(1) == 1 {
-			truncate(w)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		io.WriteString(w, `{"status":"SUCCEEDED","output":{"vulnerabilities":[]}}`)
-	}))
-	defer srv.Close()
-
-	c := testRetryClient(t, srv)
-	raw, err := c.Validate(context.Background(), ossbom.MiniBOM{})
-	if err != nil {
-		t.Fatalf("Validate: %v", err)
-	}
-	if !strings.Contains(string(raw), `"vulnerabilities"`) {
-		t.Errorf("output: %s", raw)
-	}
-	if got := hits.Load(); got != 2 {
-		t.Errorf("polls: got %d, want 2", got)
-	}
-}
-
-// TestPostScan_TruncatedBodyIsRetried is the submit-side counterpart: a body
-// that dies mid-read must not reach the caller as a decode error.
-func TestPostScan_TruncatedBodyIsRetried(t *testing.T) {
-	truncate := truncatedBodyHandler(t)
-	var hits atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if hits.Add(1) == 1 {
-			truncate(w)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		io.WriteString(w, `{"vulnerabilities":[]}`)
-	}))
-	defer srv.Close()
-
-	c := testRetryClient(t, srv)
-	if _, err := c.Validate(context.Background(), ossbom.MiniBOM{}); err != nil {
-		t.Fatalf("Validate: %v", err)
-	}
-	if got := hits.Load(); got != 2 {
-		t.Errorf("attempts: got %d, want 2", got)
-	}
-}
-
-// acceptServer captures the client-identity headers of the submission it serves.
-func acceptServer(t *testing.T, gotClient, gotVersion *string) *httptest.Server {
-	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		*gotClient = r.Header.Get("X-Ossprey-Client")
-		*gotVersion = r.Header.Get("X-Ossprey-Client-Version")
-		w.WriteHeader(http.StatusAccepted)
-		io.WriteString(w, `{"sbom_id":"sb1","scan_id":"sc1"}`)
-	}))
-}
-
-// Which CLI release a customer runs is otherwise only answerable by asking them.
-func TestSubmit_ReportsClientIdentity(t *testing.T) {
-	orig := Version
-	Version = "0.15.0"
-	t.Cleanup(func() { Version = orig })
-
-	var gotClient, gotVersion string
-	srv := acceptServer(t, &gotClient, &gotVersion)
-	defer srv.Close()
-
-	if err := testClient(t, srv).Submit(context.Background(), ossbom.MiniBOM{}); err != nil {
-		t.Fatalf("Submit: %v", err)
-	}
-	if gotVersion != "0.15.0" {
-		t.Errorf("version header: got %q, want %q", gotVersion, "0.15.0")
-	}
-	if gotClient != "cli" {
-		t.Errorf("client header: got %q, want %q", gotClient, "cli")
-	}
-}
 
 // Wrappers name themselves through OSSPREY_CLIENT, so a scan can be attributed
 // to the action that ran it. Anything the API would reject falls back to "cli".
@@ -1008,34 +1037,105 @@ func TestSubmit_ClientNameFromEnv(t *testing.T) {
 	}
 }
 
-// The floor rides inside the SBOM rather than beside it, so it survives the
-// poll path that discards the status envelope.
-func TestValidate_202_CarriesTheFloorThroughThePoll(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/public/v1/scans":
-			w.WriteHeader(http.StatusAccepted)
-			io.WriteString(w, `{"sbom_id":"sb1","scan_id":"sc1"}`)
-		case "/public/v1/scans/status":
-			w.WriteHeader(http.StatusOK)
-			io.WriteString(w, `{"status":"SUCCEEDED","failing_severity_floor":"High","output":{"vulnerabilities":[],"failing_severity_floor":"High"}}`)
-		default:
-			t.Errorf("unexpected path: %s", r.URL.Path)
-		}
-	}))
+// Which CLI release a customer runs is otherwise only answerable by asking them.
+func TestSubmit_ReportsClientIdentity(t *testing.T) {
+	orig := Version
+	Version = "0.15.0"
+	t.Cleanup(func() { Version = orig })
+
+	var gotClient, gotVersion string
+	srv := acceptServer(t, &gotClient, &gotVersion)
 	defer srv.Close()
 
-	c := testClient(t, srv)
-	c.PollBackoff = func(int) time.Duration { return time.Millisecond }
-	raw, err := c.Validate(context.Background(), ossbom.MiniBOM{})
-	if err != nil {
-		t.Fatalf("Validate: %v", err)
+	if err := testClient(t, srv).Submit(context.Background(), ossbom.MiniBOM{}); err != nil {
+		t.Fatalf("Submit: %v", err)
 	}
-	sbom := ossbom.New(ossbom.Environment{})
-	if err := sbom.ApplyAPIResponse(raw); err != nil {
-		t.Fatalf("ApplyAPIResponse: %v", err)
+	if gotVersion != "0.15.0" {
+		t.Errorf("version header: got %q, want %q", gotVersion, "0.15.0")
 	}
-	if sbom.FailingSeverityFloor != "High" {
-		t.Errorf("floor: got %q, want High", sbom.FailingSeverityFloor)
+	if gotClient != "cli" {
+		t.Errorf("client header: got %q, want %q", gotClient, "cli")
 	}
 }
+
+// Wrappers name themselves through OSSPREY_CLIENT, so a scan can be attributed
+// to the action that ran it. Anything the API would reject falls back to "cli".
+
+// acceptServer captures the client-identity headers of the submission it serves.
+func acceptServer(t *testing.T, gotClient, gotVersion *string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*gotClient = r.Header.Get("X-Ossprey-Client")
+		*gotVersion = r.Header.Get("X-Ossprey-Client-Version")
+		w.WriteHeader(http.StatusAccepted)
+		io.WriteString(w, `{"sbom_id":"sb1","scan_id":"sc1"}`)
+	}))
+}
+
+// Which CLI release a customer runs is otherwise only answerable by asking them.
+
+func mustNew(t *testing.T, baseURL, key string) *Client {
+	t.Helper()
+	c, err := New(baseURL, key)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	c.PollBackoff = func(int) time.Duration { return time.Millisecond }
+	c.RetryBackoff = func(int) time.Duration { return time.Millisecond }
+	return c
+}
+
+func mustNewBearer(t *testing.T, baseURL, token string) *Client {
+	t.Helper()
+	c, err := NewBearer(baseURL, token)
+	if err != nil {
+		t.Fatalf("NewBearer: %v", err)
+	}
+	c.PollBackoff = func(int) time.Duration { return time.Millisecond }
+	c.RetryBackoff = func(int) time.Duration { return time.Millisecond }
+	return c
+}
+
+// TestPostScan_RetriesTransportError covers the other half of "transient": the
+// connection dropping before any status arrives, which is what a flaky network
+// in CI actually looks like.
+
+// testRetryClient is testClient with the submit backoff shortened too, so the
+// retry tests never spend a real half-second asleep.
+func testRetryClient(t *testing.T, srv *httptest.Server) *Client {
+	t.Helper()
+	c := testClient(t, srv)
+	c.RetryBackoff = func(int) time.Duration { return time.Millisecond }
+	return c
+}
+
+// TestPostScan_RetriesTransient checks that a gateway failure and a dropped
+// connection are both retried rather than failing the scan with the same exit
+// code as a malware detection.
+
+// truncatedBodyHandler writes a Content-Length it does not satisfy and then
+// drops the connection, so the client's io.ReadAll fails partway through a
+// 200. Needed because httptest cannot otherwise produce a half-read response.
+func truncatedBodyHandler(t *testing.T) func(http.ResponseWriter) {
+	t.Helper()
+	return truncatedStatusHandler(t, http.StatusOK)
+}
+
+func truncatedStatusHandler(t *testing.T, status int) func(http.ResponseWriter) {
+	t.Helper()
+	return func(w http.ResponseWriter) {
+		conn, buf, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		defer conn.Close()
+		fmt.Fprintf(buf, "HTTP/1.1 %d %s\r\nContent-Type: application/json\r\nContent-Length: 200\r\n\r\n", status, http.StatusText(status))
+		buf.WriteString(`{"status":"SUCC`)
+		buf.Flush()
+	}
+}
+
+// TestAuthError_SurvivesTruncatedBody pins that the status outranks the body
+// read: a 401 whose body never finished arriving is still a rejected
+// credential, so it must not be retried as a blip or reported as a read error.
