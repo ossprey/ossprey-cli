@@ -271,9 +271,8 @@ func TestPost_ServerError(t *testing.T) {
 	}
 }
 
-// The envelope is where the floor comes from now. The SBOM body carried a copy
-// for one release, so it is still read as a fallback: a server that has not yet
-// dropped it must not end up with no floor at all.
+// The envelope is the only source. The body carried a copy briefly and no longer
+// does, and ApplyAPIResponse no longer reads one, so the two cannot disagree.
 func TestValidate_TakesTheFloorFromTheEnvelope(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
