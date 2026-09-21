@@ -1107,7 +1107,8 @@ func TestCatalogCargoOnlyFullSemverIsAPin(t *testing.T) {
 
 func TestCatalogCargoResolvesRangesToLatest(t *testing.T) {
 	// The shipping path: version lookup is on by default, so every Cargo.toml
-	// range reaches the registry. Stubbed, since the assertion is the wiring.
+	// range reaches the registry. This pins current behaviour rather than
+	// endorsing it: a latest release can fall outside the declared range.
 	t.Setenv("OSSPREY_RESOLVE_LATEST", "")
 	var askedPinned atomic.Bool // resolveVersionless calls the resolver concurrently
 	withResolveLatest(t, func(_ context.Context, _, name string) (string, error) {
