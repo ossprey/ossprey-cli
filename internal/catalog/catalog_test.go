@@ -1142,3 +1142,88 @@ func TestCatalogCargoResolvesRangesToLatest(t *testing.T) {
 		t.Error("a pinned crate should not be looked up")
 	}
 }
+
+const cargoWorkspaceRootPoolFixture = `[workspace]
+members = ["crates/app"]
+
+[workspace.dependencies]
+pinned = "=1.2.3"
+renamed = { package = "real-pool-crate", version = "=2.0.0" }
+localdep = { path = "../local" }
+privdep = { version = "=3.0.0", registry = "company-internal" }
+ranged = "1.4"
+`
+
+const cargoWorkspaceMemberFixture = `[package]
+name = "app"
+
+[dependencies]
+pinned = { workspace = true }
+renamed = { workspace = true }
+localdep = { workspace = true }
+privdep = { workspace = true }
+ranged = { workspace = true }
+`
+
+func TestCatalogCargoInheritsFromTheWorkspaceRoot(t *testing.T) {
+	// The conventional layout: the pool lives in the root manifest and the
+	// member holds only the opt-in, so reading the member alone finds nothing.
+	dir := t.TempDir()
+	writeFile(t, dir, "Cargo.toml", cargoWorkspaceRootPoolFixture)
+	if err := os.MkdirAll(filepath.Join(dir, "crates", "app"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	writeFile(t, filepath.Join(dir, "crates", "app"), "Cargo.toml", cargoWorkspaceMemberFixture)
+
+	got, err := Catalog(context.Background(), dir, Options{SkipVersionLookup: true, NoExec: true})
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	byName := map[string]Package{}
+	for _, p := range got {
+		byName[p.Name] = p
+	}
+
+	if p := byName["pinned"]; p.Version != "1.2.3" {
+		t.Errorf("root pin: version = %q, want 1.2.3", p.Version)
+	}
+	// Without the root's rename the alias goes out as a crate name, which is a
+	// lookup against whatever happens to own that name on crates.io.
+	if _, ok := byName["renamed"]; ok {
+		t.Error("the alias was emitted; the registry has no such crate")
+	}
+	if p := byName["real-pool-crate"]; p.Version != "2.0.0" {
+		t.Errorf("root rename: version = %q, want 2.0.0", p.Version)
+	}
+	// Both name something that is not on crates.io, so resolving them there is
+	// the dependency-confusion surface this cataloguer must not open.
+	for _, name := range []string{"localdep", "privdep"} {
+		if _, ok := byName[name]; ok {
+			t.Errorf("%s is not a crates.io crate and should not be emitted", name)
+		}
+	}
+	if p, ok := byName["ranged"]; !ok || p.Version != "" {
+		t.Errorf("a pooled range is still a range, got %+v", p)
+	}
+}
+
+func TestCatalogCargoWorkspaceLookupStopsAtTheScanRoot(t *testing.T) {
+	// Scanning the member alone must not read a manifest outside the scan root.
+	dir := t.TempDir()
+	writeFile(t, dir, "Cargo.toml", cargoWorkspaceRootPoolFixture)
+	member := filepath.Join(dir, "crates", "app")
+	if err := os.MkdirAll(member, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	writeFile(t, member, "Cargo.toml", cargoWorkspaceMemberFixture)
+
+	got, err := Catalog(context.Background(), member, Options{SkipVersionLookup: true, NoExec: true})
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	for _, p := range got {
+		if p.Version != "" {
+			t.Errorf("%s: version = %q, want empty; the root is outside the scan", p.Name, p.Version)
+		}
+	}
+}

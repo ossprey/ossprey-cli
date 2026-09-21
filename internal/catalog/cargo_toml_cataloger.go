@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -28,7 +29,11 @@ func NewCargoTomlCataloger(root string) *CargoTomlCataloger {
 func (c *CargoTomlCataloger) Name() string { return "ossprey-cargotoml-cataloger" }
 
 func (c *CargoTomlCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]pkg.Package, []artifact.Relationship, error) {
-	out, err := catalogByGlob(ctx, resolver, c.root, "**/Cargo.toml", "cargotoml", parseCargoTomlFile)
+	// The scan root bounds the walk to a member's workspace root.
+	parse := func(path string, loc file.Location) ([]pkg.Package, error) {
+		return parseCargoTomlFile(path, loc, c.root)
+	}
+	out, err := catalogByGlob(ctx, resolver, c.root, "**/Cargo.toml", "cargotoml", parse)
 	return out, nil, err
 }
 
@@ -53,7 +58,7 @@ type cargoManifest struct {
 	} `toml:"workspace"`
 }
 
-func parseCargoTomlFile(path string, loc file.Location) ([]pkg.Package, error) {
+func parseCargoTomlFile(path string, loc file.Location, scanRoot string) ([]pkg.Package, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -66,10 +71,11 @@ func parseCargoTomlFile(path string, loc file.Location) ([]pkg.Package, error) {
 		return nil, err
 	}
 
+	pool := workspacePool(m, path, scanRoot)
 	seen := make(map[string]struct{})
 	var out []pkg.Package
 	add := func(alias string, spec any) {
-		name, version, ok := cargoDep(alias, spec, m.Workspace.Dependencies)
+		name, version, ok := cargoDep(alias, spec, pool)
 		if !ok || name == "" || name == m.Package.Name {
 			return
 		}
@@ -97,6 +103,39 @@ func parseCargoTomlFile(path string, loc file.Location) ([]pkg.Package, error) {
 		}
 	}
 	return out, nil
+}
+
+// workspacePool returns the [workspace.dependencies] table governing this
+// manifest: its own when it declares one, else the nearest ancestor manifest
+// that does, since a workspace member conventionally holds only the opt-in.
+// Bounded by the scan root, so it never reads outside what was asked for.
+func workspacePool(m cargoManifest, manifestPath, scanRoot string) map[string]any {
+	if len(m.Workspace.Dependencies) > 0 {
+		return m.Workspace.Dependencies
+	}
+	root := filepath.Clean(scanRoot)
+	dir := filepath.Dir(filepath.Clean(manifestPath))
+	for {
+		parent := filepath.Dir(dir)
+		if parent == dir || !withinRoot(parent, root) {
+			return nil
+		}
+		dir = parent
+		data, err := os.ReadFile(filepath.Join(dir, "Cargo.toml"))
+		if err != nil {
+			continue
+		}
+		var ancestor cargoManifest
+		if toml.Unmarshal(data, &ancestor) == nil && len(ancestor.Workspace.Dependencies) > 0 {
+			return ancestor.Workspace.Dependencies
+		}
+	}
+}
+
+// withinRoot reports whether dir is root or sits inside it.
+func withinRoot(dir, root string) bool {
+	rel, err := filepath.Rel(root, dir)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // cargoDep resolves one dependency entry to the crate name and version to
