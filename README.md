@@ -1015,8 +1015,10 @@ spelling of `--passive` and keep working unchanged.
 
 ## Output
 
-`ossprey scan` prints `No malware found` on success. On a malware verdict it
-draws an alert box naming every malicious package, followed by one
+`ossprey scan` prints `No malware found` on success, or `No malware found in
+<scanned> of <total> packages` when the platform did not check everything it
+was sent (see [`unscanned`](#machine-readable-verdict---report)). On a malware
+verdict it draws an alert box naming every malicious package, followed by one
 `Error: WARNING: <pkg>:<ver> contains malware. Remediate this immediately` line
 per finding, so anything that greps the old one-line form keeps working. The
 forwarders and shims print the same box to stderr before their
