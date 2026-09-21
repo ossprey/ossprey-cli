@@ -140,23 +140,21 @@ type submitResponse struct {
 	ScanID string `json:"scan_id"`
 }
 
-// skipMessage reads the API's nested explanation for a skipped scan. The API
-// skips for two reasons, quota and nothing scannable in the SBOM, and reports
-// the second under output.error_message, so quota is the fallback, not the default.
+// skipMessage names why the API skipped a scan. It reports the reason under
+// output.reason, so a top-level message alone cannot tell quota apart from an
+// SBOM holding nothing scannable. The API's own error_message is deliberately
+// not surfaced: it enumerates the ecosystems it skipped, which is the platform's
+// business and not something to print over a customer's build.
 func skipMessage(output json.RawMessage) string {
 	const quota = "Scan skipped due to quota exhaustion"
 	var o struct {
-		Reason       string `json:"reason"`
-		ErrorMessage string `json:"error_message"`
+		Reason string `json:"reason"`
 	}
 	if err := json.Unmarshal(output, &o); err != nil {
 		return quota
 	}
-	if o.ErrorMessage != "" {
-		return o.ErrorMessage
-	}
-	if o.Reason != "" && o.Reason != "usage_limit_exceeded" {
-		return "Scan skipped: " + o.Reason
+	if o.Reason == "no_scannable_components" {
+		return "Scan skipped: nothing in this project is in an ecosystem Ossprey scans"
 	}
 	return quota
 }

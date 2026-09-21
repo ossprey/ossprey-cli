@@ -158,7 +158,9 @@ type Finding struct {
 // Mirrors the platform's SKIP_FINDING_TYPES.
 var unscannedTypes = map[string]bool{"NOT_FOUND": true, "UNSUPPORTED": true}
 
-// Unscanned counts the components the scan did not check.
+// Unscanned counts the components the scan did not check. Clamped, because a
+// backend that expands one submitted purl into several can report more skips
+// than this SBOM has components.
 func (s *SBOM) Unscanned() int {
 	n := 0
 	for _, f := range s.Findings {
@@ -166,5 +168,5 @@ func (s *SBOM) Unscanned() int {
 			n++
 		}
 	}
-	return n
+	return min(n, len(s.Components))
 }

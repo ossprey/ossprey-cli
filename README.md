@@ -1140,10 +1140,13 @@ ossprey scan . --report report.json
 | `malware` | 1         | `findings` lists every flagged package. |
 | `skipped` | 0         | **Nothing was checked**: either your quota was exhausted or the SBOM held nothing this platform scans. `skipped.message` and `skipped.reset_at` say why and until when. Do not read this as "clean". |
 
-`unscanned` is how many of `components` the platform did not check, which
-happens when a project holds packages from an ecosystem it does not scan. It is
-omitted when everything was covered, so its absence means full coverage. A
-`clean` verdict with a non-zero `unscanned` means nothing was flagged in the
+`unscanned` is how many of `components` the platform did not check: packages in
+an ecosystem it does not scan, and packages the registry did not have. It is
+omitted when zero, so on a `clean` or `malware` verdict its absence means full
+coverage. On a `skipped` verdict nothing was checked at all, so read the verdict
+rather than this field.
+
+A `clean` verdict with a non-zero `unscanned` means nothing was flagged in the
 part that was scanned, and the summary line says so: `No malware found in 410 of
 412 packages`.
 
