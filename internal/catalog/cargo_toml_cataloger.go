@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -68,7 +69,7 @@ func parseCargoTomlFile(path string, loc file.Location) ([]pkg.Package, error) {
 	seen := make(map[string]struct{})
 	var out []pkg.Package
 	add := func(alias string, spec any) {
-		name, version, ok := cargoDep(alias, spec)
+		name, version, ok := cargoDep(alias, spec, m.Workspace.Dependencies)
 		if !ok || name == "" || name == m.Package.Name {
 			return
 		}
@@ -88,9 +89,8 @@ func parseCargoTomlFile(path string, loc file.Location) ([]pkg.Package, error) {
 	for _, t := range m.Target {
 		tables = append(tables, t.Dependencies, t.DevDependencies, t.BuildDependencies)
 	}
-	// [workspace.dependencies] is an inheritance pool, not a dependency list. A
-	// member opts in with `dep = { workspace = true }`, and that entry is what
-	// gets emitted; publishing the pool would invent components nothing uses.
+	// [workspace.dependencies] is an inheritance pool, not a dependency list: it
+	// is consulted for `dep = { workspace = true }` but never emitted wholesale.
 	for _, table := range tables {
 		for n, spec := range table {
 			add(n, spec)
@@ -106,12 +106,12 @@ func parseCargoTomlFile(path string, loc file.Location) ([]pkg.Package, error) {
 // emitting the alias would look up a crate that does not exist. path and git
 // deps are not on crates.io, and `registry = "..."` names a private one, so
 // all three would only ever produce NOT_FOUND.
-func cargoDep(alias string, spec any) (name, version string, ok bool) {
+func cargoDep(alias string, spec any, pool map[string]any) (name, version string, ok bool) {
 	switch v := spec.(type) {
 	case string:
 		return alias, cargoExactVersion(v), true
 	case map[string]any:
-		for _, off := range []string{"path", "git", "registry"} {
+		for _, off := range []string{"path", "git", "registry", "registry-index"} {
 			if _, found := v[off]; found {
 				return "", "", false
 			}
@@ -120,10 +120,14 @@ func cargoDep(alias string, spec any) (name, version string, ok bool) {
 		if real, isStr := v["package"].(string); isStr && real != "" {
 			name = real
 		}
-		// Inherited from [workspace.dependencies]: the name is here, the
-		// version is in the workspace root, so leave it for resolveVersionless.
+		// `dep = { workspace = true }` inherits the pool entry, which carries the
+		// real pin and any rename, so resolve against it rather than guessing.
 		if inherit, isBool := v["workspace"].(bool); isBool && inherit {
-			return name, "", true
+			inherited, found := pool[alias]
+			if !found {
+				return name, "", true
+			}
+			return cargoDep(alias, inherited, nil)
 		}
 		s, _ := v["version"].(string)
 		return name, cargoExactVersion(s), true
@@ -131,14 +135,22 @@ func cargoDep(alias string, spec any) (name, version string, ok bool) {
 	return "", "", false
 }
 
+// cargoRelease matches a concrete crates.io release, which is always full
+// three-component semver, so "=1.0" is a range rather than a pin.
+var cargoRelease = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.\-+]*)?$`)
+
 // cargoExactVersion returns the version only when the spec pins one exactly.
 // Cargo's bare "1.0" means caret, i.e. a range, so it resolves to nothing and
-// the component goes out versionless for resolveVersionless to settle. Guessing
-// the lower bound would ship a component on a version the crate never uses.
+// the component goes out versionless. Guessing the lower bound would ship a
+// component on a version the crate never uses.
 func cargoExactVersion(spec string) string {
 	s := strings.TrimSpace(spec)
 	if !strings.HasPrefix(s, "=") {
 		return ""
 	}
-	return pinVersion(strings.TrimSpace(s[1:]))
+	s = strings.TrimSpace(s[1:])
+	if !cargoRelease.MatchString(s) {
+		return ""
+	}
+	return s
 }

@@ -1012,3 +1012,132 @@ func TestCatalogCargoWorkspacePoolIsNotADependencyList(t *testing.T) {
 		}
 	}
 }
+
+const cargoInheritanceFixture = `[package]
+name = "member"
+
+[workspace.dependencies]
+pinned-in-pool = "=1.2.3"
+ranged-in-pool = "1.4"
+renamed-in-pool = { package = "real-pool-crate", version = "=2.0.0" }
+local-in-pool = { path = "../local" }
+
+[dependencies]
+pinned-in-pool = { workspace = true }
+ranged-in-pool = { workspace = true }
+renamed-in-pool = { workspace = true }
+local-in-pool = { workspace = true }
+absent-from-pool = { workspace = true }
+two-component = "=1.0"
+three-component = "=1.0.0"
+bare-full = "1.0.0"
+prerelease = "=1.0.0-alpha.1"
+alt-index = { version = "=1.0.0", registry-index = "https://internal.example/index" }
+`
+
+func TestCatalogCargoWorkspaceInheritanceReadsThePool(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "Cargo.toml", cargoInheritanceFixture)
+
+	got, err := Catalog(context.Background(), dir, Options{SkipVersionLookup: true, NoExec: true})
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	byName := map[string]Package{}
+	for _, p := range got {
+		byName[p.Name] = p
+	}
+
+	// The pin is in the same file, so inheriting must use it rather than leave
+	// the crate versionless for the registry to answer with its latest release.
+	if p := byName["pinned-in-pool"]; p.Version != "1.2.3" {
+		t.Errorf("inherited pin: version = %q, want 1.2.3", p.Version)
+	}
+	if p, ok := byName["ranged-in-pool"]; !ok || p.Version != "" {
+		t.Errorf("a pooled range is still a range, got %+v", p)
+	}
+	// The pool entry carries the rename, so the alias is not a crate.
+	if _, ok := byName["renamed-in-pool"]; ok {
+		t.Error("the alias was emitted; the registry has no such crate")
+	}
+	if p := byName["real-pool-crate"]; p.Version != "2.0.0" {
+		t.Errorf("pooled rename: version = %q, want 2.0.0", p.Version)
+	}
+	// A pooled path dependency is not on crates.io any more than a direct one.
+	if _, ok := byName["local-in-pool"]; ok {
+		t.Error("a pooled path dependency should not be emitted")
+	}
+	if p, ok := byName["absent-from-pool"]; !ok || p.Version != "" {
+		t.Errorf("an inherit with no pool entry should stay versionless, got %+v", p)
+	}
+}
+
+func TestCatalogCargoOnlyFullSemverIsAPin(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "Cargo.toml", cargoInheritanceFixture)
+
+	got, err := Catalog(context.Background(), dir, Options{SkipVersionLookup: true, NoExec: true})
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	byName := map[string]Package{}
+	for _, p := range got {
+		byName[p.Name] = p
+	}
+
+	// crates.io releases are always three-component, so "=1.0" cannot name one.
+	if p, ok := byName["two-component"]; !ok || p.Version != "" {
+		t.Errorf("=1.0 is a range, not a release, got %+v", p)
+	}
+	if p := byName["three-component"]; p.Version != "1.0.0" {
+		t.Errorf("three-component: version = %q, want 1.0.0", p.Version)
+	}
+	// Bare "1.0.0" is caret in Cargo, so it is a range despite looking exact.
+	if p, ok := byName["bare-full"]; !ok || p.Version != "" {
+		t.Errorf("a bare version is a caret range, got %+v", p)
+	}
+	if p := byName["prerelease"]; p.Version != "1.0.0-alpha.1" {
+		t.Errorf("prerelease: version = %q, want 1.0.0-alpha.1", p.Version)
+	}
+	// registry-index names a private index just as registry names a private registry.
+	if _, ok := byName["alt-index"]; ok {
+		t.Error("a registry-index dependency should not be emitted as cargo")
+	}
+}
+
+func TestCatalogCargoResolvesRangesToLatest(t *testing.T) {
+	// The shipping path: version lookup is on by default, so every Cargo.toml
+	// range reaches the registry. Stubbed, since the assertion is the wiring.
+	t.Setenv("OSSPREY_RESOLVE_LATEST", "")
+	var asked []string
+	withResolveLatest(t, func(_ context.Context, ecosystem, name string) (string, error) {
+		asked = append(asked, ecosystem+"/"+name)
+		return "9.9.9", nil
+	})
+
+	dir := t.TempDir()
+	writeFile(t, dir, "Cargo.toml", cargoInheritanceFixture)
+
+	got, err := Catalog(context.Background(), dir, Options{NoExec: true})
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	byName := map[string]Package{}
+	for _, p := range got {
+		byName[p.Name] = p
+	}
+
+	if p := byName["two-component"]; p.Version != "9.9.9" {
+		t.Errorf("a range should resolve to the registry's latest, got %q", p.Version)
+	}
+	// A pin resolved from the pool is already concrete, so it must not be asked
+	// for and must not be overwritten by whatever the registry calls latest.
+	if p := byName["pinned-in-pool"]; p.Version != "1.2.3" {
+		t.Errorf("an inherited pin must survive resolution, got %q", p.Version)
+	}
+	for _, a := range asked {
+		if a == "cargo/pinned-in-pool" {
+			t.Error("a pinned crate should not be looked up")
+		}
+	}
+}
