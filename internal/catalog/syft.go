@@ -215,8 +215,8 @@ func resolveVersionless(ctx context.Context, pkgs []Package, opts Options) {
 		if pkgs[i].Version != "" || pkgs[i].Local {
 			continue
 		}
-		// registry.ResolveLatest only speaks npm + pypi; skip anything else.
-		if pkgs[i].Type != "npm" && pkgs[i].Type != "pypi" {
+		// Skip anything registry.ResolveLatest cannot answer for.
+		if !registry.CanResolve(pkgs[i].Type) {
 			continue
 		}
 		i := i
