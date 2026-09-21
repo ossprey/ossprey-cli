@@ -14,19 +14,11 @@ type Unscanned struct {
 	Manifests []string `json:"manifests"`
 }
 
-// Manifests for ecosystems Ossprey knows as a purl type but does not catalogue.
-// The API already records an UNSUPPORTED finding for these when a component
-// reaches it, so staying quiet about a manifest we never opened is the
-// inconsistency, not the warning.
+// Manifests for ecosystems Ossprey does not catalogue. Cargo only: this exists
+// to stop a Rust monorepo reading as clean, and the same gap for go and maven
+// wants measuring on its own rather than riding along with the Rust work.
 var unscannedManifests = map[string][]string{
-	"cargo":     {"Cargo.lock", "Cargo.toml"},
-	"golang":    {"go.mod", "go.sum"},
-	"maven":     {"pom.xml", "build.gradle", "build.gradle.kts"},
-	"gem":       {"Gemfile", "Gemfile.lock", "gems.rb", "gems.locked"},
-	"composer":  {"composer.json", "composer.lock"},
-	"nuget":     {"packages.config"},
-	"cocoapods": {"Podfile", "Podfile.lock"},
-	"pub":       {"pubspec.yaml", "pubspec.lock"},
+	"cargo": {"Cargo.lock", "Cargo.toml"},
 }
 
 var unscannedSkipDirs = map[string]bool{

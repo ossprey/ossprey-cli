@@ -46,32 +46,6 @@ func TestDetectUnscannedIgnoresVendoredTrees(t *testing.T) {
 	}
 }
 
-func TestDetectUnscannedCoversEveryUncataloguedEcosystem(t *testing.T) {
-	root := t.TempDir()
-	write(t, root, "go.mod")
-	write(t, root, "pom.xml")
-	write(t, root, "Gemfile.lock")
-	write(t, root, "composer.json")
-	write(t, root, "Podfile")
-	write(t, root, "pubspec.yaml")
-	write(t, root, "packages.config")
-
-	got := DetectUnscanned(root)
-	ecos := make([]string, 0, len(got))
-	for _, e := range got {
-		ecos = append(ecos, e.Ecosystem)
-	}
-	want := []string{"cocoapods", "composer", "gem", "golang", "maven", "nuget", "pub"}
-	if len(ecos) != len(want) {
-		t.Fatalf("want %v, got %v", want, ecos)
-	}
-	for i := range want {
-		if ecos[i] != want[i] {
-			t.Fatalf("want sorted %v, got %v", want, ecos)
-		}
-	}
-}
-
 func TestDetectUnscannedIgnoresCataloguedEcosystems(t *testing.T) {
 	// package.json and pyproject.toml are catalogued, so they must never warn.
 	root := t.TempDir()
