@@ -148,7 +148,13 @@ func workspacePool(m cargoManifest, manifestPath, scanRoot string) map[string]an
 			return nil
 		}
 		dir = parent
-		data, err := os.ReadFile(filepath.Join(dir, "Cargo.toml"))
+		ancestorPath := filepath.Join(dir, "Cargo.toml")
+		// The directory is inside the root, but the manifest itself can be a
+		// symlink pointing out of it, which would adopt a pool from elsewhere.
+		if !withinRoot(ancestorPath, root) {
+			continue
+		}
+		data, err := os.ReadFile(ancestorPath)
 		if err != nil {
 			continue
 		}
@@ -218,6 +224,13 @@ func cargoDep(alias string, spec any, pool map[string]any) (name, version string
 // cargoName is the crates.io name shape, which the Ossprey API enforces too: one
 // component failing it rejects the whole SBOM, taking every other ecosystem with it.
 var cargoName = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+// validCargoComponent reports whether a crate name and version can survive the
+// API's validator. One that cannot rejects the whole SBOM, so every cargo
+// source is held to this, not just the manifest cataloguer.
+func validCargoComponent(name, version string) bool {
+	return cargoName.MatchString(name) && len(version) <= maxCargoVersion
+}
 
 // vouched drops a dependency whose key cannot name a crate on crates.io.
 func vouched(name, version string) (string, string, bool, string) {

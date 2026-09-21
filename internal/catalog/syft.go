@@ -163,6 +163,13 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 			if v, ok := pins.versionFor(p); ok {
 				version = v
 			}
+			// The lockfile cataloger is syft's and applies no crates.io name or
+			// version rule, so gate every cargo source here: one component the
+			// API rejects fails the customer's whole SBOM, npm and pypi included.
+			if t == "cargo" && !validCargoComponent(p.Name, version) {
+				warn.Add(ctx, cargoDropEntry("it cannot be a crates.io crate name", p.Name))
+				continue
+			}
 			key := dedupKey(t, p.Name, version)
 			if _, ok := seen[key]; ok {
 				continue

@@ -1358,3 +1358,74 @@ targetdev = "=4.0.0"
 		}
 	}
 }
+
+func TestCatalogCargoWorkspaceWalkCannotFollowASymlinkOut(t *testing.T) {
+	// The ancestor directory is inside the scan root, but its manifest can be a
+	// symlink pointing out of it, which would adopt a pool from elsewhere.
+	base := t.TempDir()
+	outside := filepath.Join(base, "outside")
+	root := filepath.Join(base, "scanroot")
+	if err := os.MkdirAll(filepath.Join(root, "crates", "app"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	writeFile(t, outside, "Cargo.toml", "[workspace]\n[workspace.dependencies]\nsmuggled = \"=9.9.9\"\n")
+	if err := os.Symlink(filepath.Join(outside, "Cargo.toml"), filepath.Join(root, "Cargo.toml")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	writeFile(t, filepath.Join(root, "crates", "app"), "Cargo.toml",
+		"[package]\nname=\"app\"\n[dependencies]\nsmuggled = { workspace = true }\n")
+
+	got, err := Catalog(context.Background(), root, Options{SkipVersionLookup: true, NoExec: true})
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	for _, p := range got {
+		if p.Name == "smuggled" {
+			t.Errorf("adopted a pool from outside the scan root: %+v", p)
+		}
+	}
+}
+
+func TestCatalogCargoLockfileNamesAreHeldToTheSameRule(t *testing.T) {
+	// The lockfile cataloger is syft's and applies no crates.io rule, yet it is
+	// the primary Rust path: one bad entry rejects the customer's whole SBOM.
+	dir := t.TempDir()
+	writeFile(t, dir, "Cargo.toml", "[package]\nname = \"ok\"\n")
+	writeFile(t, dir, "Cargo.lock", `version = 3
+
+[[package]]
+name = "evil/crate"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "do not scan me"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "longver"
+version = "1.0.0-`+strings.Repeat("x", 400)+`"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "serde"
+version = "1.0.200"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+`)
+
+	got, err := Catalog(context.Background(), dir, Options{SkipVersionLookup: true, NoExec: true})
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	var names []string
+	for _, p := range got {
+		names = append(names, p.Name)
+	}
+	if len(names) != 1 || names[0] != "serde" {
+		t.Errorf("emitted %v, want only [serde]", names)
+	}
+}
