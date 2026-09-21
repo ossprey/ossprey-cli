@@ -291,15 +291,25 @@ func newScanCmd() *cobra.Command {
 			// one CI most needs the report for.
 			flushWarnings(cmd.Context())
 
-			if err := writeReport(reportPath, scan.NewReport(sbom, failingFloor(failOnInformational))); err != nil {
+			rep := scan.NewReport(sbom, failingFloor(failOnInformational))
+			rep.Unscanned = scan.DetectUnscanned(path)
+			if err := writeReport(reportPath, rep); err != nil {
 				return err
 			}
 
+			note := scan.UnscannedNote(rep.Unscanned)
+
 			if reportMalware(sbom, failingFloor(failOnInformational)) {
+				if note != "" {
+					fmt.Println(note)
+				}
 				os.Exit(1)
 			}
 
 			fmt.Println("No malware found")
+			if note != "" {
+				fmt.Println(note)
+			}
 			return nil
 		},
 	}

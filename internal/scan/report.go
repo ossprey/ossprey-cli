@@ -78,6 +78,9 @@ type Report struct {
 	Findings      []Finding `json:"findings"`
 	Informational []Finding `json:"informational,omitempty"`
 	Skipped       *Skip     `json:"skipped,omitempty"`
+	// Ecosystems whose manifests were found but not catalogued. A consumer
+	// reading Verdict must not call the repo clean while this is non-empty.
+	Unscanned []Unscanned `json:"unscanned,omitempty"`
 }
 
 // NewReport summarises a scanned SBOM: "malware" when any finding is at or
