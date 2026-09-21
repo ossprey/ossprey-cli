@@ -288,30 +288,28 @@ func newScanCmd() *cobra.Command {
 			}
 
 			rep := scan.NewReport(sbom, failingFloor(failOnInformational))
-			rep.Unscanned = scan.DetectUnscanned(cmd.Context(), path)
+			if scan.HasUnscannedManifests(cmd.Context(), path) {
+				rep.MarkPartial()
+			}
 
 			// Written before the exit below: a malware verdict is exactly the
 			// one CI most needs the report for.
-			// DetectUnscanned warns, so the flush has to follow it.
+			// HasUnscannedManifests warns, so the flush has to follow it.
 			flushWarnings(cmd.Context())
 
 			if err := writeReport(reportPath, rep); err != nil {
 				return err
 			}
 
-			note := scan.UnscannedNote(rep.Unscanned)
-
 			if reportMalware(sbom, failingFloor(failOnInformational)) {
-				if note != "" {
-					fmt.Println(note)
-				}
 				os.Exit(1)
 			}
 
-			fmt.Println("No malware found")
-			if note != "" {
-				fmt.Println(note)
+			if rep.Verdict == scan.VerdictPartial {
+				fmt.Println("No malware found in the components scanned")
+				return nil
 			}
+			fmt.Println("No malware found")
 			return nil
 		},
 	}

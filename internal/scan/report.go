@@ -34,6 +34,13 @@ const (
 	// malware found" is hiding a finding we deliberately surfaced. Consumers
 	// that only know clean/malware/skipped should treat it as non-failing.
 	VerdictInformational Verdict = "informational"
+	// VerdictPartial is a scan that found nothing but did not cover the whole
+	// tree, because it holds manifests for an ecosystem Ossprey cannot
+	// catalogue. Its own verdict for the same reason the two above are: a
+	// consumer rendering it as "no malware found" would be claiming a clean
+	// bill of health for code that was never read. Non-failing, like
+	// informational.
+	VerdictPartial Verdict = "partial"
 )
 
 // Finding is one malicious package, pre-split so a consumer doesn't have to
@@ -78,9 +85,6 @@ type Report struct {
 	Findings      []Finding `json:"findings"`
 	Informational []Finding `json:"informational,omitempty"`
 	Skipped       *Skip     `json:"skipped,omitempty"`
-	// Ecosystems whose manifests were found but not catalogued. A consumer
-	// reading Verdict must not call the repo clean while this is non-empty.
-	Unscanned []Unscanned `json:"unscanned,omitempty"`
 }
 
 // NewReport summarises a scanned SBOM: "malware" when any finding is at or
@@ -125,6 +129,14 @@ func NewReport(sbom *ossbom.SBOM, floor severity.Level) Report {
 }
 
 // SkippedReport summarises a scan the API declined to run (quota exhausted).
+// MarkPartial downgrades a clean verdict to partial. Findings outrank it: a
+// scan that found malware is still a malware verdict, incomplete or not.
+func (r *Report) MarkPartial() {
+	if r.Verdict == VerdictClean {
+		r.Verdict = VerdictPartial
+	}
+}
+
 // The verdict is deliberately neither clean nor malware: nothing was checked,
 // and a consumer must not report "no malware found" off the back of it.
 func SkippedReport(sbom *ossbom.SBOM, message, resetAt string) Report {
