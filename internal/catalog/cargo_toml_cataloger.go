@@ -49,12 +49,17 @@ type cargoManifest struct {
 	Dependencies      map[string]any `toml:"dependencies"`
 	DevDependencies   map[string]any `toml:"dev-dependencies"`
 	BuildDependencies map[string]any `toml:"build-dependencies"`
+	// Cargo still accepts the deprecated underscore spellings.
+	DevDependenciesUS   map[string]any `toml:"dev_dependencies"`
+	BuildDependenciesUS map[string]any `toml:"build_dependencies"`
 	// Platform-gated deps, e.g. [target.'cfg(windows)'.dependencies]. Still
 	// shipped to whoever builds for that platform, so still worth scanning.
 	Target map[string]struct {
-		Dependencies      map[string]any `toml:"dependencies"`
-		DevDependencies   map[string]any `toml:"dev-dependencies"`
-		BuildDependencies map[string]any `toml:"build-dependencies"`
+		Dependencies        map[string]any `toml:"dependencies"`
+		DevDependencies     map[string]any `toml:"dev-dependencies"`
+		BuildDependencies   map[string]any `toml:"build-dependencies"`
+		DevDependenciesUS   map[string]any `toml:"dev_dependencies"`
+		BuildDependenciesUS map[string]any `toml:"build_dependencies"`
 	} `toml:"target"`
 	Workspace struct {
 		Dependencies map[string]any `toml:"dependencies"`
@@ -62,7 +67,7 @@ type cargoManifest struct {
 }
 
 func parseCargoTomlFile(ctx context.Context, path string, loc file.Location, scanRoot string) ([]pkg.Package, error) {
-	data, err := os.ReadFile(path)
+	data, err := readManifest(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
@@ -97,9 +102,9 @@ func parseCargoTomlFile(ctx context.Context, path string, loc file.Location, sca
 			Locations: file.NewLocationSet(loc),
 		})
 	}
-	tables := []map[string]any{m.Dependencies, m.DevDependencies, m.BuildDependencies}
+	tables := []map[string]any{m.Dependencies, m.DevDependencies, m.BuildDependencies, m.DevDependenciesUS, m.BuildDependenciesUS}
 	for _, t := range m.Target {
-		tables = append(tables, t.Dependencies, t.DevDependencies, t.BuildDependencies)
+		tables = append(tables, t.Dependencies, t.DevDependencies, t.BuildDependencies, t.DevDependenciesUS, t.BuildDependenciesUS)
 	}
 	// [workspace.dependencies] is an inheritance pool, not a dependency list: it
 	// is consulted for `dep = { workspace = true }` but never emitted wholesale.
@@ -109,6 +114,22 @@ func parseCargoTomlFile(ctx context.Context, path string, loc file.Location, sca
 		}
 	}
 	return out, nil
+}
+
+// maxManifestBytes is a sanity bound, not a fix for deeply nested TOML, which
+// allocates quadratically in every toml cataloguer here (OSS-2098).
+const maxManifestBytes = 1 << 20
+
+// readManifest reads a Cargo.toml, refusing one too large to be genuine.
+func readManifest(path string) ([]byte, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Size() > maxManifestBytes {
+		return nil, fmt.Errorf("Cargo.toml is %d bytes, over the %d limit", info.Size(), maxManifestBytes)
+	}
+	return os.ReadFile(path)
 }
 
 // workspacePool returns the [workspace.dependencies] table governing this
@@ -138,9 +159,18 @@ func workspacePool(m cargoManifest, manifestPath, scanRoot string) map[string]an
 	}
 }
 
-// withinRoot reports whether dir is root or sits inside it.
+// withinRoot reports whether dir is root or sits inside it, resolving symlinks
+// first so a linked directory cannot walk the read outside the scan root.
 func withinRoot(dir, root string) bool {
-	rel, err := filepath.Rel(root, dir)
+	realDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return false
+	}
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(realRoot, realDir)
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
@@ -157,7 +187,9 @@ func cargoDep(alias string, spec any, pool map[string]any) (name, version string
 		return vouched(alias, cargoExactVersion(v))
 	case map[string]any:
 		for _, off := range []string{"path", "git", "registry", "registry-index"} {
-			if _, found := v[off]; found {
+			// "crates-io" is Cargo's reserved name for the default registry, so
+			// naming it explicitly still means the public one.
+			if r, found := v[off]; found && !(off == "registry" && r == "crates-io") {
 				return "", "", false, ""
 			}
 		}
@@ -204,6 +236,9 @@ func cargoDropEntry(why, alias string) warn.Entry {
 	}
 }
 
+// maxCargoVersion mirrors the API's version cap; a longer one rejects the SBOM.
+const maxCargoVersion = 256
+
 // cargoRelease matches a concrete crates.io release, which is always full
 // three-component semver, so "=1.0" is a range rather than a pin.
 var cargoRelease = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.\-+]*)?$`)
@@ -218,7 +253,7 @@ func cargoExactVersion(spec string) string {
 		return ""
 	}
 	s = strings.TrimSpace(s[1:])
-	if !cargoRelease.MatchString(s) {
+	if len(s) > maxCargoVersion || !cargoRelease.MatchString(s) {
 		return ""
 	}
 	return s

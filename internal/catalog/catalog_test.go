@@ -1279,3 +1279,82 @@ serde = "=1.0.210"
 		t.Errorf("emitted %v, want only [serde]", names)
 	}
 }
+
+func TestCatalogCargoVersionCannotExceedTheAPILimit(t *testing.T) {
+	// A version the API rejects takes the whole SBOM down with it, so an
+	// over-long one is dropped to versionless rather than emitted.
+	dir := t.TempDir()
+	writeFile(t, dir, "Cargo.toml", `[package]
+name = "ok"
+
+[dependencies]
+longver = "=1.0.0-`+strings.Repeat("x", 300)+`"
+`)
+	got, err := Catalog(context.Background(), dir, Options{SkipVersionLookup: true, NoExec: true})
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	for _, p := range got {
+		if p.Version != "" {
+			t.Errorf("emitted %d-character version; the API caps it at 256", len(p.Version))
+		}
+	}
+}
+
+func TestCatalogCargoExplicitDefaultRegistryIsStillPublic(t *testing.T) {
+	// "crates-io" is Cargo's reserved name for the default registry, so naming
+	// it is not the same as naming a private one.
+	dir := t.TempDir()
+	writeFile(t, dir, "Cargo.toml", `[package]
+name = "ok"
+
+[dependencies]
+explicit-default = { version = "=1.0.0", registry = "crates-io" }
+private = { version = "=9.0.0", registry = "company-internal" }
+`)
+	got, err := Catalog(context.Background(), dir, Options{SkipVersionLookup: true, NoExec: true})
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	byName := map[string]Package{}
+	for _, p := range got {
+		byName[p.Name] = p
+	}
+	if p := byName["explicit-default"]; p.Version != "1.0.0" {
+		t.Errorf("explicit crates-io: version = %q, want 1.0.0", p.Version)
+	}
+	if _, ok := byName["private"]; ok {
+		t.Error("an alternate-registry dependency should not be emitted as cargo")
+	}
+}
+
+func TestCatalogCargoReadsDeprecatedUnderscoreTables(t *testing.T) {
+	// Cargo still accepts dev_dependencies and build_dependencies, so a crate
+	// using them was catalogued as having none.
+	dir := t.TempDir()
+	writeFile(t, dir, "Cargo.toml", `[package]
+name = "ok"
+
+[dev_dependencies]
+devcrate = "=2.0.0"
+
+[build_dependencies]
+buildcrate = "=3.0.0"
+
+[target.'cfg(unix)'.dev_dependencies]
+targetdev = "=4.0.0"
+`)
+	got, err := Catalog(context.Background(), dir, Options{SkipVersionLookup: true, NoExec: true})
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	byName := map[string]Package{}
+	for _, p := range got {
+		byName[p.Name] = p
+	}
+	for name, want := range map[string]string{"devcrate": "2.0.0", "buildcrate": "3.0.0", "targetdev": "4.0.0"} {
+		if p, ok := byName[name]; !ok || p.Version != want {
+			t.Errorf("%s: got %+v, want version %s", name, p, want)
+		}
+	}
+}
