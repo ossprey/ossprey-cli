@@ -15,10 +15,18 @@ type Unscanned struct {
 }
 
 // Manifests for ecosystems Ossprey knows as a purl type but does not catalogue.
-// Seeded with cargo only: adding go/maven/rubygems here would start warning on
-// every existing customer's scan, which is a product call rather than a fix.
+// The API already records an UNSUPPORTED finding for these when a component
+// reaches it, so staying quiet about a manifest we never opened is the
+// inconsistency, not the warning.
 var unscannedManifests = map[string][]string{
-	"cargo": {"Cargo.lock", "Cargo.toml"},
+	"cargo":     {"Cargo.lock", "Cargo.toml"},
+	"golang":    {"go.mod", "go.sum"},
+	"maven":     {"pom.xml", "build.gradle", "build.gradle.kts"},
+	"gem":       {"Gemfile", "Gemfile.lock", "gems.rb", "gems.locked"},
+	"composer":  {"composer.json", "composer.lock"},
+	"nuget":     {"packages.config"},
+	"cocoapods": {"Podfile", "Podfile.lock"},
+	"pub":       {"pubspec.yaml", "pubspec.lock"},
 }
 
 var unscannedSkipDirs = map[string]bool{
@@ -31,7 +39,8 @@ var unscannedSkipDirs = map[string]bool{
 
 // DetectUnscanned reports ecosystems whose manifests sit in the tree unread.
 // Without it a Rust-and-JS monorepo scans its JS half and prints "No malware
-// found", which reads as a clean bill of health for the whole repo.
+// found", which reads as a clean bill of health for the whole repo. The README
+// naming Python and JavaScript is a weaker safeguard than the scan saying so.
 func DetectUnscanned(root string) []Unscanned {
 	found := map[string]map[string]bool{}
 	for eco := range unscannedManifests {
@@ -89,5 +98,5 @@ func UnscannedNote(u []Unscanned) string {
 		parts = append(parts, e.Ecosystem)
 	}
 	return "Not scanned: " + strings.Join(parts, ", ") +
-		" manifests were found but Ossprey does not catalogue them yet."
+		" manifests were found. Ossprey catalogues Python and JavaScript, so those dependencies were not checked."
 }
