@@ -1,10 +1,14 @@
 package scan
 
 import (
+	"context"
+	"fmt"
 	"io/fs"
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
 // Unscanned names an ecosystem whose manifests are present in the tree but
@@ -33,15 +37,23 @@ var unscannedSkipDirs = map[string]bool{
 // Without it a Rust-and-JS monorepo scans its JS half and prints "No malware
 // found", which reads as a clean bill of health for the whole repo. The README
 // naming Python and JavaScript is a weaker safeguard than the scan saying so.
-func DetectUnscanned(root string) []Unscanned {
+func DetectUnscanned(ctx context.Context, root string) []Unscanned {
 	found := map[string]map[string]bool{}
 	for eco := range unscannedManifests {
 		found[eco] = map[string]bool{}
 	}
 
 	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		// Swallowing this silently would repeat the bug the whole function
+		// exists to fix: an unreadable subtree could hide a manifest and the
+		// scan would claim full coverage.
 		if err != nil {
-			return nil //nolint:nilerr // an unreadable subtree is not a scan failure
+			rel, relErr := filepath.Rel(root, path)
+			if relErr != nil {
+				rel = path
+			}
+			warn.Add(ctx, unreadableEntry(filepath.ToSlash(rel), err))
+			return nil //nolint:nilerr // best-effort: keep walking the rest
 		}
 		if d.IsDir() {
 			if unscannedSkipDirs[d.Name()] {
@@ -91,4 +103,14 @@ func UnscannedNote(u []Unscanned) string {
 	}
 	return "Not scanned: " + strings.Join(parts, ", ") +
 		" manifests were found. Ossprey catalogues Python and JavaScript, so those dependencies were not checked."
+}
+
+// unreadableEntry reports a subtree the walk could not enter.
+func unreadableEntry(path string, err error) warn.Entry {
+	return warn.Entry{
+		Class: "unscanned-walk",
+		One:   fmt.Sprintf("could not check %s for manifests, so this scan's coverage is not certain", path),
+		Many:  "could not check %d paths for manifests, so this scan's coverage is not certain",
+		Item:  fmt.Sprintf("%s: %v", path, err),
+	}
 }

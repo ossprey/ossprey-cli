@@ -292,7 +292,7 @@ func newScanCmd() *cobra.Command {
 			flushWarnings(cmd.Context())
 
 			rep := scan.NewReport(sbom, failingFloor(failOnInformational))
-			rep.Unscanned = scan.DetectUnscanned(path)
+			rep.Unscanned = scan.DetectUnscanned(cmd.Context(), path)
 			if err := writeReport(reportPath, rep); err != nil {
 				return err
 			}
