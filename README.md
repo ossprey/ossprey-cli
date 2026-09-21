@@ -11,7 +11,7 @@ packages are known to contain malware.
 > [Authentication](#authentication)). The `--local` and `--dry-run-*` modes
 > work without credentials.
 
-Today the CLI covers Python and JavaScript projects via static parsing of the
+Today the CLI covers Python, JavaScript and Rust projects via static parsing of the
 manifests and lockfiles already in your repo — no package installs, no
 sandbox, no virtualenv.
 
@@ -893,12 +893,13 @@ framework manage both.
 
 ## Supported ecosystems
 
-Python and JavaScript, via syft's static catalogers.
+Python, JavaScript and Rust, via syft's static catalogers.
 
 | Ecosystem | Files parsed |
 |-----------|--------------|
 | Python | `requirements.txt`, `Pipfile.lock`, `poetry.lock`, `uv.lock`, `pdm.lock`, `setup.py`, `pyproject.toml`, wheel / egg metadata |
 | JavaScript | `package.json`, `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml` |
+| Rust | `Cargo.lock` only. A crate that gitignores its lockfile catalogues to nothing: syft ships no `Cargo.toml` parser, and the CLI never runs `cargo` to generate one. |
 
 The CLI never executes your package manager. If your repo has only a manifest
 and no lockfile, expect direct deps only — supply a lockfile for full

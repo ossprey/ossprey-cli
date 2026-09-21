@@ -10,6 +10,7 @@ import (
 	"github.com/anchore/syft/syft/pkg"
 	"github.com/anchore/syft/syft/pkg/cataloger/javascript"
 	"github.com/anchore/syft/syft/pkg/cataloger/python"
+	"github.com/anchore/syft/syft/pkg/cataloger/rust"
 	"github.com/anchore/syft/syft/source"
 	"github.com/anchore/syft/syft/source/directorysource"
 	"golang.org/x/sync/errgroup"
@@ -88,6 +89,9 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 		python.NewPackageCataloger(pyCfg),
 		javascript.NewPackageCataloger(),
 		javascript.NewLockCataloger(jsCfg),
+		// Cargo.lock only: syft v1.44.0 ships no Cargo.toml parser, so a crate
+		// that gitignores its lockfile still catalogues to nothing.
+		rust.NewCargoLockCataloger(),
 	}
 	if !opts.NoExec {
 		catalogers = append(catalogers,
@@ -145,6 +149,9 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 				continue
 			}
 			if isUnpublishedNpmLockEntry(p, locks) {
+				continue
+			}
+			if isWorkspaceCargoEntry(p) {
 				continue
 			}
 			// Syft truncates PEP 440 versions it reads out of a requirements
@@ -354,6 +361,8 @@ func ossbomType(t pkg.Type) string {
 		return "pypi"
 	case pkg.NpmPkg:
 		return "npm"
+	case pkg.RustPkg:
+		return "cargo"
 	default:
 		return ""
 	}
@@ -370,6 +379,18 @@ func isRootManifestPackage(p pkg.Package) bool {
 		}
 	}
 	return false
+}
+
+// isWorkspaceCargoEntry reports whether p is a Cargo.lock entry for a crate in
+// this workspace rather than one fetched from a registry. Cargo omits `source`
+// for path members, and emitting them would submit the project's own crates as
+// though they were dependencies.
+func isWorkspaceCargoEntry(p pkg.Package) bool {
+	m, ok := p.Metadata.(pkg.RustCargoLockEntry)
+	if !ok {
+		return false
+	}
+	return strings.TrimSpace(m.Source) == ""
 }
 
 // isUnpublishedNpmLockEntry reports whether p is a package-lock.json entry
