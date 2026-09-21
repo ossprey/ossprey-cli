@@ -899,7 +899,7 @@ Python, JavaScript and Rust, via syft's static catalogers.
 |-----------|--------------|
 | Python | `requirements.txt`, `Pipfile.lock`, `poetry.lock`, `uv.lock`, `pdm.lock`, `setup.py`, `pyproject.toml`, wheel / egg metadata |
 | JavaScript | `package.json`, `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml` |
-| Rust | `Cargo.lock` only. A crate that gitignores its lockfile catalogues to nothing: syft ships no `Cargo.toml` parser, and the CLI never runs `cargo` to generate one. |
+| Rust | `Cargo.lock` only, there is no support for parsing cargo.toml. |
 
 The CLI never executes your package manager. If your repo has only a manifest
 and no lockfile, expect direct deps only — supply a lockfile for full
