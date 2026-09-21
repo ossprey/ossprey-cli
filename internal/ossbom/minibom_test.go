@@ -145,6 +145,11 @@ func TestApplyAPIResponse(t *testing.T) {
 
 func TestApplyAPIResponseReadsFindings(t *testing.T) {
 	s := New(Environment{})
+	// Findings name components the CLI submitted, so the SBOM holds them too.
+	s.AddComponent(Component{Name: "evil", Version: "1.0.0", Type: "npm"})
+	s.AddComponent(Component{Name: "serde", Version: "1.0.200", Type: "cargo"})
+	s.AddComponent(Component{Name: "ghost", Version: "9.9.9", Type: "npm"})
+	s.AddComponent(Component{Name: "fine", Version: "1.0.0", Type: "npm"})
 	raw := []byte(`{
 		"vulnerabilities": [{"id": "MAL-1", "purl": "pkg:npm/evil@1.0.0"}],
 		"findings": [
@@ -191,5 +196,20 @@ func TestFindingsAreNotSubmitted(t *testing.T) {
 	}
 	if bytes.Contains(blob, []byte("findings")) {
 		t.Errorf("the submitted MiniBOM carries findings: %s", blob)
+	}
+}
+
+func TestUnscannedNeverExceedsComponents(t *testing.T) {
+	// A backend that expands one submitted purl into several can report more
+	// skips than this SBOM has components; "4 of 2 packages" helps nobody.
+	s := New(Environment{})
+	s.AddComponent(Component{Name: "left-pad", Version: "1.3.0", Type: "npm"})
+	s.Findings = []Finding{
+		{Purl: "pkg:npm/a@1.0.0", Type: "UNSUPPORTED"},
+		{Purl: "pkg:npm/b@1.0.0", Type: "UNSUPPORTED"},
+		{Purl: "pkg:npm/c@1.0.0", Type: "NOT_FOUND"},
+	}
+	if got := s.Unscanned(); got != 1 {
+		t.Errorf("Unscanned: got %d, want 1 (clamped to the component count)", got)
 	}
 }
