@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -73,6 +74,9 @@ func TestDetectUnscannedCleanTree(t *testing.T) {
 }
 
 func TestDetectUnscannedWarnsOnAnUnreadableSubtree(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod 0o000 does not stop directory listing on Windows")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("root reads a 0o000 directory regardless")
 	}
