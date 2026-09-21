@@ -3,8 +3,10 @@ name: CI
 on:
   pull_request:
     branches: [main, cargo-support]
+  # Deliberately not cargo-support: a push event carries full secrets, and that
+  # branch is unprotected, so this would run them with no review gate.
   push:
-    branches: [main, cargo-support]
+    branches: [main]
 
 permissions:
   contents: read
