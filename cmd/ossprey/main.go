@@ -287,12 +287,14 @@ func newScanCmd() *cobra.Command {
 				return nil
 			}
 
-			// Written before the exit below: a malware verdict is exactly the
-			// one CI most needs the report for.
-			flushWarnings(cmd.Context())
-
 			rep := scan.NewReport(sbom, failingFloor(failOnInformational))
 			rep.Unscanned = scan.DetectUnscanned(cmd.Context(), path)
+
+			// Written before the exit below: a malware verdict is exactly the
+			// one CI most needs the report for.
+			// DetectUnscanned warns, so the flush has to follow it.
+			flushWarnings(cmd.Context())
+
 			if err := writeReport(reportPath, rep); err != nil {
 				return err
 			}
