@@ -8,22 +8,20 @@ import (
 
 func TestParseFloorOverride(t *testing.T) {
 	tests := []struct {
-		name                string
-		failOn              string
-		failOnInformational bool
-		want                severity.Level
-		wantErr             bool
+		name    string
+		failOn  string
+		want    severity.Level
+		wantErr bool
 	}{
-		{name: "no flags leaves the account's floor in charge", want: severity.Unknown},
-		{name: "the shorthand is the bottom of the scale", failOnInformational: true, want: severity.Info},
+		{name: "no flag leaves the account's floor in charge", want: severity.Unknown},
 		{name: "an explicit level", failOn: "Critical", want: severity.Critical},
+		{name: "the bottom of the scale fails on everything reported", failOn: "Info", want: severity.Info},
 		{name: "casing is the wire's problem, not the user's", failOn: "high", want: severity.High},
-		{name: "the explicit level wins over the shorthand", failOn: "Medium", failOnInformational: true, want: severity.Medium},
 		{name: "a typo is an error, not a silent default", failOn: "Bananas", wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseFloorOverride(tt.failOn, tt.failOnInformational)
+			got, err := parseFloorOverride(tt.failOn)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("err: got %v, wantErr %v", err, tt.wantErr)
 			}

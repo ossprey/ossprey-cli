@@ -108,8 +108,8 @@ func TestServedFloorDecidesTheVerdict(t *testing.T) {
 		{name: "no floor served behaves as today", severity: "Info", wantCode: 0, wantVerd: "informational"},
 		{name: "nothing found at a raised floor is clean", severity: "", floor: "Critical", wantCode: 0, wantVerd: "clean"},
 		{
-			name: "the shorthand still lowers a raised floor", severity: "Medium", floor: "High",
-			args: []string{"--fail-on-informational"}, wantCode: 1, wantVerd: "malware",
+			name: "an override lowers a raised floor to the bottom", severity: "Medium", floor: "High",
+			args: []string{"--fail-on", "Info"}, wantCode: 1, wantVerd: "malware",
 		},
 		{
 			name: "an override raises past the account", severity: "High", floor: "Low",

@@ -120,22 +120,21 @@ func notifyLatestVersion(cmd *cobra.Command) {
 
 func newScanCmd() *cobra.Command {
 	var (
-		output              string
-		reportPath          string
-		verbose             bool
-		local               bool
-		dryRunSafe          bool
-		dryRunMalicious     bool
-		failOn              string
-		failOnInformational bool
-		apiURL              string
-		apiKey              string
-		noVersionLookup     bool
-		skipCI              bool
-		passive             bool
-		cacheScanOnly       bool
-		monitorID           string
-		timeout             time.Duration
+		output          string
+		reportPath      string
+		verbose         bool
+		local           bool
+		dryRunSafe      bool
+		dryRunMalicious bool
+		failOn          string
+		apiURL          string
+		apiKey          string
+		noVersionLookup bool
+		skipCI          bool
+		passive         bool
+		cacheScanOnly   bool
+		monitorID       string
+		timeout         time.Duration
 	)
 
 	cmd := &cobra.Command{
@@ -204,7 +203,7 @@ func newScanCmd() *cobra.Command {
 				fmt.Fprintln(os.Stderr, "ossprey: warning: passive mode is set in the environment, but --local never submits a scan; nothing was sent.")
 			}
 
-			override, err := parseFloorOverride(failOn, failOnInformational)
+			override, err := parseFloorOverride(failOn)
 			if err != nil {
 				return err
 			}
@@ -318,12 +317,6 @@ func newScanCmd() *cobra.Command {
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "list every warned package and manifest, and the full output of any resolver that failed (or OSSPREY_VERBOSE=1)")
 	cmd.Flags().BoolVar(&local, "local", false, "dump SBOM JSON to stdout and exit (no API submission, no verdict)")
 	cmd.Flags().StringVar(&failOn, "fail-on", "", "fail on findings at or above this severity (Info, Low, Medium, High, Critical), overriding the account's floor for this run")
-	// Deprecated by --fail-on Info, which says the same thing on the same scale.
-	// Deprecated rather than removed, the same call --ci-cache-scan-only got: it
-	// is set in pipelines we do not control, so it keeps working and warns, but
-	// there is only one way left to teach.
-	cmd.Flags().BoolVar(&failOnInformational, "fail-on-informational", false, "deprecated alias for --fail-on Info")
-	_ = cmd.Flags().MarkDeprecated("fail-on-informational", "use --fail-on Info")
 	cmd.Flags().BoolVar(&dryRunSafe, "dry-run-safe", false, "skip API submission; emit empty vulnerability list")
 	cmd.Flags().BoolVar(&dryRunMalicious, "dry-run-malicious", false, "skip API submission; inject test vulnerability against first component")
 	cmd.Flags().BoolVar(&noVersionLookup, "no-version-lookup", false, "don't query the registry to resolve unpinned dependencies; leave them versionless")
@@ -352,14 +345,13 @@ func newScanCmd() *cobra.Command {
 // without needing a project directory.
 func newCheckCmd() *cobra.Command {
 	var (
-		ecosystem           string
-		apiURL              string
-		apiKey              string
-		reportPath          string
-		dryRunSafe          bool
-		dryRunMalicious     bool
-		failOn              string
-		failOnInformational bool
+		ecosystem       string
+		apiURL          string
+		apiKey          string
+		reportPath      string
+		dryRunSafe      bool
+		dryRunMalicious bool
+		failOn          string
 	)
 
 	cmd := &cobra.Command{
@@ -371,7 +363,7 @@ func newCheckCmd() *cobra.Command {
 				return errors.New("--eco-system is required (pypi or npm)")
 			}
 
-			override, err := parseFloorOverride(failOn, failOnInformational)
+			override, err := parseFloorOverride(failOn)
 			if err != nil {
 				return err
 			}
@@ -440,12 +432,6 @@ func newCheckCmd() *cobra.Command {
 	cmd.Flags().StringVar(&apiURL, "url", defaultAPIURL, "Ossprey API URL")
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "Ossprey API key (or OSSPREY_API_KEY / API_KEY env var; optional after `ossprey login`)")
 	cmd.Flags().StringVar(&failOn, "fail-on", "", "fail on findings at or above this severity (Info, Low, Medium, High, Critical), overriding the account's floor for this run")
-	// Deprecated by --fail-on Info, which says the same thing on the same scale.
-	// Deprecated rather than removed, the same call --ci-cache-scan-only got: it
-	// is set in pipelines we do not control, so it keeps working and warns, but
-	// there is only one way left to teach.
-	cmd.Flags().BoolVar(&failOnInformational, "fail-on-informational", false, "deprecated alias for --fail-on Info")
-	_ = cmd.Flags().MarkDeprecated("fail-on-informational", "use --fail-on Info")
 	cmd.Flags().BoolVar(&dryRunSafe, "dry-run-safe", false, "skip API submission; emit empty vulnerability list")
 	cmd.Flags().BoolVar(&dryRunMalicious, "dry-run-malicious", false, "skip API submission; inject test vulnerability against first package")
 	// Same reason as scan: malicious wins the switch, so the pair is a silently
@@ -538,24 +524,16 @@ func reportMalware(sbom *ossbom.SBOM, floor severity.Level) bool {
 	return hasMalware
 }
 
-// parseFloorOverride reads the per-run floor from the flags, or Unknown when
-// this run sets none. --fail-on-informational is the shorthand for the bottom
-// of the scale and predates --fail-on, so an explicit level wins and says so.
-// Validated before the scan runs: a typo should cost a second, not a full
-// catalogue and submit.
-func parseFloorOverride(failOn string, failOnInformational bool) (severity.Level, error) {
+// parseFloorOverride reads the per-run floor from --fail-on, or Unknown when this
+// run sets none. Validated before the scan runs: a typo should cost a second,
+// not a full catalogue and submit.
+func parseFloorOverride(failOn string) (severity.Level, error) {
 	if failOn == "" {
-		if failOnInformational {
-			return severity.Info, nil
-		}
 		return severity.Unknown, nil
 	}
 	lvl := severity.Parse(failOn)
 	if lvl == severity.Unknown {
 		return severity.Unknown, fmt.Errorf("--fail-on %q is not a severity level (want Info, Low, Medium, High or Critical)", failOn)
-	}
-	if failOnInformational && lvl != severity.Info {
-		fmt.Fprintf(os.Stderr, "ossprey: --fail-on %s wins over --fail-on-informational\n", lvl)
 	}
 	return lvl, nil
 }

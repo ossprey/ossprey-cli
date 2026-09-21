@@ -428,7 +428,7 @@ func TestMalwareReportsSanitisesInformationalDescription(t *testing.T) {
 }
 
 // At the Info floor an informational finding fails, which is what
-// --fail-on-informational asks for.
+// --fail-on Info asks for.
 func TestMalwareReportsAtInfoFloor(t *testing.T) {
 	s := ossbom.New(ossbom.Environment{})
 	s.AddVulnerability(ossbom.Vulnerability{ID: "Z", Purl: "pkg:npm/removed@0.0.1-security", Severity: "Info"})
