@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -957,9 +959,11 @@ func TestCatalogCargoTomlWithoutLockfile(t *testing.T) {
 		t.Error("an alternate-registry dependency should not be emitted as cargo")
 	}
 
-	// Inherited from the workspace: name here, version in the root.
-	if p, ok := byName["inherited"]; !ok || p.Version != "" {
-		t.Errorf("a workspace-inherited dep should be emitted versionless, got %+v", p)
+	// Inherited from a workspace whose pool this fixture does not have. The key
+	// alone could name a path member or a rename alias, so it is not a crate we
+	// can vouch for and must not be resolved against crates.io.
+	if p, ok := byName["inherited"]; ok {
+		t.Errorf("emitted %+v; the pool is unreachable, so the name is unvouched", p)
 	}
 
 	// Neither is on crates.io, so submitting them yields only NOT_FOUND.
@@ -1067,8 +1071,9 @@ func TestCatalogCargoWorkspaceInheritanceReadsThePool(t *testing.T) {
 	if _, ok := byName["local-in-pool"]; ok {
 		t.Error("a pooled path dependency should not be emitted")
 	}
-	if p, ok := byName["absent-from-pool"]; !ok || p.Version != "" {
-		t.Errorf("an inherit with no pool entry should stay versionless, got %+v", p)
+	// No pool entry means the key cannot be resolved to a real crate name.
+	if p, ok := byName["absent-from-pool"]; ok {
+		t.Errorf("emitted %+v; an inherit with no pool entry is unvouched", p)
 	}
 }
 
@@ -1208,7 +1213,20 @@ func TestCatalogCargoInheritsFromTheWorkspaceRoot(t *testing.T) {
 }
 
 func TestCatalogCargoWorkspaceLookupStopsAtTheScanRoot(t *testing.T) {
-	// Scanning the member alone must not read a manifest outside the scan root.
+	// Scanning a member alone puts its workspace root out of scope, so the pool
+	// cannot be read and an inherited key could name a path member, a private
+	// registry or a rename alias. Emitting it would resolve a name we cannot
+	// vouch for against crates.io, which is the dependency-confusion surface.
+	t.Setenv("OSSPREY_RESOLVE_LATEST", "")
+	var asked []string
+	var mu sync.Mutex
+	withResolveLatest(t, func(_ context.Context, eco, name string) (string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		asked = append(asked, eco+"/"+name)
+		return "6.6.6", nil
+	})
+
 	dir := t.TempDir()
 	writeFile(t, dir, "Cargo.toml", cargoWorkspaceRootPoolFixture)
 	member := filepath.Join(dir, "crates", "app")
@@ -1217,13 +1235,47 @@ func TestCatalogCargoWorkspaceLookupStopsAtTheScanRoot(t *testing.T) {
 	}
 	writeFile(t, member, "Cargo.toml", cargoWorkspaceMemberFixture)
 
-	got, err := Catalog(context.Background(), member, Options{SkipVersionLookup: true, NoExec: true})
+	// Version lookup is deliberately left on: it is what turns a leaked key into
+	// a live crates.io request, so disabling it would assert only the safe half.
+	got, err := Catalog(context.Background(), member, Options{NoExec: true})
 	if err != nil {
 		t.Fatalf("Catalog: %v", err)
 	}
 	for _, p := range got {
-		if p.Version != "" {
-			t.Errorf("%s: version = %q, want empty; the root is outside the scan", p.Name, p.Version)
+		if p.Type == "cargo" {
+			t.Errorf("emitted %s@%s; the pool is outside the scan, so the name is unvouched", p.Name, p.Version)
 		}
+	}
+	if len(asked) != 0 {
+		t.Errorf("looked up %v on crates.io; those names never left the customer's repo", asked)
+	}
+}
+
+func TestCatalogCargoRejectsNamesCratesIoCannotHave(t *testing.T) {
+	// One component failing the API's name rule rejects the whole SBOM, taking
+	// the repo's npm and pypi components down with it.
+	dir := t.TempDir()
+	writeFile(t, dir, "Cargo.toml", `[package]
+name = "ok"
+
+[dependencies]
+"do not scan me" = "=1.0.0"
+"pkg with emoji \u1F389" = "=1.0.0"
+"`+strings.Repeat("a", 65)+`" = "=1.0.0"
+"dots.are.not.allowed" = "=1.0.0"
+aliased = { package = "not a crate!", version = "=1.0.0" }
+serde = "=1.0.210"
+`)
+
+	got, err := Catalog(context.Background(), dir, Options{SkipVersionLookup: true, NoExec: true})
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	var names []string
+	for _, p := range got {
+		names = append(names, p.Name)
+	}
+	if len(names) != 1 || names[0] != "serde" {
+		t.Errorf("emitted %v, want only [serde]", names)
 	}
 }

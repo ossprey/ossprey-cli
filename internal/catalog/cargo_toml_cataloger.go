@@ -3,6 +3,7 @@ package catalog
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -10,9 +11,11 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+
 	"github.com/anchore/syft/syft/artifact"
 	"github.com/anchore/syft/syft/file"
 	"github.com/anchore/syft/syft/pkg"
+	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
 // CargoTomlCataloger extracts direct dependencies declared in Cargo.toml. Used
@@ -31,7 +34,7 @@ func (c *CargoTomlCataloger) Name() string { return "ossprey-cargotoml-cataloger
 func (c *CargoTomlCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]pkg.Package, []artifact.Relationship, error) {
 	// The scan root bounds the walk to a member's workspace root.
 	parse := func(path string, loc file.Location) ([]pkg.Package, error) {
-		return parseCargoTomlFile(path, loc, c.root)
+		return parseCargoTomlFile(ctx, path, loc, c.root)
 	}
 	out, err := catalogByGlob(ctx, resolver, c.root, "**/Cargo.toml", "cargotoml", parse)
 	return out, nil, err
@@ -58,7 +61,7 @@ type cargoManifest struct {
 	} `toml:"workspace"`
 }
 
-func parseCargoTomlFile(path string, loc file.Location, scanRoot string) ([]pkg.Package, error) {
+func parseCargoTomlFile(ctx context.Context, path string, loc file.Location, scanRoot string) ([]pkg.Package, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -75,7 +78,10 @@ func parseCargoTomlFile(path string, loc file.Location, scanRoot string) ([]pkg.
 	seen := make(map[string]struct{})
 	var out []pkg.Package
 	add := func(alias string, spec any) {
-		name, version, ok := cargoDep(alias, spec, pool)
+		name, version, ok, why := cargoDep(alias, spec, pool)
+		if why != "" {
+			warn.Add(ctx, cargoDropEntry(why, alias))
+		}
 		if !ok || name == "" || name == m.Package.Name {
 			return
 		}
@@ -145,14 +151,14 @@ func withinRoot(dir, root string) bool {
 // emitting the alias would look up a crate that does not exist. path and git
 // deps are not on crates.io, and `registry = "..."` names a private one, so
 // all three would only ever produce NOT_FOUND.
-func cargoDep(alias string, spec any, pool map[string]any) (name, version string, ok bool) {
+func cargoDep(alias string, spec any, pool map[string]any) (name, version string, ok bool, why string) {
 	switch v := spec.(type) {
 	case string:
-		return alias, cargoExactVersion(v), true
+		return vouched(alias, cargoExactVersion(v))
 	case map[string]any:
 		for _, off := range []string{"path", "git", "registry", "registry-index"} {
 			if _, found := v[off]; found {
-				return "", "", false
+				return "", "", false, ""
 			}
 		}
 		name = alias
@@ -164,14 +170,38 @@ func cargoDep(alias string, spec any, pool map[string]any) (name, version string
 		if inherit, isBool := v["workspace"].(bool); isBool && inherit {
 			inherited, found := pool[alias]
 			if !found {
-				return name, "", true
+				// The pool is out of scan scope, so this key could name a path
+				// member, a private registry or a rename alias. Emitting it would
+				// resolve a name we cannot vouch for against crates.io.
+				return "", "", false, "its workspace root is outside the scan"
 			}
 			return cargoDep(alias, inherited, nil)
 		}
 		s, _ := v["version"].(string)
-		return name, cargoExactVersion(s), true
+		return vouched(name, cargoExactVersion(s))
 	}
-	return "", "", false
+	return "", "", false, ""
+}
+
+// cargoName is the crates.io name shape, which the Ossprey API enforces too: one
+// component failing it rejects the whole SBOM, taking every other ecosystem with it.
+var cargoName = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+// vouched drops a dependency whose key cannot name a crate on crates.io.
+func vouched(name, version string) (string, string, bool, string) {
+	if !cargoName.MatchString(name) {
+		return "", "", false, "it cannot be a crates.io crate name"
+	}
+	return name, version, true, ""
+}
+
+func cargoDropEntry(why, alias string) warn.Entry {
+	return warn.Entry{
+		Class: "cargo:undeclarable:" + why,
+		One:   fmt.Sprintf("cargotoml: skipped %q because %s", alias, why),
+		Many:  "cargotoml: skipped %d dependencies because " + why,
+		Item:  alias,
+	}
 }
 
 // cargoRelease matches a concrete crates.io release, which is always full
