@@ -56,7 +56,7 @@ func TestResolveLatest_PyPI(t *testing.T) {
 
 func TestResolveLatest_Errors(t *testing.T) {
 	t.Run("unsupported ecosystem", func(t *testing.T) {
-		if _, err := ResolveLatest(context.Background(), "cargo", "serde"); err == nil {
+		if _, err := ResolveLatest(context.Background(), "maven", "commons-io"); err == nil {
 			t.Fatal("expected error")
 		}
 	})
@@ -120,5 +120,47 @@ func TestResolveLatestServerErrorIsNotNotFound(t *testing.T) {
 	}
 	if errors.Is(err, ErrNotFound) {
 		t.Errorf("ResolveLatest() error = %v, want it NOT to match ErrNotFound", err)
+	}
+}
+
+func TestResolveLatestCargo(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// crates.io 403s a generic client, so the request must identify itself.
+		if ua := r.Header.Get("User-Agent"); ua == "" || strings.HasPrefix(ua, "Go-http-client") {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		_, _ = w.Write([]byte(`{"crate":{"max_stable_version":"1.0.200","newest_version":"1.1.0-beta.1"}}`))
+	}))
+	defer srv.Close()
+	old := cratesBaseURL
+	cratesBaseURL = srv.URL + "/"
+	defer func() { cratesBaseURL = old }()
+
+	v, err := ResolveLatest(context.Background(), "cargo", "serde")
+	if err != nil {
+		t.Fatalf("ResolveLatest: %v", err)
+	}
+	// Stable wins over the newer pre-release, matching npm dist-tags.latest.
+	if v != "1.0.200" {
+		t.Errorf("version: got %q, want 1.0.200", v)
+	}
+}
+
+func TestResolveLatestCargoPrereleaseOnly(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"crate":{"max_stable_version":"","newest_version":"0.1.0-alpha.3"}}`))
+	}))
+	defer srv.Close()
+	old := cratesBaseURL
+	cratesBaseURL = srv.URL + "/"
+	defer func() { cratesBaseURL = old }()
+
+	v, err := ResolveLatest(context.Background(), "cargo", "fresh-crate")
+	if err != nil {
+		t.Fatalf("ResolveLatest: %v", err)
+	}
+	if v != "0.1.0-alpha.3" {
+		t.Errorf("version: got %q, want the pre-release fallback", v)
 	}
 }

@@ -19,11 +19,25 @@ import (
 // DefaultHTTP is the client used by ResolveLatest. Overridable in tests.
 var DefaultHTTP = &http.Client{Timeout: 15 * time.Second}
 
+// crates.io answers 403 to a generic client, so identify ourselves (OSS-1747).
+const userAgent = "ossprey-cli (+https://github.com/ossprey/ossprey-cli)"
+
 // Registry base URLs. Vars (not consts) so tests can point them at httptest.
 var (
-	npmBaseURL  = "https://registry.npmjs.org/"
-	pypiBaseURL = "https://pypi.org/pypi/"
+	npmBaseURL    = "https://registry.npmjs.org/"
+	pypiBaseURL   = "https://pypi.org/pypi/"
+	cratesBaseURL = "https://crates.io/api/v1/crates/"
 )
+
+// CanResolve reports whether ResolveLatest knows this ecosystem, so callers do
+// not carry their own copy of the list and drift from it.
+func CanResolve(ecosystem string) bool {
+	switch ecosystem {
+	case "npm", "pypi", "cargo":
+		return true
+	}
+	return false
+}
 
 // ResolveLatest returns the latest version string for name in the given
 // ecosystem ("npm" or "pypi").
@@ -33,6 +47,8 @@ func ResolveLatest(ctx context.Context, ecosystem, name string) (string, error) 
 		return resolveNpm(ctx, name)
 	case "pypi":
 		return resolvePyPI(ctx, name)
+	case "cargo":
+		return resolveCargo(ctx, name)
 	default:
 		return "", fmt.Errorf("cannot resolve latest version: unsupported ecosystem %q", ecosystem)
 	}
@@ -79,12 +95,37 @@ func resolvePyPI(ctx context.Context, name string) (string, error) {
 // one is expected, the other means the scan resolved almost nothing.
 var ErrNotFound = errors.New("not on the public registry")
 
+// resolveCargo reads the crate's latest stable release. Unreached today, since
+// Cargo.lock always pins and resolveVersionless skips anything versioned, but a
+// hand-written SBOM can still arrive carrying a bare crate name.
+func resolveCargo(ctx context.Context, name string) (string, error) {
+	endpoint := cratesBaseURL + url.PathEscape(name)
+	var body struct {
+		Crate struct {
+			MaxStableVersion string `json:"max_stable_version"`
+			NewestVersion    string `json:"newest_version"`
+		} `json:"crate"`
+	}
+	if err := getJSON(ctx, endpoint, &body); err != nil {
+		return "", err
+	}
+	// max_stable_version is empty for a crate that has only ever pre-released.
+	if v := body.Crate.MaxStableVersion; v != "" {
+		return v, nil
+	}
+	if v := body.Crate.NewestVersion; v != "" {
+		return v, nil
+	}
+	return "", fmt.Errorf("crates.io returned no version for %q", name)
+}
+
 func getJSON(ctx context.Context, endpoint string, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", userAgent)
 	resp, err := DefaultHTTP.Do(req)
 	if err != nil {
 		return fmt.Errorf("registry request: %w", err)
