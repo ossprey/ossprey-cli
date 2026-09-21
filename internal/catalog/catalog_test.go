@@ -1109,9 +1109,11 @@ func TestCatalogCargoResolvesRangesToLatest(t *testing.T) {
 	// The shipping path: version lookup is on by default, so every Cargo.toml
 	// range reaches the registry. Stubbed, since the assertion is the wiring.
 	t.Setenv("OSSPREY_RESOLVE_LATEST", "")
-	var asked []string
-	withResolveLatest(t, func(_ context.Context, ecosystem, name string) (string, error) {
-		asked = append(asked, ecosystem+"/"+name)
+	var askedPinned atomic.Bool // resolveVersionless calls the resolver concurrently
+	withResolveLatest(t, func(_ context.Context, _, name string) (string, error) {
+		if name == "pinned-in-pool" {
+			askedPinned.Store(true)
+		}
 		return "9.9.9", nil
 	})
 
@@ -1135,9 +1137,7 @@ func TestCatalogCargoResolvesRangesToLatest(t *testing.T) {
 	if p := byName["pinned-in-pool"]; p.Version != "1.2.3" {
 		t.Errorf("an inherited pin must survive resolution, got %q", p.Version)
 	}
-	for _, a := range asked {
-		if a == "cargo/pinned-in-pool" {
-			t.Error("a pinned crate should not be looked up")
-		}
+	if askedPinned.Load() {
+		t.Error("a pinned crate should not be looked up")
 	}
 }
