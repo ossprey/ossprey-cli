@@ -40,7 +40,14 @@ type cargoManifest struct {
 	Dependencies      map[string]any `toml:"dependencies"`
 	DevDependencies   map[string]any `toml:"dev-dependencies"`
 	BuildDependencies map[string]any `toml:"build-dependencies"`
-	Workspace         struct {
+	// Platform-gated deps, e.g. [target.'cfg(windows)'.dependencies]. Still
+	// shipped to whoever builds for that platform, so still worth scanning.
+	Target map[string]struct {
+		Dependencies      map[string]any `toml:"dependencies"`
+		DevDependencies   map[string]any `toml:"dev-dependencies"`
+		BuildDependencies map[string]any `toml:"build-dependencies"`
+	} `toml:"target"`
+	Workspace struct {
 		Dependencies map[string]any `toml:"dependencies"`
 	} `toml:"workspace"`
 }
@@ -60,12 +67,9 @@ func parseCargoTomlFile(path string, loc file.Location) ([]pkg.Package, error) {
 
 	seen := make(map[string]struct{})
 	var out []pkg.Package
-	add := func(name string, spec any) {
-		if name == "" || name == m.Package.Name {
-			return
-		}
-		version, registry := cargoDepVersion(spec)
-		if !registry {
+	add := func(alias string, spec any) {
+		name, version, ok := cargoDep(alias, spec)
+		if !ok || name == "" || name == m.Package.Name {
 			return
 		}
 		key := name + "@" + version
@@ -80,9 +84,14 @@ func parseCargoTomlFile(path string, loc file.Location) ([]pkg.Package, error) {
 			Locations: file.NewLocationSet(loc),
 		})
 	}
-	for _, table := range []map[string]any{
-		m.Dependencies, m.DevDependencies, m.BuildDependencies, m.Workspace.Dependencies,
-	} {
+	tables := []map[string]any{m.Dependencies, m.DevDependencies, m.BuildDependencies}
+	for _, t := range m.Target {
+		tables = append(tables, t.Dependencies, t.DevDependencies, t.BuildDependencies)
+	}
+	// [workspace.dependencies] is an inheritance pool, not a dependency list. A
+	// member opts in with `dep = { workspace = true }`, and that entry is what
+	// gets emitted; publishing the pool would invent components nothing uses.
+	for _, table := range tables {
 		for n, spec := range table {
 			add(n, spec)
 		}
@@ -90,25 +99,36 @@ func parseCargoTomlFile(path string, loc file.Location) ([]pkg.Package, error) {
 	return out, nil
 }
 
-// cargoDepVersion returns the pinned version (empty unless the spec names one
-// exactly) and whether the dependency comes from a registry at all. A `path`
-// or `git` dependency is not on crates.io, so submitting it would only produce
-// a NOT_FOUND finding.
-func cargoDepVersion(spec any) (version string, registry bool) {
+// cargoDep resolves one dependency entry to the crate name and version to
+// submit, and whether to submit it at all.
+//
+// The key is an alias: `renamed = { package = "real-crate" }` is legal, and
+// emitting the alias would look up a crate that does not exist. path and git
+// deps are not on crates.io, and `registry = "..."` names a private one, so
+// all three would only ever produce NOT_FOUND.
+func cargoDep(alias string, spec any) (name, version string, ok bool) {
 	switch v := spec.(type) {
 	case string:
-		return cargoExactVersion(v), true
+		return alias, cargoExactVersion(v), true
 	case map[string]any:
-		if _, ok := v["path"]; ok {
-			return "", false
+		for _, off := range []string{"path", "git", "registry"} {
+			if _, found := v[off]; found {
+				return "", "", false
+			}
 		}
-		if _, ok := v["git"]; ok {
-			return "", false
+		name = alias
+		if real, isStr := v["package"].(string); isStr && real != "" {
+			name = real
+		}
+		// Inherited from [workspace.dependencies]: the name is here, the
+		// version is in the workspace root, so leave it for resolveVersionless.
+		if inherit, isBool := v["workspace"].(bool); isBool && inherit {
+			return name, "", true
 		}
 		s, _ := v["version"].(string)
-		return cargoExactVersion(s), true
+		return name, cargoExactVersion(s), true
 	}
-	return "", false
+	return "", "", false
 }
 
 // cargoExactVersion returns the version only when the spec pins one exactly.

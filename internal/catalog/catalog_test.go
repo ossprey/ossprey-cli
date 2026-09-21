@@ -878,6 +878,30 @@ criterion = "0.5"
 
 [build-dependencies]
 cc = "1.0"
+
+[target.'cfg(windows)'.dependencies]
+winapi = "0.3"
+
+[target.'cfg(unix)'.build-dependencies]
+nix = "0.29"
+
+[dependencies.renamed-thing]
+package = "real-crate"
+version = "3.1"
+
+[dependencies.private-dep]
+version = "1.0"
+registry = "company-internal"
+
+[dependencies.inherited]
+workspace = true
+`
+
+const cargoWorkspaceRootFixture = `[workspace]
+members = ["crates/app"]
+
+[workspace.dependencies]
+never-used-by-any-member = "9.9"
 `
 
 func TestCatalogCargoTomlWithoutLockfile(t *testing.T) {
@@ -913,6 +937,31 @@ func TestCatalogCargoTomlWithoutLockfile(t *testing.T) {
 		t.Errorf("an exact =2.4.1 pin should carry its version, got %q", p.Version)
 	}
 
+	// Platform-gated deps still ship to whoever builds for that platform.
+	for _, name := range []string{"winapi", "nix"} {
+		if _, ok := byName[name]; !ok {
+			t.Errorf("%s: a [target.'cfg(...)'] dependency must still be catalogued", name)
+		}
+	}
+
+	// `renamed-thing = { package = "real-crate" }`: the alias is not a crate.
+	if _, ok := byName["renamed-thing"]; ok {
+		t.Error("the alias was emitted; the registry has no such crate")
+	}
+	if _, ok := byName["real-crate"]; !ok {
+		t.Error("the real package name should be emitted for a renamed dependency")
+	}
+
+	// A private registry is not crates.io, so resolving it there is wrong.
+	if _, ok := byName["private-dep"]; ok {
+		t.Error("an alternate-registry dependency should not be emitted as cargo")
+	}
+
+	// Inherited from the workspace: name here, version in the root.
+	if p, ok := byName["inherited"]; !ok || p.Version != "" {
+		t.Errorf("a workspace-inherited dep should be emitted versionless, got %+v", p)
+	}
+
 	// Neither is on crates.io, so submitting them yields only NOT_FOUND.
 	for _, name := range []string{"local-helper", "from-git", "my-app"} {
 		if _, ok := byName[name]; ok {
@@ -944,5 +993,22 @@ func TestCatalogCargoLockWinsOverManifest(t *testing.T) {
 	}
 	if serde[0].Version != "1.0.200" {
 		t.Errorf("the lockfile version should win, got %q", serde[0].Version)
+	}
+}
+
+func TestCatalogCargoWorkspacePoolIsNotADependencyList(t *testing.T) {
+	// [workspace.dependencies] is an inheritance pool. Emitting it would invent
+	// components no member actually depends on.
+	dir := t.TempDir()
+	writeFile(t, dir, "Cargo.toml", cargoWorkspaceRootFixture)
+
+	got, err := Catalog(context.Background(), dir, Options{SkipVersionLookup: true, NoExec: true})
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	for _, p := range got {
+		if p.Name == "never-used-by-any-member" {
+			t.Fatalf("the workspace pool was emitted as a dependency: %+v", p)
+		}
 	}
 }
