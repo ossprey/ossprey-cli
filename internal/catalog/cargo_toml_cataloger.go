@@ -211,7 +211,7 @@ func cargoDep(alias string, spec any, pool map[string]any) (name, version string
 				// The pool is out of scan scope, so this key could name a path
 				// member, a private registry or a rename alias. Emitting it would
 				// resolve a name we cannot vouch for against crates.io.
-				return "", "", false, "its workspace root is outside the scan"
+				return "", "", false, "its workspace root could not be read inside the scan"
 			}
 			return cargoDep(alias, inherited, nil)
 		}
