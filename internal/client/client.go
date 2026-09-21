@@ -140,6 +140,27 @@ type submitResponse struct {
 	ScanID string `json:"scan_id"`
 }
 
+// skipMessage reads the API's nested explanation for a skipped scan. The API
+// skips for two reasons, quota and nothing scannable in the SBOM, and reports
+// the second under output.error_message, so quota is the fallback, not the default.
+func skipMessage(output json.RawMessage) string {
+	const quota = "Scan skipped due to quota exhaustion"
+	var o struct {
+		Reason       string `json:"reason"`
+		ErrorMessage string `json:"error_message"`
+	}
+	if err := json.Unmarshal(output, &o); err != nil {
+		return quota
+	}
+	if o.ErrorMessage != "" {
+		return o.ErrorMessage
+	}
+	if o.Reason != "" && o.Reason != "usage_limit_exceeded" {
+		return "Scan skipped: " + o.Reason
+	}
+	return quota
+}
+
 type statusResponse struct {
 	Status  string          `json:"status"`
 	Output  json.RawMessage `json:"output"`
@@ -304,7 +325,7 @@ func (c *Client) waitForCompletion(ctx context.Context, sbomID, scanID string) (
 		case "SKIPPED":
 			msg := sr.Message
 			if msg == "" {
-				msg = "Scan skipped due to quota exhaustion"
+				msg = skipMessage(sr.Output)
 			}
 			return nil, &ErrSkipped{Message: msg, ResetAt: sr.ResetAt}
 		case "FAILED":

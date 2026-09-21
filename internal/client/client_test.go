@@ -431,3 +431,33 @@ func TestIngestTransportErrorDoesNotCarryTheToken(t *testing.T) {
 		t.Errorf("the error names no monitor at all, so it cannot be debugged: %v", postErr)
 	}
 }
+
+func TestSkipMessage(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		want   string
+	}{
+		{
+			// The API nests this under output, which is why the CLI used to
+			// blame quota for every skipped scan.
+			"nothing scannable",
+			`{"skipped":true,"reason":"no_scannable_components","error_message":"No supported package ecosystems found in this SBOM. Skipped: 2 cargo."}`,
+			"No supported package ecosystems found in this SBOM. Skipped: 2 cargo.",
+		},
+		{
+			"quota, which stores no message",
+			`{"skipped":true,"reason":"usage_limit_exceeded"}`,
+			"Scan skipped due to quota exhaustion",
+		},
+		{"no output at all", ``, "Scan skipped due to quota exhaustion"},
+		{"unrecognised reason", `{"reason":"something_new"}`, "Scan skipped: something_new"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := skipMessage([]byte(tt.output)); got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

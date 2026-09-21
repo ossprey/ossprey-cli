@@ -1116,6 +1116,7 @@ ossprey scan . --report report.json
   "project": "my-service",
   "path": "/home/me/my-service",
   "components": 412,
+  "unscanned": 2,
   "findings": [
     {
       "purl": "pkg:npm/@acme/logger@1.4.2",
@@ -1135,9 +1136,16 @@ ossprey scan . --report report.json
 
 | Verdict   | Exit code | Meaning |
 |-----------|-----------|---------|
-| `clean`   | 0         | Scanned, nothing flagged. |
+| `clean`   | 0         | Scanned, nothing flagged. Check `unscanned` for how much was covered. |
 | `malware` | 1         | `findings` lists every flagged package. |
-| `skipped` | 0         | Your quota was exhausted; **nothing was checked**. `skipped.message` and `skipped.reset_at` say why and until when. Do not read this as "clean". |
+| `skipped` | 0         | **Nothing was checked**: either your quota was exhausted or the SBOM held nothing this platform scans. `skipped.message` and `skipped.reset_at` say why and until when. Do not read this as "clean". |
+
+`unscanned` is how many of `components` the platform did not check, which
+happens when a project holds packages from an ecosystem it does not scan. It is
+omitted when everything was covered, so its absence means full coverage. A
+`clean` verdict with a non-zero `unscanned` means nothing was flagged in the
+part that was scanned, and the summary line says so: `No malware found in 410 of
+412 packages`.
 
 `findings` is always present, empty on a clean scan, so
 `jq '.findings | length'` works either way. The file is written before the

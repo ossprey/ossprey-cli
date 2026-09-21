@@ -299,7 +299,7 @@ func newScanCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			fmt.Println("No malware found")
+			fmt.Println(noMalwareLine(sbom))
 			return nil
 		},
 	}
@@ -407,7 +407,7 @@ func newCheckCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			fmt.Println("No malware found")
+			fmt.Println(noMalwareLine(sbom))
 			return nil
 		},
 	}
@@ -475,6 +475,21 @@ func newForwardCmd(bin string) *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// noMalwareLine states how much was actually covered: an SBOM can carry
+// components in an ecosystem the platform does not scan, and a bare "No malware
+// found" would imply those were checked too.
+func noMalwareLine(sbom *ossbom.SBOM) string {
+	unscanned := sbom.Unscanned()
+	if unscanned <= 0 {
+		return "No malware found"
+	}
+	scanned := len(sbom.Components) - unscanned
+	if scanned < 0 {
+		scanned = 0
+	}
+	return fmt.Sprintf("No malware found in %d of %d packages", scanned, len(sbom.Components))
 }
 
 // progressOut is where the "still working" indicator is drawn: stderr, never

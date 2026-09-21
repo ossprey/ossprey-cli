@@ -52,15 +52,18 @@ func componentPurl(c Component) string {
 	return "pkg:" + c.Type + "/" + c.Name + "@" + c.Version
 }
 
-// ApplyAPIResponse copies vulnerabilities from a MiniBOM-shaped API response
-// into this SBOM. Returns nil on parse failure with an error context.
+// ApplyAPIResponse copies vulnerabilities and findings from a MiniBOM-shaped
+// API response into this SBOM. Returns nil on parse failure with an error context.
+// Findings name the components the scan did not check.
 func (s *SBOM) ApplyAPIResponse(raw json.RawMessage) error {
 	var resp struct {
 		Vulnerabilities []Vulnerability `json:"vulnerabilities"`
+		Findings        []Finding       `json:"findings"`
 	}
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return err
 	}
 	s.Vulnerabilities = append(s.Vulnerabilities, resp.Vulnerabilities...)
+	s.Findings = append(s.Findings, resp.Findings...)
 	return nil
 }
