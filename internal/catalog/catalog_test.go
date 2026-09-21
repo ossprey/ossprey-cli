@@ -861,3 +861,88 @@ func TestCatalogCargoLock(t *testing.T) {
 		t.Errorf("workspace-local crate was emitted: %v", byName["my-workspace-crate"])
 	}
 }
+
+const cargoTomlFixture = `[package]
+name = "my-app"
+version = "0.1.0"
+
+[dependencies]
+serde = "1.0"
+tokio = { version = "1.38", features = ["full"] }
+pinned = "=2.4.1"
+local-helper = { path = "../helper" }
+from-git = { git = "https://github.com/x/y" }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[build-dependencies]
+cc = "1.0"
+`
+
+func TestCatalogCargoTomlWithoutLockfile(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "Cargo.toml", cargoTomlFixture)
+
+	got, err := Catalog(context.Background(), dir, Options{SkipVersionLookup: true, NoExec: true})
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+
+	byName := map[string]Package{}
+	for _, p := range got {
+		byName[p.Name] = p
+	}
+
+	// A caret range is not a version. Emitting one would ship a component on a
+	// version the crate never uses; versionless lets the backend resolve it.
+	for _, name := range []string{"serde", "tokio", "criterion", "cc"} {
+		p, ok := byName[name]
+		if !ok {
+			t.Fatalf("%s missing from %v", name, byName)
+		}
+		if p.Type != "cargo" {
+			t.Errorf("%s: type = %q, want cargo", name, p.Type)
+		}
+		if p.Version != "" {
+			t.Errorf("%s: version = %q, want empty for a range", name, p.Version)
+		}
+	}
+
+	if p := byName["pinned"]; p.Version != "2.4.1" {
+		t.Errorf("an exact =2.4.1 pin should carry its version, got %q", p.Version)
+	}
+
+	// Neither is on crates.io, so submitting them yields only NOT_FOUND.
+	for _, name := range []string{"local-helper", "from-git", "my-app"} {
+		if _, ok := byName[name]; ok {
+			t.Errorf("%s should not be emitted", name)
+		}
+	}
+}
+
+func TestCatalogCargoLockWinsOverManifest(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "Cargo.toml", cargoTomlFixture)
+	writeFile(t, dir, "Cargo.lock", cargoLockFixture)
+
+	got, err := Catalog(context.Background(), dir, Options{SkipVersionLookup: true, NoExec: true})
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+
+	// serde is in both: versioned from the lock, versionless from the manifest.
+	// The merge must collapse them rather than ship the crate twice.
+	var serde []Package
+	for _, p := range got {
+		if p.Name == "serde" {
+			serde = append(serde, p)
+		}
+	}
+	if len(serde) != 1 {
+		t.Fatalf("want one serde component, got %d: %v", len(serde), serde)
+	}
+	if serde[0].Version != "1.0.200" {
+		t.Errorf("the lockfile version should win, got %q", serde[0].Version)
+	}
+}

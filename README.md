@@ -899,7 +899,7 @@ Python, JavaScript and Rust, via syft's static catalogers.
 |-----------|--------------|
 | Python | `requirements.txt`, `Pipfile.lock`, `poetry.lock`, `uv.lock`, `pdm.lock`, `setup.py`, `pyproject.toml`, wheel / egg metadata |
 | JavaScript | `package.json`, `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml` |
-| Rust | `Cargo.lock` only, there is no support for parsing cargo.toml. |
+| Rust | `Cargo.lock`, and `Cargo.toml` for direct dependencies when no lockfile is committed. |
 
 The CLI never executes your package manager. If your repo has only a manifest
 and no lockfile, expect direct deps only — supply a lockfile for full
