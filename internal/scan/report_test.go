@@ -1,6 +1,7 @@
 package scan
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -281,5 +282,40 @@ func TestSkippedReportSplitsAtTheServedFloor(t *testing.T) {
 	}
 	if len(r.Informational) != 1 {
 		t.Errorf("informational = %d, want 1", len(r.Informational))
+	}
+}
+
+func TestNewReportCountsUnscanned(t *testing.T) {
+	s := ossbom.New(ossbom.Environment{})
+	s.AddComponent(ossbom.Component{Name: "left-pad", Version: "1.3.0", Type: "npm"})
+	s.AddComponent(ossbom.Component{Name: "serde", Version: "1.0.200", Type: "cargo"})
+	s.AddComponent(ossbom.Component{Name: "rand", Version: "0.8.5", Type: "cargo"})
+	s.Findings = []ossbom.Finding{
+		{Purl: "pkg:cargo/serde@1.0.200", Type: "UNSUPPORTED"},
+		{Purl: "pkg:cargo/rand@0.8.5", Type: "UNSUPPORTED"},
+	}
+
+	r := NewReport(s, severity.FailingFloor)
+	// The verdict does not change: nothing malicious was found in what was
+	// scanned. The counts are what tell a consumer the coverage.
+	if r.Verdict != VerdictClean {
+		t.Errorf("verdict: got %q, want %q", r.Verdict, VerdictClean)
+	}
+	if r.Components != 3 || r.Unscanned != 2 {
+		t.Errorf("components/unscanned: got %d/%d, want 3/2", r.Components, r.Unscanned)
+	}
+}
+
+func TestReportOmitsUnscannedWhenFullyCovered(t *testing.T) {
+	// A consumer that predates the field must see no change on a full scan.
+	s := ossbom.New(ossbom.Environment{})
+	s.AddComponent(ossbom.Component{Name: "left-pad", Version: "1.3.0", Type: "npm"})
+
+	blob, err := json.Marshal(NewReport(s, severity.FailingFloor))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if bytes.Contains(blob, []byte("unscanned")) {
+		t.Errorf("unscanned should be omitted when zero: %s", blob)
 	}
 }

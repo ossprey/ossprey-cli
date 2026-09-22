@@ -11,7 +11,7 @@ packages are known to contain malware.
 > [Authentication](#authentication)). The `--local` and `--dry-run-*` modes
 > work without credentials.
 
-Today the CLI covers Python and JavaScript projects via static parsing of the
+Today the CLI covers Python, JavaScript and Rust projects via static parsing of the
 manifests and lockfiles already in your repo — no package installs, no
 sandbox, no virtualenv.
 
@@ -906,16 +906,19 @@ framework manage both.
 
 ## Supported ecosystems
 
-Python and JavaScript, via syft's static catalogers.
+Python, JavaScript and Rust, via syft's static catalogers.
 
 | Ecosystem | Files parsed |
 |-----------|--------------|
 | Python | `requirements.txt`, `Pipfile.lock`, `poetry.lock`, `uv.lock`, `pdm.lock`, `setup.py`, `pyproject.toml`, wheel / egg metadata |
 | JavaScript | `package.json`, `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml` |
+| Rust | `Cargo.lock` only, there is no support for parsing cargo.toml. |
 
 The CLI never executes your package manager. If your repo has only a manifest
 and no lockfile, expect direct deps only — supply a lockfile for full
-transitive coverage.
+transitive coverage. Rust is the exception: with no `Cargo.lock` it catalogues
+nothing at all, so a crate that gitignores its lockfile needs one committed to
+be scanned.
 
 When a dependency's version can't be determined — an unpinned range in a
 manifest (`click = "^8"`) with no lockfile or resolver to pin it against — the
@@ -1025,8 +1028,10 @@ spelling of `--passive` and keep working unchanged.
 
 ## Output
 
-`ossprey scan` prints `No malware found` on success. On a malware verdict it
-draws an alert box naming every malicious package, followed by one
+`ossprey scan` prints `No malware found` on success, or `No malware found in
+<scanned> of <total> packages` when the platform did not check everything it
+was sent (see [`unscanned`](#machine-readable-verdict---report)). On a malware
+verdict it draws an alert box naming every malicious package, followed by one
 `Error: WARNING: <pkg>:<ver> contains malware. Remediate this immediately` line
 per finding, so anything that greps the old one-line form keeps working. The
 forwarders and shims print the same box to stderr before their
@@ -1126,6 +1131,7 @@ ossprey scan . --report report.json
   "project": "my-service",
   "path": "/home/me/my-service",
   "components": 412,
+  "unscanned": 2,
   "findings": [
     {
       "purl": "pkg:npm/@acme/logger@1.4.2",
@@ -1145,10 +1151,20 @@ ossprey scan . --report report.json
 
 | Verdict   | Exit code | Meaning |
 |-----------|-----------|---------|
-| `clean`   | 0         | Scanned, nothing flagged. |
+| `clean`   | 0         | Scanned, nothing flagged. Check `unscanned` for how much was covered. |
 | `malware` | 1         | `findings` lists every flagged package. |
 | `informational` | 0   | Everything found sits below the floor this run graded at. `informational` lists them. Reported, not blocking, and **not** a clean scan. |
-| `skipped` | 0         | Your quota was exhausted; **nothing was checked**. `skipped.message` and `skipped.reset_at` say why and until when. Do not read this as "clean". |
+| `skipped` | 0         | **Nothing was checked**: either your quota was exhausted or the SBOM held nothing this platform scans. `skipped.message` and `skipped.reset_at` say why and until when. Do not read this as "clean". |
+
+`unscanned` is how many of `components` the platform did not check: packages in
+an ecosystem it does not scan, and packages the registry did not have. It is
+omitted when zero, so on a `clean` or `malware` verdict its absence means full
+coverage. On a `skipped` verdict nothing was checked at all, so read the verdict
+rather than this field.
+
+A `clean` verdict with a non-zero `unscanned` means nothing was flagged in the
+part that was scanned, and the summary line says so: `No malware found in 410 of
+412 packages`.
 
 `findings` is always present, empty on a clean scan, so
 `jq '.findings | length'` works either way. The file is written before the
