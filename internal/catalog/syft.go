@@ -119,6 +119,9 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 	// Custom: direct-deps fallback for package.json (syft only emits the
 	// root project from package.json, not its deps).
 	catalogers = append(catalogers, NewPackageJSONCataloger(absRoot))
+	// Custom: direct-deps fallback for Cargo.toml. Syft reads Cargo.lock only,
+	// and a library crate conventionally gitignores it.
+	catalogers = append(catalogers, NewCargoTomlCataloger(absRoot))
 
 	seen := map[string]struct{}{}
 	locks := newNpmLockClassifier(absRoot)
@@ -159,6 +162,13 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 			version := p.Version
 			if v, ok := pins.versionFor(p); ok {
 				version = v
+			}
+			// The lockfile cataloger is syft's and applies no crates.io name or
+			// version rule, so gate every cargo source here: one component the
+			// API rejects fails the customer's whole SBOM, npm and pypi included.
+			if t == "cargo" && !validCargoComponent(p.Name, version) {
+				warn.Add(ctx, cargoDropEntry("it cannot be a crates.io crate name", p.Name))
+				continue
 			}
 			key := dedupKey(t, p.Name, version)
 			if _, ok := seen[key]; ok {
@@ -348,7 +358,8 @@ func isOspreyCataloger(name string) bool {
 		"ossprey-requirements-cataloger",
 		"ossprey-pyproject-cataloger",
 		"ossprey-npm-cataloger",
-		"ossprey-packagejson-cataloger":
+		"ossprey-packagejson-cataloger",
+		"ossprey-cargotoml-cataloger":
 		return true
 	}
 	return false

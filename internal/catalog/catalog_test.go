@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -859,5 +861,571 @@ func TestCatalogCargoLock(t *testing.T) {
 	// Emitting it would submit the project's own code as a dependency.
 	if _, ok := byName["my-workspace-crate"]; ok {
 		t.Errorf("workspace-local crate was emitted: %v", byName["my-workspace-crate"])
+	}
+}
+
+const cargoTomlFixture = `[package]
+name = "my-app"
+version = "0.1.0"
+
+[dependencies]
+serde = "1.0"
+tokio = { version = "1.38", features = ["full"] }
+pinned = "=2.4.1"
+local-helper = { path = "../helper" }
+from-git = { git = "https://github.com/x/y" }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[build-dependencies]
+cc = "1.0"
+
+[target.'cfg(windows)'.dependencies]
+winapi = "0.3"
+
+[target.'cfg(unix)'.build-dependencies]
+nix = "0.29"
+
+[dependencies.renamed-thing]
+package = "real-crate"
+version = "3.1"
+
+[dependencies.private-dep]
+version = "1.0"
+registry = "company-internal"
+
+[dependencies.inherited]
+workspace = true
+`
+
+const cargoWorkspaceRootFixture = `[workspace]
+members = ["crates/app"]
+
+[workspace.dependencies]
+never-used-by-any-member = "9.9"
+`
+
+func TestCatalogCargoTomlWithoutLockfile(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "Cargo.toml", cargoTomlFixture)
+
+	got, err := Catalog(context.Background(), dir, Options{SkipVersionLookup: true, NoExec: true})
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+
+	byName := map[string]Package{}
+	for _, p := range got {
+		byName[p.Name] = p
+	}
+
+	// A caret range is not a version. Emitting one would ship a component on a
+	// version the crate never uses; versionless lets the backend resolve it.
+	for _, name := range []string{"serde", "tokio", "criterion", "cc"} {
+		p, ok := byName[name]
+		if !ok {
+			t.Fatalf("%s missing from %v", name, byName)
+		}
+		if p.Type != "cargo" {
+			t.Errorf("%s: type = %q, want cargo", name, p.Type)
+		}
+		if p.Version != "" {
+			t.Errorf("%s: version = %q, want empty for a range", name, p.Version)
+		}
+	}
+
+	if p := byName["pinned"]; p.Version != "2.4.1" {
+		t.Errorf("an exact =2.4.1 pin should carry its version, got %q", p.Version)
+	}
+
+	// Platform-gated deps still ship to whoever builds for that platform.
+	for _, name := range []string{"winapi", "nix"} {
+		if _, ok := byName[name]; !ok {
+			t.Errorf("%s: a [target.'cfg(...)'] dependency must still be catalogued", name)
+		}
+	}
+
+	// `renamed-thing = { package = "real-crate" }`: the alias is not a crate.
+	if _, ok := byName["renamed-thing"]; ok {
+		t.Error("the alias was emitted; the registry has no such crate")
+	}
+	if _, ok := byName["real-crate"]; !ok {
+		t.Error("the real package name should be emitted for a renamed dependency")
+	}
+
+	// A private registry is not crates.io, so resolving it there is wrong.
+	if _, ok := byName["private-dep"]; ok {
+		t.Error("an alternate-registry dependency should not be emitted as cargo")
+	}
+
+	// Inherited from a workspace whose pool this fixture does not have. The key
+	// alone could name a path member or a rename alias, so it is not a crate we
+	// can vouch for and must not be resolved against crates.io.
+	if p, ok := byName["inherited"]; ok {
+		t.Errorf("emitted %+v; the pool is unreachable, so the name is unvouched", p)
+	}
+
+	// Neither is on crates.io, so submitting them yields only NOT_FOUND.
+	for _, name := range []string{"local-helper", "from-git", "my-app"} {
+		if _, ok := byName[name]; ok {
+			t.Errorf("%s should not be emitted", name)
+		}
+	}
+}
+
+func TestCatalogCargoLockWinsOverManifest(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "Cargo.toml", cargoTomlFixture)
+	writeFile(t, dir, "Cargo.lock", cargoLockFixture)
+
+	got, err := Catalog(context.Background(), dir, Options{SkipVersionLookup: true, NoExec: true})
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+
+	// serde is in both: versioned from the lock, versionless from the manifest.
+	// The merge must collapse them rather than ship the crate twice.
+	var serde []Package
+	for _, p := range got {
+		if p.Name == "serde" {
+			serde = append(serde, p)
+		}
+	}
+	if len(serde) != 1 {
+		t.Fatalf("want one serde component, got %d: %v", len(serde), serde)
+	}
+	if serde[0].Version != "1.0.200" {
+		t.Errorf("the lockfile version should win, got %q", serde[0].Version)
+	}
+}
+
+func TestCatalogCargoWorkspacePoolIsNotADependencyList(t *testing.T) {
+	// [workspace.dependencies] is an inheritance pool. Emitting it would invent
+	// components no member actually depends on.
+	dir := t.TempDir()
+	writeFile(t, dir, "Cargo.toml", cargoWorkspaceRootFixture)
+
+	got, err := Catalog(context.Background(), dir, Options{SkipVersionLookup: true, NoExec: true})
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	for _, p := range got {
+		if p.Name == "never-used-by-any-member" {
+			t.Fatalf("the workspace pool was emitted as a dependency: %+v", p)
+		}
+	}
+}
+
+const cargoInheritanceFixture = `[package]
+name = "member"
+
+[workspace.dependencies]
+pinned-in-pool = "=1.2.3"
+ranged-in-pool = "1.4"
+renamed-in-pool = { package = "real-pool-crate", version = "=2.0.0" }
+local-in-pool = { path = "../local" }
+
+[dependencies]
+pinned-in-pool = { workspace = true }
+ranged-in-pool = { workspace = true }
+renamed-in-pool = { workspace = true }
+local-in-pool = { workspace = true }
+absent-from-pool = { workspace = true }
+two-component = "=1.0"
+three-component = "=1.0.0"
+bare-full = "1.0.0"
+prerelease = "=1.0.0-alpha.1"
+alt-index = { version = "=1.0.0", registry-index = "https://internal.example/index" }
+`
+
+func TestCatalogCargoWorkspaceInheritanceReadsThePool(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "Cargo.toml", cargoInheritanceFixture)
+
+	got, err := Catalog(context.Background(), dir, Options{SkipVersionLookup: true, NoExec: true})
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	byName := map[string]Package{}
+	for _, p := range got {
+		byName[p.Name] = p
+	}
+
+	// The pin is in the same file, so inheriting must use it rather than leave
+	// the crate versionless for the registry to answer with its latest release.
+	if p := byName["pinned-in-pool"]; p.Version != "1.2.3" {
+		t.Errorf("inherited pin: version = %q, want 1.2.3", p.Version)
+	}
+	if p, ok := byName["ranged-in-pool"]; !ok || p.Version != "" {
+		t.Errorf("a pooled range is still a range, got %+v", p)
+	}
+	// The pool entry carries the rename, so the alias is not a crate.
+	if _, ok := byName["renamed-in-pool"]; ok {
+		t.Error("the alias was emitted; the registry has no such crate")
+	}
+	if p := byName["real-pool-crate"]; p.Version != "2.0.0" {
+		t.Errorf("pooled rename: version = %q, want 2.0.0", p.Version)
+	}
+	// A pooled path dependency is not on crates.io any more than a direct one.
+	if _, ok := byName["local-in-pool"]; ok {
+		t.Error("a pooled path dependency should not be emitted")
+	}
+	// No pool entry means the key cannot be resolved to a real crate name.
+	if p, ok := byName["absent-from-pool"]; ok {
+		t.Errorf("emitted %+v; an inherit with no pool entry is unvouched", p)
+	}
+}
+
+func TestCatalogCargoOnlyFullSemverIsAPin(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "Cargo.toml", cargoInheritanceFixture)
+
+	got, err := Catalog(context.Background(), dir, Options{SkipVersionLookup: true, NoExec: true})
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	byName := map[string]Package{}
+	for _, p := range got {
+		byName[p.Name] = p
+	}
+
+	// crates.io releases are always three-component, so "=1.0" cannot name one.
+	if p, ok := byName["two-component"]; !ok || p.Version != "" {
+		t.Errorf("=1.0 is a range, not a release, got %+v", p)
+	}
+	if p := byName["three-component"]; p.Version != "1.0.0" {
+		t.Errorf("three-component: version = %q, want 1.0.0", p.Version)
+	}
+	// Bare "1.0.0" is caret in Cargo, so it is a range despite looking exact.
+	if p, ok := byName["bare-full"]; !ok || p.Version != "" {
+		t.Errorf("a bare version is a caret range, got %+v", p)
+	}
+	if p := byName["prerelease"]; p.Version != "1.0.0-alpha.1" {
+		t.Errorf("prerelease: version = %q, want 1.0.0-alpha.1", p.Version)
+	}
+	// registry-index names a private index just as registry names a private registry.
+	if _, ok := byName["alt-index"]; ok {
+		t.Error("a registry-index dependency should not be emitted as cargo")
+	}
+}
+
+func TestCatalogCargoResolvesRangesToLatest(t *testing.T) {
+	// The shipping path: version lookup is on by default, so every Cargo.toml
+	// range reaches the registry. This pins current behaviour rather than
+	// endorsing it: a latest release can fall outside the declared range.
+	t.Setenv("OSSPREY_RESOLVE_LATEST", "")
+	var askedPinned atomic.Bool // resolveVersionless calls the resolver concurrently
+	withResolveLatest(t, func(_ context.Context, _, name string) (string, error) {
+		if name == "pinned-in-pool" {
+			askedPinned.Store(true)
+		}
+		return "9.9.9", nil
+	})
+
+	dir := t.TempDir()
+	writeFile(t, dir, "Cargo.toml", cargoInheritanceFixture)
+
+	got, err := Catalog(context.Background(), dir, Options{NoExec: true})
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	byName := map[string]Package{}
+	for _, p := range got {
+		byName[p.Name] = p
+	}
+
+	if p := byName["two-component"]; p.Version != "9.9.9" {
+		t.Errorf("a range should resolve to the registry's latest, got %q", p.Version)
+	}
+	// A pin resolved from the pool is already concrete, so it must not be asked
+	// for and must not be overwritten by whatever the registry calls latest.
+	if p := byName["pinned-in-pool"]; p.Version != "1.2.3" {
+		t.Errorf("an inherited pin must survive resolution, got %q", p.Version)
+	}
+	if askedPinned.Load() {
+		t.Error("a pinned crate should not be looked up")
+	}
+}
+
+const cargoWorkspaceRootPoolFixture = `[workspace]
+members = ["crates/app"]
+
+[workspace.dependencies]
+pinned = "=1.2.3"
+renamed = { package = "real-pool-crate", version = "=2.0.0" }
+localdep = { path = "../local" }
+privdep = { version = "=3.0.0", registry = "company-internal" }
+ranged = "1.4"
+`
+
+const cargoWorkspaceMemberFixture = `[package]
+name = "app"
+
+[dependencies]
+pinned = { workspace = true }
+renamed = { workspace = true }
+localdep = { workspace = true }
+privdep = { workspace = true }
+ranged = { workspace = true }
+`
+
+func TestCatalogCargoInheritsFromTheWorkspaceRoot(t *testing.T) {
+	// The conventional layout: the pool lives in the root manifest and the
+	// member holds only the opt-in, so reading the member alone finds nothing.
+	dir := t.TempDir()
+	writeFile(t, dir, "Cargo.toml", cargoWorkspaceRootPoolFixture)
+	if err := os.MkdirAll(filepath.Join(dir, "crates", "app"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	writeFile(t, filepath.Join(dir, "crates", "app"), "Cargo.toml", cargoWorkspaceMemberFixture)
+
+	got, err := Catalog(context.Background(), dir, Options{SkipVersionLookup: true, NoExec: true})
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	byName := map[string]Package{}
+	for _, p := range got {
+		byName[p.Name] = p
+	}
+
+	if p := byName["pinned"]; p.Version != "1.2.3" {
+		t.Errorf("root pin: version = %q, want 1.2.3", p.Version)
+	}
+	// Without the root's rename the alias goes out as a crate name, which is a
+	// lookup against whatever happens to own that name on crates.io.
+	if _, ok := byName["renamed"]; ok {
+		t.Error("the alias was emitted; the registry has no such crate")
+	}
+	if p := byName["real-pool-crate"]; p.Version != "2.0.0" {
+		t.Errorf("root rename: version = %q, want 2.0.0", p.Version)
+	}
+	// Both name something that is not on crates.io, so resolving them there is
+	// the dependency-confusion surface this cataloguer must not open.
+	for _, name := range []string{"localdep", "privdep"} {
+		if _, ok := byName[name]; ok {
+			t.Errorf("%s is not a crates.io crate and should not be emitted", name)
+		}
+	}
+	if p, ok := byName["ranged"]; !ok || p.Version != "" {
+		t.Errorf("a pooled range is still a range, got %+v", p)
+	}
+}
+
+func TestCatalogCargoWorkspaceLookupStopsAtTheScanRoot(t *testing.T) {
+	// Scanning a member alone puts its workspace root out of scope, so the pool
+	// cannot be read and an inherited key could name a path member, a private
+	// registry or a rename alias. Emitting it would resolve a name we cannot
+	// vouch for against crates.io, which is the dependency-confusion surface.
+	t.Setenv("OSSPREY_RESOLVE_LATEST", "")
+	var asked []string
+	var mu sync.Mutex
+	withResolveLatest(t, func(_ context.Context, eco, name string) (string, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		asked = append(asked, eco+"/"+name)
+		return "6.6.6", nil
+	})
+
+	dir := t.TempDir()
+	writeFile(t, dir, "Cargo.toml", cargoWorkspaceRootPoolFixture)
+	member := filepath.Join(dir, "crates", "app")
+	if err := os.MkdirAll(member, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	writeFile(t, member, "Cargo.toml", cargoWorkspaceMemberFixture)
+
+	// Version lookup is deliberately left on: it is what turns a leaked key into
+	// a live crates.io request, so disabling it would assert only the safe half.
+	got, err := Catalog(context.Background(), member, Options{NoExec: true})
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	for _, p := range got {
+		if p.Type == "cargo" {
+			t.Errorf("emitted %s@%s; the pool is outside the scan, so the name is unvouched", p.Name, p.Version)
+		}
+	}
+	if len(asked) != 0 {
+		t.Errorf("looked up %v on crates.io; those names never left the customer's repo", asked)
+	}
+}
+
+func TestCatalogCargoRejectsNamesCratesIoCannotHave(t *testing.T) {
+	// One component failing the API's name rule rejects the whole SBOM, taking
+	// the repo's npm and pypi components down with it.
+	dir := t.TempDir()
+	writeFile(t, dir, "Cargo.toml", `[package]
+name = "ok"
+
+[dependencies]
+"do not scan me" = "=1.0.0"
+"pkg with emoji \u1F389" = "=1.0.0"
+"`+strings.Repeat("a", 65)+`" = "=1.0.0"
+"dots.are.not.allowed" = "=1.0.0"
+aliased = { package = "not a crate!", version = "=1.0.0" }
+serde = "=1.0.210"
+`)
+
+	got, err := Catalog(context.Background(), dir, Options{SkipVersionLookup: true, NoExec: true})
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	var names []string
+	for _, p := range got {
+		names = append(names, p.Name)
+	}
+	if len(names) != 1 || names[0] != "serde" {
+		t.Errorf("emitted %v, want only [serde]", names)
+	}
+}
+
+func TestCatalogCargoVersionCannotExceedTheAPILimit(t *testing.T) {
+	// A version the API rejects takes the whole SBOM down with it, so an
+	// over-long one is dropped to versionless rather than emitted.
+	dir := t.TempDir()
+	writeFile(t, dir, "Cargo.toml", `[package]
+name = "ok"
+
+[dependencies]
+longver = "=1.0.0-`+strings.Repeat("x", 300)+`"
+`)
+	got, err := Catalog(context.Background(), dir, Options{SkipVersionLookup: true, NoExec: true})
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	for _, p := range got {
+		if p.Version != "" {
+			t.Errorf("emitted %d-character version; the API caps it at 256", len(p.Version))
+		}
+	}
+}
+
+func TestCatalogCargoExplicitDefaultRegistryIsStillPublic(t *testing.T) {
+	// "crates-io" is Cargo's reserved name for the default registry, so naming
+	// it is not the same as naming a private one.
+	dir := t.TempDir()
+	writeFile(t, dir, "Cargo.toml", `[package]
+name = "ok"
+
+[dependencies]
+explicit-default = { version = "=1.0.0", registry = "crates-io" }
+private = { version = "=9.0.0", registry = "company-internal" }
+`)
+	got, err := Catalog(context.Background(), dir, Options{SkipVersionLookup: true, NoExec: true})
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	byName := map[string]Package{}
+	for _, p := range got {
+		byName[p.Name] = p
+	}
+	if p := byName["explicit-default"]; p.Version != "1.0.0" {
+		t.Errorf("explicit crates-io: version = %q, want 1.0.0", p.Version)
+	}
+	if _, ok := byName["private"]; ok {
+		t.Error("an alternate-registry dependency should not be emitted as cargo")
+	}
+}
+
+func TestCatalogCargoReadsDeprecatedUnderscoreTables(t *testing.T) {
+	// Cargo still accepts dev_dependencies and build_dependencies, so a crate
+	// using them was catalogued as having none.
+	dir := t.TempDir()
+	writeFile(t, dir, "Cargo.toml", `[package]
+name = "ok"
+
+[dev_dependencies]
+devcrate = "=2.0.0"
+
+[build_dependencies]
+buildcrate = "=3.0.0"
+
+[target.'cfg(unix)'.dev_dependencies]
+targetdev = "=4.0.0"
+`)
+	got, err := Catalog(context.Background(), dir, Options{SkipVersionLookup: true, NoExec: true})
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	byName := map[string]Package{}
+	for _, p := range got {
+		byName[p.Name] = p
+	}
+	for name, want := range map[string]string{"devcrate": "2.0.0", "buildcrate": "3.0.0", "targetdev": "4.0.0"} {
+		if p, ok := byName[name]; !ok || p.Version != want {
+			t.Errorf("%s: got %+v, want version %s", name, p, want)
+		}
+	}
+}
+
+func TestCatalogCargoWorkspaceWalkCannotFollowASymlinkOut(t *testing.T) {
+	// The ancestor directory is inside the scan root, but its manifest can be a
+	// symlink pointing out of it, which would adopt a pool from elsewhere.
+	base := t.TempDir()
+	outside := filepath.Join(base, "outside")
+	root := filepath.Join(base, "scanroot")
+	if err := os.MkdirAll(filepath.Join(root, "crates", "app"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	writeFile(t, outside, "Cargo.toml", "[workspace]\n[workspace.dependencies]\nsmuggled = \"=9.9.9\"\n")
+	if err := os.Symlink(filepath.Join(outside, "Cargo.toml"), filepath.Join(root, "Cargo.toml")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	writeFile(t, filepath.Join(root, "crates", "app"), "Cargo.toml",
+		"[package]\nname=\"app\"\n[dependencies]\nsmuggled = { workspace = true }\n")
+
+	got, err := Catalog(context.Background(), root, Options{SkipVersionLookup: true, NoExec: true})
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	for _, p := range got {
+		if p.Name == "smuggled" {
+			t.Errorf("adopted a pool from outside the scan root: %+v", p)
+		}
+	}
+}
+
+func TestCatalogCargoLockfileNamesAreHeldToTheSameRule(t *testing.T) {
+	// The lockfile cataloger is syft's and applies no crates.io rule, yet it is
+	// the primary Rust path: one bad entry rejects the customer's whole SBOM.
+	dir := t.TempDir()
+	writeFile(t, dir, "Cargo.toml", "[package]\nname = \"ok\"\n")
+	writeFile(t, dir, "Cargo.lock", `version = 3
+
+[[package]]
+name = "evil/crate"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "do not scan me"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "longver"
+version = "1.0.0-`+strings.Repeat("x", 400)+`"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "serde"
+version = "1.0.200"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+`)
+
+	got, err := Catalog(context.Background(), dir, Options{SkipVersionLookup: true, NoExec: true})
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	var names []string
+	for _, p := range got {
+		names = append(names, p.Name)
+	}
+	if len(names) != 1 || names[0] != "serde" {
+		t.Errorf("emitted %v, want only [serde]", names)
 	}
 }
