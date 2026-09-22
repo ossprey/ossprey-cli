@@ -431,3 +431,39 @@ func TestIngestTransportErrorDoesNotCarryTheToken(t *testing.T) {
 		t.Errorf("the error names no monitor at all, so it cannot be debugged: %v", postErr)
 	}
 }
+
+func TestSkipMessage(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		want   string
+	}{
+		{
+			// The API nests the reason under output, which is why the CLI used
+			// to blame quota for every skipped scan.
+			"nothing scannable",
+			`{"skipped":true,"reason":"no_scannable_components","error_message":"No supported package ecosystems found in this SBOM. Skipped: 2 cargo. Supported ecosystems: pypi, npm."}`,
+			"Scan skipped: nothing in this project is in an ecosystem Ossprey scans",
+		},
+		{
+			"quota, which stores no message",
+			`{"skipped":true,"reason":"usage_limit_exceeded"}`,
+			"Scan skipped due to quota exhaustion",
+		},
+		{"no output at all", ``, "Scan skipped due to quota exhaustion"},
+		{"unrecognised reason", `{"reason":"something_new"}`, "Scan skipped due to quota exhaustion"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := skipMessage([]byte(tt.output))
+			if got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+			// The API's own text enumerates the ecosystems it skipped. That is
+			// the platform's business, not something to print over a build.
+			if strings.Contains(got, "cargo") || strings.Contains(got, "Supported ecosystems") {
+				t.Errorf("the API's ecosystem list leaked into CLI output: %q", got)
+			}
+		})
+	}
+}

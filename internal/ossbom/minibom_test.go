@@ -1,6 +1,7 @@
 package ossbom
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 )
@@ -139,5 +140,76 @@ func TestApplyAPIResponse(t *testing.T) {
 				t.Errorf("vulns: got %d, want %d", len(s.Vulnerabilities), tt.wantVulns)
 			}
 		})
+	}
+}
+
+func TestApplyAPIResponseReadsFindings(t *testing.T) {
+	s := New(Environment{})
+	// Findings name components the CLI submitted, so the SBOM holds them too.
+	s.AddComponent(Component{Name: "evil", Version: "1.0.0", Type: "npm"})
+	s.AddComponent(Component{Name: "serde", Version: "1.0.200", Type: "cargo"})
+	s.AddComponent(Component{Name: "ghost", Version: "9.9.9", Type: "npm"})
+	s.AddComponent(Component{Name: "fine", Version: "1.0.0", Type: "npm"})
+	raw := []byte(`{
+		"vulnerabilities": [{"id": "MAL-1", "purl": "pkg:npm/evil@1.0.0"}],
+		"findings": [
+			{"purl": "pkg:cargo/serde@1.0.200", "type": "UNSUPPORTED"},
+			{"purl": "pkg:npm/ghost@9.9.9", "type": "NOT_FOUND"},
+			{"purl": "pkg:npm/fine@1.0.0", "type": "SCANNED"}
+		]
+	}`)
+	if err := s.ApplyAPIResponse(raw); err != nil {
+		t.Fatalf("ApplyAPIResponse: %v", err)
+	}
+	if len(s.Vulnerabilities) != 1 {
+		t.Errorf("vulnerabilities: got %d, want 1", len(s.Vulnerabilities))
+	}
+	if len(s.Findings) != 3 {
+		t.Fatalf("findings: got %d, want 3", len(s.Findings))
+	}
+	// Only the two skip types mean the component went unchecked.
+	if got := s.Unscanned(); got != 2 {
+		t.Errorf("Unscanned: got %d, want 2", got)
+	}
+}
+
+func TestApplyAPIResponseWithoutFindings(t *testing.T) {
+	// A response from before the platform sent findings must still parse.
+	s := New(Environment{})
+	if err := s.ApplyAPIResponse([]byte(`{"vulnerabilities": []}`)); err != nil {
+		t.Fatalf("ApplyAPIResponse: %v", err)
+	}
+	if got := s.Unscanned(); got != 0 {
+		t.Errorf("Unscanned: got %d, want 0", got)
+	}
+}
+
+func TestFindingsAreNotSubmitted(t *testing.T) {
+	// Findings come back from the platform; sending them back would be noise.
+	s := New(Environment{})
+	s.AddComponent(Component{Name: "left-pad", Version: "1.3.0", Type: "npm"})
+	s.Findings = []Finding{{Purl: "pkg:cargo/serde@1.0.200", Type: "UNSUPPORTED"}}
+
+	blob, err := json.Marshal(s.ToMiniBOM())
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if bytes.Contains(blob, []byte("findings")) {
+		t.Errorf("the submitted MiniBOM carries findings: %s", blob)
+	}
+}
+
+func TestUnscannedNeverExceedsComponents(t *testing.T) {
+	// A backend that expands one submitted purl into several can report more
+	// skips than this SBOM has components; "4 of 2 packages" helps nobody.
+	s := New(Environment{})
+	s.AddComponent(Component{Name: "left-pad", Version: "1.3.0", Type: "npm"})
+	s.Findings = []Finding{
+		{Purl: "pkg:npm/a@1.0.0", Type: "UNSUPPORTED"},
+		{Purl: "pkg:npm/b@1.0.0", Type: "UNSUPPORTED"},
+		{Purl: "pkg:npm/c@1.0.0", Type: "NOT_FOUND"},
+	}
+	if got := s.Unscanned(); got != 1 {
+		t.Errorf("Unscanned: got %d, want 1 (clamped to the component count)", got)
 	}
 }

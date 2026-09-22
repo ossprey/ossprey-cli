@@ -1015,8 +1015,10 @@ spelling of `--passive` and keep working unchanged.
 
 ## Output
 
-`ossprey scan` prints `No malware found` on success. On a malware verdict it
-draws an alert box naming every malicious package, followed by one
+`ossprey scan` prints `No malware found` on success, or `No malware found in
+<scanned> of <total> packages` when the platform did not check everything it
+was sent (see [`unscanned`](#machine-readable-verdict---report)). On a malware
+verdict it draws an alert box naming every malicious package, followed by one
 `Error: WARNING: <pkg>:<ver> contains malware. Remediate this immediately` line
 per finding, so anything that greps the old one-line form keeps working. The
 forwarders and shims print the same box to stderr before their
@@ -1116,6 +1118,7 @@ ossprey scan . --report report.json
   "project": "my-service",
   "path": "/home/me/my-service",
   "components": 412,
+  "unscanned": 2,
   "findings": [
     {
       "purl": "pkg:npm/@acme/logger@1.4.2",
@@ -1135,9 +1138,19 @@ ossprey scan . --report report.json
 
 | Verdict   | Exit code | Meaning |
 |-----------|-----------|---------|
-| `clean`   | 0         | Scanned, nothing flagged. |
+| `clean`   | 0         | Scanned, nothing flagged. Check `unscanned` for how much was covered. |
 | `malware` | 1         | `findings` lists every flagged package. |
-| `skipped` | 0         | Your quota was exhausted; **nothing was checked**. `skipped.message` and `skipped.reset_at` say why and until when. Do not read this as "clean". |
+| `skipped` | 0         | **Nothing was checked**: either your quota was exhausted or the SBOM held nothing this platform scans. `skipped.message` and `skipped.reset_at` say why and until when. Do not read this as "clean". |
+
+`unscanned` is how many of `components` the platform did not check: packages in
+an ecosystem it does not scan, and packages the registry did not have. It is
+omitted when zero, so on a `clean` or `malware` verdict its absence means full
+coverage. On a `skipped` verdict nothing was checked at all, so read the verdict
+rather than this field.
+
+A `clean` verdict with a non-zero `unscanned` means nothing was flagged in the
+part that was scanned, and the summary line says so: `No malware found in 410 of
+412 packages`.
 
 `findings` is always present, empty on a clean scan, so
 `jq '.findings | length'` works either way. The file is written before the

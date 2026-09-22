@@ -71,10 +71,13 @@ type Skip struct {
 // Findings below the failing floor go in Informational instead, which is
 // omitted when empty so a consumer that predates it sees no change.
 type Report struct {
-	Verdict       Verdict   `json:"verdict"`
-	Project       string    `json:"project,omitempty"`
-	Path          string    `json:"path,omitempty"`
-	Components    int       `json:"components"`
+	Verdict    Verdict `json:"verdict"`
+	Project    string  `json:"project,omitempty"`
+	Path       string  `json:"path,omitempty"`
+	Components int     `json:"components"`
+	// Unscanned is how many of Components the platform did not check. Omitted
+	// when zero, so a consumer that predates it sees no change on a full scan.
+	Unscanned     int       `json:"unscanned,omitempty"`
 	Findings      []Finding `json:"findings"`
 	Informational []Finding `json:"informational,omitempty"`
 	Skipped       *Skip     `json:"skipped,omitempty"`
@@ -91,6 +94,7 @@ func NewReport(sbom *ossbom.SBOM, floor severity.Level) Report {
 		Project:    sbom.Env.Project,
 		Path:       sbom.Env.Path,
 		Components: len(sbom.Components),
+		Unscanned:  sbom.Unscanned(),
 		Findings:   []Finding{},
 	}
 	for _, v := range sbom.Vulnerabilities {
