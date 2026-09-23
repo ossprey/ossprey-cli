@@ -246,7 +246,7 @@ func swap(t *testing.T, exec func(context.Context, string, []string) error, chk 
 	t.Helper()
 	oe, oc, os := execFn, checkFn, scanProjectFn
 	execFn, checkFn = exec, chk
-	scanProjectFn = func(context.Context, string, string, string, string, bool) (*ossbom.SBOM, error) {
+	scanProjectFn = func(context.Context, scanRequest) (*ossbom.SBOM, error) {
 		t.Error("scanProjectFn called unexpectedly")
 		return ossbom.New(ossbom.Environment{}), nil
 	}
@@ -255,7 +255,7 @@ func swap(t *testing.T, exec func(context.Context, string, []string) error, chk 
 
 // swapScan replaces the project-scan seam for tests that exercise the bare /
 // manifest-install path.
-func swapScan(t *testing.T, fn func(context.Context, string, string, string, string, bool) (*ossbom.SBOM, error)) {
+func swapScan(t *testing.T, fn func(context.Context, scanRequest) (*ossbom.SBOM, error)) {
 	t.Helper()
 	old := scanProjectFn
 	scanProjectFn = fn
@@ -299,8 +299,8 @@ func TestRun_BareInstall_ScansProjectManifest(t *testing.T) {
 	swap(t, ex.fn, cleanSBOM)
 	var scanCalled bool
 	var scanDir string
-	swapScan(t, func(_ context.Context, dir, _, _, _ string, _ bool) (*ossbom.SBOM, error) {
-		scanCalled, scanDir = true, dir
+	swapScan(t, func(_ context.Context, req scanRequest) (*ossbom.SBOM, error) {
+		scanCalled, scanDir = true, req.Dir
 		return ossbom.New(ossbom.Environment{}), nil
 	})
 
@@ -324,7 +324,7 @@ func TestRun_BareInstall_ScansProjectManifest(t *testing.T) {
 func TestRun_BareInstall_MalwareInManifestBlocks(t *testing.T) {
 	ex := &stubExec{}
 	swap(t, ex.fn, cleanSBOM)
-	swapScan(t, func(_ context.Context, _, _, _, _ string, _ bool) (*ossbom.SBOM, error) {
+	swapScan(t, func(_ context.Context, _ scanRequest) (*ossbom.SBOM, error) {
 		s := ossbom.New(ossbom.Environment{})
 		s.AddVulnerability(ossbom.NewMalwareVulnerability("V1", "pkg:npm/evil@1.0.0", "bad"))
 		return s, nil
@@ -343,7 +343,7 @@ func TestRun_RequirementsFile_ScansProject(t *testing.T) {
 	ex := &stubExec{}
 	swap(t, ex.fn, cleanSBOM)
 	var scanCalled bool
-	swapScan(t, func(_ context.Context, _, _, _, _ string, _ bool) (*ossbom.SBOM, error) {
+	swapScan(t, func(_ context.Context, _ scanRequest) (*ossbom.SBOM, error) {
 		scanCalled = true
 		return ossbom.New(ossbom.Environment{}), nil
 	})
@@ -400,7 +400,7 @@ func TestRun_ManifestInstallVerbs_ScanProject(t *testing.T) {
 			ex := &stubExec{}
 			swap(t, ex.fn, cleanSBOM)
 			var scanCalled bool
-			swapScan(t, func(_ context.Context, _, _, _, _ string, _ bool) (*ossbom.SBOM, error) {
+			swapScan(t, func(_ context.Context, _ scanRequest) (*ossbom.SBOM, error) {
 				scanCalled = true
 				return ossbom.New(ossbom.Environment{}), nil
 			})
@@ -673,32 +673,50 @@ func TestRun_SkipCI_BareInstall_DoesNotScan(t *testing.T) {
 	}
 }
 
-func TestRun_CacheScanOnly_NamedPackages_PostsAndForwards(t *testing.T) {
-	ex := &stubExec{}
-	var gotSubmitOnly bool
-	swap(t, ex.fn, func(_ context.Context, o check.Options) (*ossbom.SBOM, error) {
-		gotSubmitOnly = o.SubmitOnly
+// A passive install on a manager that writes a lockfile observes the install
+// instead of predicting it: the manager runs first, untouched and undelayed,
+// and the scan then catalogues the lockfile it wrote.
+func TestRun_Passive_NamedPackages_ScanRunsAfterTheInstall(t *testing.T) {
+	var order []string
+	swap(t, func(context.Context, string, []string) error {
+		order = append(order, "install")
+		return nil
+	}, func(_ context.Context, o check.Options) (*ossbom.SBOM, error) {
+		t.Error("passive must not resolve specs in front of a lockfile manager")
 		return malwareSBOM(context.Background(), o)
+	})
+	var got scanRequest
+	swapScan(t, func(_ context.Context, req scanRequest) (*ossbom.SBOM, error) {
+		order, got = append(order, "scan"), req
+		s := ossbom.New(ossbom.Environment{})
+		s.AddComponent(ossbom.Component{Name: "lodash", Version: "4.17.21", Type: "npm"})
+		return s, nil
 	})
 
 	err := Run(context.Background(), Options{Bin: "npm", Args: []string{"install", "lodash@4.17.21"}, Passive: true})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if !gotSubmitOnly {
-		t.Error("CacheScanOnly must check with SubmitOnly set")
+	if want := []string{"install", "scan"}; !reflect.DeepEqual(order, want) {
+		t.Errorf("order = %v, want %v (the install must not wait on the scan)", order, want)
 	}
-	if !ex.called {
-		t.Error("CacheScanOnly must always forward, even when the SBOM carries a verdict")
+	if !got.SubmitOnly {
+		t.Error("passive must post without polling for a verdict")
+	}
+	if !got.Installed {
+		t.Error("the post-install scan must read what was installed, not re-resolve the project")
+	}
+	if got.Dir != "." {
+		t.Errorf("scan dir = %q, want \".\"", got.Dir)
 	}
 }
 
 func TestRun_CacheScanOnly_ManifestInstall_PostsAndForwards(t *testing.T) {
 	ex := &stubExec{}
 	swap(t, ex.fn, cleanSBOM)
-	var gotSubmitOnly bool
-	swapScan(t, func(_ context.Context, _, _, _, _ string, submitOnly bool) (*ossbom.SBOM, error) {
-		gotSubmitOnly = submitOnly
+	var got scanRequest
+	swapScan(t, func(_ context.Context, req scanRequest) (*ossbom.SBOM, error) {
+		got = req
 		return ossbom.New(ossbom.Environment{}), nil
 	})
 
@@ -706,8 +724,11 @@ func TestRun_CacheScanOnly_ManifestInstall_PostsAndForwards(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if !gotSubmitOnly {
+	if !got.SubmitOnly {
 		t.Error("CacheScanOnly manifest install must scan with submitOnly set")
+	}
+	if !got.Installed {
+		t.Error("a passive bare install must catalogue the lockfile the install wrote")
 	}
 	if !ex.called {
 		t.Error("CacheScanOnly must forward after posting the scan")
@@ -716,7 +737,8 @@ func TestRun_CacheScanOnly_ManifestInstall_PostsAndForwards(t *testing.T) {
 
 func TestRun_CacheScanOnly_ErrorStillForwards(t *testing.T) {
 	ex := &stubExec{}
-	swap(t, ex.fn, func(context.Context, check.Options) (*ossbom.SBOM, error) {
+	swap(t, ex.fn, cleanSBOM)
+	swapScan(t, func(context.Context, scanRequest) (*ossbom.SBOM, error) {
 		return nil, errors.New("api unreachable")
 	})
 
@@ -874,15 +896,17 @@ func captureProgress(t *testing.T) *bytes.Buffer {
 	return &buf
 }
 
-// A passive forwarded install passes SubmitOnly, so it posts the SBOM and
-// installs regardless of any verdict. Saying it was "checking" the packages
-// would describe a gate that is not there.
+// A passive forwarded install posts the SBOM and never waits for a verdict.
+// Saying it was "checking" the packages would describe a gate that is not
+// there — and the wait it announces is the submission after the install, never
+// one in front of it.
 func TestPassiveInstallDoesNotClaimToCheck(t *testing.T) {
 	ex := &stubExec{}
+	swap(t, ex.fn, cleanSBOM)
 	var gotSubmitOnly bool
-	swap(t, ex.fn, func(ctx context.Context, o check.Options) (*ossbom.SBOM, error) {
-		gotSubmitOnly = o.SubmitOnly
-		return cleanSBOM(ctx, o)
+	swapScan(t, func(_ context.Context, req scanRequest) (*ossbom.SBOM, error) {
+		gotSubmitOnly = req.SubmitOnly
+		return ossbom.New(ossbom.Environment{}), nil
 	})
 	buf := captureProgress(t)
 
@@ -893,10 +917,37 @@ func TestPassiveInstallDoesNotClaimToCheck(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 	if !gotSubmitOnly {
-		t.Fatal("passive must pass SubmitOnly; the wording below depends on it")
+		t.Fatal("passive must post without polling; the wording below depends on it")
 	}
-	if got, want := buf.String(), "ossprey: submitting scan of 1 package...\n"; got != want {
+	if got, want := buf.String(), "ossprey: submitting scan...\n"; got != want {
 		t.Errorf("progress = %q, want %q", got, want)
+	}
+}
+
+// pip writes no lockfile, so there is nothing to read after the install and the
+// named packages are all we will ever know. Its passive submission therefore
+// runs beside the install — which must mean beside, not before: this test
+// deadlocks (and Go reports it) if Run waits for the check before exec'ing.
+func TestPassivePip_DoesNotDelayTheInstall(t *testing.T) {
+	installed := make(chan struct{})
+	var gotSubmitOnly bool
+	swap(t, func(context.Context, string, []string) error {
+		close(installed)
+		return nil
+	}, func(ctx context.Context, o check.Options) (*ossbom.SBOM, error) {
+		<-installed // if the install were waiting on us, nothing would close this
+		gotSubmitOnly = o.SubmitOnly
+		return cleanSBOM(ctx, o)
+	})
+
+	err := Run(context.Background(), Options{
+		Bin: "pip", Args: []string{"install", "flask==1.0"}, Passive: true,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !gotSubmitOnly {
+		t.Error("passive pip must submit without polling for a verdict")
 	}
 }
 
@@ -917,11 +968,11 @@ func TestNonPassiveInstallAnnouncesTheCheck(t *testing.T) {
 	}
 }
 
-// Passive mode forwards without ever reaching a verdict. It still has to flush
-// warnings first: the real manager's output starts the moment it execs, and a
-// non-zero exit there leaves the process via os.Exit, so anything not printed
-// by now is buried at best and lost at worst.
-func TestPassiveFlushesWarningsBeforeForwarding(t *testing.T) {
+// A passive scan now runs after the install, so its warnings cannot come out in
+// front of the manager. They must still come out: Run returns to a caller that
+// leaves via os.Exit on a non-zero install, so a warning not printed before
+// Run returns is lost outright (OSS-2001).
+func TestPassiveFlushesWarningsBeforeReturning(t *testing.T) {
 	var buf bytes.Buffer
 	old := errOut
 	errOut = &buf
@@ -931,7 +982,11 @@ func TestPassiveFlushesWarningsBeforeForwarding(t *testing.T) {
 	swap(t, func(_ context.Context, bin string, _ []string) error {
 		fmt.Fprintln(&buf, "<the real "+bin+" runs here>")
 		return nil
-	}, func(context.Context, check.Options) (*ossbom.SBOM, error) {
+	}, cleanSBOM)
+	swapScan(t, func(ctx context.Context, _ scanRequest) (*ossbom.SBOM, error) {
+		warn.Add(ctx, registry.UnresolvedEntry("npm", "@acme/private",
+			fmt.Errorf("%w (registry returned status 404)", registry.ErrNotFound),
+			"left unversioned"))
 		return ossbom.New(ossbom.Environment{}), nil
 	})
 
@@ -940,12 +995,6 @@ func TestPassiveFlushesWarningsBeforeForwarding(t *testing.T) {
 		Bin:     "npm",
 		Args:    []string{"install", "lodash@4.17.21", "@acme/private"},
 		Passive: true,
-		ResolveLatest: func(_ context.Context, _, name string) (string, error) {
-			if name == "@acme/private" {
-				return "", fmt.Errorf("%w (registry returned status 404)", registry.ErrNotFound)
-			}
-			return "1.0.0", nil
-		},
 	})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -957,7 +1006,7 @@ func TestPassiveFlushesWarningsBeforeForwarding(t *testing.T) {
 	if warning < 0 {
 		t.Fatalf("the warning was dropped entirely:\n%s", out)
 	}
-	if manager < 0 || warning > manager {
-		t.Errorf("warnings must be flushed before the real manager runs:\n%s", out)
+	if manager < 0 || warning < manager {
+		t.Errorf("the install must run first, and the warning must still be printed:\n%s", out)
 	}
 }

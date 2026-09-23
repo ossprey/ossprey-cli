@@ -11,6 +11,19 @@ is flagged as malware. It never executes the project's package manager during a
 scan (no installs, sandbox, or virtualenv) — see the custom catalogers for the
 one exception.
 
+## Where docs go
+
+`README.md` is the landing page for someone who has never run this tool: what it
+is, install, `init`, scan, and one short section per way of using it, each
+linking onward. Keep it that way — every flag table, edge case and rationale
+belongs in `docs/`, which is the reference set (`install`, `init`,
+`cli-reference`, `forwarder`, `shims`, `passive-monitoring`, `precommit`, `ci`,
+`output`, `ecosystems`, `architecture`, indexed by `docs/README.md`). When a
+behaviour changes, the user-facing statement of it lives in exactly one of those
+pages; this file keeps the *why*. `docs/architecture.md` holds the mermaid
+diagrams, so a change to the forwarder's decisions or the scan pipeline needs
+them updated too.
+
 ## Commands
 
 ```sh
@@ -95,7 +108,7 @@ Windows resolves it under `%LOCALAPPDATA%`.
    `.github/workflows/ossprey.yml`; that was dropped because it made a
    GitHub-shaped assumption about a CLI that otherwise doesn't care about your CI,
    and because it wrote into the user's repo. The knowledge that made the template
-   correct now lives in README's "CI usage" section instead, and it is worth
+   correct now lives in `docs/ci.md` ("CI usage") instead, and it is worth
    keeping there: the job needs an `if:` guard so **fork** `pull_request` runs skip
    (GitHub withholds secrets from them, so `OSSPREY_API_KEY` is empty and every
    external PR fails red for a missing key rather than for malware — never close
@@ -112,7 +125,7 @@ Windows resolves it under `%LOCALAPPDATA%`.
 
    The post-verb table (`valueFlags`) carries the same asymmetry and it bites harder there: omitting a value-taking flag makes its value read as a package, checking something that isn't being installed (noisy, safe), while wrongly listing a boolean flag swallows the package name and skips its check (silent, unsafe). Keep a table per manager and never alias one to another — `valueFlags["pnpm"] = valueFlags["npm"]` inherited npm's value-taking `-w` into pnpm, where `-w` is boolean `--workspace-root`, so `pnpm add -w <pkg>` installed unchecked (OSS-1577). `TestPnpmBooleanFlagsAreNotValueFlags` now guards both tables.
 
-   **Not covered, deliberately (for now):** fetch-and-execute — `npm exec`, `pnpm dlx`, `yarn dlx`, `uv tool run`. These name a package but are not install verbs, so they forward unchecked. Do **not** close this by adding `dlx` to a `verbAt` list: only the first non-flag token is a package and the rest is the program's own argv, so `pnpm dlx cowsay moo` would check `moo` (a real npm package) and could block on it. It needs its own matcher alongside `uvInstallAt`, plus handling for `--package=` naming a different package from the command. Note also that `npx` and `uvx` are separate binaries absent from `DefaultManagers()`, so they are not shimmed at all — covering `pnpm dlx` alone buys little. README's "What is not checked" section is the user-facing statement of this.
+   **Not covered, deliberately (for now):** fetch-and-execute — `npm exec`, `pnpm dlx`, `yarn dlx`, `uv tool run`. These name a package but are not install verbs, so they forward unchecked. Do **not** close this by adding `dlx` to a `verbAt` list: only the first non-flag token is a package and the rest is the program's own argv, so `pnpm dlx cowsay moo` would check `moo` (a real npm package) and could block on it. It needs its own matcher alongside `uvInstallAt`, plus handling for `--package=` naming a different package from the command. Note also that `npx` and `uvx` are separate binaries absent from `DefaultManagers()`, so they are not shimmed at all — covering `pnpm dlx` alone buys little. `docs/forwarder.md`'s "What is not checked" section is the user-facing statement of this.
 
    **Known gap (pnpm 9 and earlier):** `pnpm run` (and `pnpm exec`) install the project's declared dependencies as a side effect when `node_modules` is missing — `npm run` does not. Since `run` is a pass-through, those packages are never checked. Closing it would put a scan in front of every script invocation, so it is an open product decision. Not reproducible on pnpm 10.34.5 (with or without `CI=1`, `verify-deps-before-run` at its default), so pnpm 10 appears to have stopped auto-installing; `TestPnpmRunAutoInstallsUnchecked` skips with a re-check message rather than passing when it can't reproduce.
 
@@ -132,6 +145,13 @@ A **monitor id** (`--monitor`, `OSSPREY_MONITOR_ID`) is a submit-only credential
 **The token format is a security boundary, not a convenience check.** `internal/monitor` is a dependency-free leaf holding the one definition (`^ospi_[0-9a-f]{64}$`, mirroring the service's `ingest/config.py TOKEN_PATTERN`). It is a leaf because `client` needs it for the URL path and `shim` needs it for a generated `/bin/sh` file, and `shim` must not import `client` (see below). Loosening that pattern would let a hostile flag value reach both an interpolated URL and an executable file; `shim.ValidateMode` runs in `Plan`, so `--dry-run` rejects a bad id too, and `TestValidateModeRejectsAHostileMonitorID` pins the shapes.
 
 `shim install --watchdog` / `--monitor <id>` bake `OSSPREY_PASSIVE=1` (plus `OSSPREY_MONITOR_ID`) into the generated script, which previously set no environment at all. The mode round-trips through an `ossprey-mode:` header line next to the existing `ossprey-bin:` one, so `shim status` reports it per manager — per manager, not per directory, because a partial re-install can leave a machine with a mix.
+
+**A passive forwarded install observes the install; it does not predict it.** Passive blocks nothing, so nothing it does belongs in front of the install — and an earlier revision put a whole catalogue there, `npm install --package-lock-only` and uv included, so every passive `npm install` resolved the same tree twice and the user waited for both. `forward.Run` therefore branches on `Manager.Lockfile` before it parses specs at all:
+
+- **npm, pnpm, yarn, poetry, uv** (`Lockfile: true`) go through `passiveAfterInstall`: exec the real manager untouched, then catalogue with `scanRequest.Installed` (which is `catalog.Options.NoExec` — manifests and lockfiles parsed, nothing shelled out to) and `submit.Post`. The lockfile the manager just wrote already names the whole resolved tree, so this costs a parse and a POST, it reads a directory that has stopped moving, and the SBOM describes what was installed rather than what we predicted. Moving this *beside* the install instead (a goroutine) was tried and is worse: it races the manager for the very files it is reading. `TestRun_Passive_NamedPackages_ScanRunsAfterTheInstall` pins the ordering and the two flags.
+- **pip** (`Lockfile` unset) keeps the old spec/manifest logic, because `pip install foo` updates no file — there is nothing to read afterwards, and the named packages are all we will ever know. It runs through `passiveAlongside`, which starts the install first and submits concurrently. `TestPassivePip_DoesNotDelayTheInstall` deadlocks if that order is ever reversed.
+
+Two consequences worth keeping: the post-install catalogue falls back to a full declaring scan when it catalogues **nothing** (a failed install, an unsupported layout) rather than reporting a project with no dependencies; and warnings now drain *after* the manager rather than before it, so `passiveAfterInstall`/`passiveAlongside` must drain before returning — `main` leaves via `os.Exit(ee.ExitCode())` on a non-zero install, so a warning not printed by then is lost (`TestPassiveFlushesWarningsBeforeReturning`). Progress is announced only for the residual wait, never in front of the manager's own output.
 
 ### Shims (`internal/shim`)
 
