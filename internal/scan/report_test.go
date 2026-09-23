@@ -68,7 +68,7 @@ func TestSkippedReportIsNeitherCleanNorMalware(t *testing.T) {
 	s := ossbom.New(ossbom.Environment{})
 	s.AddComponent(ossbom.Component{Name: "requests", Version: "2.31.0", Type: "pypi"})
 
-	r := SkippedReport(s, "monthly quota exhausted", "2026-09-01T00:00:00Z")
+	r := SkippedReport(s, severity.FailingFloor, "monthly quota exhausted", "2026-09-01T00:00:00Z")
 	if r.Verdict != VerdictSkipped {
 		t.Errorf("verdict: got %q, want %q", r.Verdict, VerdictSkipped)
 	}
@@ -196,7 +196,7 @@ func TestSkippedReportOverridesInformational(t *testing.T) {
 	s := ossbom.New(ossbom.Environment{Project: "p"})
 	s.AddVulnerability(ossbom.Vulnerability{ID: "Z", Purl: "pkg:npm/removed@0.0.1-security", Severity: "Info"})
 
-	if r := SkippedReport(s, "quota exhausted", ""); r.Verdict != VerdictSkipped {
+	if r := SkippedReport(s, severity.FailingFloor, "quota exhausted", ""); r.Verdict != VerdictSkipped {
 		t.Errorf("verdict = %q, want %q", r.Verdict, VerdictSkipped)
 	}
 }
@@ -269,14 +269,15 @@ func TestNewReportAtARaisedFloorStillFailsAnUngradedFinding(t *testing.T) {
 	}
 }
 
-// A skipped scan reached no verdict, but its arrays are still split, so it has
-// to use the same floor as everything else rather than the compiled-in one.
-func TestSkippedReportSplitsAtTheServedFloor(t *testing.T) {
+// A skipped scan reached no verdict, but its arrays are still split, so it uses
+// the floor the run resolved. The caller's floor wins over the served one, which
+// is how a --fail-on override reaches a skipped report.
+func TestSkippedReportSplitsAtTheRunsFloor(t *testing.T) {
 	s := ossbom.New(ossbom.Environment{Project: "p"})
-	s.FailingSeverityFloor = "Critical"
+	s.FailingSeverityFloor = "Low"
 	s.AddVulnerability(ossbom.Vulnerability{ID: "Z", Purl: "pkg:npm/mid@1.0.0", Severity: "High"})
 
-	r := SkippedReport(s, "quota exhausted", "")
+	r := SkippedReport(s, severity.Critical, "quota exhausted", "")
 	if len(r.Findings) != 0 {
 		t.Errorf("findings = %d, want 0", len(r.Findings))
 	}
