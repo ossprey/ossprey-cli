@@ -59,7 +59,94 @@ var progressOut io.Writer = os.Stderr
 type Manager struct {
 	Bin       string // executable name, e.g. "npm"
 	Ecosystem string // "npm" or "pypi"
+	// Lockfile marks a manager that *can* write a lockfile enumerating
+	// everything it installed, transitives included. Passive mode reads that
+	// lockfile after the install instead of resolving the same tree a second
+	// time in front of it. pip never can: `pip install foo` updates no file, so
+	// there is nothing to read afterwards.
+	//
+	// A capability, not a promise about any given command — the invocation
+	// decides, so route on writesLocalLockfile rather than on this flag.
+	Lockfile  bool
 	installAt func(args []string) (specStart int, ok bool)
+}
+
+// noLocalLockfileFlags name the options that stop an install from updating a
+// lockfile in the current directory: a global install, a lockfile explicitly
+// disabled, or a run redirected at another project. When one is present, a
+// post-install catalogue of "." would describe a tree this command never
+// touched, so passive mode submits the packages named on the command line
+// instead.
+//
+// Bias: listing a harmless flag costs a fallback to the older, slower passive
+// path. Missing one costs a passive install that reports the wrong tree, or
+// nothing at all — so when in doubt, list it. `--no-save` is deliberately
+// absent: npm still updates an existing package-lock.json.
+var noLocalLockfileFlags = map[string]map[string]bool{
+	"npm": flagSet("-g", "--global", "--no-package-lock", "--package-lock",
+		"--location", "--prefix", "-C"),
+	"pnpm":   flagSet("-g", "--global", "--no-lockfile", "--lockfile", "--dir", "-C"),
+	"yarn":   flagSet("-g", "--global", "--no-lockfile", "--cwd"),
+	"poetry": flagSet("-C", "--directory", "--project"),
+	"uv":     flagSet("--directory", "--project", "--system"),
+}
+
+// hereValues are the values of a redirecting flag that still mean "this
+// directory", so `npm --prefix . install x` keeps the post-install path.
+var hereValues = flagSet(".", "./", ".\\")
+
+// writesLocalLockfile reports whether this invocation is expected to leave an
+// up-to-date lockfile in the current directory — which is the thing passive
+// mode reads once the install is done.
+//
+// The manager alone does not settle it. `uv pip install foo` resolves into an
+// environment and leaves uv.lock alone; `npm install -g foo` touches nothing
+// local; `npm install --no-package-lock foo` writes no lock by request; and
+// `pnpm --dir ../other add foo` locks a directory we are not scanning. Reading
+// "." after any of those would submit a tree that has nothing to do with the
+// command, and the package actually installed would go unreported.
+func writesLocalLockfile(m *Manager, args []string) bool {
+	if !m.Lockfile {
+		return false
+	}
+	// `uv pip install` is pip wearing uv's coat. `uv add` / `uv sync` do lock.
+	if m.Bin == "uv" {
+		if i := verbIndex("uv", args); i >= 0 && args[i] == "pip" {
+			return false
+		}
+	}
+	blocking := noLocalLockfileFlags[m.Bin]
+	for i := 0; i < len(args); i++ {
+		flag, value, hasInline := splitFlagValue(args[i])
+		if !blocking[flag] {
+			continue
+		}
+		if !hasInline && isDirFlag(flag) && i+1 < len(args) {
+			value = args[i+1]
+		}
+		// The spellings that keep the local lockfile: a redirect that points
+		// here, npm's project location, an explicitly enabled lockfile.
+		switch {
+		case isDirFlag(flag) && hereValues[value]:
+			continue
+		case flag == "--location" && value == "project":
+			continue
+		case (flag == "--package-lock" || flag == "--lockfile") && value == "true":
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// isDirFlag reports whether a flag's value names the directory the manager
+// operates on, rather than being a boolean.
+func isDirFlag(flag string) bool {
+	switch flag {
+	case "--prefix", "-C", "--dir", "--cwd", "--directory", "--project":
+		return true
+	}
+	return false
 }
 
 // managers is the registry of supported forwarders. Install verbs include both
@@ -68,14 +155,14 @@ type Manager struct {
 // `yarn install`, `poetry install`, `uv sync`); the latter trigger a project
 // manifest scan instead of falling through unchecked (OSS-1284).
 var managers = map[string]*Manager{
-	"npm":    {Bin: "npm", Ecosystem: "npm", installAt: verbAt("npm", "install", "i", "add", "ci", "update", "up")},
-	"pnpm":   {Bin: "pnpm", Ecosystem: "npm", installAt: verbAt("pnpm", "install", "i", "add", "update", "up")},
-	"yarn":   {Bin: "yarn", Ecosystem: "npm", installAt: verbAt("yarn", "add", "install", "upgrade", "up")},
+	"npm":    {Bin: "npm", Ecosystem: "npm", Lockfile: true, installAt: verbAt("npm", "install", "i", "add", "ci", "update", "up")},
+	"pnpm":   {Bin: "pnpm", Ecosystem: "npm", Lockfile: true, installAt: verbAt("pnpm", "install", "i", "add", "update", "up")},
+	"yarn":   {Bin: "yarn", Ecosystem: "npm", Lockfile: true, installAt: verbAt("yarn", "add", "install", "upgrade", "up")},
 	"pip":    {Bin: "pip", Ecosystem: "pypi", installAt: verbAt("pip", "install")},
 	"pip3":   {Bin: "pip3", Ecosystem: "pypi", installAt: verbAt("pip3", "install")},
-	"poetry": {Bin: "poetry", Ecosystem: "pypi", installAt: verbAt("poetry", "add", "install", "update", "lock")},
+	"poetry": {Bin: "poetry", Ecosystem: "pypi", Lockfile: true, installAt: verbAt("poetry", "add", "install", "update", "lock")},
 	// uv: `uv add <pkg>`, `uv sync`, and `uv pip install <pkg>`.
-	"uv": {Bin: "uv", Ecosystem: "pypi", installAt: uvInstallAt},
+	"uv": {Bin: "uv", Ecosystem: "pypi", Lockfile: true, installAt: uvInstallAt},
 }
 
 // Managers returns the names of every supported forwarder, for CLI wiring.
@@ -229,23 +316,6 @@ func Run(ctx context.Context, opts Options) error {
 	}
 
 	finish := func(sbom *ossbom.SBOM, err error) error {
-		// Passive mode never blocks the install, not even on a failed submission:
-		// a monitor that can break `npm install` is a monitor people rip out.
-		if opts.Passive {
-			mode := "passive"
-			if opts.MonitorID != "" {
-				// Named because a monitor also decides whose account this lands
-				// in, and the env var carrying it may not have been set by the
-				// person reading this line.
-				mode = "passive, monitor " + monitor.Redact(opts.MonitorID)
-			}
-			if err != nil {
-				fmt.Fprintf(errOut, "ossprey: warning: could not post scan (%v); installing anyway (%s)\n", err, mode)
-			} else {
-				fmt.Fprintf(errOut, "ossprey: scan posted to the Ossprey dashboard; installing without blocking (%s)\n", mode)
-			}
-			return forwardTo()
-		}
 		if err != nil {
 			return err
 		}
@@ -269,6 +339,18 @@ func Run(ctx context.Context, opts Options) error {
 		return forwardTo()
 	}
 
+	// Passive mode blocks nothing, so nothing it does belongs in front of the
+	// install. When the install will leave a lockfile here, that lockfile is
+	// the resolution we used to duplicate: let the manager run, then catalogue
+	// what it wrote. Cheaper (no second `npm install --package-lock-only`),
+	// raceless (we read the tree after it settles), and more accurate, because
+	// it describes what was installed rather than what we predicted. An
+	// invocation that locks somewhere else — or nowhere — falls through to the
+	// spec path below, which submits the packages it can name.
+	if opts.Passive && writesLocalLockfile(m, opts.Args) {
+		return passiveAfterInstall(ctx, m, opts)
+	}
+
 	parsed := ParseSpecs(m, opts.Args[start:])
 
 	switch {
@@ -278,27 +360,38 @@ func Run(ctx context.Context, opts Options) error {
 			fmt.Fprintf(errOut, "ossprey: not checking non-registry install targets: %s (run `ossprey scan` for full coverage)\n",
 				strings.Join(other, ", "))
 		}
+		if opts.Passive {
+			// This invocation leaves no lockfile here to read afterwards (pip,
+			// `uv pip install`, a global or redirected install), so the names
+			// on the command line are all we will ever know. Resolve and
+			// submit them beside the install rather than ahead of it.
+			return passiveAlongside(ctx, m, opts, len(parsed.Specs), func(ctx context.Context) (*ossbom.SBOM, error) {
+				resolved := resolveSpecs(ctx, resolve, parsed.Specs)
+				if len(resolved) == 0 {
+					return nil, errNothingToCheck
+				}
+				return checkFn(ctx, check.Options{
+					Specs:      resolved,
+					APIURL:     opts.APIURL,
+					APIKey:     opts.APIKey,
+					SubmitOnly: true,
+					MonitorID:  opts.MonitorID,
+				})
+			})
+		}
 		resolved := resolveSpecs(ctx, resolve, parsed.Specs)
 		if len(resolved) == 0 {
 			fmt.Fprintln(errOut, "ossprey: nothing left to check after version resolution; forwarding")
 			return forwardTo()
 		}
 		// The scan is the one part of a forwarded install that takes visible
-		// time, and until it prints something the terminal looks hung. Passive
-		// passes SubmitOnly below, so it gets the submit wording: "checking"
-		// would promise a verdict this install never waits for.
-		var stop func()
-		if opts.Passive {
-			stop = progress.Submit(progressOut, len(resolved))
-		} else {
-			stop = progress.Scan(progressOut, len(resolved))
-		}
+		// time, and until it prints something the terminal looks hung.
+		stop := progress.Scan(progressOut, len(resolved))
 		sbom, err := checkFn(ctx, check.Options{
-			Specs:      resolved,
-			APIURL:     opts.APIURL,
-			APIKey:     opts.APIKey,
-			SubmitOnly: opts.Passive,
-			MonitorID:  opts.MonitorID,
+			Specs:     resolved,
+			APIURL:    opts.APIURL,
+			APIKey:    opts.APIKey,
+			MonitorID: opts.MonitorID,
 		})
 		stop()
 		return finish(sbom, err)
@@ -307,12 +400,28 @@ func Run(ctx context.Context, opts Options) error {
 		// No packages named — the manager installs from the project manifest /
 		// lockfile. Scan the project and check every declared dependency rather
 		// than falling through unchecked.
+		if opts.Passive {
+			// As above: nothing will be written here for us to read, so the
+			// project's own manifest is the best description of this install,
+			// and it exists before it as well as after. Scan beside the
+			// install rather than in front of it.
+			fmt.Fprintf(errOut, "ossprey: no packages named; scanning project manifest alongside `%s %s`\n",
+				m.Bin, strings.Join(opts.Args, " "))
+			return passiveAlongside(ctx, m, opts, 0, func(ctx context.Context) (*ossbom.SBOM, error) {
+				return scanProjectFn(ctx, scanRequest{
+					Dir: ".", APIURL: opts.APIURL, APIKey: opts.APIKey,
+					MonitorID: opts.MonitorID, SubmitOnly: true,
+				})
+			})
+		}
 		fmt.Fprintf(errOut, "ossprey: no packages named; scanning project manifest before `%s %s`\n",
 			m.Bin, strings.Join(opts.Args, " "))
 		// Cataloguing a whole project can take longer than the API scan itself
 		// (npm range resolution, uv), so the indicator wraps both.
 		stop := progress.Start(progressOut, "ossprey: scan in progress")
-		sbom, err := scanProjectFn(ctx, ".", opts.APIURL, opts.APIKey, opts.MonitorID, opts.Passive)
+		sbom, err := scanProjectFn(ctx, scanRequest{
+			Dir: ".", APIURL: opts.APIURL, APIKey: opts.APIKey, MonitorID: opts.MonitorID,
+		})
 		stop()
 		return finish(sbom, err)
 
@@ -409,28 +518,160 @@ func manifestInstall(p installArgs) bool {
 	return len(p.ReqFiles) > 0 || len(p.NonPackages) == 0
 }
 
-// scanProject catalogs dir, submits the resulting SBOM to the Ossprey API, and
-// returns it with any vulnerabilities applied. It is the default scanProjectFn
-// seam. When the directory has no catalogable dependencies it returns the empty
-// SBOM without an API call so a bare install in a non-project dir forwards.
-func scanProject(ctx context.Context, dir, apiURL, apiKey, monitorID string, submitOnly bool) (*ossbom.SBOM, error) {
-	sbom, err := scan.Run(ctx, scan.Options{Path: dir})
+// scanProject catalogs a directory, submits the resulting SBOM to the Ossprey
+// API, and returns it with any vulnerabilities applied. It is the default
+// scanProjectFn seam. When the directory has no catalogable dependencies it
+// returns the empty SBOM without an API call so a bare install in a non-project
+// dir forwards.
+
+// scanRequest describes one project scan-and-submit.
+type scanRequest struct {
+	Dir       string
+	APIURL    string
+	APIKey    string
+	MonitorID string
+	// SubmitOnly posts the SBOM without polling for a verdict (passive).
+	SubmitOnly bool
+	// Installed catalogues what the manager just installed rather than what the
+	// project declares: manifests and lockfiles are parsed, but the catalogers
+	// that shell out to uv/npm to resolve ranges are not run. After an install
+	// the lockfile already names the whole resolved tree, so re-resolving it
+	// would only repeat, slower, work the manager has just finished.
+	Installed bool
+}
+
+func scanProject(ctx context.Context, req scanRequest) (*ossbom.SBOM, error) {
+	sbom, err := scan.Run(ctx, scan.Options{Path: req.Dir, NoExec: req.Installed})
 	if err != nil {
 		return nil, err
+	}
+	if req.Installed && len(sbom.Components) == 0 {
+		// The install wrote no lockfile we can read (an unsupported layout, or
+		// a failed install). Fall back to the declaring scan rather than
+		// reporting a project with no dependencies: passive mode's whole job is
+		// to see this machine's installs.
+		if sbom, err = scan.Run(ctx, scan.Options{Path: req.Dir}); err != nil {
+			return nil, err
+		}
 	}
 	if len(sbom.Components) == 0 {
 		return sbom, nil // nothing declared to check
 	}
-	if submitOnly {
-		if err := submit.Post(ctx, sbom, apiURL, apiKey, monitorID); err != nil {
+	if req.SubmitOnly {
+		if err := submit.Post(ctx, sbom, req.APIURL, req.APIKey, req.MonitorID); err != nil {
 			return nil, err
 		}
 		return sbom, nil
 	}
-	if err := submit.Validate(ctx, sbom, apiURL, apiKey); err != nil {
+	if err := submit.Validate(ctx, sbom, req.APIURL, req.APIKey); err != nil {
 		return nil, err
 	}
 	return sbom, nil
+}
+
+// errNothingToCheck reports a passive submission that had nothing to send —
+// every named package failed version resolution. Not an error the user caused,
+// so it gets its own line rather than a "could not post scan" warning.
+var errNothingToCheck = errors.New("nothing left to check after version resolution")
+
+// passiveAfterInstall forwards the install first and catalogues what it left
+// behind: the lockfile the manager wrote names every package it actually
+// installed, transitives included.
+//
+// Order is the point. Running in front of the install delayed it by a full
+// resolution (`npm install --package-lock-only`, uv) to predict a tree the
+// manager was about to resolve for real; running *beside* it removed the delay
+// but raced the manager for the same files. Running after it costs a parse and
+// a POST, reads a settled directory, and describes what was installed instead
+// of what we guessed would be.
+//
+// Passive blocks nothing, so a failed install is still worth cataloguing (it
+// may have installed most of the tree before failing) and its exit code is
+// returned untouched.
+func passiveAfterInstall(ctx context.Context, m *Manager, opts Options) error {
+	// Nothing of ours has run yet, so this drain is normally empty — it is here
+	// so that no path execs the real manager without flushing first.
+	fmt.Fprint(errOut, warn.Drain(ctx))
+	execErr := execFn(ctx, m.Bin, opts.Args)
+
+	// Only now is there a wait to announce, and it is a short one: parsing a
+	// lockfile and posting it, with no resolver in the way.
+	stop := progress.Submit(progressOut, 0)
+	sbom, err := scanProjectFn(ctx, scanRequest{
+		Dir:        ".",
+		APIURL:     opts.APIURL,
+		APIKey:     opts.APIKey,
+		MonitorID:  opts.MonitorID,
+		SubmitOnly: true,
+		Installed:  true,
+	})
+	stop()
+
+	fmt.Fprint(errOut, warn.Drain(ctx))
+	reportPassive(opts, sbom, err)
+	return execErr
+}
+
+// passiveAlongside runs work concurrently with the real package manager, for
+// the one manager that leaves nothing to read afterwards (pip). The install
+// starts immediately; the submission catches up with it.
+func passiveAlongside(ctx context.Context, m *Manager, opts Options, n int, work func(context.Context) (*ossbom.SBOM, error)) error {
+	type outcome struct {
+		sbom *ossbom.SBOM
+		err  error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		sbom, err := work(ctx)
+		done <- outcome{sbom, err}
+	}()
+
+	// Warnings are deliberately not drained here: the goroutine is still
+	// filling them, and from this line on the manager's output owns the
+	// terminal. They go out below, before this function returns, which is
+	// before main can os.Exit on a non-zero install.
+	execErr := execFn(ctx, m.Bin, opts.Args)
+
+	var res outcome
+	select {
+	case res = <-done:
+	default:
+		// The install finished first, so there is a residual wait and it is
+		// worth announcing. Nothing was drawn earlier, when the manager's own
+		// output would have been fighting it.
+		stop := progress.Submit(progressOut, n)
+		res = <-done
+		stop()
+	}
+
+	fmt.Fprint(errOut, warn.Drain(ctx))
+	reportPassive(opts, res.sbom, res.err)
+	return execErr
+}
+
+// reportPassive states what the passive submission did. It never returns an
+// error: passive mode never blocks an install, not even on a failed submission
+// — a monitor that can break `npm install` is a monitor people rip out.
+func reportPassive(opts Options, sbom *ossbom.SBOM, err error) {
+	mode := "passive"
+	if opts.MonitorID != "" {
+		// Named because a monitor also decides whose account this lands in, and
+		// the env var carrying it may not have been set by the person reading
+		// this line.
+		mode = "passive, monitor " + monitor.Redact(opts.MonitorID)
+	}
+	switch {
+	case errors.Is(err, errNothingToCheck):
+		fmt.Fprintf(errOut, "ossprey: nothing left to check after version resolution; nothing posted (%s)\n", mode)
+	case err != nil:
+		fmt.Fprintf(errOut, "ossprey: warning: could not post scan (%v); the install was not blocked (%s)\n", err, mode)
+	case sbom != nil && len(sbom.Components) == 0:
+		// "Scan posted" would claim coverage of an install we catalogued
+		// nothing from.
+		fmt.Fprintf(errOut, "ossprey: found no dependencies to report; nothing posted (%s)\n", mode)
+	default:
+		fmt.Fprintf(errOut, "ossprey: scan posted to the Ossprey dashboard; the install was not blocked (%s)\n", mode)
+	}
 }
 
 // installArgs is the classification of an install command's arguments
