@@ -1,10 +1,9 @@
 // Package severity models the Ossprey finding severity scale and the floor at
 // or above which a finding fails a scan.
 //
-// The scale is ordered Info < Low < Medium < High < Critical. Info is
-// informational: the finding is reported to the user with its justification but
-// does not fail the scan, and being below the floor is the one and only thing
-// that makes Info special.
+// The scale is ordered Info < Low < Medium < High < Critical. No level is
+// special: a finding fails when it is at or above the configured floor, so Info
+// fails a scan graded at Info exactly as Critical fails one graded at Critical.
 //
 // Parsing is fail-closed. The API omits severity on findings recorded before it
 // was captured and on findings sourced from the OSV advisory tables, and an

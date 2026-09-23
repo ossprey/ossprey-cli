@@ -288,7 +288,7 @@ func newScanCmd() *cobra.Command {
 				stop()
 				if err != nil {
 					if skipped, ok := printSkipped(err); ok {
-						return writeReport(reportPath, scan.SkippedReport(sbom, skipped.Message, skipped.ResetAt))
+						return writeReport(reportPath, scan.SkippedReport(sbom, resolveFloor(sbom.FailingSeverityFloor, override), skipped.Message, skipped.ResetAt))
 					}
 					return err
 				}
@@ -423,7 +423,7 @@ func newCheckCmd() *cobra.Command {
 					// sbom is nil when Run failed, so there is no component
 					// count to report — only the skip itself.
 					return writeReport(reportPath, scan.SkippedReport(
-						ossbom.New(ossbom.Environment{}), skipped.Message, skipped.ResetAt))
+						ossbom.New(ossbom.Environment{}), resolveFloor("", override), skipped.Message, skipped.ResetAt))
 				}
 				return err
 			}

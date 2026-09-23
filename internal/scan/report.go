@@ -128,8 +128,8 @@ func NewReport(sbom *ossbom.SBOM, floor severity.Level) Report {
 // SkippedReport summarises a scan the API declined to run (quota exhausted).
 // The verdict is deliberately neither clean nor malware: nothing was checked,
 // and a consumer must not report "no malware found" off the back of it.
-func SkippedReport(sbom *ossbom.SBOM, message, resetAt string) Report {
-	r := NewReport(sbom, severity.ParseFloor(sbom.FailingSeverityFloor))
+func SkippedReport(sbom *ossbom.SBOM, floor severity.Level, message, resetAt string) Report {
+	r := NewReport(sbom, floor)
 	r.Verdict = VerdictSkipped
 	r.Skipped = &Skip{Message: message, ResetAt: resetAt}
 	return r
