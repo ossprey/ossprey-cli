@@ -10,11 +10,14 @@ Python, JavaScript and Rust, via syft's static catalogers.
 | JavaScript | `package.json`, `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml` |
 | Rust | `Cargo.lock` only, there is no support for parsing cargo.toml. |
 
-The CLI never executes your package manager. If your repo has only a manifest
-and no lockfile, expect direct deps only — supply a lockfile for full
-transitive coverage. Rust is the exception: with no `Cargo.lock` it catalogues
-nothing at all, so a crate that gitignores its lockfile needs one committed to
-be scanned.
+The CLI never installs your dependencies. It does run a resolver — `npm install
+--package-lock-only` (in a temporary directory) or `uv pip compile` — when a
+project ships a manifest with no lockfile, purely to work out which versions an
+install would pull; nothing is installed and your project is not modified. When
+that resolver is missing from PATH or disabled, expect direct deps only —
+supply a lockfile for full transitive coverage. Rust is the exception: with no
+`Cargo.lock` it catalogues nothing at all, so a crate that gitignores its
+lockfile needs one committed to be scanned.
 
 When a dependency's version can't be determined — an unpinned range in a
 manifest (`click = "^8"`) with no lockfile or resolver to pin it against — the

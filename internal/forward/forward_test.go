@@ -711,6 +711,75 @@ func TestRun_Passive_NamedPackages_ScanRunsAfterTheInstall(t *testing.T) {
 	}
 }
 
+// The manager alone does not decide whether a lockfile lands here. An install
+// that locks nothing local (global, redirected, lockfile disabled, `uv pip`)
+// must keep the older passive path, which submits the packages it can name:
+// cataloguing "." afterwards would report a tree the command never touched and
+// drop the package that was actually installed.
+func TestWritesLocalLockfile(t *testing.T) {
+	cases := []struct {
+		bin  string
+		args []string
+		want bool
+	}{
+		{"npm", []string{"install", "left-pad"}, true},
+		{"npm", []string{"ci"}, true},
+		{"npm", []string{"install", "--no-save", "left-pad"}, true}, // npm still updates an existing lock
+		{"npm", []string{"install", "-g", "left-pad"}, false},
+		{"npm", []string{"install", "--global", "left-pad"}, false},
+		{"npm", []string{"install", "--no-package-lock", "left-pad"}, false},
+		{"npm", []string{"install", "--package-lock=false", "left-pad"}, false},
+		{"npm", []string{"install", "--package-lock=true", "left-pad"}, true},
+		{"npm", []string{"--prefix", "./app", "install", "left-pad"}, false},
+		{"npm", []string{"--prefix", ".", "install", "left-pad"}, true},
+		{"npm", []string{"install", "--location=global", "left-pad"}, false},
+		{"npm", []string{"install", "--location=project", "left-pad"}, true},
+		{"pnpm", []string{"add", "left-pad"}, true},
+		{"pnpm", []string{"--dir", "../other", "add", "left-pad"}, false},
+		{"pnpm", []string{"add", "--no-lockfile", "left-pad"}, false},
+		{"yarn", []string{"add", "left-pad"}, true},
+		{"yarn", []string{"--cwd", "/tmp/x", "add", "left-pad"}, false},
+		{"poetry", []string{"add", "flask"}, true},
+		{"poetry", []string{"-C", "../svc", "add", "flask"}, false},
+		{"uv", []string{"add", "flask"}, true},
+		{"uv", []string{"sync"}, true},
+		{"uv", []string{"pip", "install", "flask"}, false}, // installs into an env, no uv.lock
+		{"uv", []string{"--directory", "../svc", "add", "flask"}, false},
+		{"pip", []string{"install", "flask"}, false}, // no lockfile at all
+	}
+	for _, tc := range cases {
+		m, ok := Lookup(tc.bin)
+		if !ok {
+			t.Fatalf("unknown manager %q", tc.bin)
+		}
+		if got := writesLocalLockfile(m, tc.args); got != tc.want {
+			t.Errorf("writesLocalLockfile(%s %v) = %v, want %v", tc.bin, tc.args, got, tc.want)
+		}
+	}
+}
+
+// The routing above has to reach Run: a global install must still report the
+// package it installed, which only the spec path can do.
+func TestRun_PassiveGlobalInstall_SubmitsTheNamedPackage(t *testing.T) {
+	var gotSpecs []check.Spec
+	swap(t, func(context.Context, string, []string) error { return nil },
+		func(ctx context.Context, o check.Options) (*ossbom.SBOM, error) {
+			gotSpecs = o.Specs
+			return cleanSBOM(ctx, o)
+		})
+	// swap's scanProjectFn stub fails the test if the post-install path runs.
+
+	err := Run(context.Background(), Options{
+		Bin: "npm", Args: []string{"install", "-g", "left-pad@1.3.0"}, Passive: true,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(gotSpecs) != 1 || gotSpecs[0].Name != "left-pad" {
+		t.Errorf("specs = %v, want the named package; a global install leaves no local lockfile to read", gotSpecs)
+	}
+}
+
 func TestRun_CacheScanOnly_ManifestInstall_PostsAndForwards(t *testing.T) {
 	ex := &stubExec{}
 	swap(t, ex.fn, cleanSBOM)

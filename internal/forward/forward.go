@@ -59,13 +59,94 @@ var progressOut io.Writer = os.Stderr
 type Manager struct {
 	Bin       string // executable name, e.g. "npm"
 	Ecosystem string // "npm" or "pypi"
-	// Lockfile marks a manager that writes a lockfile enumerating everything it
-	// installed, transitives included. Passive mode reads that lockfile after
-	// the install instead of resolving the same tree a second time in front of
-	// it. pip is the odd one out: `pip install foo` updates no file, so there
-	// is nothing to read afterwards.
+	// Lockfile marks a manager that *can* write a lockfile enumerating
+	// everything it installed, transitives included. Passive mode reads that
+	// lockfile after the install instead of resolving the same tree a second
+	// time in front of it. pip never can: `pip install foo` updates no file, so
+	// there is nothing to read afterwards.
+	//
+	// A capability, not a promise about any given command — the invocation
+	// decides, so route on writesLocalLockfile rather than on this flag.
 	Lockfile  bool
 	installAt func(args []string) (specStart int, ok bool)
+}
+
+// noLocalLockfileFlags name the options that stop an install from updating a
+// lockfile in the current directory: a global install, a lockfile explicitly
+// disabled, or a run redirected at another project. When one is present, a
+// post-install catalogue of "." would describe a tree this command never
+// touched, so passive mode submits the packages named on the command line
+// instead.
+//
+// Bias: listing a harmless flag costs a fallback to the older, slower passive
+// path. Missing one costs a passive install that reports the wrong tree, or
+// nothing at all — so when in doubt, list it. `--no-save` is deliberately
+// absent: npm still updates an existing package-lock.json.
+var noLocalLockfileFlags = map[string]map[string]bool{
+	"npm": flagSet("-g", "--global", "--no-package-lock", "--package-lock",
+		"--location", "--prefix", "-C"),
+	"pnpm":   flagSet("-g", "--global", "--no-lockfile", "--lockfile", "--dir", "-C"),
+	"yarn":   flagSet("-g", "--global", "--no-lockfile", "--cwd"),
+	"poetry": flagSet("-C", "--directory", "--project"),
+	"uv":     flagSet("--directory", "--project", "--system"),
+}
+
+// hereValues are the values of a redirecting flag that still mean "this
+// directory", so `npm --prefix . install x` keeps the post-install path.
+var hereValues = flagSet(".", "./", ".\\")
+
+// writesLocalLockfile reports whether this invocation is expected to leave an
+// up-to-date lockfile in the current directory — which is the thing passive
+// mode reads once the install is done.
+//
+// The manager alone does not settle it. `uv pip install foo` resolves into an
+// environment and leaves uv.lock alone; `npm install -g foo` touches nothing
+// local; `npm install --no-package-lock foo` writes no lock by request; and
+// `pnpm --dir ../other add foo` locks a directory we are not scanning. Reading
+// "." after any of those would submit a tree that has nothing to do with the
+// command, and the package actually installed would go unreported.
+func writesLocalLockfile(m *Manager, args []string) bool {
+	if !m.Lockfile {
+		return false
+	}
+	// `uv pip install` is pip wearing uv's coat. `uv add` / `uv sync` do lock.
+	if m.Bin == "uv" {
+		if i := verbIndex("uv", args); i >= 0 && args[i] == "pip" {
+			return false
+		}
+	}
+	blocking := noLocalLockfileFlags[m.Bin]
+	for i := 0; i < len(args); i++ {
+		flag, value, hasInline := splitFlagValue(args[i])
+		if !blocking[flag] {
+			continue
+		}
+		if !hasInline && isDirFlag(flag) && i+1 < len(args) {
+			value = args[i+1]
+		}
+		// The spellings that keep the local lockfile: a redirect that points
+		// here, npm's project location, an explicitly enabled lockfile.
+		switch {
+		case isDirFlag(flag) && hereValues[value]:
+			continue
+		case flag == "--location" && value == "project":
+			continue
+		case (flag == "--package-lock" || flag == "--lockfile") && value == "true":
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// isDirFlag reports whether a flag's value names the directory the manager
+// operates on, rather than being a boolean.
+func isDirFlag(flag string) bool {
+	switch flag {
+	case "--prefix", "-C", "--dir", "--cwd", "--directory", "--project":
+		return true
+	}
+	return false
 }
 
 // managers is the registry of supported forwarders. Install verbs include both
@@ -259,13 +340,14 @@ func Run(ctx context.Context, opts Options) error {
 	}
 
 	// Passive mode blocks nothing, so nothing it does belongs in front of the
-	// install. For a manager that writes a lockfile, the install itself is the
-	// resolution we used to duplicate: let it run, then catalogue the lockfile
-	// it wrote and submit that. Cheaper (no second `npm install
-	// --package-lock-only`), raceless (we read the tree after it settles), and
-	// more accurate, because it describes what was installed rather than what we
-	// predicted would be.
-	if opts.Passive && m.Lockfile {
+	// install. When the install will leave a lockfile here, that lockfile is
+	// the resolution we used to duplicate: let the manager run, then catalogue
+	// what it wrote. Cheaper (no second `npm install --package-lock-only`),
+	// raceless (we read the tree after it settles), and more accurate, because
+	// it describes what was installed rather than what we predicted. An
+	// invocation that locks somewhere else — or nowhere — falls through to the
+	// spec path below, which submits the packages it can name.
+	if opts.Passive && writesLocalLockfile(m, opts.Args) {
 		return passiveAfterInstall(ctx, m, opts)
 	}
 
@@ -279,10 +361,10 @@ func Run(ctx context.Context, opts Options) error {
 				strings.Join(other, ", "))
 		}
 		if opts.Passive {
-			// pip only: it writes no lockfile, so there is nothing to read
-			// after the install and the named packages are all we will ever
-			// know. Resolve and submit them beside the install rather than
-			// ahead of it.
+			// This invocation leaves no lockfile here to read afterwards (pip,
+			// `uv pip install`, a global or redirected install), so the names
+			// on the command line are all we will ever know. Resolve and
+			// submit them beside the install rather than ahead of it.
 			return passiveAlongside(ctx, m, opts, len(parsed.Specs), func(ctx context.Context) (*ossbom.SBOM, error) {
 				resolved := resolveSpecs(ctx, resolve, parsed.Specs)
 				if len(resolved) == 0 {
@@ -319,9 +401,10 @@ func Run(ctx context.Context, opts Options) error {
 		// lockfile. Scan the project and check every declared dependency rather
 		// than falling through unchecked.
 		if opts.Passive {
-			// pip again (see above): the requirements file describes this
-			// install and exists before it as well as after, so the scan runs
-			// beside the install rather than in front of it.
+			// As above: nothing will be written here for us to read, so the
+			// project's own manifest is the best description of this install,
+			// and it exists before it as well as after. Scan beside the
+			// install rather than in front of it.
 			fmt.Fprintf(errOut, "ossprey: no packages named; scanning project manifest alongside `%s %s`\n",
 				m.Bin, strings.Join(opts.Args, " "))
 			return passiveAlongside(ctx, m, opts, 0, func(ctx context.Context) (*ossbom.SBOM, error) {

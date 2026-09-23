@@ -4,10 +4,15 @@ What happens between your command and a verdict.
 
 ## The scan pipeline
 
-Every command ends in the same place: a list of packages, compressed to a wire
-format, checked against the Ossprey API. Nothing here executes your project's
-package manager except the two resolvers marked below, and those only run when
-a manifest ships without a lockfile.
+Whenever Ossprey checks something — `ossprey scan`, `ossprey check`, or a
+forwarded install — it ends up here: a list of packages, compressed to a wire
+format, submitted to the Ossprey API. Only a *gating* run polls for the
+verdict; passive runs stop at the submission, and commands the forwarder does
+not recognise (or that `OSSPREY_SKIP_CI` disables) never enter this pipeline at
+all.
+
+Nothing here installs anything. The one exception is the resolver step marked
+below, which runs only when a manifest ships without a lockfile.
 
 ```mermaid
 flowchart LR
@@ -25,7 +30,7 @@ flowchart LR
     C --> F
     F --> G["MiniBOM<br/>purl + source + env + location"]
     G --> H["POST /scans"]
-    H --> I["poll for a verdict"]
+    H --> I["poll for a verdict<br/>(gating mode only)"]
     I --> J{"malware?"}
     J -- "yes" --> K["banner + exit 1"]
     J -- "no" --> L["exit 0"]
@@ -54,18 +59,21 @@ flowchart TD
     AA -- "yes" --> AB["block: exit 1,<br/>manager never runs"]
     AA -- "no" --> U
 
-    W -- "yes" --> AC{"manager writes<br/>a lockfile?"}
-    AC -- "npm, pnpm, yarn,<br/>poetry, uv" --> AD["exec the real manager first"]
+    W -- "yes" --> AC{"will it leave a lockfile<br/>in this directory?"}
+    AC -- "yes: npm install,<br/>poetry add, uv sync, ..." --> AD["exec the real manager first"]
     AD --> AE["catalog the lockfile it wrote"]
     AE --> AF["post the scan, never block"]
-    AC -- "pip" --> AG["exec the real manager<br/>and submit alongside it"]
+    AC -- "no: pip, uv pip,<br/>-g, --prefix ../x" --> AG["exec the real manager<br/>and submit the named<br/>packages alongside it"]
     AG --> AF
 ```
 
 The passive branch is the one worth reading twice. It never gates, so it never
-sits in front of the install: on a lockfile manager the install runs first and
-Ossprey then reads the lockfile it wrote, which is both faster and more
-accurate than predicting the tree beforehand.
+sits in front of the install: where a lockfile will land, the install runs
+first and Ossprey reads what it wrote, which is both faster and more accurate
+than predicting the tree beforehand. Where one will not — pip, `uv pip
+install`, a global or redirected install — there would be nothing to read, so
+the named packages are submitted beside the install instead (`writesLocalLockfile`
+in `internal/forward/forward.go` is the one place that decides).
 
 ```mermaid
 sequenceDiagram

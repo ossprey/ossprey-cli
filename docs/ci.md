@@ -78,9 +78,14 @@ For other CI systems the shape is the same: install the CLI, set
 
 Inside GitHub Actions or Azure Pipelines the scan also picks up the repository,
 organisation and branch from the runner's environment and sends them with the
-OSSBOM, so the dashboard groups runs by repository instead of minting a fresh
-asset per run. Nothing to configure; off CI those variables are unset and
-nothing is sent.
+OSSBOM, so a scan made with a login or an API key groups by repository in the
+dashboard instead of minting a fresh asset per run. Nothing to configure; off
+CI those variables are unset and nothing is sent.
+
+A submission made with a [monitor id](passive-monitoring.md#monitor--passive-with-no-credential-at-all)
+takes a different route (the ingest endpoint) and may be attributed to the
+monitor rather than to the repository, so confirm what you see in the dashboard
+before relying on repository grouping for a monitor-based rollout.
 
 Two env vars help while rolling Ossprey out across a CI estate, and both work
 for `ossprey scan` and the package-manager forwarders/shims alike:

@@ -4,8 +4,11 @@
 
 It reads the manifests and lockfiles already in your repo, asks the
 [Ossprey](https://ossprey.com) platform whether any of those packages are known
-malware, and fails the build if they are. It never installs anything, never runs
-your package manager's install, and never needs a sandbox or a virtualenv.
+malware, and fails the build if they are. It never installs your dependencies
+and never needs a sandbox or a virtualenv. (When a project ships a manifest but
+no lockfile, it may run a resolver — `npm install --package-lock-only` or `uv
+pip compile` — to work out which versions an install *would* pull. That
+resolves; it does not install.)
 
 Works with **Python**, **JavaScript** and **Rust** projects.
 
@@ -142,8 +145,11 @@ ossprey shim install --watchdog          # uses this machine's login
 ossprey shim install --monitor ospi_...  # or a submit-only id, no credential on the machine
 ```
 
-The install runs first, at full speed; Ossprey reports what was installed
-afterwards. Visibility now, gating later.
+For the usual case — `npm install`, `poetry add`, anything that leaves a
+lockfile behind — the install runs first, at full speed, and Ossprey reports
+what was actually installed afterwards. Where no lockfile lands (pip, `uv pip
+install`, a global install) it submits the packages it can name alongside the
+install instead. Either way nothing is blocked and nothing waits.
 
 → [docs/passive-monitoring.md](docs/passive-monitoring.md)
 

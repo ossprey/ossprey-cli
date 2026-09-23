@@ -7,15 +7,34 @@ CI and for your own machine, and wrong for rolling out across a fleet, where
 you want visibility first and nobody's work interrupted.
 
 Passive mode submits the scan and gets out of the way. It never waits for a
-verdict, never blocks an install, and always exits 0 — even if the submission
-itself fails. Results show up in the dashboard.
+verdict and never blocks an install: a failed submission is a warning, not an
+error, and does not change the exit status. `ossprey scan --passive` therefore
+always exits 0; a passive *forwarded install* passes the real package manager's
+exit code straight through, so `npm install` failing still fails. Results show
+up in the dashboard.
 
-It also never delays the install. For a manager that writes a lockfile (npm,
-pnpm, yarn, poetry, uv) the install runs first, untouched, and Ossprey then
-reads the lockfile it wrote — so the SBOM describes what was actually
+It also never delays the install. When the command will leave a lockfile in the
+current directory — `npm install`, `pnpm add`, `yarn add`, `poetry add`, `uv
+sync` and friends — the install runs first, untouched, and Ossprey then reads
+the lockfile it wrote. The SBOM therefore describes what was actually
 installed, transitives included, and nothing re-resolves a tree the manager has
-just resolved for real. pip writes no lockfile, so there it submits the named
-packages alongside the install instead.
+just resolved for real.
+
+Where no lockfile lands here, there is nothing to read afterwards, so Ossprey
+submits the packages it can name **alongside** the install instead — the
+install still starts immediately. That covers:
+
+- `pip` and `pip3`, which write no lockfile at all, and `uv pip install`, which
+  resolves into an environment rather than into `uv.lock`;
+- global installs (`npm install -g`, `--location=global`);
+- installs with the lockfile turned off (`npm install --no-package-lock`,
+  `pnpm add --no-lockfile`);
+- installs redirected elsewhere (`npm --prefix ./app install`, `pnpm --dir
+  ../other add`, `poetry -C ../svc add`). A redirect that points here
+  (`--prefix .`) keeps the post-install path.
+
+In that mode only the named packages are covered, not their transitives — the
+same scope a gating `ossprey npm install foo` has.
 
 There are two ways to run it, and the difference is where the credential lives.
 
@@ -74,8 +93,8 @@ blocking install from a passive one at a glance.
   its install scripts already run) by the time the dashboard hears about it.
   That is the trade passive mode makes; the default mode is the one that gates.
 - **A small tail after the install.** Parsing the lockfile and posting it takes
-  a moment after the manager exits — no resolver, no verdict wait. On pip,
-  where the submission runs beside the install, there is usually nothing left
+  a moment after the manager exits — no resolver, no verdict wait. Where the
+  submission runs alongside the install instead, there is usually nothing left
   to wait for at all.
 - **A monitor id is a capability.** Anyone holding it can submit scans to your
   account, which spends quota. It cannot read anything, but revoke it in the

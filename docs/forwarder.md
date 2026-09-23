@@ -7,6 +7,12 @@ Wrap an install so packages are checked **before** they hit your machine. If
 any are flagged, the install is blocked (exit `1`) and the real package manager
 is never invoked; otherwise the command is forwarded unchanged.
 
+> Everything on this page describes the default, **gating** mode. In
+> [passive mode](passive-monitoring.md) nothing is checked in front of the
+> install and nothing is ever blocked: the manager runs first (or alongside the
+> submission), and a scan that fails to submit is a warning rather than an
+> error.
+
 ```sh
 ossprey npm install foo@1.2.3 bar@2.0.0   # checks each named package
 ossprey yarn add foo@1.2.3
@@ -143,8 +149,9 @@ listed above, since `ossprey <anything else>` isn't a command.
 
 An intercepted install needs credentials exactly like `ossprey scan` does, so
 run `ossprey login` once (or export `OSSPREY_API_KEY`) before relying on the
-aliases. With neither, the install stops on a credentials error rather than
-being quietly forwarded.
+aliases. With neither, a gating install stops on a credentials error rather
+than being quietly forwarded. (A passive install never stops for anything, so
+there the same failure is a warning and the install proceeds.)
 
 To check they took, run `type npm`. Non-install commands (`npm run build`, `pip
 list`, `poetry run pytest`) go straight through untouched, so an
