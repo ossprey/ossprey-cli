@@ -55,6 +55,11 @@ func componentPurl(c Component) string {
 // ApplyAPIResponse copies vulnerabilities and findings from a MiniBOM-shaped
 // API response into this SBOM. Returns nil on parse failure with an error context.
 // Findings name the components the scan did not check.
+//
+// Deliberately not the failing severity floor: that is a property of the scan,
+// not of the document, so it travels on the response envelope and submit.Validate
+// sets it. An SBOM other formats have to be able to carry is the wrong place to
+// put a per-account policy value.
 func (s *SBOM) ApplyAPIResponse(raw json.RawMessage) error {
 	var resp struct {
 		Vulnerabilities []Vulnerability `json:"vulnerabilities"`

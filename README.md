@@ -176,17 +176,28 @@ ossprey scan .
 
 Exit codes:
 
-- `0` — no malware found, only informational findings, `--local` dump, or scan skipped by the API (e.g. quota exhausted)
+- `0` — no malware found, only findings below the floor this run grades at, `--local` dump, or scan skipped by the API (e.g. quota exhausted)
 - `1` — malware found, **or** the scan itself failed (bad path, catalog error, API/network error, missing key)
 
-A finding graded `Info` is reported as a `Note:` line and does not fail the
-scan. Every other grade fails, and so does a finding the API could not grade,
-so an older server that sends no grade behaves exactly as before.
+A finding below the floor this run grades at is reported as a `Note:` line and
+does not fail the scan. Everything at or above it fails, and so does a finding
+the API could not grade, whatever the floor is set to, so an older server that
+sends no grade behaves exactly as before. The floor is your account's unless
+`--fail-on` overrode it for this run.
 
-Pass `--fail-on-informational` to fail on those too, if you would rather your
-build stopped on anything Ossprey reports at all. It only ever makes the check
-stricter; there is deliberately no flag to raise the threshold, because that
-would let a real detection through.
+The floor is your account's setting, served with the scan: change it once in
+the dashboard and every integration follows. It defaults to `Low`, which makes
+`Info` the only grade that is reported without failing. `scan`, `check`, the
+first scan `init` runs and the package-manager forwarders all apply it; the
+pre-commit hook does not, because `/malware/check` does not serve it, so that
+hook keeps the compiled-in `Low`.
+
+Pass `--fail-on <level>` to use a different floor for one run. It overrides the
+account setting in either direction, so `--fail-on Critical` lets a High finding
+through and `--fail-on Info` stops on everything Ossprey reports at all.
+
+`--fail-on Info` replaces the old `--fail-on-informational`, which was removed:
+`Info` is the bottom of the scale, so the flag said nothing the level does not.
 
 If you need to distinguish "clean" from "errored" in CI, pass
 [`--report report.json`](#machine-readable-verdict---report): the file exists
@@ -408,7 +419,7 @@ ossprey scan [path] [flags]
 | `--timeout <dur>` | Give up cataloguing after this long and emit whatever resolved (or `OSSPREY_SCAN_TIMEOUT`). Off by default. |
 | `--url <url>` | Override the Ossprey API URL (default `https://api.ossprey.com`). |
 | `--api-key <key>` | Provide the API key on the command line instead of an env var. |
-| `--fail-on-informational` | Also fail on informational findings, which are reported but exit 0 by default. |
+| `--fail-on <level>` | Fail on findings at or above this severity (`Info`, `Low`, `Medium`, `High`, `Critical`), overriding your account's floor for this run. |
 | `--dry-run-safe` | Skip the API; report an empty vulnerability list. |
 | `--dry-run-malicious` | Skip the API; inject a test finding against the first component. |
 | `--skip-ci` | Skip the Ossprey scan entirely and exit 0. Also settable as `OSSPREY_SKIP_CI=1`. |
@@ -484,11 +495,13 @@ registry (PyPI / npm) and checked. Both `name@version` and pip's
 | `-e, --eco-system <pypi\|npm>` | Package ecosystem (required). |
 | `--url <url>` | Override the Ossprey API URL. |
 | `--api-key <key>` | API key (or env var). |
+| `--report <file>` | Write the JSON verdict report to `<file>`. |
+| `--fail-on <level>` | Fail on findings at or above this severity, overriding your account's floor for this run. |
 | `--dry-run-safe` | Skip the API; report an empty vulnerability list. |
 | `--dry-run-malicious` | Skip the API; inject a test finding against the first package. |
 
 Exit codes match `scan`: `1` on a malware verdict or error, `0` otherwise
-(an `Info` finding is reported but does not fail).
+(a finding below the floor this run grades at is reported but does not fail).
 
 ## Package-manager forwarder
 
@@ -1140,6 +1153,7 @@ ossprey scan . --report report.json
 |-----------|-----------|---------|
 | `clean`   | 0         | Scanned, nothing flagged. Check `unscanned` for how much was covered. |
 | `malware` | 1         | `findings` lists every flagged package. |
+| `informational` | 0   | Everything found sits below the floor this run graded at. `informational` lists them. Reported, not blocking, and **not** a clean scan. |
 | `skipped` | 0         | **Nothing was checked**: either your quota was exhausted or the SBOM held nothing this platform scans. `skipped.message` and `skipped.reset_at` say why and until when. Do not read this as "clean". |
 
 `unscanned` is how many of `components` the platform did not check: packages in

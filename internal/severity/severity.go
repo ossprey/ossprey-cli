@@ -1,10 +1,9 @@
 // Package severity models the Ossprey finding severity scale and the floor at
 // or above which a finding fails a scan.
 //
-// The scale is ordered Info < Low < Medium < High < Critical. Info is
-// informational: the finding is reported to the user with its justification but
-// does not fail the scan, and being below the floor is the one and only thing
-// that makes Info special.
+// The scale is ordered Info < Low < Medium < High < Critical. No level is
+// special: a finding fails when it is at or above the configured floor, so Info
+// fails a scan graded at Info exactly as Critical fails one graded at Critical.
 //
 // Parsing is fail-closed. The API omits severity on findings recorded before it
 // was captured and on findings sourced from the OSV advisory tables, and an
@@ -29,8 +28,9 @@ const (
 	Critical
 )
 
-// FailingFloor is the lowest level that fails a scan. Info is the only named
-// level below it.
+// FailingFloor is the floor a run grades at when nothing else says otherwise:
+// no account floor served and no per-run override. It is a default, not a cap;
+// an account may sit anywhere on the scale.
 const FailingFloor = Low
 
 var byName = map[string]Level{
@@ -60,6 +60,17 @@ func Parse(s string) Level {
 	return Unknown
 }
 
+// ParseFloor reads a floor rather than a grade, so an unrecognised value falls
+// back to FailingFloor instead of Unknown. The two directions are opposite on
+// purpose: an unreadable grade must fail, an unreadable floor must not fail
+// everything.
+func ParseFloor(s string) Level {
+	if lvl := Parse(s); lvl != Unknown {
+		return lvl
+	}
+	return FailingFloor
+}
+
 // String is the canonical title-case name.
 func (l Level) String() string {
 	if name, ok := names[l]; ok {
@@ -75,9 +86,8 @@ func (l Level) Fails() bool {
 }
 
 // FailsAt reports whether a finding at this level fails a scan at the given
-// floor, so a caller can opt into a stricter one (`--fail-on-informational`
-// lowers it to Info). Unknown fails at every floor: a finding we could not
-// grade must never pass because of it.
+// floor, which is the account's setting or a per-run override. Unknown fails at
+// every floor: a finding we could not grade must never pass because of it.
 func (l Level) FailsAt(floor Level) bool {
 	if l == Unknown {
 		return true

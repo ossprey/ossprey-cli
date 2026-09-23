@@ -356,8 +356,9 @@ func reportAndForward(ctx context.Context, m *Manager, opts Options, sbom *ossbo
 	fmt.Fprint(errOut, warn.Drain(ctx))
 
 	// The forwarders parse no flags of their own (DisableFlagParsing), so there
-	// is nowhere to opt into a stricter floor; the default applies.
-	summary, hasMalware := scan.MalwareReports(sbom, severity.FailingFloor)
+	// is nowhere to override the floor for one install; the account's setting
+	// applies, and the compiled-in default where the API served no usable one.
+	summary, hasMalware := scan.MalwareReports(sbom, severity.ParseFloor(sbom.FailingSeverityFloor))
 	for _, msg := range summary.Informational {
 		fmt.Fprintln(errOut, "ossprey: "+msg)
 	}

@@ -68,7 +68,7 @@ func TestSkippedReportIsNeitherCleanNorMalware(t *testing.T) {
 	s := ossbom.New(ossbom.Environment{})
 	s.AddComponent(ossbom.Component{Name: "requests", Version: "2.31.0", Type: "pypi"})
 
-	r := SkippedReport(s, "monthly quota exhausted", "2026-09-01T00:00:00Z")
+	r := SkippedReport(s, severity.FailingFloor, "monthly quota exhausted", "2026-09-01T00:00:00Z")
 	if r.Verdict != VerdictSkipped {
 		t.Errorf("verdict: got %q, want %q", r.Verdict, VerdictSkipped)
 	}
@@ -196,14 +196,14 @@ func TestSkippedReportOverridesInformational(t *testing.T) {
 	s := ossbom.New(ossbom.Environment{Project: "p"})
 	s.AddVulnerability(ossbom.Vulnerability{ID: "Z", Purl: "pkg:npm/removed@0.0.1-security", Severity: "Info"})
 
-	if r := SkippedReport(s, "quota exhausted", ""); r.Verdict != VerdictSkipped {
+	if r := SkippedReport(s, severity.FailingFloor, "quota exhausted", ""); r.Verdict != VerdictSkipped {
 		t.Errorf("verdict = %q, want %q", r.Verdict, VerdictSkipped)
 	}
 }
 
-// --fail-on-informational lowers the floor to Info, so a finding that would
-// normally be reported without failing becomes a failing one -- and the report
-// must agree with the exit code rather than still calling it informational.
+// The shorthand lowers the floor to Info, so a finding that would normally be
+// reported without failing becomes a failing one -- and the report must agree
+// with the exit code rather than still calling it informational.
 func TestNewReportAtInfoFloorTreatsInfoAsFailing(t *testing.T) {
 	s := ossbom.New(ossbom.Environment{Project: "p"})
 	s.AddVulnerability(ossbom.Vulnerability{ID: "Z", Purl: "pkg:npm/removed@0.0.1-security", Severity: "Info"})
@@ -237,6 +237,52 @@ func TestVerdictMarshalsAsAPlainString(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), `"verdict": "clean"`) && !strings.Contains(string(raw), `"verdict":"clean"`) {
 		t.Errorf("verdict did not marshal as the plain string \"clean\": %s", raw)
+	}
+}
+
+// An account sitting above Low is the direction that could not be expressed
+// before: the finding is real, graded, and still below what this account asked
+// to be stopped by.
+func TestNewReportAtARaisedFloorReportsWithoutFailing(t *testing.T) {
+	s := ossbom.New(ossbom.Environment{Project: "p"})
+	s.AddVulnerability(ossbom.Vulnerability{ID: "Z", Purl: "pkg:npm/mid@1.0.0", Severity: "Medium"})
+
+	r := NewReport(s, severity.High)
+	if r.Verdict != VerdictInformational {
+		t.Errorf("verdict = %q, want %q", r.Verdict, VerdictInformational)
+	}
+	if len(r.Findings) != 0 {
+		t.Errorf("findings = %d, want 0", len(r.Findings))
+	}
+	if len(r.Informational) != 1 {
+		t.Fatalf("informational = %d, want 1", len(r.Informational))
+	}
+}
+
+// Whatever the account asked for, a finding the API could not grade fails.
+func TestNewReportAtARaisedFloorStillFailsAnUngradedFinding(t *testing.T) {
+	s := ossbom.New(ossbom.Environment{Project: "p"})
+	s.AddVulnerability(ossbom.Vulnerability{ID: "Z", Purl: "pkg:npm/mystery@1.0.0"})
+
+	if r := NewReport(s, severity.Critical); r.Verdict != VerdictMalware {
+		t.Errorf("verdict = %q, want %q", r.Verdict, VerdictMalware)
+	}
+}
+
+// A skipped scan reached no verdict, but its arrays are still split, so it uses
+// the floor the run resolved. The caller's floor wins over the served one, which
+// is how a --fail-on override reaches a skipped report.
+func TestSkippedReportSplitsAtTheRunsFloor(t *testing.T) {
+	s := ossbom.New(ossbom.Environment{Project: "p"})
+	s.FailingSeverityFloor = "Low"
+	s.AddVulnerability(ossbom.Vulnerability{ID: "Z", Purl: "pkg:npm/mid@1.0.0", Severity: "High"})
+
+	r := SkippedReport(s, severity.Critical, "quota exhausted", "")
+	if len(r.Findings) != 0 {
+		t.Errorf("findings = %d, want 0", len(r.Findings))
+	}
+	if len(r.Informational) != 1 {
+		t.Errorf("informational = %d, want 1", len(r.Informational))
 	}
 }
 

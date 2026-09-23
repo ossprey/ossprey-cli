@@ -917,6 +917,48 @@ func TestNonPassiveInstallAnnouncesTheCheck(t *testing.T) {
 	}
 }
 
+// The forwarders parse no flags, so before the served floor they could only
+// ever grade at the compiled-in default. A raised account floor now reaches
+// them, which is the point: an install is not blocked by a finding the account
+// asked not to be stopped by.
+func TestRun_BareInstall_HonoursTheServedFloor(t *testing.T) {
+	ex := &stubExec{}
+	swap(t, ex.fn, cleanSBOM)
+	swapScan(t, func(_ context.Context, _, _, _, _ string, _ bool) (*ossbom.SBOM, error) {
+		s := ossbom.New(ossbom.Environment{})
+		s.FailingSeverityFloor = "Critical"
+		s.AddVulnerability(ossbom.Vulnerability{ID: "V1", Purl: "pkg:npm/mid@1.0.0", Severity: "High"})
+		return s, nil
+	})
+
+	if err := Run(context.Background(), Options{Bin: "npm", Args: []string{"install"}}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !ex.called {
+		t.Error("a finding below the account's floor must not block the install")
+	}
+}
+
+// Whatever the account asked for, a finding we could not grade still blocks.
+func TestRun_BareInstall_UngradedFindingBlocksAtARaisedFloor(t *testing.T) {
+	ex := &stubExec{}
+	swap(t, ex.fn, cleanSBOM)
+	swapScan(t, func(_ context.Context, _, _, _, _ string, _ bool) (*ossbom.SBOM, error) {
+		s := ossbom.New(ossbom.Environment{})
+		s.FailingSeverityFloor = "Critical"
+		s.AddVulnerability(ossbom.NewMalwareVulnerability("V1", "pkg:npm/evil@1.0.0", "bad"))
+		return s, nil
+	})
+
+	err := Run(context.Background(), Options{Bin: "npm", Args: []string{"install"}})
+	if !errors.Is(err, ErrBlocked) {
+		t.Fatalf("err: got %v, want ErrBlocked", err)
+	}
+	if ex.called {
+		t.Error("an ungraded finding must block whatever the floor")
+	}
+}
+
 // Passive mode forwards without ever reaching a verdict. It still has to flush
 // warnings first: the real manager's output starts the moment it execs, and a
 // non-zero exit there leaves the process via os.Exit, so anything not printed
