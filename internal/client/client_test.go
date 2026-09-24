@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ossprey/ossprey-cli/internal/monitor"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
 )
 
@@ -340,6 +341,128 @@ func TestSubmit_Errors(t *testing.T) {
 			}
 			if !strings.Contains(err.Error(), tt.wantMatch) {
 				t.Errorf("err: got %q, want substring %q", err.Error(), tt.wantMatch)
+			}
+		})
+	}
+}
+
+const testIngestToken = "ospi_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+func TestNewIngestRejectsAMalformedToken(t *testing.T) {
+	// The token lands in a URL path, so a value carrying a slash or a query
+	// character would silently retarget the request at another route.
+	for _, token := range []string{
+		"", "nope", "ospi_short",
+		testIngestToken + "/../../dashboard/v1",
+		testIngestToken + "?x=1",
+		"ospi_" + strings.Repeat("z", 64),
+	} {
+		if _, err := NewIngest("https://api.test", token); err == nil {
+			t.Errorf("NewIngest accepted %q", token)
+		}
+	}
+}
+
+func TestIngestClientPostsToTheIngestMountWithNoCredential(t *testing.T) {
+	var gotPath, gotAPIKey, gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAPIKey = r.Header.Get("x-api-key")
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusAccepted)
+		io.WriteString(w, `{"sbom_id":"sb1","scan_id":"sc1"}`)
+	}))
+	defer srv.Close()
+
+	c, err := NewIngest(srv.URL, testIngestToken)
+	if err != nil {
+		t.Fatalf("NewIngest: %v", err)
+	}
+	if err := c.Submit(context.Background(), ossbom.MiniBOM{}); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+
+	if want := "/ingest/" + testIngestToken + "/scans"; gotPath != want {
+		t.Errorf("posted to %q, want %q", gotPath, want)
+	}
+	// An empty x-api-key would read as a malformed key rather than as no
+	// credential, which is why authenticate returns early for this mode.
+	if gotAPIKey != "" || gotAuth != "" {
+		t.Errorf("ingest client sent a credential: x-api-key=%q authorization=%q", gotAPIKey, gotAuth)
+	}
+}
+
+// A monitor id is submit-only. Refusing here means the caller gets a clear
+// error instead of a 404 from a status route that was never meant to exist.
+func TestIngestClientRefusesValidate(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("Validate must not reach the network for an ingest client (path %s)", r.URL.Path)
+	}))
+	defer srv.Close()
+
+	c, err := NewIngest(srv.URL, testIngestToken)
+	if err != nil {
+		t.Fatalf("NewIngest: %v", err)
+	}
+	if _, err := c.Validate(context.Background(), ossbom.MiniBOM{}); !errors.Is(err, ErrIngestSubmitOnly) {
+		t.Fatalf("Validate() error = %v, want ErrIngestSubmitOnly", err)
+	}
+}
+
+// The token is the whole credential and it travels in the URL path, so every
+// *url.Error carries it -- into terminal scrollback and CI logs, on every
+// install a proxy, DNS or TLS failure touches.
+func TestIngestTransportErrorDoesNotCarryTheToken(t *testing.T) {
+	// A port nothing listens on: a refused connection is the common case.
+	c, err := NewIngest("http://127.0.0.1:1", testIngestToken)
+	if err != nil {
+		t.Fatalf("NewIngest: %v", err)
+	}
+
+	postErr := c.Submit(context.Background(), ossbom.MiniBOM{})
+
+	if postErr == nil {
+		t.Fatal("Post to a closed port returned no error")
+	}
+	if strings.Contains(postErr.Error(), testIngestToken) {
+		t.Errorf("the monitor id reached an error message: %v", postErr)
+	}
+	if !strings.Contains(postErr.Error(), monitor.Prefix) {
+		t.Errorf("the error names no monitor at all, so it cannot be debugged: %v", postErr)
+	}
+}
+
+func TestSkipMessage(t *testing.T) {
+	tests := []struct {
+		name   string
+		output string
+		want   string
+	}{
+		{
+			// The API nests the reason under output, which is why the CLI used
+			// to blame quota for every skipped scan.
+			"nothing scannable",
+			`{"skipped":true,"reason":"no_scannable_components","error_message":"No supported package ecosystems found in this SBOM. Skipped: 2 cargo. Supported ecosystems: pypi, npm."}`,
+			"Scan skipped: nothing in this project is in an ecosystem Ossprey scans",
+		},
+		{
+			"quota, which stores no message",
+			`{"skipped":true,"reason":"usage_limit_exceeded"}`,
+			"Scan skipped due to quota exhaustion",
+		},
+		{"no output at all", ``, "Scan skipped due to quota exhaustion"},
+		{"unrecognised reason", `{"reason":"something_new"}`, "Scan skipped due to quota exhaustion"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := skipMessage([]byte(tt.output))
+			if got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+			// The API's own text enumerates the ecosystems it skipped. That is
+			// the platform's business, not something to print over a build.
+			if strings.Contains(got, "cargo") || strings.Contains(got, "Supported ecosystems") {
+				t.Errorf("the API's ecosystem list leaked into CLI output: %q", got)
 			}
 		})
 	}

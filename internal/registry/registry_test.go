@@ -2,6 +2,7 @@ package registry
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -55,7 +56,7 @@ func TestResolveLatest_PyPI(t *testing.T) {
 
 func TestResolveLatest_Errors(t *testing.T) {
 	t.Run("unsupported ecosystem", func(t *testing.T) {
-		if _, err := ResolveLatest(context.Background(), "cargo", "serde"); err == nil {
+		if _, err := ResolveLatest(context.Background(), "maven", "commons-io"); err == nil {
 			t.Fatal("expected error")
 		}
 	})
@@ -87,4 +88,79 @@ func TestResolveLatest_Errors(t *testing.T) {
 			t.Fatal("expected error when latest is empty")
 		}
 	})
+}
+
+// A 404 means the package is not on the public registry — the normal answer for
+// a private or internal package. Callers grade that differently from an outage,
+// so it must be distinguishable without string-matching the message.
+func TestResolveLatestNotFoundIsTyped(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+	npmBaseURL = srv.URL + "/"
+
+	_, err := ResolveLatest(context.Background(), "npm", "@wayflyer/flyui")
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("ResolveLatest() error = %v, want one matching ErrNotFound", err)
+	}
+}
+
+// An outage must NOT look like a missing package.
+func TestResolveLatestServerErrorIsNotNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	npmBaseURL = srv.URL + "/"
+
+	_, err := ResolveLatest(context.Background(), "npm", "lodash")
+	if err == nil {
+		t.Fatal("expected an error on 500")
+	}
+	if errors.Is(err, ErrNotFound) {
+		t.Errorf("ResolveLatest() error = %v, want it NOT to match ErrNotFound", err)
+	}
+}
+
+func TestResolveLatestCargo(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// crates.io 403s a generic client, so the request must identify itself.
+		if ua := r.Header.Get("User-Agent"); ua == "" || strings.HasPrefix(ua, "Go-http-client") {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		_, _ = w.Write([]byte(`{"crate":{"max_stable_version":"1.0.200","newest_version":"1.1.0-beta.1"}}`))
+	}))
+	defer srv.Close()
+	old := cratesBaseURL
+	cratesBaseURL = srv.URL + "/"
+	defer func() { cratesBaseURL = old }()
+
+	v, err := ResolveLatest(context.Background(), "cargo", "serde")
+	if err != nil {
+		t.Fatalf("ResolveLatest: %v", err)
+	}
+	// Stable wins over the newer pre-release, matching npm dist-tags.latest.
+	if v != "1.0.200" {
+		t.Errorf("version: got %q, want 1.0.200", v)
+	}
+}
+
+func TestResolveLatestCargoPrereleaseOnly(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"crate":{"max_stable_version":"","newest_version":"0.1.0-alpha.3"}}`))
+	}))
+	defer srv.Close()
+	old := cratesBaseURL
+	cratesBaseURL = srv.URL + "/"
+	defer func() { cratesBaseURL = old }()
+
+	v, err := ResolveLatest(context.Background(), "cargo", "fresh-crate")
+	if err != nil {
+		t.Fatalf("ResolveLatest: %v", err)
+	}
+	if v != "0.1.0-alpha.3" {
+		t.Errorf("version: got %q, want the pre-release fallback", v)
+	}
 }

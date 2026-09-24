@@ -13,7 +13,7 @@ func TestLookPathRealSkipsShims(t *testing.T) {
 	shimDir, realDir := filepath.Join(root, "shims"), filepath.Join(root, "real")
 	mkdirs(t, shimDir, realDir)
 
-	writeExec(t, filepath.Join(shimDir, "npm"), Script("npm", shimDir, filepath.Join(root, "ossprey")))
+	writeExec(t, filepath.Join(shimDir, "npm"), Script(ScriptOptions{Manager: "npm", Dir: shimDir, Binary: filepath.Join(root, "ossprey")}))
 	real := filepath.Join(realDir, "npm")
 	writeExec(t, real, "#!/bin/sh\nexit 0\n")
 
@@ -34,7 +34,7 @@ func TestLookPathRealReportsShimOnlyPath(t *testing.T) {
 	root := t.TempDir()
 	shimDir := filepath.Join(root, "shims")
 	mkdirs(t, shimDir)
-	writeExec(t, filepath.Join(shimDir, "npm"), Script("npm", shimDir, filepath.Join(root, "ossprey")))
+	writeExec(t, filepath.Join(shimDir, "npm"), Script(ScriptOptions{Manager: "npm", Dir: shimDir, Binary: filepath.Join(root, "ossprey")}))
 	t.Setenv("PATH", shimDir)
 
 	_, err := LookPathReal("npm")

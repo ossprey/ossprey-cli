@@ -72,6 +72,7 @@ type SBOM struct {
 	Env             Environment     `json:"env"`
 	Components      []Component     `json:"components"`
 	Vulnerabilities []Vulnerability `json:"vulnerabilities"`
+	Findings        []Finding       `json:"findings,omitempty"`
 
 	dedupe map[string]int
 }
@@ -146,4 +147,26 @@ func (s *SBOM) Sort() {
 		}
 		return s.Components[i].Version < s.Components[j].Version
 	})
+}
+
+// Finding is a component the scan recorded but did not check.
+type Finding struct {
+	Purl string `json:"purl"`
+	Type string `json:"type"`
+}
+
+// Mirrors the platform's SKIP_FINDING_TYPES.
+var unscannedTypes = map[string]bool{"NOT_FOUND": true, "UNSUPPORTED": true}
+
+// Unscanned counts the components the scan did not check. Clamped, because a
+// backend that expands one submitted purl into several can report more skips
+// than this SBOM has components.
+func (s *SBOM) Unscanned() int {
+	n := 0
+	for _, f := range s.Findings {
+		if unscannedTypes[f.Type] {
+			n++
+		}
+	}
+	return min(n, len(s.Components))
 }

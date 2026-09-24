@@ -434,7 +434,9 @@ func TestOssbomType(t *testing.T) {
 	}{
 		{pkg.PythonPkg, "pypi"},
 		{pkg.NpmPkg, "npm"},
-		{pkg.RustPkg, ""},
+		{pkg.RustPkg, "cargo"},
+		// An ecosystem with no cataloger still maps to "", and Catalog drops it.
+		{pkg.GemPkg, ""},
 	}
 	for _, tt := range tests {
 		if got := ossbomType(tt.in); got != tt.want {
@@ -801,5 +803,61 @@ func TestLocations(t *testing.T) {
 	got := locations(p)
 	if len(got) != 2 {
 		t.Fatalf("got %d locations, want 2: %v", len(got), got)
+	}
+}
+
+const cargoLockFixture = `version = 3
+
+[[package]]
+name = "my-workspace-crate"
+version = "0.1.0"
+
+[[package]]
+name = "serde"
+version = "1.0.200"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aaaa"
+
+[[package]]
+name = "tokio"
+version = "1.38.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbbb"
+`
+
+func TestCatalogCargoLock(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "Cargo.lock", cargoLockFixture)
+
+	got, err := Catalog(context.Background(), dir, Options{SkipVersionLookup: true, NoExec: true})
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+
+	byName := map[string]Package{}
+	for _, p := range got {
+		byName[p.Name] = p
+	}
+
+	for _, want := range []struct{ name, version string }{
+		{"serde", "1.0.200"},
+		{"tokio", "1.38.0"},
+	} {
+		p, ok := byName[want.name]
+		if !ok {
+			t.Fatalf("%s missing from %v", want.name, byName)
+		}
+		if p.Type != "cargo" {
+			t.Errorf("%s: type = %q, want cargo", p.Name, p.Type)
+		}
+		if p.Version != want.version {
+			t.Errorf("%s: version = %q, want %q", p.Name, p.Version, want.version)
+		}
+	}
+
+	// No `source` means a path member of this workspace, not a registry crate.
+	// Emitting it would submit the project's own code as a dependency.
+	if _, ok := byName["my-workspace-crate"]; ok {
+		t.Errorf("workspace-local crate was emitted: %v", byName["my-workspace-crate"])
 	}
 }

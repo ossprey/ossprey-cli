@@ -20,6 +20,59 @@ var Tick = 200 * time.Millisecond
 // often as to a UTF-8 terminal, and a mojibake spinner is worse than none.
 var frames = [...]byte{'|', '/', '-', '\\'}
 
+// Scan announces the wait on an Ossprey API scan of n packages — the submit-
+// and-poll phase, which prints nothing at all until a verdict comes back, so
+// the terminal reads a perfectly healthy multi-second wait as a hang.
+//
+// The sentence lives here rather than at each call site so that the same wait
+// reads the same way wherever it was started from: `ossprey check`, `ossprey
+// scan`, or a forwarded `npm install`.
+func Scan(w io.Writer, n int) (stop func()) {
+	// A count of zero is dropped rather than rendered: "checking 0 packages"
+	// reads as a bug in front of a submission that really is happening, and an
+	// empty catalogue is reported properly once the scan returns.
+	if n <= 0 {
+		return Start(w, "ossprey: scan in progress")
+	}
+	return Start(w, fmt.Sprintf("ossprey: scan in progress, checking %s", packages(n)))
+}
+
+// Submit announces a submit-only send of n packages: passive mode posts the
+// SBOM and returns without polling, so there is a wait but never a verdict.
+//
+// Its own wording rather than Scan's, because "checking" promises a result that
+// passive mode deliberately never fetches — a forwarded install that said it
+// was checking packages and then installed them regardless would read as a
+// scanner that had passed them.
+func Submit(w io.Writer, n int) (stop func()) {
+	if n <= 0 {
+		return Start(w, "ossprey: submitting scan")
+	}
+	return Start(w, fmt.Sprintf("ossprey: submitting scan of %s", packages(n)))
+}
+
+// packages renders a count for the messages above. Split out only so that the
+// singular case is impossible to lose in a future edit of the sentence.
+func packages(n int) string {
+	if n == 1 {
+		return "1 package"
+	}
+	return fmt.Sprintf("%d packages", n)
+}
+
+// Catalog announces the cataloguing phase of a scan: reading the project's
+// manifests and, where a lockfile is missing, resolving ranges through uv or
+// npm. On a monorepo that resolution is the longest stretch of the whole
+// command — minutes of network round trips with nothing printed — and it runs
+// before there is any component count to report, so the message carries none.
+//
+// Its own sentence rather than Scan's: nothing has been submitted yet, and a
+// line claiming a scan was in progress would put the wait in the wrong place
+// for anyone reading a log to find out where the time went.
+func Catalog(w io.Writer) (stop func()) {
+	return Start(w, "ossprey: cataloguing dependencies")
+}
+
 // Start announces msg on w and returns a function that ends the announcement.
 //
 // On an interactive terminal the line is redrawn in place with a spinner and an

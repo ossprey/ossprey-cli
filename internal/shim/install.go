@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+
+	"github.com/ossprey/ossprey-cli/internal/monitor"
 )
 
 type Options struct {
@@ -18,6 +20,41 @@ type Options struct {
 	All          bool
 	SkipProfiles bool
 	Home         string
+	// Mode picks blocking (default), watchdog or monitor submission. See Mode.
+	// Left unset on a re-run, an already-installed passive mode is inherited
+	// rather than silently reverted -- see resolveMode.
+	Mode Mode
+	// MonitorID is required by ModeMonitor and rejected otherwise.
+	MonitorID string
+	// ClearMode asks for blocking explicitly, overriding an installed passive
+	// mode instead of inheriting it.
+	ClearMode bool
+}
+
+// ValidateMode checks the mode/monitor-id pairing before anything is written.
+//
+// The monitor id is interpolated into a generated shell script, so this is the
+// gate that keeps a hostile flag value out of an executable file. It runs in
+// Plan, which means `--dry-run` rejects a bad id too.
+func ValidateMode(o Options) error {
+	switch o.Mode {
+	case ModeBlocking:
+		if o.MonitorID != "" {
+			return errors.New("a monitor id needs --monitor; it has no meaning without it")
+		}
+	case ModeWatchdog:
+		if o.MonitorID != "" {
+			return errors.New("--watchdog and --monitor are mutually exclusive: --watchdog submits with this machine's own login")
+		}
+	case ModeMonitor:
+		if !monitor.ValidToken(o.MonitorID) {
+			return fmt.Errorf("invalid monitor id %q: expected %s followed by 64 hex characters",
+				monitor.Redact(o.MonitorID), monitor.Prefix)
+		}
+	default:
+		return fmt.Errorf("unknown shim mode %q", o.Mode)
+	}
+	return nil
 }
 
 type ManagerResult struct {
@@ -25,19 +62,46 @@ type ManagerResult struct {
 	Path string
 	Real string
 	Note string
+	// Mode and MonitorID are per manager, because a flagless re-install
+	// inherits each shim's own mode. Resolving once for the whole directory
+	// would let the first passive shim found turn the malware gate off for
+	// every other manager on the machine.
+	Mode      Mode
+	MonitorID string
 }
 
 type Result struct {
-	Dir      string
-	Binary   string
-	Done     []ManagerResult
-	Skipped  []ManagerResult
-	Profiles []string
-	OnPath   bool
-	PathHint string
+	Dir       string
+	Binary    string
+	Mode      Mode
+	MonitorID string
+	Done      []ManagerResult
+	Skipped   []ManagerResult
+	Profiles  []string
+	OnPath    bool
+	PathHint  string
+}
+
+// resolveMode keeps an installed passive mode across a re-run that names none.
+//
+// `shim install` is documented as safe to re-run, and is how you re-point shims
+// after moving the binary -- install.sh calls it on every upgrade. Taking the
+// mode from the flags alone would mean a routine upgrade silently rewrote a
+// fleet's monitor shims into blocking ones, and the next `npm install` that hit
+// a flagged transitive dependency would start failing builds everywhere. So an
+// existing mode is inherited unless the caller names a different one; asking
+// for blocking explicitly is what --no-passive is for.
+func resolveMode(o Options, dir, manager string) (Mode, string) {
+	if o.Mode != ModeBlocking || o.ClearMode {
+		return o.Mode, o.MonitorID
+	}
+	return ShimMode(filepath.Join(dir, scriptName(manager)))
 }
 
 func Plan(o Options) (*Result, error) {
+	if err := ValidateMode(o); err != nil {
+		return nil, err
+	}
 	dir, bin, err := resolve(o)
 	if err != nil {
 		return nil, err
@@ -47,15 +111,23 @@ func Plan(o Options) (*Result, error) {
 		return nil, err
 	}
 
-	res := &Result{Dir: dir, Binary: bin, OnPath: onPath(dir)}
+	res := &Result{Dir: dir, Binary: bin, OnPath: onPath(dir), Mode: o.Mode, MonitorID: o.MonitorID}
 	for _, name := range managers {
 		real, lookErr := LookPathReal(name)
 		if lookErr != nil && !o.All && !explicit {
 			res.Skipped = append(res.Skipped, ManagerResult{Name: name, Note: "not installed"})
 			continue
 		}
-		res.Done = append(res.Done, ManagerResult{Name: name, Path: filepath.Join(dir, scriptName(name)), Real: real})
+		mode, monitorID := resolveMode(o, dir, name)
+		res.Done = append(res.Done, ManagerResult{
+			Name:      name,
+			Path:      filepath.Join(dir, scriptName(name)),
+			Real:      real,
+			Mode:      mode,
+			MonitorID: monitorID,
+		})
 	}
+	res.Mode, res.MonitorID = summariseMode(res.Done, o)
 	if o.SkipProfiles || runtime.GOOS == "windows" {
 		return res, nil
 	}
@@ -71,6 +143,27 @@ func Plan(o Options) (*Result, error) {
 	return res, nil
 }
 
+// summariseMode reduces the per-manager modes to the one the Result reports.
+//
+// A machine can carry a mix, so the summary is the strongest passive mode
+// present: that is what decides the directory permissions, and reporting the
+// weakest would understate what is installed.
+func summariseMode(done []ManagerResult, o Options) (Mode, string) {
+	if o.Mode != ModeBlocking || o.ClearMode {
+		return o.Mode, o.MonitorID
+	}
+	mode, monitorID := ModeBlocking, ""
+	for _, m := range done {
+		if m.Mode == ModeMonitor {
+			return m.Mode, m.MonitorID
+		}
+		if m.Mode != ModeBlocking {
+			mode, monitorID = m.Mode, m.MonitorID
+		}
+	}
+	return mode, monitorID
+}
+
 func Install(o Options) (*Result, error) {
 	res, err := Plan(o)
 	if err != nil {
@@ -79,8 +172,22 @@ func Install(o Options) (*Result, error) {
 	if err := os.MkdirAll(res.Dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create shim directory %s: %w", res.Dir, err)
 	}
+	// Chmod rather than a mode on MkdirAll, which leaves an existing directory
+	// -- every upgrade after the first -- at whatever it already was.
+	if res.Mode == ModeMonitor {
+		if err := os.Chmod(res.Dir, 0o700); err != nil {
+			return nil, fmt.Errorf("restrict shim directory %s: %w", res.Dir, err)
+		}
+	}
 	for _, m := range res.Done {
-		if err := writeShim(m.Path, m.Name, res.Dir, res.Binary); err != nil {
+		opts := ScriptOptions{
+			Manager:   m.Name,
+			Dir:       res.Dir,
+			Binary:    res.Binary,
+			Mode:      m.Mode,
+			MonitorID: m.MonitorID,
+		}
+		if err := writeShim(m.Path, opts); err != nil {
 			return nil, err
 		}
 	}
@@ -155,12 +262,21 @@ func Uninstall(o Options) (*Result, error) {
 	return res, nil
 }
 
-func writeShim(path, manager, dir, bin string) error {
+func writeShim(path string, o ScriptOptions) error {
 	if _, err := os.Stat(path); err == nil && !IsShim(path) {
 		return fmt.Errorf("%s already exists and was not created by ossprey; move it aside or choose another shim directory with %s", path, DirEnv)
 	}
+	// A monitor shim embeds the monitor id, which is a live submit credential,
+	// so the file is only readable by its owner. World-readable would hand it to
+	// every local account. Written exclusively at 0o700 rather than via
+	// os.WriteFile, so the predictable .tmp path cannot be pre-created by
+	// somebody else and left readable.
+	perm := os.FileMode(0o755)
+	if o.Mode == ModeMonitor {
+		perm = 0o700
+	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(Script(manager, dir, bin)), 0o755); err != nil {
+	if err := writeExclusive(tmp, Script(o), perm); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
@@ -168,6 +284,23 @@ func writeShim(path, manager, dir, bin string) error {
 		return fmt.Errorf("install %s: %w", path, err)
 	}
 	return nil
+}
+
+// writeExclusive removes path, then creates it with O_EXCL. The remove handles
+// a file already sitting there; O_EXCL handles the race between the two, where
+// a symlink planted in the gap would otherwise be written through.
+func writeExclusive(path, content string, perm os.FileMode) error {
+	_ = os.Remove(path)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := f.WriteString(content); err != nil {
+		f.Close()
+		_ = os.Remove(path)
+		return err
+	}
+	return f.Close()
 }
 
 func resolve(o Options) (dir, bin string, err error) {

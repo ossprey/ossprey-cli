@@ -28,8 +28,12 @@ var uvReqLine = regexp.MustCompile(`^([A-Za-z0-9_.\-]+)==([^\s;]+)`)
 // wrong-architecture binary, a broken install — would otherwise fail every
 // manifest with no fallback left, and leave those projects on direct
 // dependencies alone. Mirrors findPython's probe.
+//
+// Resolution goes through lookTool, not exec.LookPath, so an ossprey shim at
+// the front of PATH is skipped in favour of the real uv — running the shim
+// would re-enter ossprey once per manifest until the resolve timeout fires.
 func lookupUV(ctx context.Context) (string, bool) {
-	path, err := exec.LookPath("uv")
+	path, err := lookTool("uv")
 	if err != nil {
 		return "", false
 	}
@@ -100,7 +104,7 @@ func runUV(ctx context.Context, uv, cache, dir string, args []string, loc file.L
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, uv, args...)
-	cmd.Env = append(os.Environ(), "UV_CACHE_DIR="+cache)
+	cmd.Env = toolEnv("UV_CACHE_DIR=" + cache)
 	cmd.WaitDelay = 5 * time.Second // the kill lands on uv, but Output still waits on pipes a PEP 517 build backend may hold
 	stdout, err := cmd.Output()
 	if err != nil {
@@ -109,7 +113,7 @@ func runUV(ctx context.Context, uv, cache, dir string, args []string, loc file.L
 		}
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
-			return nil, fmt.Errorf("uv %s: %s", dir, strings.TrimSpace(string(ee.Stderr)))
+			return nil, newToolError("uv", dir, string(ee.Stderr))
 		}
 		return nil, fmt.Errorf("uv %s: %w", dir, err)
 	}

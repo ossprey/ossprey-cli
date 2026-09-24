@@ -11,6 +11,19 @@ is flagged as malware. It never executes the project's package manager during a
 scan (no installs, sandbox, or virtualenv) — see the custom catalogers for the
 one exception.
 
+## Where docs go
+
+`README.md` is the landing page for someone who has never run this tool: what it
+is, install, `init`, scan, and one short section per way of using it, each
+linking onward. Keep it that way — every flag table, edge case and rationale
+belongs in `docs/`, which is the reference set (`install`, `init`,
+`cli-reference`, `forwarder`, `shims`, `passive-monitoring`, `precommit`, `ci`,
+`output`, `ecosystems`, `architecture`, indexed by `docs/README.md`). When a
+behaviour changes, the user-facing statement of it lives in exactly one of those
+pages; this file keeps the *why*. `docs/architecture.md` holds the mermaid
+diagrams, so a change to the forwarder's decisions or the scan pipeline needs
+them updated too.
+
 ## Commands
 
 ```sh
@@ -95,7 +108,7 @@ Windows resolves it under `%LOCALAPPDATA%`.
    `.github/workflows/ossprey.yml`; that was dropped because it made a
    GitHub-shaped assumption about a CLI that otherwise doesn't care about your CI,
    and because it wrote into the user's repo. The knowledge that made the template
-   correct now lives in README's "CI usage" section instead, and it is worth
+   correct now lives in `docs/ci.md` ("CI usage") instead, and it is worth
    keeping there: the job needs an `if:` guard so **fork** `pull_request` runs skip
    (GitHub withholds secrets from them, so `OSSPREY_API_KEY` is empty and every
    external PR fails red for a missing key rather than for malware — never close
@@ -112,11 +125,34 @@ Windows resolves it under `%LOCALAPPDATA%`.
 
    The post-verb table (`valueFlags`) carries the same asymmetry and it bites harder there: omitting a value-taking flag makes its value read as a package, checking something that isn't being installed (noisy, safe), while wrongly listing a boolean flag swallows the package name and skips its check (silent, unsafe). Keep a table per manager and never alias one to another — `valueFlags["pnpm"] = valueFlags["npm"]` inherited npm's value-taking `-w` into pnpm, where `-w` is boolean `--workspace-root`, so `pnpm add -w <pkg>` installed unchecked (OSS-1577). `TestPnpmBooleanFlagsAreNotValueFlags` now guards both tables.
 
-   **Not covered, deliberately (for now):** fetch-and-execute — `npm exec`, `pnpm dlx`, `yarn dlx`, `uv tool run`. These name a package but are not install verbs, so they forward unchecked. Do **not** close this by adding `dlx` to a `verbAt` list: only the first non-flag token is a package and the rest is the program's own argv, so `pnpm dlx cowsay moo` would check `moo` (a real npm package) and could block on it. It needs its own matcher alongside `uvInstallAt`, plus handling for `--package=` naming a different package from the command. Note also that `npx` and `uvx` are separate binaries absent from `DefaultManagers()`, so they are not shimmed at all — covering `pnpm dlx` alone buys little. README's "What is not checked" section is the user-facing statement of this.
+   **Not covered, deliberately (for now):** fetch-and-execute — `npm exec`, `pnpm dlx`, `yarn dlx`, `uv tool run`. These name a package but are not install verbs, so they forward unchecked. Do **not** close this by adding `dlx` to a `verbAt` list: only the first non-flag token is a package and the rest is the program's own argv, so `pnpm dlx cowsay moo` would check `moo` (a real npm package) and could block on it. It needs its own matcher alongside `uvInstallAt`, plus handling for `--package=` naming a different package from the command. Note also that `npx` and `uvx` are separate binaries absent from `DefaultManagers()`, so they are not shimmed at all — covering `pnpm dlx` alone buys little. `docs/forwarder.md`'s "What is not checked" section is the user-facing statement of this.
 
    **Known gap (pnpm 9 and earlier):** `pnpm run` (and `pnpm exec`) install the project's declared dependencies as a side effect when `node_modules` is missing — `npm run` does not. Since `run` is a pass-through, those packages are never checked. Closing it would put a scan in front of every script invocation, so it is an open product decision. Not reproducible on pnpm 10.34.5 (with or without `CI=1`, `verify-deps-before-run` at its default), so pnpm 10 appears to have stopped auto-installing; `TestPnpmRunAutoInstallsUnchecked` skips with a re-check message rather than passing when it can't reproduce.
 
 4. **`shim install|uninstall|status|dir`** (`cmd/ossprey/shim.go` → `internal/shim`) — writes PATH shims so `npm install` routes through `ossprey npm` with no prefix, covering scripts, CI and coding agents that a shell alias never reaches (OSS-1566). Also driven by `install.sh --override-package-managers` / `install.ps1 -OverridePackageManagers`.
+
+### Passive modes and monitor ids
+
+`--passive` submits the scan and returns without polling for a verdict, always exiting 0. It is not new behaviour: `--ci-cache-scan-only` already did exactly this (`submit.Post`, no polling, warn-don't-fail), under a name that reads as "only check the cache" when in fact it runs the full pipeline. The old flag and `OSSPREY_CI_CACHE_SCAN_ONLY` are kept working indefinitely — they are set in pipelines we do not control — but the flag is `Hidden` so there is one name to teach. One behaviour did change: `--passive --report` is now **refused** rather than silently writing nothing, because a consumer reading a stale report from an earlier run cannot tell it apart from this run's.
+
+A **monitor id** (`--monitor`, `OSSPREY_MONITOR_ID`) is a submit-only credential that travels in the URL path: `POST /ingest/<token>/scans`, no auth header at all. It exists so scanning can be rolled out to machines and CI without distributing a secret that could read the customer's data, so the asymmetry is the point and must be preserved:
+
+- `client.mount()` has a third branch for it, and `authenticate()` **returns early** rather than falling through — an empty `x-api-key` header reads as a malformed key, not as no credential.
+- `Client.Validate` **refuses** an ingest client (`ErrIngestSubmitOnly`). The ingest mount has no status route; polling it would 404 confusingly.
+- `submit.NewSubmitClient` lets a monitor id win outright with no fallback. Quietly sending under a stored login instead would file the scan against the wrong thing and hide a typo in the id.
+- The id is validated in `cmd/ossprey/main.go` **before** passive mode's fail-open can swallow it, or a typo becomes a warning on a scan that went nowhere.
+
+**The token format is a security boundary, not a convenience check.** `internal/monitor` is a dependency-free leaf holding the one definition (`^ospi_[0-9a-f]{64}$`, mirroring the service's `ingest/config.py TOKEN_PATTERN`). It is a leaf because `client` needs it for the URL path and `shim` needs it for a generated `/bin/sh` file, and `shim` must not import `client` (see below). Loosening that pattern would let a hostile flag value reach both an interpolated URL and an executable file; `shim.ValidateMode` runs in `Plan`, so `--dry-run` rejects a bad id too, and `TestValidateModeRejectsAHostileMonitorID` pins the shapes.
+
+`shim install --watchdog` / `--monitor <id>` bake `OSSPREY_PASSIVE=1` (plus `OSSPREY_MONITOR_ID`) into the generated script, which previously set no environment at all. The mode round-trips through an `ossprey-mode:` header line next to the existing `ossprey-bin:` one, so `shim status` reports it per manager — per manager, not per directory, because a partial re-install can leave a machine with a mix.
+
+**A passive forwarded install observes the install; it does not predict it.** Passive blocks nothing, so nothing it does belongs in front of the install — and an earlier revision put a whole catalogue there, `npm install --package-lock-only` and uv included, so every passive `npm install` resolved the same tree twice and the user waited for both. `forward.Run` therefore branches on `Manager.Lockfile` before it parses specs at all:
+
+- **npm, pnpm, yarn, poetry, uv** (`Lockfile: true`) go through `passiveAfterInstall` — but only when `writesLocalLockfile` agrees the *invocation* will leave one in `.`. `Manager.Lockfile` is a capability, not a promise: `uv pip install` resolves into an environment, `npm install -g` and `--no-package-lock` write no local lock, and `pnpm --dir ../other add` locks a directory we are not scanning. Routing on the flag alone meant cataloguing `.` after a command that never touched it — reporting an unrelated tree, or nothing, and dropping the package actually installed (CodeRabbit, PR #66). The bias is one-sided: a flag wrongly listed in `noLocalLockfileFlags` costs only a fallback to the slower spec path, a flag missing from it costs the report, so when in doubt list it. `--no-save` is deliberately absent (npm still updates an existing lockfile), and `--prefix .` / `--location=project` / `--package-lock=true` stay on the fast path. `TestWritesLocalLockfile` is the table.
+- Where it agrees, the steps are: exec the real manager untouched, then catalogue with `scanRequest.Installed` (which is `catalog.Options.NoExec` — manifests and lockfiles parsed, nothing shelled out to) and `submit.Post`. The lockfile the manager just wrote already names the whole resolved tree, so this costs a parse and a POST, it reads a directory that has stopped moving, and the SBOM describes what was installed rather than what we predicted. Moving this *beside* the install instead (a goroutine) was tried and is worse: it races the manager for the very files it is reading. `TestRun_Passive_NamedPackages_ScanRunsAfterTheInstall` pins the ordering and the two flags.
+- **Everything else** — pip (`Lockfile` unset) and any invocation `writesLocalLockfile` rejects — keeps the old spec/manifest logic through `passiveAlongside`, which starts the install first and submits concurrently. `TestPassivePip_DoesNotDelayTheInstall` deadlocks if that order is ever reversed; `TestRun_PassiveGlobalInstall_SubmitsTheNamedPackage` pins that a global install still reports its package.
+
+Two consequences worth keeping: the post-install catalogue falls back to a full declaring scan when it catalogues **nothing** (a failed install, an unsupported layout) rather than reporting a project with no dependencies; and warnings now drain *after* the manager rather than before it, so `passiveAfterInstall`/`passiveAlongside` must drain before returning — `main` leaves via `os.Exit(ee.ExitCode())` on a non-zero install, so a warning not printed by then is lost (`TestPassiveFlushesWarningsBeforeReturning`). Progress is announced only for the residual wait, never in front of the manager's own output.
 
 ### Shims (`internal/shim`)
 
@@ -127,7 +163,7 @@ A shim is a generated `/bin/sh` script (`.cmd` on Windows) named after the manag
 - **The allowlist lives in `forward`, not the script.** Shims forward everything; `forward.Run`'s `installAt` decides what gets checked, so `npm run`/`poetry run` pass straight through. One allowlist, one language.
 - **Only our files.** `Uninstall` deletes only marker-carrying files; profile edits live between `# >>> ossprey shims >>>` markers.
 
-`shim` must stay a leaf package (`forward` imports it). `DefaultManagers()` and `forward.Managers()` are kept in agreement by an external test in `internal/shim/forward_agreement_test.go`.
+`shim` must stay a leaf package (`forward` imports it) — its only first-party dependency is `internal/monitor`, which is itself dependency-free. Do **not** reach for `internal/client` from here to validate a monitor id, which is what `internal/monitor` exists to avoid. `DefaultManagers()` and `forward.Managers()` are kept in agreement by an external test in `internal/shim/forward_agreement_test.go`.
 
 ### Core data flow (scan)
 
@@ -147,7 +183,7 @@ directory `FileResolver` and runs them all unconditionally:
 
 - **Syft built-ins** handle lockfiles + installed-package metadata (Python, JS lock).
 - **Custom catalogers** fill resolution gaps where a project ships a manifest but no lockfile:
-  - **The Python resolver is chosen once, in `Catalog`** (`lookupUV`): `uv` where the host has one — its three catalogers get the resolved binary path — and `PipCataloger` otherwise. They resolve the same manifests, so building both would pay twice for identical output. Keep that choice at the call site: a cataloger that decides for itself whether to run hides the scan's shape from the one place that assembles it. `lookupUV` **runs** `uv --version` rather than trusting `exec.LookPath`, because picking uv rules pip out for the whole scan — a uv that is present but cannot execute would fail every manifest with no fallback left. `findPython` probes the same way, for the same reason.
+  - **The Python resolver is chosen once, in `Catalog`** (`lookupUV`): `uv` where the host has one — its three catalogers get the resolved binary path — and `PipCataloger` otherwise. They resolve the same manifests, so building both would pay twice for identical output. Keep that choice at the call site: a cataloger that decides for itself whether to run hides the scan's shape from the one place that assembles it. `lookupUV` **runs** `uv --version` rather than trusting the PATH lookup, because picking uv rules pip out for the whole scan — a uv that is present but cannot execute would fail every manifest with no fallback left. `findPython` probes the same way, for the same reason.
   - **These resolvers execute code, and the docs must not claim otherwise.** Resolving an sdist-only dependency makes pip *and* uv run that package's PEP 517 build backend to read its metadata — from the dependency tree we are scanning for malware. `npm install --package-lock-only --ignore-scripts` is the one that genuinely runs nothing. Neither `--only-binary=:all:` (pip) nor `--no-build` (uv) is set, because a sdist-only dependency would then fail the whole manifest instead of resolving.
   - `UVCataloger` — full transitive resolution via `uv` (hatch, uv, bare pyproject).
   - `SetupPyCataloger` — transitives from legacy `setup.py` setuptools projects.
@@ -166,6 +202,27 @@ SBOMs for weeks — every unpinned dependency versionless, rejected at intake �
 without anything in the output saying so. Custom catalogers named via
 `isOspreyCataloger` parse deps only; syft's manifest catalogers also emit the
 root project itself, which is dropped via `isRootManifestPackage`.
+
+Every one of those lookups goes through `lookTool`/`toolEnv` (`toolpath.go`),
+**never `exec.LookPath`** — including `lookupUV`, even though it resolves once
+for the whole scan rather than per cataloger.
+
+**Why not `exec.LookPath`:** `ossprey shim install` puts the shim directory at
+the *front* of PATH, so on a machine with shims installed `exec.LookPath("npm")`
+returns a script whose whole job is to run `ossprey npm ...`. A cataloger that
+executes it re-enters ossprey — the forwarder sees no packages named, scans the
+temp manifest the cataloger just wrote, and shells out to the shim again, one
+process per level. A plain `ossprey scan .` fork-bombed itself (3000+ processes
+in one measured run) until `OSSPREY_RESOLVE_TIMEOUT` fired, then emitted a whole
+nested scan's output — its own warnings, verdict and `blocked` line — inside one
+cataloger warning, and fell back to the versionless direct-deps cataloger, so
+transitive dependencies went unscanned (OSS-1993). `lookTool` is
+`shim.LookPathReal`, which skips marker-carrying candidates; `toolEnv` also sets
+`OSSPREY_SHIM_BYPASS=1`, the same belt-and-braces pairing as the shim script's
+own PATH-stripping guard, for shims reached by a route PATH scanning cannot see.
+`TestCatalogNeverInvokesAnOssprevShim` pins it. `PipCataloger` is exempt from the
+name lookup but not from the hazard: it shells out as `python -m pip` precisely
+because `pip` itself may be a shim.
 
 A cataloger's error is **not** a reason to drop its packages: syft's generic
 cataloger returns everything it parsed alongside an `unknown` error naming the
@@ -229,6 +286,82 @@ Two independent budgets, both off-by-default-safe:
   once the deadline passes, since every remaining manifest fails identically and
   `scan.Run` already says so once.
 
+### Malware alert (`internal/alert`, `internal/ansi`)
+
+A malware verdict draws a 72-column boxed banner (block-letter MALWARE and a
+package/version/ecosystem table) **before** the existing
+`Error: WARNING: <pkg>:<ver> contains malware...` lines, which stay untouched
+because the smoke tests and downstream greps key on them (OSS-1981).
+`alert.Malware(findings, outcome, profile)` renders it; `scan.MalwareSummary`
+carries the structured `Detected` findings it needs. `reportMalware` in
+main.go (scan/check/init, stdout, no outcome text) and `reportAndForward` in
+forward.go (forwarders, stderr, "Installation blocked.") are the two callers;
+precommit deliberately keeps its compact wording. Informational findings never
+get the banner. Both callers write through a swappable `io.Writer`
+(`verdictOut`, `errOut`) so tests can capture the output.
+
+`ansi.Detect(w)` picks a colour profile: `NO_COLOR`/`TERM=dumb` win, then
+`FORCE_COLOR`/`CLICOLOR_FORCE`, then known CI log viewers (GitHub Actions,
+GitLab, Azure DevOps, Buildkite) get `Basic`, else colour only if `w` is a TTY.
+Depth comes from `COLORTERM` (truecolor) and `TERM` (256color). Escapes wrap
+text only, never the box-drawing, so a leaked escape cannot misalign the box;
+`TestMalwareColourStripsToPlain` pins that stripping a coloured banner yields
+the plain one. `ansi.Enable` switches on virtual-terminal processing on
+Windows conhost and is a no-op elsewhere. Tests that assert "no escapes" on a
+`bytes.Buffer` must clear the CI env vars first, or they fail on GitHub Actions.
+
+### Warnings (`internal/warn`)
+
+Non-fatal diagnostics are collected, not printed where they happen. A real
+customer scan (OSS-2001) buried its malware verdict under twenty-five lines of
+uv's raw stderr plus one line per private package; nothing in that output was
+wrong and none of it was readable. `warn.Add(ctx, Entry)` records an occurrence,
+`warn.Drain(ctx)` renders and clears.
+
+Five things hold it together:
+
+- **Grouping is by `Class`, never by message.** A private package that 404s and
+  an unreachable registry both leave a component unversioned, but one is
+  expected and the other means the scan resolved almost nothing, so they must
+  never share a count. `registry.ErrNotFound` is what separates them — grade the
+  error, don't string-match the status. The same split applies to the
+  consequence: `left unversioned` (scan path, still submitted and checked) and
+  `skipping its check` (forward path, not checked at all) are different classes
+  because they are different outcomes.
+- **A subprocess's output never prints at the default level, and never
+  unprefixed.** `newToolError` (`internal/catalog/toolerror.go`) splits a uv/npm
+  failure into the one actionable line — skipping the tool's own leading
+  `warning:` advisories — and the rest, which only `OSSPREY_VERBOSE` shows,
+  behind an `ossprey: | ` gutter. The gutter is the point: uv's own `error:`
+  lines read as ossprey's in the report that prompted this.
+- **A warning is never lost.** `Add` outside a collector context falls back to
+  stderr, and every drain point sits *before* a verdict, never in a `defer`
+  behind one. In `forward.Run` that is enforced by a single `forwardTo` closure:
+  **nothing execs the real manager without draining first**. Do not call
+  `execFn` directly from `Run` — the manager's output starts immediately and
+  never stops, and `newForwardCmd` leaves via `os.Exit(ee.ExitCode())` on a
+  non-zero exit, so `main`'s post-`Execute` safety-net drain never runs. An
+  earlier revision forwarded the passive/cache-only path straight to `execFn`
+  and dropped its warnings outright.
+- **A headline is one readable line.** `warn.MaxLine` caps it, and
+  `catalog.maxSummary` caps the cause a subprocess contributes: both a manifest
+  path and a malformed line can be arbitrarily long, and an unbounded headline
+  would rebuild the wall of text this removes. Detail is never truncated.
+- **The collector rides on `ctx`** because the catalogers it serves sit behind
+  syft's `Catalog(ctx, resolver)` signature, which has nowhere to return one.
+  `warn` must stay a leaf (only `internal/env`); `registry.UnresolvedEntry` and
+  `catalog.catalogerEntry`/`parseEntry` are where domain wording lives.
+
+Verbosity is an env var (`OSSPREY_VERBOSE`) as well as `scan -v`, because the
+forwarders run with `DisableFlagParsing` and cannot accept a `-v` that npm would
+not also see. `warn.SetVerbose` exists so cobra can raise a collector built
+before flags were parsed; verbosity only ever goes up.
+
+`parseEntry` closes a pre-existing hole: syft's per-cataloger errors were read
+as `pkgs, _, _` and discarded, so a malformed requirement went missing from the
+SBOM in silence. Those errors are partial by design (OSS-1869) — keep taking the
+packages, and now report the rest.
+
 ### OSSBOM model (`internal/ossbom`)
 
 `SBOM` is the rich internal model. `MiniBOM` (`minibom.go`) is the compressed
@@ -240,7 +373,8 @@ changes.
 ### API client (`internal/client`)
 
 `Validate` POSTs the MiniBOM to `/public/v1/scans`, then polls
-`/public/v1/scans/status` (quadratic backoff, capped at `maxPollAttempts`). A
+`/public/v1/scans/status` (quadratic backoff, capped at `maxPollAttempts`), and
+refuses outright for an ingest client (see "Passive modes and monitor ids"). A
 quota-exhausted response surfaces as a typed `*ErrSkipped` that propagates
 unwrapped so callers can detect it via `errors.As` and **exit 0** rather than
 failing the build (see `reportSkipped` in main.go). API key resolution order:
@@ -252,6 +386,12 @@ failing the build (see `reportSkipped` in main.go). API key resolution order:
 - **Severity** (`internal/severity`) grades a finding `Info < Low < Medium < High < Critical`, and `FailingFloor` is `Low`. `Info` is the only level below it: the finding is printed as a `Note:` line and the scan still exits 0 (OSS-1432). `--fail-on-informational` on `scan`/`check` lowers the floor to `Info` so those fail too, and it lowers it for the `--report` verdict at the same time so the file cannot disagree with the exit status. The floor can only ever be lowered — there is no flag to raise it, since that would let a real detection pass. The forwarders parse no flags of their own (`DisableFlagParsing`), so they always use the default floor. Parsing is deliberately **fail-closed** — an empty or unrecognised grade is `Unknown`, and `Unknown.Fails()` is true, so an older API that sends no severity and an OSV-sourced finding that carries none both behave exactly as they did before. Never invert that default for convenience; it is the one thing standing between "we could not grade it" and "we passed it".
 - **`--report <file>`** (`internal/scan/report.go`, on `scan` and `check`) writes the machine-readable verdict — `clean` / `malware` / `informational` / `skipped` plus per-finding name, version, ecosystem, severity and description — for CI to act on. `findings` holds only what **fails**, so a consumer counting it to say "N malicious packages" stays correct without knowing what a severity is; anything below the failing floor goes in `informational`, which is omitted when empty; `ossprey/gh-action` renders its PR comment from it. Three rules hold it together. It never touches **stdout**, which `--local` owns for the OSSBOM (the two flags are rejected together, because `--local` returns before any verdict exists). It is written **before** the `os.Exit(1)`, since a malware run is the one CI most needs it on. And `skipped` is its own verdict, not a flavour of clean: a quota-exhausted scan checked nothing, and a consumer that renders it as "no malware found" is lying. `informational` exists for the same reason: that scan *did* find something and said so, so folding it into `clean` would hide a finding we deliberately surfaced. A consumer that only knows the older three should treat it as non-failing. The JSON keys are a contract with the action — `test/smoke/report_smoke_test.go` redeclares the struct so a rename breaks a test instead of the action.
 - **Where the CLI stops.** `--report` states the verdict; that is the whole of what the CLI owes CI. Rendering it (Markdown tables, pull-request comments, job summaries, `::error::` annotations) belongs in the consumer — `ossprey/gh-action` does its own, in bash. Do not move that back here, even when a `--report-format markdown` or a `render` subcommand would delete a hundred lines of someone's shell: every such feature is dead weight to the users installing this CLI for `scan`, `check` and the forwarders, and it makes the CLI's release cadence a dependency of one CI vendor's UI. The test for a new flag is whether a GitLab or Jenkins user would reach for it too.
+- **Warnings are collected, not printed inline** (`internal/warn`): repeated
+  diagnostics arrive as one counted line per cause, before the verdict, on
+  stderr. `OSSPREY_VERBOSE=1` (or `scan -v`) lists the individuals and any
+  resolver's full output. Never `Fprintf(os.Stderr, ...)` a per-package or
+  per-manifest diagnostic directly — that is what OSS-2001 was.
+- **The wait is announced** (`internal/progress`): submitting an SBOM and polling for a verdict prints nothing until the verdict arrives, so a healthy multi-second wait reads as a hang. `progress.Scan(w, n)` owns the one sentence every caller uses — `scan`, `check` and the forwarders — so the same wait cannot start describing itself differently depending on where it was started from. Passive waits get `progress.Submit(w, n)` instead, and the split is the point rather than a wording preference: passive posts the SBOM and returns, so a message that said it was *checking* packages would promise a verdict nobody waits for, in front of an install that proceeds regardless. Both `scan --passive` and a passive forwarded install go through it; `TestPassiveInstallDoesNotClaimToCheck` pins that the two never collapse into one message. Three rules hold it up. It draws to **stderr** (`progressOut` in both main.go and `forward`, kept apart from `forward`'s `errOut` so a test capturing verdict lines is not handed the animation), never stdout, which `--local` owns for the OSSBOM and CI greps for the verdict: an indicator that corrupted a machine-readable stream to fix a human-readable one is a bad trade. And it animates **only on a terminal** — `progress.Start` falls back to one plain line into a pipe, a file or a CI log, where a carriage-returned line is noise rather than motion. Nothing is announced for a path that does no waiting: a dry run, or `--local`.
 - **API text is untrusted for display** (`internal/apitext`): finding justifications and descriptions are free text from the wire, printed straight to a developer's terminal. `apitext.OneLine` collapses control and formatting characters so a newline cannot forge an extra report line, a carriage return cannot overwrite one, and an ESC cannot start an ANSI sequence. Run any API-supplied string through it before interpolating it into terminal output.
 - **Fail-open vs fail-closed:** the `check`/forward path fails *closed* for unpinned packages it can pin (resolves latest via `internal/registry`), but fails *open* (skips with a warning) when the registry is unreachable or a token has no parseable package name — a registry outage must never block development.
 - **Dry-run flags** (`--dry-run-safe`, `--dry-run-malicious`) and `--local` skip the API entirely and need no key — useful for testing catalog output without a live backend.

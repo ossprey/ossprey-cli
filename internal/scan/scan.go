@@ -11,6 +11,7 @@ import (
 
 	"github.com/anchore/packageurl-go"
 
+	"github.com/ossprey/ossprey-cli/internal/alert"
 	"github.com/ossprey/ossprey-cli/internal/apitext"
 	"github.com/ossprey/ossprey-cli/internal/catalog"
 	"github.com/ossprey/ossprey-cli/internal/env"
@@ -24,6 +25,12 @@ type Options struct {
 	// SkipVersionLookup disables the registry lookup that resolves unpinned
 	// components to their latest published version, leaving them versionless.
 	SkipVersionLookup bool
+	// NoExec restricts the catalogue to manifest/lockfile parsing: the custom
+	// catalogers that shell out to uv or npm are not instantiated. A lockfile
+	// already enumerates the full transitive tree, so a project that has one
+	// loses nothing; only a manifest-without-lockfile project degrades to its
+	// direct dependencies. See catalog.Options.NoExec.
+	NoExec bool
 	// Timeout caps the whole catalogue; zero means no deadline. On expiry the
 	// SBOM cataloged so far is returned rather than discarded.
 	Timeout time.Duration
@@ -48,6 +55,7 @@ func Run(ctx context.Context, opts Options) (*ossbom.SBOM, error) {
 
 	pkgs, err := catalog.Catalog(ctx, opts.Path, catalog.Options{
 		SkipVersionLookup: opts.SkipVersionLookup,
+		NoExec:            opts.NoExec,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("catalog: %w", err)
@@ -117,7 +125,10 @@ type MalwareSummary struct {
 	Failing []string
 	// Informational is one line per finding below it, reported but not fatal.
 	Informational []string
+	Detected      []alert.Finding
 }
+
+func (s MalwareSummary) Alert() []alert.Finding { return s.Detected }
 
 // MalwareReports renders a scanned SBOM's findings and reports whether any of
 // them fail at the given floor.
@@ -129,13 +140,14 @@ type MalwareSummary struct {
 func MalwareReports(sbom *ossbom.SBOM, floor severity.Level) (MalwareSummary, bool) {
 	var summary MalwareSummary
 	for _, v := range sbom.Vulnerabilities {
-		_, name, version := parsePurl(v.Purl)
+		eco, name, version := parsePurl(v.Purl)
 		// Sanitised here rather than at each format call: the purl is API data on
 		// every path out of this loop, including the failing one.
-		name, version = apitext.OneLine(name), apitext.OneLine(version)
+		eco, name, version = apitext.OneLine(eco), apitext.OneLine(name), apitext.OneLine(version)
 		if severity.Parse(v.Severity).FailsAt(floor) {
 			summary.Failing = append(summary.Failing,
 				fmt.Sprintf("WARNING: %s:%s contains malware. Remediate this immediately", name, version))
+			summary.Detected = append(summary.Detected, alert.Finding{Name: name, Version: version, Ecosystem: eco})
 			continue
 		}
 		summary.Informational = append(summary.Informational,

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ossprey/ossprey-cli/internal/alert"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
 	"github.com/ossprey/ossprey-cli/internal/severity"
 )
@@ -466,6 +467,29 @@ func TestMalwareReportsSanitisesPurlDerivedOutput(t *testing.T) {
 	for _, line := range append(append([]string{}, summary.Failing...), summary.Informational...) {
 		if strings.ContainsAny(line, "\n\r\x1b") {
 			t.Errorf("control characters survived into a report line: %q", line)
+		}
+	}
+}
+
+func TestMalwareReportsExposesFailingFindings(t *testing.T) {
+	sbom := ossbom.New(ossbom.Environment{})
+	sbom.Vulnerabilities = []ossbom.Vulnerability{
+		{ID: "X", Purl: "pkg:pypi/requests@2.31.0", Severity: "Critical"},
+		{ID: "Y", Purl: "pkg:npm/%40scope/lodash@4.17.21", Severity: "Info"},
+		{ID: "Z", Purl: "pkg:npm/left-pad@1.3.0"},
+	}
+	summary, _ := MalwareReports(sbom, severity.FailingFloor)
+	got := summary.Alert()
+	want := []alert.Finding{
+		{Name: "requests", Version: "2.31.0", Ecosystem: "pypi"},
+		{Name: "left-pad", Version: "1.3.0", Ecosystem: "npm"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("Alert() = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("Alert()[%d] = %+v, want %+v", i, got[i], want[i])
 		}
 	}
 }
