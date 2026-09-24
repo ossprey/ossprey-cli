@@ -10,11 +10,13 @@ import (
 	"github.com/anchore/syft/syft/pkg"
 	"github.com/anchore/syft/syft/pkg/cataloger/javascript"
 	"github.com/anchore/syft/syft/pkg/cataloger/python"
+	"github.com/anchore/syft/syft/pkg/cataloger/rust"
 	"github.com/anchore/syft/syft/source"
 	"github.com/anchore/syft/syft/source/directorysource"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/ossprey/ossprey-cli/internal/registry"
+	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
 type Package struct {
@@ -87,6 +89,9 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 		python.NewPackageCataloger(pyCfg),
 		javascript.NewPackageCataloger(),
 		javascript.NewLockCataloger(jsCfg),
+		// Cargo.lock only: syft v1.44.0 ships no Cargo.toml parser, so a crate
+		// that gitignores its lockfile still catalogues to nothing.
+		rust.NewCargoLockCataloger(),
 	}
 	if !opts.NoExec {
 		catalogers = append(catalogers,
@@ -127,7 +132,10 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 		// away a whole ecosystem over one unparseable line — a single
 		// `flask>2.0` in requirements.txt emptied the SBOM of every Python
 		// package, silently scanning nothing.
-		pkgs, _, _ := c.Catalog(ctx, resolver)
+		pkgs, _, err := c.Catalog(ctx, resolver)
+		if err != nil && ctx.Err() == nil {
+			warn.Add(ctx, parseEntry(c.Name(), err))
+		}
 		// Syft's manifest catalogers emit the root project itself from
 		// package.json / pyproject.toml — drop those. Our custom catalogers
 		// parse deps only, so the rule does not apply.
@@ -141,6 +149,9 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 				continue
 			}
 			if isUnpublishedNpmLockEntry(p, locks) {
+				continue
+			}
+			if isWorkspaceCargoEntry(p) {
 				continue
 			}
 			// Syft truncates PEP 440 versions it reads out of a requirements
@@ -204,16 +215,22 @@ func resolveVersionless(ctx context.Context, pkgs []Package, opts Options) {
 		if pkgs[i].Version != "" || pkgs[i].Local {
 			continue
 		}
-		// registry.ResolveLatest only speaks npm + pypi; skip anything else.
-		if pkgs[i].Type != "npm" && pkgs[i].Type != "pypi" {
+		// Skip anything registry.ResolveLatest cannot answer for.
+		if !registry.CanResolve(pkgs[i].Type) {
 			continue
 		}
 		i := i
 		g.Go(func() error {
 			v, err := resolveLatestFn(ctx, pkgs[i].Type, pkgs[i].Name)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "ossprey: could not resolve latest version of %s/%s (%v); leaving it unversioned\n",
-					pkgs[i].Type, pkgs[i].Name, err)
+				// Past the deadline every remaining lookup fails on the expired
+				// context, not on the registry. Reporting those as "registry
+				// unreachable" would blame an outage for our own timeout;
+				// scan.Run already says the deadline was hit, once.
+				if ctx.Err() == nil {
+					warn.Add(ctx, registry.UnresolvedEntry(pkgs[i].Type, pkgs[i].Name, err,
+						"left unversioned"))
+				}
 				return nil
 			}
 			// Each goroutine writes a distinct index — safe without a lock.
@@ -344,6 +361,8 @@ func ossbomType(t pkg.Type) string {
 		return "pypi"
 	case pkg.NpmPkg:
 		return "npm"
+	case pkg.RustPkg:
+		return "cargo"
 	default:
 		return ""
 	}
@@ -360,6 +379,18 @@ func isRootManifestPackage(p pkg.Package) bool {
 		}
 	}
 	return false
+}
+
+// isWorkspaceCargoEntry reports whether p is a Cargo.lock entry for a crate in
+// this workspace rather than one fetched from a registry. Cargo omits `source`
+// for path members, and emitting them would submit the project's own crates as
+// though they were dependencies.
+func isWorkspaceCargoEntry(p pkg.Package) bool {
+	m, ok := p.Metadata.(pkg.RustCargoLockEntry)
+	if !ok {
+		return false
+	}
+	return strings.TrimSpace(m.Source) == ""
 }
 
 // isUnpublishedNpmLockEntry reports whether p is a package-lock.json entry

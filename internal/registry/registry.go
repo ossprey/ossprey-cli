@@ -6,21 +6,38 @@ package registry
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"time"
+
+	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
 // DefaultHTTP is the client used by ResolveLatest. Overridable in tests.
 var DefaultHTTP = &http.Client{Timeout: 15 * time.Second}
 
+// crates.io answers 403 to a generic client, so identify ourselves (OSS-1747).
+const userAgent = "ossprey-cli (+https://github.com/ossprey/ossprey-cli)"
+
 // Registry base URLs. Vars (not consts) so tests can point them at httptest.
 var (
-	npmBaseURL  = "https://registry.npmjs.org/"
-	pypiBaseURL = "https://pypi.org/pypi/"
+	npmBaseURL    = "https://registry.npmjs.org/"
+	pypiBaseURL   = "https://pypi.org/pypi/"
+	cratesBaseURL = "https://crates.io/api/v1/crates/"
 )
+
+// CanResolve reports whether ResolveLatest knows this ecosystem, so callers do
+// not carry their own copy of the list and drift from it.
+func CanResolve(ecosystem string) bool {
+	switch ecosystem {
+	case "npm", "pypi", "cargo":
+		return true
+	}
+	return false
+}
 
 // ResolveLatest returns the latest version string for name in the given
 // ecosystem ("npm" or "pypi").
@@ -30,6 +47,8 @@ func ResolveLatest(ctx context.Context, ecosystem, name string) (string, error) 
 		return resolveNpm(ctx, name)
 	case "pypi":
 		return resolvePyPI(ctx, name)
+	case "cargo":
+		return resolveCargo(ctx, name)
 	default:
 		return "", fmt.Errorf("cannot resolve latest version: unsupported ecosystem %q", ecosystem)
 	}
@@ -71,18 +90,52 @@ func resolvePyPI(ctx context.Context, name string) (string, error) {
 	return body.Info.Version, nil
 }
 
+// ErrNotFound reports that the registry has no such package. A private or
+// internal package answers this way, so callers grade it apart from an outage:
+// one is expected, the other means the scan resolved almost nothing.
+var ErrNotFound = errors.New("not on the public registry")
+
+// resolveCargo reads the crate's latest stable release. Unreached today, since
+// Cargo.lock always pins and resolveVersionless skips anything versioned, but a
+// hand-written SBOM can still arrive carrying a bare crate name.
+func resolveCargo(ctx context.Context, name string) (string, error) {
+	endpoint := cratesBaseURL + url.PathEscape(name)
+	var body struct {
+		Crate struct {
+			MaxStableVersion string `json:"max_stable_version"`
+			NewestVersion    string `json:"newest_version"`
+		} `json:"crate"`
+	}
+	if err := getJSON(ctx, endpoint, &body); err != nil {
+		return "", err
+	}
+	// max_stable_version is empty for a crate that has only ever pre-released.
+	if v := body.Crate.MaxStableVersion; v != "" {
+		return v, nil
+	}
+	if v := body.Crate.NewestVersion; v != "" {
+		return v, nil
+	}
+	return "", fmt.Errorf("crates.io returned no version for %q", name)
+}
+
 func getJSON(ctx context.Context, endpoint string, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", userAgent)
 	resp, err := DefaultHTTP.Do(req)
 	if err != nil {
 		return fmt.Errorf("registry request: %w", err)
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusNotFound {
+		// Not an outage: the normal answer for a private or internal package.
+		return fmt.Errorf("%w (registry returned status 404)", ErrNotFound)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("registry returned status %d", resp.StatusCode)
 	}
@@ -90,4 +143,28 @@ func getJSON(ctx context.Context, endpoint string, out any) error {
 		return fmt.Errorf("decode registry response: %w", err)
 	}
 	return nil
+}
+
+// UnresolvedEntry grades a failed registry lookup. A 404 is the expected answer
+// for a private or internal package; anything else is an outage, and the two
+// must never share a count — 400 packages "not on the public registry" is
+// normal for a monorepo, 400 packages behind an unreachable registry means the
+// scan resolved almost nothing. outcome names the consequence, which differs
+// between the scan path (submitted unversioned) and the forward path (not
+// checked at all).
+func UnresolvedEntry(ecosystem, name string, err error, outcome string) warn.Entry {
+	if errors.Is(err, ErrNotFound) {
+		return warn.Entry{
+			Class: "registry-missing:" + outcome,
+			One:   "1 package not on the public registry; " + outcome,
+			Many:  "%d packages not on the public registry; " + outcome,
+			Item:  fmt.Sprintf("%s/%s (404)", ecosystem, name),
+		}
+	}
+	return warn.Entry{
+		Class: "registry-down:" + outcome,
+		One:   "1 package could not be resolved (registry unreachable); " + outcome,
+		Many:  "%d packages could not be resolved (registry unreachable); " + outcome,
+		Item:  fmt.Sprintf("%s/%s (%v)", ecosystem, name, err),
+	}
 }

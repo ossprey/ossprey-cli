@@ -25,6 +25,12 @@ type Options struct {
 	// SkipVersionLookup disables the registry lookup that resolves unpinned
 	// components to their latest published version, leaving them versionless.
 	SkipVersionLookup bool
+	// NoExec restricts the catalogue to manifest/lockfile parsing: the custom
+	// catalogers that shell out to uv or npm are not instantiated. A lockfile
+	// already enumerates the full transitive tree, so a project that has one
+	// loses nothing; only a manifest-without-lockfile project degrades to its
+	// direct dependencies. See catalog.Options.NoExec.
+	NoExec bool
 	// Timeout caps the whole catalogue; zero means no deadline. On expiry the
 	// SBOM cataloged so far is returned rather than discarded.
 	Timeout time.Duration
@@ -49,6 +55,7 @@ func Run(ctx context.Context, opts Options) (*ossbom.SBOM, error) {
 
 	pkgs, err := catalog.Catalog(ctx, opts.Path, catalog.Options{
 		SkipVersionLookup: opts.SkipVersionLookup,
+		NoExec:            opts.NoExec,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("catalog: %w", err)

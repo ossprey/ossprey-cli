@@ -203,11 +203,11 @@ func forwardEnv(home, apiURL, path string) []string {
 // looking in an empty directory.
 func shimDirOf(t *testing.T, env []string) string {
 	t.Helper()
-	out, code := run(t, env, binPath, "shim", "dir")
-	if code != 0 {
-		t.Fatalf("shim dir exited %d: %s", code, out)
+	res := runForwardEnv(t, t.TempDir(), env, binPath, "shim", "dir")
+	if res.exitCode != 0 {
+		t.Fatalf("shim dir exited %d: %s", res.exitCode, res.stderr)
 	}
-	dir := strings.TrimSpace(out)
+	dir := strings.TrimSpace(res.stdout)
 	if dir == "" {
 		t.Fatal("shim dir printed nothing")
 	}
