@@ -19,9 +19,10 @@ ossprey yarn add foo@1.2.3
 ossprey pip install foo==1.2.3
 ossprey poetry add foo
 ossprey uv pip install foo==1.2.3
+ossprey npx create-vite@latest app        # checks create-vite, then runs it
 ```
 
-Supported managers: `npm`, `pnpm`, `yarn`, `pip`, `pip3`, `poetry`, `uv`.
+Supported managers: `npm`, `npx`, `pnpm`, `yarn`, `pip`, `pip3`, `poetry`, `uv`.
 
 ## What is checked
 
@@ -36,6 +37,7 @@ check and no API call.
 | `pip`, `pip3` | `install` |
 | `poetry` | `add`, `install`, `update`, `lock` |
 | `uv` | `add`, `sync`, `pip install` |
+| `npx` | every invocation that fetches a package (see [npx](#npx)) |
 
 Each manager's global options are understood before the subcommand, so
 `pnpm --filter web add x` and `npm --prefix ./app install x` are checked like any
@@ -47,10 +49,10 @@ Pass-through commands are not checked, which is intended for `npm run`,
 `pip list` and friends. Three groups are worth calling out, because they can
 still put code on your machine:
 
-- **Fetch-and-execute.** `npm exec`, `pnpm dlx`, `yarn dlx` and `uv tool run`
-  download a package and run it. They name a package, but it is not an install
-  verb, so it is forwarded unchecked. `npx` and `uvx` are separate binaries and
-  are not shimmed at all, so they bypass Ossprey entirely.
+- **Fetch-and-execute, other than `npx`.** `npm exec`, `pnpm dlx`, `yarn dlx`
+  and `uv tool run` download a package and run it. They name a package, but it
+  is not an install verb, so it is forwarded unchecked. `uvx` is a separate
+  binary and is not shimmed at all, so it bypasses Ossprey entirely.
 - **Script runners.** `npm run`, `pnpm run`, `poetry run` and equivalents. The
   scripts themselves are not inspected.
 - **Anything the manager resolves that was not named and is not in the
@@ -88,6 +90,30 @@ package is skipped (fail-open) so a registry outage never blocks development.
 An install whose only targets are local paths or URLs (nothing checkable and no
 manifest to scan) is forwarded with a warning.
 
+## npx
+
+`npx` downloads a package and runs it, so the package is checked before it
+runs. If it is flagged, `npx` never starts.
+
+- **Only the package is checked, never its arguments.** npx reads its own
+  options up to the first positional, and everything after that belongs to the
+  program: `npx cowsay moo` checks `cowsay`, not `moo`.
+- **`--package`/`-p` names the packages.** `npx -p typescript@5.4.0 tsc`
+  checks `typescript@5.4.0`; `tsc` is a command it provides, not a package.
+  Each `-p` is checked.
+- **Unpinned versions, tags and ranges check the latest release.**
+  `npx create-vite@latest` and `npx cowsay@^1` are checked at the version the
+  registry currently calls latest. An exact version is checked as given.
+- **A command already in the project is not checked.** An unpinned `npx
+  eslint` whose bin is in the nearest project's `node_modules/.bin` (or whose
+  package is in its `node_modules`) runs from there and fetches nothing, so it
+  forwards straight through. The install that put it there is what the other
+  forwarders check.
+- **Nothing to fetch, nothing to check.** `npx --version` and `npx -c '<cmd>'`
+  with no `-p` forward untouched and scan nothing.
+- **Git and URL targets are not checked.** `npx github:user/repo` is forwarded
+  with a warning, like a URL install.
+
 > **Known gap (pnpm 9 and earlier):** `pnpm run` and `pnpm exec` install the
 > project's declared dependencies as a side effect when `node_modules` is
 > missing, which `npm run` does not do. Those are pass-through commands, so the
@@ -118,13 +144,13 @@ alias per manager removes that step in your own terminal.
 Bash or Zsh, in `~/.bashrc` / `~/.zshrc`:
 
 ```sh
-for mgr in npm pnpm yarn pip pip3 poetry uv; do alias "$mgr=ossprey $mgr"; done
+for mgr in npm npx pnpm yarn pip pip3 poetry uv; do alias "$mgr=ossprey $mgr"; done
 ```
 
 Fish, in `~/.config/fish/config.fish`:
 
 ```fish
-for mgr in npm pnpm yarn pip pip3 poetry uv
+for mgr in npm npx pnpm yarn pip pip3 poetry uv
     alias $mgr "ossprey $mgr"
 end
 ```
@@ -134,6 +160,7 @@ functions):
 
 ```powershell
 function npm    { ossprey npm    @args }
+function npx    { ossprey npx    @args }
 function pnpm   { ossprey pnpm   @args }
 function yarn   { ossprey yarn   @args }
 function pip    { ossprey pip    @args }

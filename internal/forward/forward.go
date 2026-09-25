@@ -1,5 +1,5 @@
 // Package forward implements the package-manager forwarder: it inspects an
-// install command (npm/yarn/pip/poetry/uv), checks the named packages against
+// install command (npm/yarn/pip/poetry/uv) or an npx fetch-and-run, checks the named packages against
 // the Ossprey API, blocks the install if any are malicious, and otherwise execs
 // the real package manager with the original arguments untouched.
 //
@@ -69,6 +69,14 @@ type Manager struct {
 	// decides, so route on writesLocalLockfile rather than on this flag.
 	Lockfile  bool
 	installAt func(args []string) (specStart int, ok bool)
+	// parse classifies the arguments after installAt's specStart. Nil means
+	// ParseSpecs, which understands install verbs.
+	parse func(args []string) installArgs
+	// FetchExec marks a manager that downloads a package and runs it rather
+	// than installing into a project (npx). It has no manifest install: naming
+	// nothing means it runs something already on disk, so it never triggers a
+	// project scan.
+	FetchExec bool
 }
 
 // noLocalLockfileFlags name the options that stop an install from updating a
@@ -163,6 +171,8 @@ var managers = map[string]*Manager{
 	"poetry": {Bin: "poetry", Ecosystem: "pypi", Lockfile: true, installAt: verbAt("poetry", "add", "install", "update", "lock")},
 	// uv: `uv add <pkg>`, `uv sync`, and `uv pip install <pkg>`.
 	"uv": {Bin: "uv", Ecosystem: "pypi", Lockfile: true, installAt: uvInstallAt},
+	// npx: `npx <pkg>`, `npx -p <pkg> <cmd>`. See npx.go.
+	"npx": {Bin: "npx", Ecosystem: "npm", FetchExec: true, installAt: npxInstallAt, parse: npxParse},
 }
 
 // Managers returns the names of every supported forwarder, for CLI wiring.
@@ -351,7 +361,12 @@ func Run(ctx context.Context, opts Options) error {
 		return passiveAfterInstall(ctx, m, opts)
 	}
 
-	parsed := ParseSpecs(m, opts.Args[start:])
+	var parsed installArgs
+	if m.parse != nil {
+		parsed = m.parse(opts.Args[start:])
+	} else {
+		parsed = ParseSpecs(m, opts.Args[start:])
+	}
 
 	switch {
 	case len(parsed.Specs) > 0:
@@ -395,6 +410,16 @@ func Run(ctx context.Context, opts Options) error {
 		})
 		stop()
 		return finish(sbom, err)
+
+	case m.FetchExec:
+		// Nothing named will be fetched: a local bin, `npx --version`, or
+		// `npx -c` in the project's own context. A git or URL target is fetched
+		// and run, though, and cannot be checked, so say so.
+		if len(parsed.NonPackages) > 0 {
+			fmt.Fprintf(errOut, "ossprey: not checking non-registry targets: %s; forwarding\n",
+				strings.Join(parsed.NonPackages, ", "))
+		}
+		return forwardTo()
 
 	case manifestInstall(parsed):
 		// No packages named — the manager installs from the project manifest /
@@ -472,7 +497,11 @@ func reportAndForward(ctx context.Context, m *Manager, opts Options, sbom *ossbo
 	}
 	if hasMalware {
 		profile := ansi.Detect(errOut)
-		fmt.Fprint(errOut, alert.Malware(summary.Alert(), "Installation blocked.", profile))
+		outcome := "Installation blocked."
+		if m.FetchExec {
+			outcome = "Execution blocked."
+		}
+		fmt.Fprint(errOut, alert.Malware(summary.Alert(), outcome, profile))
 		for _, msg := range summary.Failing {
 			fmt.Fprintln(errOut, profile.Red("Error: "+msg))
 		}
