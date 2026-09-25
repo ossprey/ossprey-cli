@@ -29,9 +29,10 @@ const (
 	Critical
 )
 
-// FailingFloor is the lowest level that fails a scan. Info is the only named
-// level below it.
-const FailingFloor = Low
+// FailingFloor is the level a run grades at when nothing else says otherwise.
+// Info is the bottom of the scale, so everything fails by default: passing a
+// finding is a choice an account makes, not one it inherits.
+const FailingFloor = Info
 
 var byName = map[string]Level{
 	"info":     Info,
