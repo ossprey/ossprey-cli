@@ -19,6 +19,7 @@ import (
 	"github.com/ossprey/ossprey-cli/internal/client"
 	"github.com/ossprey/ossprey-cli/internal/env"
 	"github.com/ossprey/ossprey-cli/internal/forward"
+	"github.com/ossprey/ossprey-cli/internal/gitscan"
 	monitorpkg "github.com/ossprey/ossprey-cli/internal/monitor"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
 	"github.com/ossprey/ossprey-cli/internal/progress"
@@ -100,6 +101,7 @@ func newRootCmd() *cobra.Command {
 	for _, bin := range forward.Managers() {
 		root.AddCommand(newForwardCmd(bin))
 	}
+	root.AddCommand(newGitCmd())
 
 	return root
 }
@@ -457,24 +459,60 @@ func newForwardCmd(bin string) *cobra.Command {
 				Passive:   env.Passive() || monitor != "",
 				MonitorID: monitor,
 			})
-			switch {
-			case err == nil:
-				return nil
-			case errors.Is(err, forward.ErrBlocked):
-				os.Exit(1)
-			default:
-				var ee *exec.ExitError
-				if errors.As(err, &ee) {
-					os.Exit(ee.ExitCode())
-				}
-				if reportSkipped(err) {
-					return nil
-				}
-				return err
-			}
-			return nil
+			return forwardResult(err)
 		},
 	}
+}
+
+// newGitCmd wraps git: a clone or pull of a public GitHub repository is
+// checked (the repository itself, not its deps) before git runs. Shimmed only
+// on request (`ossprey shim install --git`).
+func newGitCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:                "git [args...]",
+		Short:              "Check a public GitHub repo on clone/pull, then forward to git",
+		DisableFlagParsing: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			apiURL := os.Getenv("OSSPREY_API_URL")
+			if apiURL == "" {
+				apiURL = defaultAPIURL
+			}
+			monitor := env.MonitorID()
+			if monitor != "" && !monitorpkg.ValidToken(monitor) {
+				return invalidMonitorErr(monitor)
+			}
+			err := gitscan.Run(cmd.Context(), gitscan.Options{
+				Args:      args,
+				APIURL:    apiURL,
+				APIKey:    os.Getenv("OSSPREY_API_KEY"),
+				SkipCI:    env.SkipCI(),
+				Passive:   env.Passive() || monitor != "",
+				MonitorID: monitor,
+			})
+			return forwardResult(err)
+		},
+	}
+}
+
+// forwardResult maps a wrapper's error to its exit: 1 on malware, the real
+// tool's own code when it failed.
+func forwardResult(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, forward.ErrBlocked):
+		os.Exit(1)
+	default:
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			os.Exit(ee.ExitCode())
+		}
+		if reportSkipped(err) {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // noMalwareLine states how much was actually covered: an SBOM can carry

@@ -38,7 +38,8 @@ added 1 package in 412ms
 | `ossprey shim install --watchdog` | Passive: submit scans with this machine's login, never block an install |
 | `ossprey shim install --monitor <id>` | Passive: submit through a monitor's id, with no credential on the machine |
 
-Useful flags: `--managers npm,pip` to shim a subset, `--all` to shim managers
+Useful flags: `--git` to also shim git (opt-in, see [git.md](git.md)),
+`--managers npm,pip` to shim a subset, `--all` to shim managers
 you have not installed yet, `--no-path` to write the shims but manage PATH
 yourself, `--dir` / `$OSSPREY_SHIM_DIR` to relocate them.
 

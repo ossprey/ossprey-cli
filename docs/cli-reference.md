@@ -8,6 +8,7 @@ Every command, flag and credential the CLI understands.
 | [`ossprey scan [path]`](#scan) | Catalogue a directory, submit the OSSBOM, fail on malware. `path` defaults to `.`. |
 | [`ossprey check -e <pypi\|npm> <pkg>...`](#check--scan-named-packages) | Check packages by name, no project needed. |
 | [`ossprey npm\|pnpm\|yarn\|pip\|pip3\|poetry\|uv ...`](forwarder.md) | Check, then run the real package manager. Blocks the install on malware. |
+| [`ossprey git clone\|pull ...`](git.md) | Check a public GitHub repo, then run git. Blocks on malware. |
 | [`ossprey shim install`](shims.md) | Put shims on `PATH` so installs are checked without the `ossprey` prefix. |
 | [`ossprey precommit`](precommit.md) | Git pre-commit hook: block commits that stage known-malicious packages. |
 | [`ossprey login`](#authentication) | Browser login via Auth0. Stores tokens locally. |

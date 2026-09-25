@@ -17,6 +17,8 @@
 #                                this machine's login and never block installs.
 #   --monitor <id>               With the shims, submit passively through a
 #                                monitor's id, needing no credential at all.
+#   --git                        Also shim git (opt-in): check public GitHub
+#                                repos on clone/pull. Implies the shims.
 #
 # Env vars:
 #   OSSPREY_VERSION      Tag to install (e.g. v0.1.0). Default: latest.
@@ -24,6 +26,7 @@
 #   OSSPREY_OVERRIDE_PACKAGE_MANAGERS=1   Same as --override-package-managers.
 #   OSSPREY_WATCHDOG=1                    Same as --watchdog.
 #   OSSPREY_MONITOR_ID=<id>               Same as --monitor <id>.
+#   OSSPREY_SHIM_GIT=1                    Same as --git.
 
 set -eu
 
@@ -34,6 +37,7 @@ INSTALL_DIR="${OSSPREY_INSTALL_DIR:-/usr/local/bin}"
 OVERRIDE="${OSSPREY_OVERRIDE_PACKAGE_MANAGERS:-}"
 WATCHDOG="${OSSPREY_WATCHDOG:-}"
 MONITOR_ID="${OSSPREY_MONITOR_ID:-}"
+SHIM_GIT="${OSSPREY_SHIM_GIT:-}"
 
 log()  { printf '==> %s\n' "$*" >&2; }
 err()  { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -53,6 +57,8 @@ Flags:
                                 this machine's login, never block an install.
   --monitor <id>                Passive mode for the shims using a monitor's
                                 id, so the machine needs no credential.
+  --git                         Also shim git: check public GitHub repos on
+                                clone/pull (opt-in).
   -h, --help                    Show this help.
 
 Env vars:
@@ -61,6 +67,7 @@ Env vars:
   OSSPREY_OVERRIDE_PACKAGE_MANAGERS=1   Same as --override-package-managers.
   OSSPREY_WATCHDOG=1            Same as --watchdog.
   OSSPREY_MONITOR_ID=<id>       Same as --monitor <id>.
+  OSSPREY_SHIM_GIT=1            Same as --git.
 EOF
   exit 0
 }
@@ -69,6 +76,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --override-package-managers|--shims) OVERRIDE=1 ;;
     --watchdog) WATCHDOG=1; OVERRIDE=1 ;;
+    --git) SHIM_GIT=1; OVERRIDE=1 ;;
     --monitor)
       shift
       { [ $# -gt 0 ] && [ -n "$1" ]; } || err "--monitor needs an id"
@@ -177,7 +185,7 @@ fi
 # Asking for a mode is asking for the shims: the flags set OVERRIDE themselves,
 # so without this the env-var spelling installs no shims at all and says nothing
 # about it, leaving an operator believing a fleet reports when it does not.
-if [ -n "$MONITOR_ID" ] || [ -n "$WATCHDOG" ]; then
+if [ -n "$MONITOR_ID" ] || [ -n "$WATCHDOG" ] || [ -n "$SHIM_GIT" ]; then
   OVERRIDE=1
 fi
 
@@ -190,6 +198,9 @@ elif [ -n "$WATCHDOG" ]; then
   set -- --watchdog
 else
   set --
+fi
+if [ -n "$SHIM_GIT" ]; then
+  set -- "$@" --git
 fi
 
 if [ -n "$OVERRIDE" ]; then
