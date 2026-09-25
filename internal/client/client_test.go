@@ -467,3 +467,68 @@ func TestSkipMessage(t *testing.T) {
 		})
 	}
 }
+
+// acceptServer captures the client-identity headers of the submission it serves.
+func acceptServer(t *testing.T, gotClient, gotVersion *string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*gotClient = r.Header.Get("X-Ossprey-Client")
+		*gotVersion = r.Header.Get("X-Ossprey-Client-Version")
+		w.WriteHeader(http.StatusAccepted)
+		io.WriteString(w, `{"sbom_id":"sb1","scan_id":"sc1"}`)
+	}))
+}
+
+// Which CLI release a customer runs is otherwise only answerable by asking them.
+func TestSubmit_ReportsClientIdentity(t *testing.T) {
+	orig := Version
+	Version = "0.15.0"
+	t.Cleanup(func() { Version = orig })
+
+	var gotClient, gotVersion string
+	srv := acceptServer(t, &gotClient, &gotVersion)
+	defer srv.Close()
+
+	if err := testClient(t, srv).Submit(context.Background(), ossbom.MiniBOM{}); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if gotVersion != "0.15.0" {
+		t.Errorf("version header: got %q, want %q", gotVersion, "0.15.0")
+	}
+	if gotClient != "cli" {
+		t.Errorf("client header: got %q, want %q", gotClient, "cli")
+	}
+}
+
+// Wrappers name themselves through OSSPREY_CLIENT, so a scan can be attributed
+// to the action that ran it. Anything the API would reject falls back to "cli".
+func TestSubmit_ClientNameFromEnv(t *testing.T) {
+	tests := []struct {
+		name string
+		env  string
+		want string
+	}{
+		{"unset falls back to the cli", "", "cli"},
+		{"wrapper names itself", "gh-action", "gh-action"},
+		{"case is folded", "GH-Action", "gh-action"},
+		{"punctuation is kept", "azdo-task_1.2", "azdo-task_1.2"},
+		{"spaces fall back", "not a name", "cli"},
+		{"over-long falls back", strings.Repeat("x", 33), "cli"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("OSSPREY_CLIENT", tt.env)
+
+			var gotClient, gotVersion string
+			srv := acceptServer(t, &gotClient, &gotVersion)
+			defer srv.Close()
+
+			if err := testClient(t, srv).Submit(context.Background(), ossbom.MiniBOM{}); err != nil {
+				t.Fatalf("Submit: %v", err)
+			}
+			if gotClient != tt.want {
+				t.Errorf("client header: got %q, want %q", gotClient, tt.want)
+			}
+		})
+	}
+}
