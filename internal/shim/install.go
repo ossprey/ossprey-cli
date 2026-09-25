@@ -29,6 +29,8 @@ type Options struct {
 	// ClearMode asks for blocking explicitly, overriding an installed passive
 	// mode instead of inheriting it.
 	ClearMode bool
+	// Git adds the opt-in git shim to whatever else is being installed.
+	Git bool
 }
 
 // ValidateMode checks the mode/monitor-id pairing before anything is written.
@@ -109,6 +111,13 @@ func Plan(o Options) (*Result, error) {
 	managers, explicit, err := managersFor(o)
 	if err != nil {
 		return nil, err
+	}
+	// A flagless re-run re-points opt-in shims already installed rather than
+	// leaving them calling a binary that may have moved.
+	for _, name := range OptInManagers() {
+		if !explicit && !slices.Contains(managers, name) && IsShim(filepath.Join(dir, scriptName(name))) {
+			managers = append(managers, name)
+		}
 	}
 
 	res := &Result{Dir: dir, Binary: bin, OnPath: onPath(dir), Mode: o.Mode, MonitorID: o.MonitorID}
@@ -331,10 +340,14 @@ func resolve(o Options) (dir, bin string, err error) {
 
 func managersFor(o Options) (names []string, explicit bool, err error) {
 	if len(o.Managers) == 0 {
-		return DefaultManagers(), false, nil
+		names = DefaultManagers()
+	} else if names, err = ValidateManagers(o.Managers); err != nil {
+		return nil, true, err
 	}
-	names, err = ValidateManagers(o.Managers)
-	return names, true, err
+	if o.Git && !slices.Contains(names, "git") {
+		names = append(names, "git")
+	}
+	return names, len(o.Managers) > 0, nil
 }
 
 func updatePath(o Options, dir string) (changed []string, hint string, err error) {

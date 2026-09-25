@@ -14,16 +14,19 @@
 #                              machine's login and never block an install.
 #   -MonitorId <id>            With the shims, submit passively through a
 #                              monitor's id, needing no credential at all.
+#   -Git                       Also shim git (opt-in): check public GitHub repos
+#                              on clone/pull. Implies the shims.
 #
 # Env vars:
 #   OSSPREY_VERSION      Tag to install (e.g. v0.1.0). Default: latest.
 #   OSSPREY_INSTALL_DIR  Install location. Default: %LOCALAPPDATA%\Programs\ossprey
 #   OSSPREY_WATCHDOG=1                    Same as -Watchdog.
 #   OSSPREY_MONITOR_ID=<id>               Same as -MonitorId <id>.
+#   OSSPREY_SHIM_GIT=1                    Same as -Git.
 #   OSSPREY_OVERRIDE_PACKAGE_MANAGERS=1   Same as -OverridePackageManagers, and
 #                              the way to ask for shims through `irm ... | iex`.
 
-param([switch]$OverridePackageManagers, [switch]$Watchdog, [string]$MonitorId)
+param([switch]$OverridePackageManagers, [switch]$Watchdog, [string]$MonitorId, [switch]$Git)
 
 $ErrorActionPreference = 'Stop'
 
@@ -122,8 +125,10 @@ try {
     $modeArgs = @()
     if ($MonitorId) { $modeArgs = @("--monitor", $MonitorId) }
     elseif ($Watchdog) { $modeArgs = @("--watchdog") }
+    if (-not $Git -and $env:OSSPREY_SHIM_GIT) { $Git = $true }
+    if ($Git) { $modeArgs += "--git" }
 
-    if ($OverridePackageManagers -or $MonitorId -or $Watchdog -or $env:OSSPREY_OVERRIDE_PACKAGE_MANAGERS) {
+    if ($OverridePackageManagers -or $MonitorId -or $Watchdog -or $Git -or $env:OSSPREY_OVERRIDE_PACKAGE_MANAGERS) {
         Log 'installing package-manager shims'
         try {
             & $dest shim install @modeArgs

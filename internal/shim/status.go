@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 )
 
 type Status struct {
@@ -54,9 +55,14 @@ func Load(o Options) (*Status, error) {
 		st.DirExists = true
 	}
 
-	for _, name := range DefaultManagers() {
+	for _, name := range SupportedManagers() {
 		m := ManagerStatus{Name: name}
 		shimPath := filepath.Join(dir, scriptName(name))
+		// Opt-in shims are listed only once installed, so status never nags
+		// about git.
+		if slices.Contains(optInManagers, name) && !IsShim(shimPath) {
+			continue
+		}
 		if IsShim(shimPath) {
 			m.Shim = shimPath
 			m.Mode, m.MonitorID = ShimMode(shimPath)

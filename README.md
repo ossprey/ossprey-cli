@@ -83,7 +83,7 @@ as JSON, use [`--report report.json`](docs/output.md#machine-readable-verdict---
 
 ## Stopping malware before it lands
 
-A scan tells you what is already in your project. These three stop something bad
+A scan tells you what is already in your project. These stop something bad
 getting in — pick whichever fits how your team works.
 
 ### Check installs on your machine
@@ -106,6 +106,16 @@ Makefiles, CI steps and coding agents — not just your own terminal.
 
 → [docs/forwarder.md](docs/forwarder.md) for what is and is not checked ·
 [docs/shims.md](docs/shims.md) for shims
+
+### Check a repo before you clone it
+
+```sh
+ossprey shim install --git          # opt-in: plain `git clone` / `git pull` is checked
+```
+
+Checks a public GitHub repository itself before git fetches it.
+
+→ [docs/git.md](docs/git.md)
 
 ### Check what a commit adds
 
@@ -183,7 +193,7 @@ The full list, and every flag, is in [docs/cli-reference.md](docs/cli-reference.
 
 Everything above in depth: **[docs/](docs/README.md)** — [install](docs/install.md)
 · [`init`](docs/init.md) · [CLI reference](docs/cli-reference.md) ·
-[forwarder](docs/forwarder.md) · [shims](docs/shims.md) ·
+[forwarder](docs/forwarder.md) · [shims](docs/shims.md) · [git](docs/git.md) ·
 [passive monitoring](docs/passive-monitoring.md) ·
 [pre-commit](docs/precommit.md) · [CI](docs/ci.md) · [output](docs/output.md) ·
 [ecosystems](docs/ecosystems.md) · [how it works](docs/architecture.md)

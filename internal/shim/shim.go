@@ -35,8 +35,22 @@ const (
 
 var defaultManagers = []string{"npm", "pnpm", "yarn", "pip", "pip3", "poetry", "uv"}
 
+// optInManagers are shimmed only when asked for by name (or --git): shimming
+// git by default would put a network lookup in front of every pull.
+var optInManagers = []string{"git"}
+
 func DefaultManagers() []string {
 	return slices.Clone(defaultManagers)
+}
+
+// OptInManagers are the supported commands never shimmed by default.
+func OptInManagers() []string {
+	return slices.Clone(optInManagers)
+}
+
+// SupportedManagers is every command a shim can be written for.
+func SupportedManagers() []string {
+	return slices.Concat(defaultManagers, optInManagers)
 }
 
 func ValidateManagers(names []string) ([]string, error) {
@@ -46,15 +60,15 @@ func ValidateManagers(names []string) ([]string, error) {
 		if name == "" {
 			continue
 		}
-		if !slices.Contains(defaultManagers, name) {
-			return nil, fmt.Errorf("unknown package manager %q (supported: %s)", name, strings.Join(defaultManagers, ", "))
+		if !slices.Contains(SupportedManagers(), name) {
+			return nil, fmt.Errorf("unknown package manager %q (supported: %s)", name, strings.Join(SupportedManagers(), ", "))
 		}
 		if !slices.Contains(out, name) {
 			out = append(out, name)
 		}
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("no package managers named (supported: %s)", strings.Join(defaultManagers, ", "))
+		return nil, fmt.Errorf("no package managers named (supported: %s)", strings.Join(SupportedManagers(), ", "))
 	}
 	return out, nil
 }
