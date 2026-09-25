@@ -13,6 +13,8 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/Masterminds/semver/v3"
+
 	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
@@ -73,6 +75,73 @@ func resolveNpm(ctx context.Context, name string) (string, error) {
 	return body.DistTags.Latest, nil
 }
 
+// ErrNoMatch reports a specifier that names no published release: a range
+// nothing satisfies, or a word that is neither a range nor a dist-tag. Not an
+// outage and not a missing package, so callers grade it apart from both.
+var ErrNoMatch = errors.New("no published version matches")
+
+// ResolveNpmSpec returns the release npm itself would pick for name@spec: the
+// version a dist-tag points at (`next`, `beta`), or the highest published
+// version a range allows (`^1`, `1.x`). An empty spec means latest.
+//
+// Checking latest instead would pass a clean `latest` while npm runs whatever
+// the tag or an older major line points at, which is exactly where a malicious
+// release can sit unnoticed. As in npm, a spec that parses as a range is a
+// range; only otherwise is it looked up as a tag.
+func ResolveNpmSpec(ctx context.Context, name, spec string) (string, error) {
+	if spec == "" {
+		return resolveNpm(ctx, name)
+	}
+	// The abbreviated packument carries dist-tags and every version, and is a
+	// fraction of the full document's size for a popular package.
+	var body struct {
+		DistTags map[string]string          `json:"dist-tags"`
+		Versions map[string]json.RawMessage `json:"versions"`
+	}
+	if err := getJSONAccept(ctx, npmBaseURL+url.PathEscape(name),
+		"application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8", &body); err != nil {
+		return "", err
+	}
+	constraint, err := semver.NewConstraint(spec)
+	if err != nil {
+		if v := body.DistTags[spec]; v != "" {
+			return v, nil
+		}
+		return "", fmt.Errorf("%w %s@%s (not a range or a dist-tag)", ErrNoMatch, name, spec)
+	}
+	// npm-pick-manifest's order: the latest tag when the range allows it, else
+	// the highest match that is not deprecated, else the highest match at all.
+	if latest, err := semver.StrictNewVersion(body.DistTags["latest"]); err == nil && constraint.Check(latest) {
+		return latest.Original(), nil
+	}
+	var best, bestDeprecated *semver.Version
+	for raw, meta := range body.Versions {
+		v, err := semver.StrictNewVersion(raw)
+		if err != nil || !constraint.Check(v) {
+			continue
+		}
+		var m struct {
+			Deprecated any `json:"deprecated"`
+		}
+		_ = json.Unmarshal(meta, &m)
+		deprecated := m.Deprecated != nil && m.Deprecated != false && m.Deprecated != ""
+		if deprecated {
+			if bestDeprecated == nil || v.GreaterThan(bestDeprecated) {
+				bestDeprecated = v
+			}
+		} else if best == nil || v.GreaterThan(best) {
+			best = v
+		}
+	}
+	if best == nil {
+		best = bestDeprecated
+	}
+	if best == nil {
+		return "", fmt.Errorf("%w %s@%s", ErrNoMatch, name, spec)
+	}
+	return best.Original(), nil
+}
+
 // resolvePyPI reads info.version from the PyPI JSON API.
 func resolvePyPI(ctx context.Context, name string) (string, error) {
 	endpoint := pypiBaseURL + url.PathEscape(name) + "/json"
@@ -120,11 +189,15 @@ func resolveCargo(ctx context.Context, name string) (string, error) {
 }
 
 func getJSON(ctx context.Context, endpoint string, out any) error {
+	return getJSONAccept(ctx, endpoint, "application/json", out)
+}
+
+func getJSONAccept(ctx context.Context, endpoint, accept string, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept", accept)
 	req.Header.Set("User-Agent", userAgent)
 	resp, err := DefaultHTTP.Do(req)
 	if err != nil {
@@ -153,6 +226,14 @@ func getJSON(ctx context.Context, endpoint string, out any) error {
 // between the scan path (submitted unversioned) and the forward path (not
 // checked at all).
 func UnresolvedEntry(ecosystem, name string, err error, outcome string) warn.Entry {
+	if errors.Is(err, ErrNoMatch) {
+		return warn.Entry{
+			Class: "registry-nomatch:" + outcome,
+			One:   "1 package version specifier matched no published release; " + outcome,
+			Many:  "%d package version specifiers matched no published release; " + outcome,
+			Item:  err.Error(),
+		}
+	}
 	if errors.Is(err, ErrNotFound) {
 		return warn.Entry{
 			Class: "registry-missing:" + outcome,

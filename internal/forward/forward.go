@@ -288,7 +288,10 @@ type Options struct {
 	// ResolveLatest fills a concrete version for unpinned packages. Defaults to
 	// registry.ResolveLatest; overridable in tests.
 	ResolveLatest func(ctx context.Context, ecosystem, name string) (string, error)
-	SkipCI        bool
+	// ResolveSpec picks the npm release a dist-tag or range names, for npx.
+	// Defaults to registry.ResolveNpmSpec; overridable in tests.
+	ResolveSpec func(ctx context.Context, name, spec string) (string, error)
+	SkipCI      bool
 	// Passive submits the scan and forwards the install without waiting for a
 	// verdict. This is what the watchdog and monitor shims run in.
 	Passive bool
@@ -336,6 +339,10 @@ func Run(ctx context.Context, opts Options) error {
 	if resolve == nil {
 		resolve = registry.ResolveLatest
 	}
+	resolveSpec := opts.ResolveSpec
+	if resolveSpec == nil {
+		resolveSpec = registry.ResolveNpmSpec
+	}
 
 	start, isInstall := m.installAt(opts.Args)
 	if !isInstall {
@@ -367,6 +374,15 @@ func Run(ctx context.Context, opts Options) error {
 	} else {
 		parsed = ParseSpecs(m, opts.Args[start:])
 	}
+	// resolveAll pins every named package to the release that will actually be
+	// installed or run.
+	resolveAll := func(ctx context.Context) []check.Spec {
+		specs := parsed.Specs
+		if m.FetchExec {
+			specs = resolveNpxSpecifiers(ctx, resolveSpec, specs)
+		}
+		return resolveSpecs(ctx, resolve, specs)
+	}
 
 	switch {
 	case len(parsed.Specs) > 0:
@@ -381,7 +397,7 @@ func Run(ctx context.Context, opts Options) error {
 			// on the command line are all we will ever know. Resolve and
 			// submit them beside the install rather than ahead of it.
 			return passiveAlongside(ctx, m, opts, len(parsed.Specs), func(ctx context.Context) (*ossbom.SBOM, error) {
-				resolved := resolveSpecs(ctx, resolve, parsed.Specs)
+				resolved := resolveAll(ctx)
 				if len(resolved) == 0 {
 					return nil, errNothingToCheck
 				}
@@ -394,7 +410,7 @@ func Run(ctx context.Context, opts Options) error {
 				})
 			})
 		}
-		resolved := resolveSpecs(ctx, resolve, parsed.Specs)
+		resolved := resolveAll(ctx)
 		if len(resolved) == 0 {
 			fmt.Fprintln(errOut, "ossprey: nothing left to check after version resolution; forwarding")
 			return forwardTo()

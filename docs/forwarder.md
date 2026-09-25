@@ -101,14 +101,25 @@ runs. If it is flagged, `npx` never starts.
 - **`--package`/`-p` names the packages.** `npx -p typescript@5.4.0 tsc`
   checks `typescript@5.4.0`; `tsc` is a command it provides, not a package.
   Each `-p` is checked.
-- **Unpinned versions, tags and ranges check the latest release.**
-  `npx create-vite@latest` and `npx cowsay@^1` are checked at the version the
-  registry currently calls latest. An exact version is checked as given.
+- **The version checked is the version npx runs.** An exact version is checked
+  as given, an unpinned name at the registry's latest, a dist-tag
+  (`npx create-vite@next`) at the release that tag points to, and a range
+  (`npx cowsay@^1`) at the release npm would pick for it: the latest tag if the
+  range allows it, otherwise the highest non-deprecated match. If a tag or range
+  matches nothing, or the registry can't be reached, that package is skipped
+  with a warning rather than reported clean.
+- **Options are read the way npm reads them.** Which options take a value comes
+  from npm's own definitions. A few options mean different things in different
+  npm versions: `--allow-scripts` takes a value in npm 12 but is an unknown
+  (boolean) flag in npm 10, so `npx --allow-scripts a b` runs `b` on one and
+  `a` on the other. For those, and for any option Ossprey doesn't recognise,
+  both candidates are checked.
 - **A command already in the project is not checked.** An unpinned `npx
   eslint` whose bin is in the nearest project's `node_modules/.bin` (or whose
   package is in its `node_modules`) runs from there and fetches nothing, so it
   forwards straight through. The install that put it there is what the other
-  forwarders check.
+  forwarders check. `--prefix`/`-C` points npx at another project, so with
+  either the package is always checked.
 - **Nothing to fetch, nothing to check.** `npx --version` and `npx -c '<cmd>'`
   with no `-p` forward untouched and scan nothing.
 - **Git and URL targets are not checked.** `npx github:user/repo` is forwarded

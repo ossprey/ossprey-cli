@@ -1,13 +1,17 @@
 package forward
 
 import (
+	"context"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
 
+	"github.com/Masterminds/semver/v3"
+
 	"github.com/ossprey/ossprey-cli/internal/check"
+	"github.com/ossprey/ossprey-cli/internal/registry"
+	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
 // npx is fetch-and-execute, not an install: `npx cowsay moo` downloads cowsay
@@ -25,16 +29,8 @@ import (
 //   - `-c`/`--call` runs a shell string. With no `-p` it runs in the local
 //     project's context and fetches nothing.
 //
-// npxValueFlags follows the same asymmetry as valueFlags, and it bites the same
-// way: listing a boolean flag here swallows the package after it and runs it
-// unchecked, so only flags known to take a value belong. `-s` is deliberately
-// absent — legacy npx read it as --shell, npm 7+ reads it as --silent.
-var npxValueFlags = flagSet("--call", "-c", "--workspace", "-w", "--registry",
-	"--prefix", "-C", "--cache", "--userconfig", "--globalconfig", "--loglevel",
-	"--shell", "--script-shell", "--node-arg", "-n", "--node-options")
-
-// npxPackageFlags name the packages npx should fetch.
-var npxPackageFlags = flagSet("--package", "-p")
+// Which flags take a value is npm's call, not ours, and it changes between
+// npm versions; see npx_flags.go.
 
 // npxInstallAt matches every npx invocation; npxParse decides what, if
 // anything, it fetches.
@@ -45,10 +41,19 @@ func npxInstallAt([]string) (int, bool) { return 0, true }
 var localBinFn = localBin
 
 // npxParse classifies an npx command line into the packages it will fetch.
+// A spec's Version is either an exact release or the specifier as written (a
+// dist-tag or range), which resolveNpxSpecifiers turns into the release npm
+// would pick.
 func npxParse(args []string) installArgs {
 	var (
 		packages []string
-		command  string
+		// candidates are the tokens that may be the package when no --package
+		// is given: the first positional, plus the value of any flag whose
+		// meaning depends on the npm version.
+		candidates []string
+		// redirected is set by --prefix, which moves the project npx looks in
+		// for local bins away from the one localBin would search.
+		redirected bool
 	)
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -58,35 +63,67 @@ func npxParse(args []string) installArgs {
 		if a == "--" {
 			// Option parsing ends; the next token is the command.
 			if i+1 < len(args) {
-				command = args[i+1]
+				candidates = append(candidates, args[i+1])
 			}
 			break
 		}
 		if !strings.HasPrefix(a, "-") {
-			command = a
+			candidates = append(candidates, a)
 			break
 		}
-		flag, value, hasInline := splitFlagValue(a)
+		key, value, hasInline := splitFlagValue(strings.TrimLeft(a, "-"))
+		if long, ok := npxShorthands[key]; ok {
+			if long == "" {
+				continue // carries its own value, e.g. -s is --loglevel silent
+			}
+			key = long
+		}
+		next := ""
+		if i+1 < len(args) {
+			next = args[i+1]
+		}
 		switch {
-		case npxPackageFlags[flag]:
+		case key == "package":
 			if !hasInline {
 				if i+1 >= len(args) {
 					continue
 				}
-				value = args[i+1]
+				value = next
 				i++
 			}
 			packages = append(packages, value)
-		case npxValueFlags[flag] && !hasInline:
-			i++
+		case key == "prefix":
+			redirected = true
+			if !hasInline && i+1 < len(args) {
+				i++
+			}
+		case strings.HasPrefix(key, "no-") || npxSwitches[key]:
+			// nopt reads every --no-* as a boolean, and lets any boolean take
+			// an explicit true/false.
+			if !hasInline && (next == "true" || next == "false") {
+				i++
+			}
+		case npxOptions[key]:
+			if !hasInline && i+1 < len(args) {
+				i++
+			}
+		default:
+			// Unknown, or a value in some npm and a boolean in others. Under
+			// one reading the next token is this flag's value, under the other
+			// it is the package — so check it, and keep reading for the
+			// package the first reading would run.
+			if !hasInline && next != "" && !strings.HasPrefix(next, "-") {
+				candidates = append(candidates, next)
+				i++
+			}
 		}
 	}
 
 	// With -p the positional is a bin those packages provide; without it the
 	// positional is the package itself.
 	asCommand := len(packages) == 0
-	if asCommand && command != "" {
-		packages = []string{command}
+	if asCommand {
+		packages = candidates
 	}
 
 	var out installArgs
@@ -105,15 +142,15 @@ func npxParse(args []string) installArgs {
 			out.NonPackages = append(out.NonPackages, tok)
 			continue
 		}
-		// A dist-tag or range (`cowsay@latest`, `cowsay@^1`) names no release,
-		// so let the registry pick one rather than submitting a version that
-		// does not exist.
-		s.Version = concreteNpmVersion(s.Version)
-		// An unpinned command already in the project's node_modules runs from
-		// there: npx fetches nothing, so there is nothing to check here (the
-		// install that put it there is what the other forwarders check).
-		// `npx eslint` is overwhelmingly this case.
-		if s.Version == "" && localBinFn(s.Name, asCommand) {
+		if v, ok := exactNpmVersion(s.Version); ok {
+			s.Version = v
+		}
+		// A name with no specifier that is already in the project's
+		// node_modules runs from there: npx fetches nothing, so there is
+		// nothing to check here (the install that put it there is what the
+		// other forwarders check). `npx eslint` is overwhelmingly this case.
+		// Not under --prefix, which points npx at a different project.
+		if s.Version == "" && !redirected && localBinFn(s.Name, asCommand) {
 			continue
 		}
 		out.Specs = append(out.Specs, s)
@@ -121,15 +158,37 @@ func npxParse(args []string) installArgs {
 	return out
 }
 
-var semverish = regexp.MustCompile(`^\d+\.\d+\.\d+([-+][0-9A-Za-z.+-]*)?$`)
-
-// concreteNpmVersion returns v when it names one release, else "".
-func concreteNpmVersion(v string) string {
+// exactNpmVersion reports whether v names exactly one release, normalised the
+// way npm normalises it (`v1.2.3` and `=1.2.3` are 1.2.3).
+func exactNpmVersion(v string) (string, bool) {
 	v = strings.TrimPrefix(strings.TrimPrefix(v, "="), "v")
-	if semverish.MatchString(v) {
-		return v
+	if _, err := semver.StrictNewVersion(v); err != nil {
+		return "", false
 	}
-	return ""
+	return v, true
+}
+
+// resolveNpxSpecifiers turns each dist-tag or range into the release npm would
+// run for it. Checking latest instead would pass a clean latest while npx runs
+// whatever `@next` or an older major line points at. A specifier that cannot be
+// resolved is treated like a registry outage: warned about and not checked,
+// never reported as clean.
+func resolveNpxSpecifiers(ctx context.Context, resolve func(context.Context, string, string) (string, error), specs []check.Spec) []check.Spec {
+	out := make([]check.Spec, 0, len(specs))
+	for _, s := range specs {
+		if s.Version != "" {
+			if _, exact := exactNpmVersion(s.Version); !exact {
+				v, err := resolve(ctx, s.Name, s.Version)
+				if err != nil {
+					warn.Add(ctx, registry.UnresolvedEntry(s.Ecosystem, s.Name, err, "skipping its check"))
+					continue
+				}
+				s.Version = v
+			}
+		}
+		out = append(out, s)
+	}
+	return out
 }
 
 // localBin reports whether npx would use an unpinned name from the current

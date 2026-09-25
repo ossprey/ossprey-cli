@@ -1,15 +1,22 @@
 package forward
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/ossprey/ossprey-cli/internal/check"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
+	"github.com/ossprey/ossprey-cli/internal/registry"
+	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
 // noLocalBins makes every name look absent from node_modules, so a parse test
@@ -39,8 +46,24 @@ func TestNpxParse(t *testing.T) {
 		{"program flags are not ours", []string{"cowsay", "-p", "evil"}, []check.Spec{npm("cowsay", "")}, nil},
 		{"pinned", []string{"cowsay@1.5.0", "moo"}, []check.Spec{npm("cowsay", "1.5.0")}, nil},
 		{"scoped pinned", []string{"@angular/cli@17.0.0", "new", "app"}, []check.Spec{npm("@angular/cli", "17.0.0")}, nil},
-		{"dist-tag resolves latest", []string{"create-vite@latest", "app"}, []check.Spec{npm("create-vite", "")}, nil},
-		{"range resolves latest", []string{"cowsay@^1"}, []check.Spec{npm("cowsay", "")}, nil},
+		// Tags and ranges keep the specifier for resolveNpxSpecifiers.
+		{"dist-tag kept", []string{"create-vite@next", "app"}, []check.Spec{npm("create-vite", "next")}, nil},
+		{"range kept", []string{"cowsay@^1"}, []check.Spec{npm("cowsay", "^1")}, nil},
+		{"exact normalised", []string{"cowsay@v1.5.0"}, []check.Spec{npm("cowsay", "1.5.0")}, nil},
+		// Shorthands and option values, per npm's own definitions.
+		{"loglevel value", []string{"--loglevel", "silent", "cowsay"}, []check.Spec{npm("cowsay", "")}, nil},
+		{"silent shorthand carries its value", []string{"-s", "cowsay", "moo"}, []check.Spec{npm("cowsay", "")}, nil},
+		{"removed -n takes a value", []string{"-n", "--inspect", "cowsay"}, []check.Spec{npm("cowsay", "")}, nil},
+		{"negated boolean", []string{"--no-yes", "cowsay", "moo"}, []check.Spec{npm("cowsay", "")}, nil},
+		{"boolean with explicit value", []string{"--yes", "true", "cowsay"}, []check.Spec{npm("cowsay", "")}, nil},
+		// A string option in npm 12 and unknown (so boolean) in npm 10: either
+		// token may be what runs, so both are checked.
+		{"version-dependent option checks both readings", []string{"--allow-scripts", "helper-pkg", "evil-pkg", "arg"},
+			[]check.Spec{npm("helper-pkg", ""), npm("evil-pkg", "")}, nil},
+		{"unknown flag checks both readings", []string{"--brand-new-flag", "a", "b"},
+			[]check.Spec{npm("a", ""), npm("b", "")}, nil},
+		{"inline version-dependent value is not a candidate", []string{"--allow-scripts=helper-pkg", "evil-pkg"},
+			[]check.Spec{npm("evil-pkg", "")}, nil},
 		{"leading options", []string{"-y", "--quiet", "create-react-app", "my-app"}, []check.Spec{npm("create-react-app", "")}, nil},
 		{"value flag before command", []string{"--registry", "https://r.example", "cowsay"}, []check.Spec{npm("cowsay", "")}, nil},
 		{"double dash", []string{"--yes", "--", "cowsay", "moo"}, []check.Spec{npm("cowsay", "")}, nil},
@@ -79,6 +102,27 @@ func TestNpxLocalBinIsNotChecked(t *testing.T) {
 	// A pinned version is fetched unless the local copy matches, so it is checked.
 	if got := npxParse([]string{"eslint@9.0.0", "."}).Specs; len(got) != 1 {
 		t.Errorf("a pinned command must still be checked; got %+v", got)
+	}
+}
+
+// --prefix moves the project npx runs from, so a bin found from the current
+// directory says nothing about what npx will fetch.
+func TestNpxPrefixDisablesTheLocalBinSkip(t *testing.T) {
+	old := localBinFn
+	localBinFn = func(string, bool) bool { return true }
+	t.Cleanup(func() { localBinFn = old })
+
+	for _, args := range [][]string{
+		{"--prefix", "/tmp/empty", "eslint"},
+		{"--prefix=/tmp/empty", "eslint"},
+		{"-C", "/tmp/empty", "eslint"},
+	} {
+		if got := npxParse(args).Specs; len(got) != 1 || got[0].Name != "eslint" {
+			t.Errorf("%v: specs = %+v, want eslint checked", args, got)
+		}
+	}
+	if got := npxParse([]string{"eslint"}).Specs; len(got) != 0 {
+		t.Errorf("without --prefix the local bin is used; got %+v", got)
 	}
 }
 
@@ -178,24 +222,72 @@ func TestRun_Npx_NothingToFetchForwardsWithoutScan(t *testing.T) {
 	}
 }
 
-func TestRun_Npx_ResolvesUnpinnedToLatest(t *testing.T) {
+// A tag or range is checked at the release npm would run for it, never at
+// latest: a malicious release can sit behind @next or on an older major line.
+func TestRun_Npx_ResolvesSpecifiersToWhatNpxRuns(t *testing.T) {
 	noLocalBins(t)
 	ex := &stubExec{}
-	var got string
+	var got []check.Spec
 	swap(t, ex.fn, func(_ context.Context, o check.Options) (*ossbom.SBOM, error) {
-		got = o.Specs[0].Version
+		got = o.Specs
 		return ossbom.New(ossbom.Environment{}), nil
 	})
+	var asked []string
 	err := Run(context.Background(), Options{
-		Bin:           "npx",
-		Args:          []string{"create-vite@latest", "app"},
-		ResolveLatest: func(context.Context, string, string) (string, error) { return "5.2.0", nil },
+		Bin:  "npx",
+		Args: []string{"-p", "create-vite@next", "-p", "cowsay@^1", "-p", "left-pad", "create-vite", "app"},
+		ResolveSpec: func(_ context.Context, name, spec string) (string, error) {
+			asked = append(asked, name+"@"+spec)
+			return map[string]string{"next": "6.0.0-beta.2", "^1": "1.5.0"}[spec], nil
+		},
+		ResolveLatest: func(context.Context, string, string) (string, error) { return "1.3.0", nil },
 	})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if got != "5.2.0" {
-		t.Errorf("checked version %q, want the registry's latest", got)
+	want := []check.Spec{
+		{Ecosystem: "npm", Name: "create-vite", Version: "6.0.0-beta.2"},
+		{Ecosystem: "npm", Name: "cowsay", Version: "1.5.0"},
+		{Ecosystem: "npm", Name: "left-pad", Version: "1.3.0"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("checked %+v, want %+v", got, want)
+	}
+	if want := []string{"create-vite@next", "cowsay@^1"}; !reflect.DeepEqual(asked, want) {
+		t.Errorf("resolved %v, want %v", asked, want)
+	}
+}
+
+// An unresolvable specifier is never reported as checked.
+func TestRun_Npx_UnresolvableSpecifierIsNotReportedClean(t *testing.T) {
+	noLocalBins(t)
+	ex := &stubExec{}
+	swap(t, ex.fn, func(context.Context, check.Options) (*ossbom.SBOM, error) {
+		t.Error("nothing resolved, so nothing should be checked")
+		return nil, nil
+	})
+	var buf bytes.Buffer
+	old := errOut
+	errOut = &buf
+	t.Cleanup(func() { errOut = old })
+
+	ctx := warn.NewContext(context.Background(), false)
+	err := Run(ctx, Options{
+		Bin:  "npx",
+		Args: []string{"cowsay@^9"},
+		ResolveSpec: func(context.Context, string, string) (string, error) {
+			return "", fmt.Errorf("%w cowsay@^9", registry.ErrNoMatch)
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "matched no published release; skipping its check") {
+		t.Errorf("expected the skipped check to be named, got:\n%s", out)
+	}
+	if strings.Contains(out, "no malware found") {
+		t.Errorf("an unchecked package must not read as clean:\n%s", out)
 	}
 }
 
@@ -219,4 +311,85 @@ func TestRun_Npx_PassiveSubmitsTheNamedPackage(t *testing.T) {
 	if !got.SubmitOnly || len(got.Specs) != 1 || got.Specs[0].Name != "evil" {
 		t.Errorf("submitted %+v, want evil submit-only", got)
 	}
+}
+
+// TestNpxTablesAgreeWithInstalledNpm re-derives npx_flags.go from the npm on
+// PATH. A flag missing from both tables is fine — npxParse checks both
+// readings of it — but one in the wrong table moves the check onto the wrong
+// token: a boolean read as an option swallows the package, an option read as a
+// boolean checks its value instead of what runs.
+func TestNpxTablesAgreeWithInstalledNpm(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not on PATH")
+	}
+	defs := installedNpmDefinitions(t, node)
+	if defs == "" {
+		t.Skip("could not locate npm's config definitions")
+	}
+	script := `const {definitions, shorthands} = require(process.argv[1]);
+const out = {switches: [], options: [], shorthands};
+for (const [k, {type}] of Object.entries(definitions))
+  (type === Boolean || (Array.isArray(type) && type.includes(Boolean)) ? out.switches : out.options).push(k);
+console.log(JSON.stringify(out));`
+	raw, err := exec.Command(node, "-e", script, defs).Output()
+	if err != nil {
+		t.Skipf("reading %s: %v", defs, err)
+	}
+	var got struct {
+		Switches   []string            `json:"switches"`
+		Options    []string            `json:"options"`
+		Shorthands map[string][]string `json:"shorthands"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range got.Switches {
+		if npxOptions[k] {
+			t.Errorf("--%s is a boolean in the installed npm but npxOptions says it takes a value", k)
+		}
+	}
+	for _, k := range got.Options {
+		if npxSwitches[k] {
+			t.Errorf("--%s takes a value in the installed npm but npxSwitches says it is a boolean", k)
+		}
+	}
+	for k, exp := range got.Shorthands {
+		ours, ok := npxShorthands[k]
+		if !ok || k == "p" || k == "n" {
+			continue // unknown to us is ambiguous (safe); npx overrides p and n
+		}
+		want := ""
+		if len(exp) == 1 {
+			want = strings.TrimPrefix(exp[0], "--")
+		}
+		if ours != want {
+			t.Errorf("shorthand -%s: installed npm expands to %v, npxShorthands says %q", k, exp, ours)
+		}
+	}
+}
+
+// installedNpmDefinitions finds @npmcli/config's definitions inside the npm
+// that ships with node, wherever this platform keeps it.
+func installedNpmDefinitions(t *testing.T, node string) string {
+	t.Helper()
+	var roots []string
+	if npm, err := exec.LookPath("npm"); err == nil {
+		if out, err := exec.Command(npm, "root", "-g").Output(); err == nil {
+			roots = append(roots, filepath.Join(strings.TrimSpace(string(out)), "npm"))
+		}
+	}
+	if real, err := filepath.EvalSymlinks(node); err == nil {
+		dir := filepath.Dir(real)
+		roots = append(roots,
+			filepath.Join(dir, "node_modules", "npm"),              // Windows
+			filepath.Join(dir, "..", "lib", "node_modules", "npm")) // Unix
+	}
+	for _, r := range roots {
+		p := filepath.Join(r, "node_modules", "@npmcli", "config", "lib", "definitions", "index.js")
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return ""
 }

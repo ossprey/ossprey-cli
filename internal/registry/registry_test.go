@@ -164,3 +164,45 @@ func TestResolveLatestCargoPrereleaseOnly(t *testing.T) {
 		t.Errorf("version: got %q, want the pre-release fallback", v)
 	}
 }
+
+func TestResolveNpmSpec(t *testing.T) {
+	var accept string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		accept = r.Header.Get("Accept")
+		io.WriteString(w, `{
+			"dist-tags": {"latest": "2.1.0", "next": "3.0.0-rc.1", "legacy": "1.2.0"},
+			"versions": {
+				"1.0.0": {}, "1.2.0": {}, "1.3.0": {}, "1.4.0": {"deprecated": "broken"},
+				"1.5.0-beta.1": {}, "2.0.0": {}, "2.1.0": {}, "2.2.0": {}, "3.0.0-rc.1": {}
+			}
+		}`)
+	}))
+	defer srv.Close()
+	old := npmBaseURL
+	npmBaseURL = srv.URL + "/"
+	defer func() { npmBaseURL = old }()
+
+	cases := map[string]string{
+		"next":   "3.0.0-rc.1", // a dist-tag runs what it points at, not latest
+		"legacy": "1.2.0",
+		"^1":     "1.3.0", // an older major line, skipping the deprecated 1.4.0 and the prerelease
+		"1.x":    "1.3.0",
+		"^2":     "2.1.0", // latest satisfies the range, so npm picks it over 2.2.0
+		"~1.4.0": "1.4.0", // deprecated is still better than nothing
+		"*":      "2.1.0",
+	}
+	for spec, want := range cases {
+		got, err := ResolveNpmSpec(context.Background(), "pkg", spec)
+		if err != nil || got != want {
+			t.Errorf("ResolveNpmSpec(%q) = %q, %v; want %q", spec, got, err, want)
+		}
+	}
+	if !strings.Contains(accept, "application/vnd.npm.install-v1+json") {
+		t.Errorf("Accept = %q, want the abbreviated packument", accept)
+	}
+	for _, spec := range []string{"^9", "nosuchtag"} {
+		if _, err := ResolveNpmSpec(context.Background(), "pkg", spec); !errors.Is(err, ErrNoMatch) {
+			t.Errorf("ResolveNpmSpec(%q) err = %v, want ErrNoMatch", spec, err)
+		}
+	}
+}
