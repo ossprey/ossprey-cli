@@ -183,17 +183,29 @@ directory `FileResolver` and runs them all unconditionally:
 
 - **Syft built-ins** handle lockfiles + installed-package metadata (Python, JS lock).
 - **Custom catalogers** fill resolution gaps where a project ships a manifest but no lockfile:
+  - **The Python resolver is chosen once, in `Catalog`** (`lookupUV`): `uv` where the host has one — its three catalogers get the resolved binary path — and `PipCataloger` otherwise. They resolve the same manifests, so building both would pay twice for identical output. Keep that choice at the call site: a cataloger that decides for itself whether to run hides the scan's shape from the one place that assembles it. `lookupUV` **runs** `uv --version` rather than trusting the PATH lookup, because picking uv rules pip out for the whole scan — a uv that is present but cannot execute would fail every manifest with no fallback left. `findPython` probes the same way, for the same reason.
+  - **These resolvers execute code, and the docs must not claim otherwise.** Resolving an sdist-only dependency makes pip *and* uv run that package's PEP 517 build backend to read its metadata — from the dependency tree we are scanning for malware. `npm install --package-lock-only --ignore-scripts` is the one that genuinely runs nothing. Neither `--only-binary=:all:` (pip) nor `--no-build` (uv) is set, because a sdist-only dependency would then fail the whole manifest instead of resolving.
   - `UVCataloger` — full transitive resolution via `uv` (hatch, uv, bare pyproject).
   - `SetupPyCataloger` — transitives from legacy `setup.py` setuptools projects.
-  - `PyProjectCataloger` — direct-deps fallback for `pyproject.toml` when `uv` is absent.
-  - `NpmResolveCataloger` — runs `npm install --package-lock-only` to resolve ranges when no lockfile is committed (npm analogue of uv). **This is the one place the CLI shells out to a package manager.**
+  - `PipCataloger` — the same resolution via `pip install --dry-run --report`, for hosts with no `uv`. Two rules are load-bearing. It shells out as `python -m pip`, never `pip`: `pip` may be an ossprey shim, which would route straight back into `ossprey pip install` → project scan → pip cataloger, unbounded. And it resolves a `pyproject.toml` from its *parsed* `[project]` requirement strings written to a temp file, never by pointing pip at the directory — `pip install --dry-run .` builds the project's metadata, executing a PEP 517 backend from the tree we are scanning for malware. `[tool.poetry.dependencies]` is skipped because poetry's caret/tilde shorthand is not PEP 508 and would fail the whole manifest (uv's `pip compile` reads `[project]` only, same as here); poetry projects are covered by their `poetry.lock` via syft. pip predating 22.2 has no `--dry-run`/`--report`, so the version is checked once and the cataloger skips with a warning rather than failing every manifest identically.
+  - `PyProjectCataloger` — direct-deps fallback for `pyproject.toml` when no resolver is available.
+  - `NpmResolveCataloger` — runs `npm install --package-lock-only` to resolve ranges when no lockfile is committed (npm analogue of uv).
   - `PackageJSONCataloger` — direct-deps fallback for `package.json`.
 
-Custom catalogers shell out via `lookTool`/`toolEnv` (`toolpath.go`), **never
-`exec.LookPath`**; if the tool is missing they **silently skip** (return nil)
-rather than error. Custom catalogers named via `isOspreyCataloger` parse deps
-only; syft's manifest catalogers also emit the root project itself, which is
-dropped via `isRootManifestPackage`.
+Custom catalogers shell out to a tool the caller resolved (`lookupUV`) or that
+they look up themselves (`npm`); a missing tool means the cataloger is not built,
+or **silently skips** (returns nil) rather than erroring. The one break in that
+silence is `PipCataloger`: when the host has no uv and no usable pip *and* the
+tree declares Python dependencies, it prints one line saying the scan covers
+direct dependencies only. That silence is what let a customer's CI ship manifest-only
+SBOMs for weeks — every unpinned dependency versionless, rejected at intake —
+without anything in the output saying so. Custom catalogers named via
+`isOspreyCataloger` parse deps only; syft's manifest catalogers also emit the
+root project itself, which is dropped via `isRootManifestPackage`.
+
+Every one of those lookups goes through `lookTool`/`toolEnv` (`toolpath.go`),
+**never `exec.LookPath`** — including `lookupUV`, even though it resolves once
+for the whole scan rather than per cataloger.
 
 **Why not `exec.LookPath`:** `ossprey shim install` puts the shim directory at
 the *front* of PATH, so on a machine with shims installed `exec.LookPath("npm")`
@@ -208,7 +220,9 @@ transitive dependencies went unscanned (OSS-1993). `lookTool` is
 `shim.LookPathReal`, which skips marker-carrying candidates; `toolEnv` also sets
 `OSSPREY_SHIM_BYPASS=1`, the same belt-and-braces pairing as the shim script's
 own PATH-stripping guard, for shims reached by a route PATH scanning cannot see.
-`TestCatalogNeverInvokesAnOssprevShim` pins it.
+`TestCatalogNeverInvokesAnOssprevShim` pins it. `PipCataloger` is exempt from the
+name lookup but not from the hazard: it shells out as `python -m pip` precisely
+because `pip` itself may be a shim.
 
 A cataloger's error is **not** a reason to drop its packages: syft's generic
 cataloger returns everything it parsed alongside an `unknown` error naming the
