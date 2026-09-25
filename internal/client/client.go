@@ -23,6 +23,23 @@ const pollInterval = 3 * time.Second
 // 300 polls at pollInterval gives a ~15 minute ceiling, above the platform's 850s budget.
 const maxPollAttempts = 300
 
+// retryInterval is the wait before the first submit retry; the second waits
+// twice as long. Kept short deliberately: this covers a dropped connection or a
+// load balancer blipping, not an outage, and a scan sits in front of a
+// developer's install.
+const retryInterval = 500 * time.Millisecond
+
+// maxSubmitAttempts is one submit plus two retries. A blip usually clears on
+// the first retry, and more attempts would trade a rare save against seconds
+// added to every genuinely-down run.
+const maxSubmitAttempts = 3
+
+// maxTransientPolls is how many consecutive transient status-poll failures are
+// tolerated before the scan is given up on. Bounded rather than unlimited: an
+// API that is simply down would otherwise hold the caller for the full poll
+// ceiling with nothing to show.
+const maxTransientPolls = 3
+
 // defaultBaseURL is used when New is called without an explicit URL.
 const defaultBaseURL = "https://api.ossprey.com"
 
@@ -87,6 +104,11 @@ type Client struct {
 
 	// PollBackoff returns the wait before poll `attempt`. Overridden in tests.
 	PollBackoff func(attempt int) time.Duration
+
+	// RetryBackoff returns the wait before submit retry `attempt`. Overridden
+	// in tests, for the same reason PollBackoff is: nothing in the suite should
+	// spend real seconds asleep.
+	RetryBackoff func(attempt int) time.Duration
 }
 
 // New constructs an API-key Client; baseURL defaults to https://api.ossprey.com.
@@ -128,9 +150,10 @@ func newClient(baseURL string) *Client {
 		baseURL = defaultBaseURL
 	}
 	return &Client{
-		BaseURL:     baseURL,
-		HTTP:        &http.Client{Timeout: 60 * time.Second},
-		PollBackoff: defaultPollBackoff,
+		BaseURL:      baseURL,
+		HTTP:         &http.Client{Timeout: 60 * time.Second},
+		PollBackoff:  defaultPollBackoff,
+		RetryBackoff: defaultRetryBackoff,
 	}
 }
 
@@ -164,6 +187,52 @@ func (c *Client) authenticate(req *http.Request) {
 
 func defaultPollBackoff(int) time.Duration {
 	return pollInterval
+}
+
+func defaultRetryBackoff(attempt int) time.Duration {
+	return time.Duration(attempt) * retryInterval
+}
+
+// retryable reports whether an HTTP status is worth sending the request again.
+//
+// Only the gateway family qualifies. A 4xx is a real answer -- a bad key, a
+// malformed SBOM -- and repeating it just delays the same failure; a 500 is the
+// backend having already accepted and processed the request, so a retry risks a
+// duplicate scan against the user's quota for no better odds.
+func retryable(status int) bool {
+	switch status {
+	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	}
+	return false
+}
+
+// sleepOrDone waits for d unless ctx ends first, in which case it returns the
+// context's error. Retries must never outlive a cancelled scan: a plain
+// time.Sleep here would keep a Ctrl-C'd or timed-out run alive for the backoff.
+func sleepOrDone(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+// authError turns a 401/403 into something a user can act on. The raw body is
+// a JSON blob naming no fix, and the credential could have come from any of
+// three places (see submit.NewClient), so the message names all of them.
+func (c *Client) authError(status int) error {
+	switch {
+	case c.IngestToken != "":
+		return fmt.Errorf("monitor id rejected (status %d): check the id passed to --monitor", status)
+	case c.BearerToken != "":
+		return fmt.Errorf("login rejected (status %d): your session is no longer valid, run `ossprey login` to sign in again", status)
+	default:
+		return fmt.Errorf("API key rejected (status %d): check OSSPREY_API_KEY (or --api-key), or run `ossprey login`", status)
+	}
 }
 
 type submitResponse struct {
@@ -275,31 +344,108 @@ func (c *Client) postScan(ctx context.Context, mb ossbom.MiniBOM) (int, []byte, 
 		return 0, nil, fmt.Errorf("build url: %w", c.redact(err))
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return 0, nil, err
+	backoff := c.RetryBackoff
+	if backoff == nil {
+		backoff = defaultRetryBackoff
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set(clientHeader, clientName())
-	req.Header.Set(clientVersionHdr, Version)
-	c.authenticate(req)
 
+	// A single dropped connection used to fail the whole scan with exit 1 --
+	// the same exit code as "malware found", so a network blip in CI read as a
+	// detection. Retry the transport and gateway failures that say nothing
+	// about the SBOM; everything else is an answer and is returned as one.
+	//
+	// The submit endpoint has no idempotency key, so a retry after a failure
+	// the backend had already accepted enqueues a second scan and spends a
+	// second unit of quota. That is the accepted cost: quota exhaustion fails
+	// open (ErrSkipped, exit 0) while the failure being fixed here fails closed
+	// and looks like malware, and a user whose scan died would re-run the
+	// command by hand anyway. Bounded at maxSubmitAttempts so the waste cannot
+	// compound. Revisit if the API grows an idempotency key.
+	var lastErr error
+	for attempt := 1; attempt <= maxSubmitAttempts; attempt++ {
+		if attempt > 1 {
+			if err := sleepOrDone(ctx, backoff(attempt-1)); err != nil {
+				return 0, nil, err
+			}
+		}
+
+		// The reader is rebuilt per attempt: bytes.NewReader is consumed by the
+		// first Do, so a retry reusing it would POST an empty body.
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+		if err != nil {
+			return 0, nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(clientHeader, clientName())
+		req.Header.Set(clientVersionHdr, Version)
+		c.authenticate(req)
+
+		status, respBody, err := c.doSubmit(req)
+		// Graded before err, so a rejected credential is named even when its
+		// response body never finished arriving.
+		if status == http.StatusUnauthorized || status == http.StatusForbidden {
+			return 0, nil, c.authError(status)
+		}
+		if err != nil {
+			// A cancelled or expired context is not transient: retrying would
+			// only fail the same way, once per remaining attempt.
+			if ctx.Err() != nil {
+				return 0, nil, err
+			}
+			lastErr = err
+			continue
+		}
+
+		switch {
+		case status == http.StatusOK || status == http.StatusAccepted:
+			return status, respBody, nil
+		case status == http.StatusTooManyRequests:
+			return 0, nil, errors.New("rate limit exceeded")
+		case retryable(status):
+			lastErr = fmt.Errorf("submit failed (status %d): %s", status, truncate(string(respBody), 500))
+		default:
+			return 0, nil, fmt.Errorf("submit failed (status %d): %s", status, truncate(string(respBody), 500))
+		}
+	}
+
+	return 0, nil, lastErr
+}
+
+// doSubmit sends one attempt and reads its body. Split out so the retry loop
+// above can defer nothing and still close every response body it opens.
+func (c *Client) doSubmit(req *http.Request) (int, []byte, error) {
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return 0, nil, fmt.Errorf("submit: %w", c.redact(err))
 	}
 	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
-
-	switch resp.StatusCode {
-	case http.StatusOK, http.StatusAccepted:
-		return resp.StatusCode, respBody, nil
-	case http.StatusTooManyRequests:
-		return 0, nil, errors.New("rate limit exceeded")
-	default:
-		return 0, nil, fmt.Errorf("submit failed (status %d): %s", resp.StatusCode, truncate(string(respBody), 500))
+	// A truncated body is as transient as a refused connection, and swallowing
+	// the read error here would surface it as a decode failure on a 202 -- a
+	// definite-looking error the retry loop would not touch.
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		// The status is returned alongside the error: it is the one thing that
+		// did arrive, and a 401 whose body failed to read is still a rejected
+		// credential, not a blip to retry.
+		return resp.StatusCode, nil, fmt.Errorf("submit: read response: %w", c.redact(err))
 	}
+	return resp.StatusCode, body, nil
+}
+
+// doPoll sends one status poll and reads its body. A failure to read the body
+// is returned as an error rather than ignored, so the caller counts it against
+// the transient allowance instead of decoding a half-received response.
+func (c *Client) doPoll(req *http.Request) (int, []byte, error) {
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return 0, nil, fmt.Errorf("poll status: %w", c.redact(err))
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return resp.StatusCode, nil, fmt.Errorf("poll status: read response: %w", c.redact(err))
+	}
+	return resp.StatusCode, body, nil
 }
 
 func (c *Client) waitForCompletion(ctx context.Context, sbomID, scanID string) (json.RawMessage, error) {
@@ -313,7 +459,11 @@ func (c *Client) waitForCompletion(ctx context.Context, sbomID, scanID string) (
 		backoff = defaultPollBackoff
 	}
 
-	for i := 1; i < maxPollAttempts; i++ {
+	// Consecutive transient failures, reset by any answer the API does give.
+	var transient int
+	var lastErr error
+
+	for i := 1; i <= maxPollAttempts; i++ {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
@@ -331,16 +481,37 @@ func (c *Client) waitForCompletion(ctx context.Context, sbomID, scanID string) (
 		q.Set("scan_id", scanID)
 		req.URL.RawQuery = q.Encode()
 
-		resp, err := c.HTTP.Do(req)
+		// The poll gets the same tolerance as the submit, but spends the
+		// existing attempt budget rather than adding sleeps of its own: it is
+		// already a loop with a wait in it. The scan is running server-side
+		// either way, so a blip here should cost a poll, not the verdict.
+		status, body, err := c.doPoll(req)
+		if status == http.StatusUnauthorized || status == http.StatusForbidden {
+			return nil, c.authError(status)
+		}
 		if err != nil {
-			return nil, fmt.Errorf("poll status: %w", err)
+			if ctx.Err() != nil {
+				return nil, err
+			}
+			lastErr = err
+			if transient++; transient >= maxTransientPolls {
+				return nil, lastErr
+			}
+			continue
 		}
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
 
-		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
-			return nil, fmt.Errorf("status poll failed (%d): %s", resp.StatusCode, truncate(string(body), 500))
+		if status != http.StatusOK && status != http.StatusAccepted {
+			err := fmt.Errorf("status poll failed (%d): %s", status, truncate(string(body), 500))
+			if !retryable(status) {
+				return nil, err
+			}
+			lastErr = err
+			if transient++; transient >= maxTransientPolls {
+				return nil, lastErr
+			}
+			continue
 		}
+		transient = 0
 
 		var sr statusResponse
 		if err := json.Unmarshal(body, &sr); err != nil {
