@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ossprey/ossprey-cli/internal/check"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
@@ -222,9 +223,10 @@ func TestRun_Npx_NothingToFetchForwardsWithoutScan(t *testing.T) {
 	}
 }
 
-// A tag or range is checked at the release npm would run for it, never at
-// latest: a malicious release can sit behind @next or on an older major line.
-func TestRun_Npx_ResolvesSpecifiersToWhatNpxRuns(t *testing.T) {
+// runNpxResolving runs npx with a stub resolver and returns what was checked
+// and what the resolver was asked.
+func runNpxResolving(t *testing.T, args []string, resolve func(name, spec string, pick registry.NpmPick) string) ([]check.Spec, []string) {
+	t.Helper()
 	noLocalBins(t)
 	ex := &stubExec{}
 	var got []check.Spec
@@ -233,28 +235,123 @@ func TestRun_Npx_ResolvesSpecifiersToWhatNpxRuns(t *testing.T) {
 		return ossbom.New(ossbom.Environment{}), nil
 	})
 	var asked []string
-	err := Run(context.Background(), Options{
+	err := Run(warn.NewContext(context.Background(), false), Options{
 		Bin:  "npx",
-		Args: []string{"-p", "create-vite@next", "-p", "cowsay@^1", "-p", "left-pad", "create-vite", "app"},
-		ResolveSpec: func(_ context.Context, name, spec string) (string, error) {
-			asked = append(asked, name+"@"+spec)
-			return map[string]string{"next": "6.0.0-beta.2", "^1": "1.5.0"}[spec], nil
+		Args: args,
+		ResolveSpec: func(_ context.Context, name, spec string, pick registry.NpmPick) (string, error) {
+			asked = append(asked, fmt.Sprintf("%s@%s tag=%q before=%s", name, spec, pick.DefaultTag, pick.Before.Format(time.RFC3339)))
+			return resolve(name, spec, pick), nil
 		},
-		ResolveLatest: func(context.Context, string, string) (string, error) { return "1.3.0", nil },
+		ResolveLatest: func(context.Context, string, string) (string, error) {
+			t.Error("npx must resolve through the npm-aware resolver, never plain latest")
+			return "", errors.New("unused")
+		},
 	})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
+	return got, asked
+}
+
+// Every non-exact spec — an unpinned name included — is checked at the release
+// npm would run for it: a malicious release can sit behind @next, on an older
+// major line, or behind a deprecated latest.
+func TestRun_Npx_ResolvesSpecifiersToWhatNpxRuns(t *testing.T) {
+	got, asked := runNpxResolving(t,
+		[]string{"-p", "create-vite@next", "-p", "cowsay@^1", "-p", "left-pad", "-p", "exact@1.0.0", "create-vite", "app"},
+		func(_, spec string, _ registry.NpmPick) string {
+			return map[string]string{"next": "6.0.0-beta.2", "^1": "1.5.0", "": "1.3.0"}[spec]
+		})
 	want := []check.Spec{
 		{Ecosystem: "npm", Name: "create-vite", Version: "6.0.0-beta.2"},
 		{Ecosystem: "npm", Name: "cowsay", Version: "1.5.0"},
 		{Ecosystem: "npm", Name: "left-pad", Version: "1.3.0"},
+		{Ecosystem: "npm", Name: "exact", Version: "1.0.0"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("checked %+v, want %+v", got, want)
 	}
-	if want := []string{"create-vite@next", "cowsay@^1"}; !reflect.DeepEqual(asked, want) {
-		t.Errorf("resolved %v, want %v", asked, want)
+	if len(asked) != 3 {
+		t.Errorf("an exact version needs no resolving; asked %v", asked)
+	}
+}
+
+// --tag and --before change what npx runs, so they reach the resolver, from a
+// flag or from npm_config_* (the flag wins).
+func TestRun_Npx_TagAndBeforeReachTheResolver(t *testing.T) {
+	stub := func(string, string, registry.NpmPick) string { return "1.0.0" }
+	cases := []struct {
+		name string
+		env  map[string]string
+		args []string
+		want string
+	}{
+		{"flags", nil, []string{"--tag", "beta", "--before", "2024-06-01", "cowsay"},
+			`cowsay@ tag="beta" before=2024-06-01T00:00:00Z`},
+		{"inline and alias", nil, []string{"--tag=beta", "--enjoy-by=2024-06-01T12:00:00Z", "cowsay@^1"},
+			`cowsay@^1 tag="beta" before=2024-06-01T12:00:00Z`},
+		{"environment", map[string]string{"NPM_CONFIG_TAG": "canary", "npm_config_before": "2024-06-01"}, []string{"cowsay"},
+			`cowsay@ tag="canary" before=2024-06-01T00:00:00Z`},
+		{"flag beats environment", map[string]string{"npm_config_tag": "canary"}, []string{"--tag", "beta", "cowsay"},
+			`cowsay@ tag="beta" before=0001-01-01T00:00:00Z`},
+		// A tag value is not the package.
+		{"value is consumed", nil, []string{"--tag", "latest", "cowsay"},
+			`cowsay@ tag="latest" before=0001-01-01T00:00:00Z`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("npm_config_tag", "")
+			os.Unsetenv("npm_config_tag")
+			t.Setenv("npm_config_before", "")
+			os.Unsetenv("npm_config_before")
+			for k, v := range c.env {
+				t.Setenv(k, v)
+			}
+			_, asked := runNpxResolving(t, c.args, stub)
+			if len(asked) != 1 || asked[0] != c.want {
+				t.Errorf("resolver asked %v, want [%s]", asked, c.want)
+			}
+		})
+	}
+}
+
+// A --before npm might read but ossprey cannot must not be guessed at: the
+// affected check is skipped with a warning, never reported clean. An exact
+// version does not depend on the date and is still checked.
+func TestRun_Npx_UnreadableBeforeSkipsTheCheck(t *testing.T) {
+	var buf bytes.Buffer
+	old := errOut
+	errOut = &buf
+	t.Cleanup(func() { errOut = old })
+
+	got, asked := runNpxResolving(t,
+		[]string{"--before", "next tuesday", "-p", "cowsay", "-p", "exact@1.0.0", "cowsay"},
+		func(string, string, registry.NpmPick) string { return "9.9.9" })
+	if len(asked) != 0 {
+		t.Errorf("nothing should be resolved against a date we cannot read; asked %v", asked)
+	}
+	if want := []check.Spec{{Ecosystem: "npm", Name: "exact", Version: "1.0.0"}}; !reflect.DeepEqual(got, want) {
+		t.Errorf("checked %+v, want %+v", got, want)
+	}
+	if !strings.Contains(buf.String(), "--before date ossprey cannot read; skipping its check") {
+		t.Errorf("expected the skipped check to be named, got:\n%s", buf.String())
+	}
+}
+
+func TestParseNpmDate(t *testing.T) {
+	for in, want := range map[string]string{
+		"2024-06-01":                "2024-06-01T00:00:00Z",
+		"2024-06-01T12:30:00Z":      "2024-06-01T12:30:00Z",
+		"2024-06-01T12:30:00.000Z":  "2024-06-01T12:30:00Z",
+		"2024-06-01T12:30:00+02:00": "2024-06-01T10:30:00Z",
+	} {
+		got, ok := parseNpmDate(in)
+		if !ok || got.UTC().Format(time.RFC3339) != want {
+			t.Errorf("parseNpmDate(%q) = %v, %v; want %s", in, got, ok, want)
+		}
+	}
+	if _, ok := parseNpmDate("next tuesday"); ok {
+		t.Error("an unreadable date must be reported, not guessed")
 	}
 }
 
@@ -275,7 +372,7 @@ func TestRun_Npx_UnresolvableSpecifierIsNotReportedClean(t *testing.T) {
 	err := Run(ctx, Options{
 		Bin:  "npx",
 		Args: []string{"cowsay@^9"},
-		ResolveSpec: func(context.Context, string, string) (string, error) {
+		ResolveSpec: func(context.Context, string, string, registry.NpmPick) (string, error) {
 			return "", fmt.Errorf("%w cowsay@^9", registry.ErrNoMatch)
 		},
 	})

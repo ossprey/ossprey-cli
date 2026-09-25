@@ -80,52 +80,95 @@ func resolveNpm(ctx context.Context, name string) (string, error) {
 // outage and not a missing package, so callers grade it apart from both.
 var ErrNoMatch = errors.New("no published version matches")
 
-// ResolveNpmSpec returns the release npm itself would pick for name@spec: the
-// version a dist-tag points at (`next`, `beta`), or the highest published
-// version a range allows (`^1`, `1.x`). An empty spec means latest.
+// NpmPick carries the npm config that changes which release a specifier
+// names: `--tag` (the default tag an unpinned name or a range prefers) and
+// `--before` (only releases published by then count).
+type NpmPick struct {
+	DefaultTag string    // "" means latest
+	Before     time.Time // zero means no cut-off
+}
+
+// ResolveNpmSpec returns the release npm itself would pick for name@spec,
+// following npm-pick-manifest step for step:
 //
-// Checking latest instead would pass a clean `latest` while npm runs whatever
-// the tag or an older major line points at, which is exactly where a malicious
-// release can sit unnoticed. As in npm, a spec that parses as a range is a
-// range; only otherwise is it looked up as a tag.
-func ResolveNpmSpec(ctx context.Context, name, spec string) (string, error) {
-	if spec == "" {
-		return resolveNpm(ctx, name)
-	}
-	// The abbreviated packument carries dist-tags and every version, and is a
-	// fraction of the full document's size for a popular package.
+//   - a dist-tag (`next`) names exactly the version it points at — unless that
+//     was published after Before, when the highest release up to it counts;
+//   - an unpinned name (the range `*`) or a range prefers the default tag's
+//     version when the range allows it and it is not deprecated — for `*`
+//     even when that version is a prerelease;
+//   - otherwise the highest matching release, non-deprecated first.
+//
+// Checking latest instead would pass a clean latest while npm runs whatever
+// the tag, an older major line or a --before date points at, which is exactly
+// where a malicious release can sit unnoticed. As in npm, a spec that parses as
+// a range is a range; only otherwise is it looked up as a tag.
+func ResolveNpmSpec(ctx context.Context, name, spec string, pick NpmPick) (string, error) {
 	var body struct {
-		DistTags map[string]string          `json:"dist-tags"`
-		Versions map[string]json.RawMessage `json:"versions"`
+		DistTags map[string]string `json:"dist-tags"`
+		Versions map[string]struct {
+			Deprecated any `json:"deprecated"`
+		} `json:"versions"`
+		Time map[string]string `json:"time"`
 	}
-	if err := getJSONAccept(ctx, npmBaseURL+url.PathEscape(name),
-		"application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8", &body); err != nil {
+	// The abbreviated packument carries dist-tags, versions and deprecation,
+	// at a fraction of the full document's size — but no publish times, so a
+	// cut-off needs the full one, as it does in npm.
+	accept := "application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8"
+	if !pick.Before.IsZero() {
+		accept = "application/json"
+	}
+	if err := getJSONAccept(ctx, npmBaseURL+url.PathEscape(name), accept, &body); err != nil {
 		return "", err
 	}
-	constraint, err := semver.NewConstraint(spec)
-	if err != nil {
-		if v := body.DistTags[spec]; v != "" {
-			return v, nil
+	publishedInTime := func(v string) bool {
+		if pick.Before.IsZero() {
+			return true
 		}
-		return "", fmt.Errorf("%w %s@%s (not a range or a dist-tag)", ErrNoMatch, name, spec)
+		t, err := time.Parse(time.RFC3339, body.Time[v])
+		return err == nil && !t.After(pick.Before)
 	}
-	// npm-pick-manifest's order: the latest tag when the range allows it, else
-	// the highest match that is not deprecated, else the highest match at all.
-	if latest, err := semver.StrictNewVersion(body.DistTags["latest"]); err == nil && constraint.Check(latest) {
-		return latest.Original(), nil
+	deprecated := func(v string) bool {
+		d := body.Versions[v].Deprecated
+		return d != nil && d != false && d != ""
 	}
+
+	constraint, err := semver.NewConstraint(orStar(spec))
+	if err != nil {
+		tagged := body.DistTags[spec]
+		if tagged == "" {
+			return "", fmt.Errorf("%w %s@%s (not a range or a dist-tag)", ErrNoMatch, name, spec)
+		}
+		if publishedInTime(tagged) {
+			return tagged, nil
+		}
+		if constraint, err = semver.NewConstraint("<=" + tagged); err != nil {
+			return "", fmt.Errorf("%w %s@%s (tag points at %q)", ErrNoMatch, name, spec, tagged)
+		}
+	}
+
+	defaultTag := pick.DefaultTag
+	if defaultTag == "" {
+		defaultTag = "latest"
+	}
+	if dv, err := semver.StrictNewVersion(body.DistTags[defaultTag]); err == nil {
+		raw := dv.Original()
+		// npm-pick-manifest tests a literal `*` — which is what an unpinned
+		// name is — by string, not by range, so a prerelease default tag
+		// (`--tag beta` pointing at 6.0.0-beta) still wins there.
+		allowed := orStar(spec) == "*" || constraint.Check(dv)
+		if _, published := body.Versions[raw]; published && allowed &&
+			!deprecated(raw) && publishedInTime(raw) {
+			return raw, nil
+		}
+	}
+
 	var best, bestDeprecated *semver.Version
-	for raw, meta := range body.Versions {
+	for raw := range body.Versions {
 		v, err := semver.StrictNewVersion(raw)
-		if err != nil || !constraint.Check(v) {
+		if err != nil || !constraint.Check(v) || !publishedInTime(raw) {
 			continue
 		}
-		var m struct {
-			Deprecated any `json:"deprecated"`
-		}
-		_ = json.Unmarshal(meta, &m)
-		deprecated := m.Deprecated != nil && m.Deprecated != false && m.Deprecated != ""
-		if deprecated {
+		if deprecated(raw) {
 			if bestDeprecated == nil || v.GreaterThan(bestDeprecated) {
 				bestDeprecated = v
 			}
@@ -137,9 +180,16 @@ func ResolveNpmSpec(ctx context.Context, name, spec string) (string, error) {
 		best = bestDeprecated
 	}
 	if best == nil {
-		return "", fmt.Errorf("%w %s@%s", ErrNoMatch, name, spec)
+		return "", fmt.Errorf("%w %s@%s", ErrNoMatch, name, orStar(spec))
 	}
 	return best.Original(), nil
+}
+
+func orStar(spec string) string {
+	if spec == "" {
+		return "*"
+	}
+	return spec
 }
 
 // resolvePyPI reads info.version from the PyPI JSON API.

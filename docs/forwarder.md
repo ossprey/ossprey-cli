@@ -101,13 +101,20 @@ runs. If it is flagged, `npx` never starts.
 - **`--package`/`-p` names the packages.** `npx -p typescript@5.4.0 tsc`
   checks `typescript@5.4.0`; `tsc` is a command it provides, not a package.
   Each `-p` is checked.
-- **The version checked is the version npx runs.** An exact version is checked
-  as given, an unpinned name at the registry's latest, a dist-tag
-  (`npx create-vite@next`) at the release that tag points to, and a range
-  (`npx cowsay@^1`) at the release npm would pick for it: the latest tag if the
-  range allows it, otherwise the highest non-deprecated match. If a tag or range
-  matches nothing, or the registry can't be reached, that package is skipped
-  with a warning rather than reported clean.
+- **The version checked is the version npx runs**, picked the way npm picks
+  it:
+  - an exact version is checked as given;
+  - a dist-tag (`npx create-vite@next`) is checked at the release it points to;
+  - an unpinned name or a range (`npx cowsay@^1`) is checked at the default tag
+    (`latest`) if the range allows it and that release isn't deprecated,
+    otherwise at the highest non-deprecated match.
+
+  `--tag` changes the default tag, and `--before` / `--enjoy-by` count only
+  releases published by that date. Both are read from the command line or from
+  `npm_config_tag` / `npm_config_before`, but not from `.npmrc`. If a `--before`
+  date can't be read, or a tag or range matches nothing, or the registry can't
+  be reached, that package is skipped with a warning rather than reported
+  clean.
 - **Options are read the way npm reads them.** Which options take a value comes
   from npm's own definitions. A few options mean different things in different
   npm versions: `--allow-scripts` takes a value in npm 12 but is an unknown

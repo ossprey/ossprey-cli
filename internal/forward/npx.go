@@ -2,10 +2,12 @@ package forward
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/Masterminds/semver/v3"
 
@@ -54,6 +56,7 @@ func npxParse(args []string) installArgs {
 		// redirected is set by --prefix, which moves the project npx looks in
 		// for local bins away from the one localBin would search.
 		redirected bool
+		pick       npxPick
 	)
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -92,6 +95,19 @@ func npxParse(args []string) installArgs {
 				i++
 			}
 			packages = append(packages, value)
+		case key == "tag" || key == "before":
+			if !hasInline {
+				if i+1 >= len(args) {
+					continue
+				}
+				value = next
+				i++
+			}
+			if key == "tag" {
+				pick.tag, pick.tagSet = value, true
+			} else {
+				pick.before, pick.beforeSet = value, true
+			}
 		case key == "prefix":
 			redirected = true
 			if !hasInline && i+1 < len(args) {
@@ -126,7 +142,7 @@ func npxParse(args []string) installArgs {
 		packages = candidates
 	}
 
-	var out installArgs
+	out := installArgs{npmPick: pick.withEnv()}
 	for _, tok := range packages {
 		// `npm:` names a registry package under an alias; the package is what
 		// follows it.
@@ -168,23 +184,94 @@ func exactNpmVersion(v string) (string, bool) {
 	return v, true
 }
 
-// resolveNpxSpecifiers turns each dist-tag or range into the release npm would
-// run for it. Checking latest instead would pass a clean latest while npx runs
-// whatever `@next` or an older major line points at. A specifier that cannot be
-// resolved is treated like a registry outage: warned about and not checked,
-// never reported as clean.
-func resolveNpxSpecifiers(ctx context.Context, resolve func(context.Context, string, string) (string, error), specs []check.Spec) []check.Spec {
+// npxPick is the npm config, as npx was given it, that changes which release
+// a specifier names. Flags win over npm_config_* environment variables, as in
+// npm. A .npmrc can set these too and is not read here.
+type npxPick struct {
+	tag, before       string
+	tagSet, beforeSet bool
+}
+
+func (p npxPick) withEnv() npxPick {
+	if !p.tagSet {
+		p.tag, p.tagSet = npmConfigEnv("tag")
+	}
+	if !p.beforeSet {
+		p.before, p.beforeSet = npmConfigEnv("before")
+	}
+	return p
+}
+
+// npmConfigEnv reads npm_config_<key>, which npm matches case-insensitively.
+func npmConfigEnv(key string) (string, bool) {
+	prefix := "npm_config_" + key + "="
+	for _, kv := range os.Environ() {
+		if len(kv) >= len(prefix) && strings.EqualFold(kv[:len(prefix)], prefix) {
+			return kv[len(prefix):], true
+		}
+	}
+	return "", false
+}
+
+// npmDateLayouts are the spellings of a --before date this parser accepts: the
+// ISO forms npm's own docs use, and the long forms JavaScript's Date prints.
+var npmDateLayouts = []string{
+	time.RFC3339Nano, "2006-01-02T15:04Z07:00", "2006-01-02T15:04:05", "2006-01-02T15:04",
+	"2006-01-02 15:04:05", "2006-01-02", time.RFC1123, time.RFC1123Z,
+	"Mon Jan 02 2006 15:04:05 GMT-0700", "Jan 2 2006", "January 2 2006", "Jan 2, 2006",
+	"January 2, 2006",
+}
+
+// parseNpmDate reads a --before value. A date alone is midnight UTC and a date
+// and time with no zone is local, which is how JavaScript's Date reads them.
+func parseNpmDate(v string) (time.Time, bool) {
+	v = strings.TrimSpace(v)
+	for _, layout := range npmDateLayouts {
+		loc := time.Local
+		if layout == "2006-01-02" || strings.Contains(layout, "Z07") || strings.Contains(layout, "MST") ||
+			strings.Contains(layout, "-0700") {
+			loc = time.UTC
+		}
+		if t, err := time.ParseInLocation(layout, v, loc); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
+}
+
+// resolveNpxSpecifiers turns every spec that is not an exact release — an
+// unpinned name, a dist-tag or a range — into the release npm would run for it,
+// honouring --tag and --before. Checking latest instead would pass a clean
+// latest while npx runs whatever `@next`, an older major line, a deprecated
+// latest or a cut-off date points at. A spec that cannot be resolved is treated
+// like a registry outage: warned about and not checked, never reported clean.
+func resolveNpxSpecifiers(ctx context.Context, resolve func(context.Context, string, string, registry.NpmPick) (string, error), p npxPick, specs []check.Spec) []check.Spec {
+	pick := registry.NpmPick{DefaultTag: p.tag}
+	// npm may read a date we cannot, and guessing would check a release other
+	// than the one it runs, so an unreadable one skips every check it affects.
+	beforeUnreadable := false
+	if p.beforeSet && p.before != "" {
+		t, ok := parseNpmDate(p.before)
+		pick.Before, beforeUnreadable = t, !ok
+	}
 	out := make([]check.Spec, 0, len(specs))
 	for _, s := range specs {
-		if s.Version != "" {
-			if _, exact := exactNpmVersion(s.Version); !exact {
-				v, err := resolve(ctx, s.Name, s.Version)
-				if err != nil {
-					warn.Add(ctx, registry.UnresolvedEntry(s.Ecosystem, s.Name, err, "skipping its check"))
-					continue
-				}
-				s.Version = v
+		if _, exact := exactNpmVersion(s.Version); !exact {
+			if beforeUnreadable {
+				warn.Add(ctx, warn.Entry{
+					Class: "npx-before-unreadable",
+					One:   "1 package's version depends on a --before date ossprey cannot read; skipping its check",
+					Many:  "%d packages' versions depend on a --before date ossprey cannot read; skipping their checks",
+					Item:  fmt.Sprintf("npm/%s (--before %q)", s.Name, p.before),
+				})
+				continue
 			}
+			v, err := resolve(ctx, s.Name, s.Version, pick)
+			if err != nil {
+				warn.Add(ctx, registry.UnresolvedEntry(s.Ecosystem, s.Name, err, "skipping its check"))
+				continue
+			}
+			s.Version = v
 		}
 		out = append(out, s)
 	}

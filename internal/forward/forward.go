@@ -288,9 +288,10 @@ type Options struct {
 	// ResolveLatest fills a concrete version for unpinned packages. Defaults to
 	// registry.ResolveLatest; overridable in tests.
 	ResolveLatest func(ctx context.Context, ecosystem, name string) (string, error)
-	// ResolveSpec picks the npm release a dist-tag or range names, for npx.
-	// Defaults to registry.ResolveNpmSpec; overridable in tests.
-	ResolveSpec func(ctx context.Context, name, spec string) (string, error)
+	// ResolveSpec picks the npm release npx would run for an unpinned name, a
+	// dist-tag or a range. Defaults to registry.ResolveNpmSpec; overridable in
+	// tests.
+	ResolveSpec func(ctx context.Context, name, spec string, pick registry.NpmPick) (string, error)
 	SkipCI      bool
 	// Passive submits the scan and forwards the install without waiting for a
 	// verdict. This is what the watchdog and monitor shims run in.
@@ -379,7 +380,7 @@ func Run(ctx context.Context, opts Options) error {
 	resolveAll := func(ctx context.Context) []check.Spec {
 		specs := parsed.Specs
 		if m.FetchExec {
-			specs = resolveNpxSpecifiers(ctx, resolveSpec, specs)
+			specs = resolveNpxSpecifiers(ctx, resolveSpec, parsed.npmPick, specs)
 		}
 		return resolveSpecs(ctx, resolve, specs)
 	}
@@ -730,6 +731,9 @@ type installArgs struct {
 	// ReqFiles are requirements files referenced via -r/--requirement. Their
 	// packages live in the file, not on the command line.
 	ReqFiles []string
+	// npmPick is npx's --tag/--before, which change which release an
+	// unpinned name or a range resolves to.
+	npmPick npxPick
 }
 
 // ParseSpecs classifies install arguments. A real-world multi-package install
