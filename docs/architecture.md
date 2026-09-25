@@ -45,7 +45,7 @@ install still works".
 
 ```mermaid
 flowchart TD
-    S["ossprey npm install ..."] --> T{"an install verb?"}
+    S["ossprey npm install ..."] --> T{"an install verb?<br/>(every npx is)"}
     T -- "no, e.g. npm run" --> U["exec the real manager"]
     T -- "yes" --> V{"OSSPREY_SKIP_CI?"}
     V -- "set" --> U
@@ -54,6 +54,7 @@ flowchart TD
     W -- "no: gating" --> X{"packages named?"}
     X -- "yes" --> Y["check those packages"]
     X -- "no: bare install" --> Z["scan the project manifest"]
+    X -- "no: npx fetches nothing<br/>(local bin, -c)" --> U
     Y --> AA{"malware?"}
     Z --> AA
     AA -- "yes" --> AB["block: exit 1,<br/>manager never runs"]
@@ -63,7 +64,7 @@ flowchart TD
     AC -- "yes: npm install,<br/>poetry add, uv sync, ..." --> AD["exec the real manager first"]
     AD --> AE["catalog the lockfile it wrote"]
     AE --> AF["post the scan, never block"]
-    AC -- "no: pip, uv pip,<br/>-g, --prefix ../x" --> AG["exec the real manager<br/>and submit the named<br/>packages alongside it"]
+    AC -- "no: pip, uv pip, npx,<br/>-g, --prefix ../x" --> AG["exec the real manager<br/>and submit the named<br/>packages alongside it"]
     AG --> AF
 ```
 

@@ -1,5 +1,5 @@
 // Package forward implements the package-manager forwarder: it inspects an
-// install command (npm/yarn/pip/poetry/uv), checks the named packages against
+// install command (npm/yarn/pip/poetry/uv) or an npx fetch-and-run, checks the named packages against
 // the Ossprey API, blocks the install if any are malicious, and otherwise execs
 // the real package manager with the original arguments untouched.
 //
@@ -69,6 +69,14 @@ type Manager struct {
 	// decides, so route on writesLocalLockfile rather than on this flag.
 	Lockfile  bool
 	installAt func(args []string) (specStart int, ok bool)
+	// parse classifies the arguments after installAt's specStart. Nil means
+	// ParseSpecs, which understands install verbs.
+	parse func(args []string) installArgs
+	// FetchExec marks a manager that downloads a package and runs it rather
+	// than installing into a project (npx). It has no manifest install: naming
+	// nothing means it runs something already on disk, so it never triggers a
+	// project scan.
+	FetchExec bool
 }
 
 // noLocalLockfileFlags name the options that stop an install from updating a
@@ -163,6 +171,8 @@ var managers = map[string]*Manager{
 	"poetry": {Bin: "poetry", Ecosystem: "pypi", Lockfile: true, installAt: verbAt("poetry", "add", "install", "update", "lock")},
 	// uv: `uv add <pkg>`, `uv sync`, and `uv pip install <pkg>`.
 	"uv": {Bin: "uv", Ecosystem: "pypi", Lockfile: true, installAt: uvInstallAt},
+	// npx: `npx <pkg>`, `npx -p <pkg> <cmd>`. See npx.go.
+	"npx": {Bin: "npx", Ecosystem: "npm", FetchExec: true, installAt: npxInstallAt, parse: npxParse},
 }
 
 // Managers returns the names of every supported forwarder, for CLI wiring.
@@ -278,7 +288,11 @@ type Options struct {
 	// ResolveLatest fills a concrete version for unpinned packages. Defaults to
 	// registry.ResolveLatest; overridable in tests.
 	ResolveLatest func(ctx context.Context, ecosystem, name string) (string, error)
-	SkipCI        bool
+	// ResolveSpec picks the npm release npx would run for an unpinned name, a
+	// dist-tag or a range. Defaults to registry.ResolveNpmSpec; overridable in
+	// tests.
+	ResolveSpec func(ctx context.Context, name, spec string, pick registry.NpmPick) (string, error)
+	SkipCI      bool
 	// Passive submits the scan and forwards the install without waiting for a
 	// verdict. This is what the watchdog and monitor shims run in.
 	Passive bool
@@ -326,6 +340,10 @@ func Run(ctx context.Context, opts Options) error {
 	if resolve == nil {
 		resolve = registry.ResolveLatest
 	}
+	resolveSpec := opts.ResolveSpec
+	if resolveSpec == nil {
+		resolveSpec = registry.ResolveNpmSpec
+	}
 
 	start, isInstall := m.installAt(opts.Args)
 	if !isInstall {
@@ -351,7 +369,21 @@ func Run(ctx context.Context, opts Options) error {
 		return passiveAfterInstall(ctx, m, opts)
 	}
 
-	parsed := ParseSpecs(m, opts.Args[start:])
+	var parsed installArgs
+	if m.parse != nil {
+		parsed = m.parse(opts.Args[start:])
+	} else {
+		parsed = ParseSpecs(m, opts.Args[start:])
+	}
+	// resolveAll pins every named package to the release that will actually be
+	// installed or run.
+	resolveAll := func(ctx context.Context) []check.Spec {
+		specs := parsed.Specs
+		if m.FetchExec {
+			specs = resolveNpxSpecifiers(ctx, resolveSpec, parsed.npmPick, specs)
+		}
+		return resolveSpecs(ctx, resolve, specs)
+	}
 
 	switch {
 	case len(parsed.Specs) > 0:
@@ -366,7 +398,7 @@ func Run(ctx context.Context, opts Options) error {
 			// on the command line are all we will ever know. Resolve and
 			// submit them beside the install rather than ahead of it.
 			return passiveAlongside(ctx, m, opts, len(parsed.Specs), func(ctx context.Context) (*ossbom.SBOM, error) {
-				resolved := resolveSpecs(ctx, resolve, parsed.Specs)
+				resolved := resolveAll(ctx)
 				if len(resolved) == 0 {
 					return nil, errNothingToCheck
 				}
@@ -379,7 +411,7 @@ func Run(ctx context.Context, opts Options) error {
 				})
 			})
 		}
-		resolved := resolveSpecs(ctx, resolve, parsed.Specs)
+		resolved := resolveAll(ctx)
 		if len(resolved) == 0 {
 			fmt.Fprintln(errOut, "ossprey: nothing left to check after version resolution; forwarding")
 			return forwardTo()
@@ -395,6 +427,16 @@ func Run(ctx context.Context, opts Options) error {
 		})
 		stop()
 		return finish(sbom, err)
+
+	case m.FetchExec:
+		// Nothing named will be fetched: a local bin, `npx --version`, or
+		// `npx -c` in the project's own context. A git or URL target is fetched
+		// and run, though, and cannot be checked, so say so.
+		if len(parsed.NonPackages) > 0 {
+			fmt.Fprintf(errOut, "ossprey: not checking non-registry targets: %s; forwarding\n",
+				strings.Join(parsed.NonPackages, ", "))
+		}
+		return forwardTo()
 
 	case manifestInstall(parsed):
 		// No packages named — the manager installs from the project manifest /
@@ -472,7 +514,11 @@ func reportAndForward(ctx context.Context, m *Manager, opts Options, sbom *ossbo
 	}
 	if hasMalware {
 		profile := ansi.Detect(errOut)
-		fmt.Fprint(errOut, alert.Malware(summary.Alert(), "Installation blocked.", profile))
+		outcome := "Installation blocked."
+		if m.FetchExec {
+			outcome = "Execution blocked."
+		}
+		fmt.Fprint(errOut, alert.Malware(summary.Alert(), outcome, profile))
 		for _, msg := range summary.Failing {
 			fmt.Fprintln(errOut, profile.Red("Error: "+msg))
 		}
@@ -685,6 +731,9 @@ type installArgs struct {
 	// ReqFiles are requirements files referenced via -r/--requirement. Their
 	// packages live in the file, not on the command line.
 	ReqFiles []string
+	// npmPick is npx's --tag/--before, which change which release an
+	// unpinned name or a range resolves to.
+	npmPick npxPick
 }
 
 // ParseSpecs classifies install arguments. A real-world multi-package install

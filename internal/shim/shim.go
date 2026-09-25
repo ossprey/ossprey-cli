@@ -33,7 +33,7 @@ const (
 	blockEnd   = "# <<< ossprey shims <<<"
 )
 
-var defaultManagers = []string{"npm", "pnpm", "yarn", "pip", "pip3", "poetry", "uv"}
+var defaultManagers = []string{"npm", "npx", "pnpm", "yarn", "pip", "pip3", "poetry", "uv"}
 
 func DefaultManagers() []string {
 	return slices.Clone(defaultManagers)

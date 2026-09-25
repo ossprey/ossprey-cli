@@ -45,7 +45,8 @@ yourself, `--dir` / `$OSSPREY_SHIM_DIR` to relocate them.
 **How it behaves**
 
 - **Only installs are checked.** `npm run build`, `poetry run pytest`, `pip
-  list` and friends are exec'd straight through. The allowlist is the same one
+  list` and friends are exec'd straight through. `npx` counts as an install
+  whenever it fetches a package to run. The allowlist is the same one
   the forwarder uses, so there is only one place it can drift.
 - **It fails open.** If the ossprey binary goes missing the shim prints a
   warning and runs the real manager anyway. `OSSPREY_SHIM_BYPASS=1 npm install
