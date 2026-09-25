@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -41,6 +42,36 @@ const maxTransientPolls = 3
 
 // defaultBaseURL is used when New is called without an explicit URL.
 const defaultBaseURL = "https://api.ossprey.com"
+
+// Client-identity headers. The API turns these into a metric dimension, which is
+// how a customer's version becomes visible without asking them for it.
+const (
+	clientHeader      = "X-Ossprey-Client"
+	clientVersionHdr  = "X-Ossprey-Client-Version"
+	defaultClientName = "cli"
+	clientNameEnv     = "OSSPREY_CLIENT"
+)
+
+// clientNamePattern bounds what a wrapper may call itself: the value becomes a
+// metric dimension, so it is held to the same shape the API accepts.
+var clientNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,31}$`)
+
+// Version is this binary's release version, set from main at startup (the same
+// ldflag-injected value `ossprey --version` prints). Wrappers report their own
+// identity through OSSPREY_CLIENT instead of replacing this: the version of the
+// CLI actually doing the scanning is what support needs.
+var Version = "0.0.0-dev"
+
+// clientName is what invoked us: the GitHub Action or Azure DevOps task wrapping
+// this binary when one did, otherwise the CLI itself. An unusable value falls
+// back to "cli" rather than sending junk the API would have to reject.
+func clientName() string {
+	name := strings.ToLower(strings.TrimSpace(os.Getenv(clientNameEnv)))
+	if !clientNamePattern.MatchString(name) {
+		return defaultClientName
+	}
+	return name
+}
 
 // APIKeyFromEnv returns the first non-empty value of OSSPREY_API_KEY then
 // API_KEY. Returns "" if neither is set.
@@ -345,6 +376,8 @@ func (c *Client) postScan(ctx context.Context, mb ossbom.MiniBOM) (int, []byte, 
 			return 0, nil, err
 		}
 		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(clientHeader, clientName())
+		req.Header.Set(clientVersionHdr, Version)
 		c.authenticate(req)
 
 		status, respBody, err := c.doSubmit(req)

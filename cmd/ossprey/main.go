@@ -55,6 +55,10 @@ func main() {
 		}
 	}()
 
+	// What --version prints and what every scan submission reports, from the
+	// one ldflag-injected value, so the two cannot drift.
+	client.Version = version
+
 	// One collector for the whole run. It is built before cobra parses -v, so
 	// the root's PersistentPreRun raises it once the flag is known.
 	ctx := warn.NewContext(context.Background(), false)
