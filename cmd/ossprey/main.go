@@ -72,7 +72,9 @@ func main() {
 	fmt.Fprint(os.Stderr, warn.Drain(ctx))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
-		os.Exit(1)
+		// 2, not 1: exit 1 means malware and nothing else, so a failed scan
+		// must never read as a detection (or a detection as a failed scan).
+		os.Exit(2)
 	}
 }
 

@@ -25,8 +25,9 @@ To have the forwarders run without typing `ossprey` every time, see
 
 - `0` — no malware found, only informational findings, `--local` dump, or scan
   skipped by the API (e.g. quota exhausted)
-- `1` — malware found, **or** the scan itself failed (bad path, catalog error,
-  API/network error, missing key)
+- `1` — malware found, and nothing else
+- `2` — the scan itself failed (bad path, catalog error, API/network error,
+  missing key, bad flag), or ossprey crashed
 
 A finding graded `Info` is reported as a `Note:` line and does not fail the
 scan. Every other grade fails, and so does a finding the API could not grade,
@@ -37,8 +38,8 @@ build stopped on anything Ossprey reports at all. It only ever makes the check
 stricter; there is deliberately no flag to raise the threshold, because that
 would let a real detection through.
 
-"Clean" and "errored" share exit code `0` and `1` respectively with other
-outcomes, so if CI needs to tell them apart, write a
+Exit `0` covers both "clean" and "skipped" (nothing was checked), so if CI
+needs to tell those apart, write a
 [`--report` file](output.md#machine-readable-verdict---report): it exists, with
 a `verdict`, only when the scan actually reached one.
 
@@ -112,7 +113,7 @@ registry (PyPI / npm) and checked. Both `name@version` and pip's
 | `--dry-run-safe` | Skip the API; report an empty vulnerability list. |
 | `--dry-run-malicious` | Skip the API; inject a test finding against the first package. |
 
-Exit codes match `scan`: `1` on a malware verdict or error, `0` otherwise
+Exit codes match `scan`: `1` on a malware verdict, `2` on error, `0` otherwise
 (an `Info` finding is reported but does not fail).
 
 ## Authentication
