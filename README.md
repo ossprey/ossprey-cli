@@ -73,10 +73,11 @@ ossprey check -e npm left-pad@1.3.0 # or just ask about one package
 | Exit | Meaning |
 | ---- | ------- |
 | `0` | Nothing malicious found (or the scan was skipped, e.g. quota exhausted) |
-| `1` | Malware found — **or** the scan itself failed |
+| `1` | Malware found |
+| `2` | The scan itself failed (bad path, network/API error, missing key) |
 
 So `ossprey scan .` in a CI job fails the build on malware, with no extra
-plumbing. If you need to tell "clean" apart from "errored", or want the findings
+plumbing. If you need to tell "clean" apart from "skipped", or want the findings
 as JSON, use [`--report report.json`](docs/output.md#machine-readable-verdict---report).
 
 ---

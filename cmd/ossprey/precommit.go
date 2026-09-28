@@ -86,7 +86,7 @@ func hasPrecommitCredentials(apiKey string) bool {
 // staged dependency manifests against HEAD and checks only the packages the
 // commit introduces against the known-malware lookup.
 //
-// Exit-code semantics deliberately differ from `scan` (where errors exit 1):
+// Exit-code semantics deliberately differ from `scan` (where errors exit 2):
 // this runs on every commit, so anything that is not a confirmed malware hit
 // — no API key or login session, network outage, endpoint not deployed, git
 // trouble — fails
