@@ -15,12 +15,19 @@ const (
 	ProductGitHubActions = "GITHUB_ACTIONS"
 )
 
+// MachineGitHubHosted stands in for the hostname on a GitHub-hosted runner.
+// Each job gets a fresh VM with its own hostname, and the backend hashes the
+// SBOM's env into its id, so the real hostname made every CI run of unchanged
+// dependencies a distinct SBOM the service could not recognise as a repeat.
+const MachineGitHubHosted = "github-hosted-runner"
+
 type detector func() (ossbom.Environment, bool)
 
 var detectors = []detector{detectAzureDevOps, detectGitHubActions}
 
 // Overlay fills attribution and Project from the detected CI platform, leaving
-// Path and MachineName to the caller.
+// Path to the caller. MachineName is left to the caller too, except on an
+// ephemeral hosted runner, where the platform's stable name replaces it.
 func Overlay(e *ossbom.Environment) {
 	for _, detect := range detectors {
 		got, ok := detect()
@@ -32,6 +39,9 @@ func Overlay(e *ossbom.Environment) {
 		setIfEmpty(&e.Branch, got.Branch)
 		setIfEmpty(&e.ProductEnv, got.ProductEnv)
 		setIfEmpty(&e.Project, got.Project)
+		if got.MachineName != "" {
+			e.MachineName = got.MachineName
+		}
 		return
 	}
 }
@@ -85,6 +95,11 @@ func detectGitHubActions() (ossbom.Environment, bool) {
 	}
 
 	e := ossbom.Environment{Branch: githubBranch(), ProductEnv: ProductGitHubActions}
+	// Self-hosted runners keep their hostname: it is stable, so it already
+	// dedupes, and it says which machine ran the scan.
+	if os.Getenv("RUNNER_ENVIRONMENT") == "github-hosted" {
+		e.MachineName = MachineGitHubHosted
+	}
 	// A half-filled org/repo pair groups nothing, so require both.
 	if org, repo, ok := strings.Cut(os.Getenv("GITHUB_REPOSITORY"), "/"); ok {
 		e.GithubOrg, e.GithubRepo, e.Project = org, repo, repo
