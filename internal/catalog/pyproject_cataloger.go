@@ -33,6 +33,7 @@ func (c *PyProjectCataloger) Catalog(ctx context.Context, resolver file.Resolver
 type pyproject struct {
 	Project struct {
 		Name                 string              `toml:"name"`
+		RequiresPython       string              `toml:"requires-python"`
 		Dependencies         []string            `toml:"dependencies"`
 		OptionalDependencies map[string][]string `toml:"optional-dependencies"`
 	} `toml:"project"`

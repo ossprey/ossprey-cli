@@ -427,6 +427,63 @@ func TestUVArgsForPyProject(t *testing.T) {
 	}
 }
 
+func TestUVArgsForPyProjectPoetryPythonFloor(t *testing.T) {
+	pythonVersion := func(args []string) string {
+		for i, a := range args {
+			if a == "--python-version" && i+1 < len(args) {
+				return args[i+1]
+			}
+		}
+		return ""
+	}
+	tests := []struct {
+		name, pyproject, want string
+	}{
+		{"poetry caret", "[tool.poetry.dependencies]\npython = \"^3.12\"\n", "3.12"},
+		{"requires-python wins", "[project]\nname = \"x\"\nrequires-python = \">=3.10\"\n[tool.poetry.dependencies]\npython = \"^3.12\"\n", ""},
+		{"no python constraint", "[tool.poetry.dependencies]\nrequests = \"^2\"\n", ""},
+		{"no poetry table", "[project]\nname = \"x\"\n", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, dir, "pyproject.toml", tt.pyproject)
+			args := uvArgsForPyProject(dir)
+			if got := pythonVersion(args); got != tt.want {
+				t.Errorf("--python-version = %q, want %q (args %v)", got, tt.want, args)
+			}
+			if args[len(args)-1] != filepath.Join(dir, "pyproject.toml") {
+				t.Errorf("pyproject.toml must stay the last arg, got %v", args)
+			}
+		})
+	}
+}
+
+func TestPythonConstraintFloor(t *testing.T) {
+	tests := map[string]string{
+		"^3.12":         "3.12",
+		"~3.11":         "3.11",
+		"~=3.10":        "3.10",
+		">=3.10,<4.0":   "3.10",
+		">= 3.9, < 4":   "3.9",
+		"<4.0,>=3.12":   "3.12",
+		"3.12.*":        "3.12",
+		"==3.11.4":      "3.11",
+		"^3.9 || ^3.11": "3.9",
+		">=3.8,>=3.10":  "3.10",
+		"*":             "",
+		"<4.0":          "",
+		">3.11":         "",
+		"^3.12 || *":    "",
+		"":              "",
+	}
+	for spec, want := range tests {
+		if got := pythonConstraintFloor(spec); got != want {
+			t.Errorf("pythonConstraintFloor(%q) = %q, want %q", spec, got, want)
+		}
+	}
+}
+
 func TestOssbomType(t *testing.T) {
 	tests := []struct {
 		in   pkg.Type
