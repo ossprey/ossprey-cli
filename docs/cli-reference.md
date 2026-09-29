@@ -11,6 +11,7 @@ Every command, flag and credential the CLI understands.
 | [`ossprey git clone\|pull ...`](git.md) | Check a public GitHub repo, then run git. Blocks on malware. |
 | [`ossprey shim install`](shims.md) | Put shims on `PATH` so installs are checked without the `ossprey` prefix. |
 | [`ossprey precommit`](precommit.md) | Git pre-commit hook: block commits that stage known-malicious packages. |
+| [`ossprey trust list\|add\|remove`](trust.md) | Manage trusted registries and npm scopes, whose packages are neither checked nor sent. |
 | [`ossprey login`](#authentication) | Browser login via Auth0. Stores tokens locally. |
 | [`ossprey whoami`](#authentication) | Show who the stored login belongs to. |
 | [`ossprey logout`](#authentication) | Remove the stored login. |
@@ -58,7 +59,9 @@ a `verdict`, only when the scan actually reached one.
 | `OSSPREY_RESOLVE_TIMEOUT` | — | Cap one uv/npm resolver invocation (default `2m`). |
 | `OSSPREY_SCAN_CONCURRENCY` | — | How many catalogers run at once (default `8`). |
 | `OSSPREY_RESOLVE_LATEST=0` | `--no-version-lookup` | Don't resolve unpinned versions from the registry. |
-| `OSSPREY_CONFIG_DIR` | — | Where the stored login lives. |
+| `OSSPREY_CONFIG_DIR` | — | Where the stored login and `trust.json` live. |
+| `OSSPREY_TRUSTED_REGISTRIES` | `trust add --registry` | Extra [trusted registry](trust.md) URL prefixes, comma-separated. |
+| `OSSPREY_TRUSTED_NPM_SCOPES` | `trust add --npm-scope` | Extra [trusted npm scopes](trust.md), comma-separated. |
 | `OSSPREY_SHIM_DIR` | `--dir` | Where [shims](shims.md) are written. |
 | `OSSPREY_SHIM_BYPASS=1` | — | Skip the check for one shimmed command. |
 | `OSSPREY_PRECOMMIT_TIMEOUT` | — | Budget for the [pre-commit](precommit.md) lookup (default `10s`). |
@@ -115,6 +118,8 @@ registry (PyPI / npm) and checked. Both `name@version` and pip's
 
 Exit codes match `scan`: `1` on a malware verdict, `2` on error, `0` otherwise
 (an `Info` finding is reported but does not fail).
+
+`check` ignores [trusted sources](trust.md): a package you name is checked.
 
 ## Authentication
 

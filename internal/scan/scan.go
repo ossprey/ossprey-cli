@@ -17,6 +17,8 @@ import (
 	"github.com/ossprey/ossprey-cli/internal/env"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
 	"github.com/ossprey/ossprey-cli/internal/severity"
+	"github.com/ossprey/ossprey-cli/internal/trust"
+	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
 type Options struct {
@@ -34,6 +36,9 @@ type Options struct {
 	// Timeout caps the whole catalogue; zero means no deadline. On expiry the
 	// SBOM cataloged so far is returned rather than discarded.
 	Timeout time.Duration
+	// Trust names the sources whose packages are left out of the SBOM: not
+	// checked, and not sent. See internal/trust.
+	Trust trust.Policy
 }
 
 // ErrNoComponents is returned by InjectTestVulnerability when nothing was catalogued.
@@ -56,6 +61,7 @@ func Run(ctx context.Context, opts Options) (*ossbom.SBOM, error) {
 	pkgs, err := catalog.Catalog(ctx, opts.Path, catalog.Options{
 		SkipVersionLookup: opts.SkipVersionLookup,
 		NoExec:            opts.NoExec,
+		Trust:             opts.Trust,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("catalog: %w", err)
@@ -80,6 +86,15 @@ func Run(ctx context.Context, opts Options) (*ossbom.SBOM, error) {
 	sbom.Name = scanEnv.Project
 
 	for _, p := range pkgs {
+		// Dropped here rather than in the catalog so that every consumer of
+		// the SBOM — the submission, `--local`, `-o` — sees the same thing:
+		// a trusted package is not sent anywhere. Never silently, though; a
+		// scan that quietly checked less than it catalogued is what OSS-2001's
+		// warnings exist to prevent.
+		if p.Trusted {
+			warn.Add(ctx, TrustedEntry(p.Type, p.Name, p.Version))
+			continue
+		}
 		c := ossbom.Component{
 			Name:     p.Name,
 			Version:  p.Version,
@@ -98,6 +113,22 @@ func Run(ctx context.Context, opts Options) (*ossbom.SBOM, error) {
 	}
 
 	return sbom, nil
+}
+
+// TrustedEntry is the warning recorded for a package left out of a scan
+// because its source is trusted. One class for every path that drops one, so
+// scan, pre-commit and the forwarders count them the same way.
+func TrustedEntry(ecosystem, name, version string) warn.Entry {
+	id := name
+	if version != "" {
+		id += "@" + version
+	}
+	return warn.Entry{
+		Class: "trusted-source",
+		One:   fmt.Sprintf("%s (%s) is from a trusted source; not checked or sent", id, ecosystem),
+		Many:  "%d packages are from trusted sources; not checked or sent (OSSPREY_VERBOSE=1 lists them)",
+		Item:  fmt.Sprintf("%s (%s)", id, ecosystem),
+	}
 }
 
 // InjectTestVulnerability appends a fake malware finding against the first component.

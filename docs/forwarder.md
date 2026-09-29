@@ -59,6 +59,10 @@ still put code on your machine:
 
 For these, run `ossprey scan` on the project afterwards.
 
+Packages from [trusted sources](trust.md) are deliberately not checked. A named
+install applies only the npm scope rule, and a bare install applies both rules,
+from the lockfile.
+
 **Two modes, picked automatically:**
 
 - **Named packages** (`ossprey npm install foo bar`, `ossprey pip install

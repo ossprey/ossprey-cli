@@ -18,7 +18,7 @@ is, install, `init`, scan, and one short section per way of using it, each
 linking onward. Keep it that way — every flag table, edge case and rationale
 belongs in `docs/`, which is the reference set (`install`, `init`,
 `cli-reference`, `forwarder`, `shims`, `passive-monitoring`, `precommit`, `ci`,
-`output`, `ecosystems`, `architecture`, indexed by `docs/README.md`). When a
+`output`, `ecosystems`, `trust`, `architecture`, indexed by `docs/README.md`). When a
 behaviour changes, the user-facing statement of it lives in exactly one of those
 pages; this file keeps the *why*. `docs/architecture.md` holds the mermaid
 diagrams, so a change to the forwarder's decisions or the scan pipeline needs
@@ -166,6 +166,49 @@ A shim is a generated `/bin/sh` script (`.cmd` on Windows) named after the manag
 - **Only our files.** `Uninstall` deletes only marker-carrying files; profile edits live between `# >>> ossprey shims >>>` markers.
 
 `shim` must stay a leaf package (`forward` imports it) — its only first-party dependency is `internal/monitor`, which is itself dependency-free. Do **not** reach for `internal/client` from here to validate a monitor id, which is what `internal/monitor` exists to avoid. `DefaultManagers()` and `forward.Managers()` are kept in agreement by an external test in `internal/shim/forward_agreement_test.go`.
+
+### Trusted sources (`internal/trust`)
+
+A customer's internal packages live on private registries (a CodeArtifact
+"internal" PyPI index beside a "public-proxy" one on the **same host**; npm via
+`@org:registry=`). They cannot be resolved publicly, so they filled scans with
+NOT_FOUND noise and sent internal names off the machine. `trust.Policy` holds
+registry URL prefixes and npm scopes; trusted packages are **dropped before the
+SBOM is built** (`scan.Run`, after `catalog` marks `Package.Trusted`), so the
+submission, `--local` and `-o` agree, and one counted `warn` class
+(`scan.TrustedEntry`) says how many were left out. `ossprey trust
+list|add|remove` writes `trust.json` beside `credentials.json`;
+`OSSPREY_TRUSTED_REGISTRIES` / `OSSPREY_TRUSTED_NPM_SCOPES` add to it.
+
+Every rule is a hole in the scan by design, so the rules are narrow:
+
+- **No name rule for PyPI**, even though a name prefix was the first thing asked for.
+  Anyone can publish that name to PyPI, and an internal name resolved from
+  the public index (dependency confusion) is exactly what an ignore must never
+  hide. npm scopes are the one name rule, because a mapped scope *is* how npm
+  picks the registry and it never falls back to the public one.
+- **Prefix, never host.** Both CodeArtifact repos share a host; host matching
+  would trust the proxy. Paths are `path.Clean`ed after decoding, so
+  `/internal/../public-proxy/` (or `%2e%2e`) is judged where it lands.
+- **Provenance is what the lockfile recorded** (`registryOf`: npm/yarn
+  `resolved`, uv/poetry `Index`, pip `download_info.url`, our npm resolver's
+  lock). Unrecorded means checked. Trusted needs **every** recorded sighting
+  trusted: dedup and `mergeVersionless` fold sightings' `Registries` together
+  rather than keeping the first, since one lockfile fetching it publicly is
+  enough to need a check. Don't add pnpm (no URL) or Pipfile.lock (index
+  *name*) without real URLs.
+- **Named forwarded installs apply only the scope rule** (`dropTrusted`, before
+  `resolveSpecs` so nothing private is looked up publicly). Inferring the
+  registry from `pip.conf`/`.npmrc` was rejected: missing an `extra-index-url`
+  would trust a package pip then fetches publicly. The status quo there is
+  already right — a private-only name 404s and is skipped once; a squatted
+  public one gets checked. An all-trusted named install must forward directly:
+  an empty spec list otherwise reads as a bare install and scans the project.
+- **Machine-level only, never from the repo** — a PR could otherwise trust its
+  own registry. A bad entry is dropped with a warning (`loadTrust`), which only
+  means more is checked; `trust add/remove` refuse to rewrite a file they could
+  not fully parse, since writing back what parsed would delete the rest.
+- `check` ignores trust: naming a package is asking for it to be checked.
 
 ### Core data flow (scan)
 
