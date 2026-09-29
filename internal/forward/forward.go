@@ -31,6 +31,7 @@ import (
 	"github.com/ossprey/ossprey-cli/internal/severity"
 	"github.com/ossprey/ossprey-cli/internal/shim"
 	"github.com/ossprey/ossprey-cli/internal/submit"
+	"github.com/ossprey/ossprey-cli/internal/trust"
 	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
@@ -285,6 +286,11 @@ type Options struct {
 	// MonitorID sends a passive submission through a monitor's ingest token, so
 	// the machine needs no login and no API key. Ignored unless Passive.
 	MonitorID string
+	// Trust names sources whose packages are neither checked nor sent. A named
+	// install applies only its npm scopes: which registry a package not yet
+	// installed will be fetched from is recorded nowhere until the lockfile is
+	// written. Project scans apply all of it.
+	Trust trust.Policy
 }
 
 // Run executes the forwarder flow:
@@ -352,6 +358,18 @@ func Run(ctx context.Context, opts Options) error {
 	}
 
 	parsed := ParseSpecs(m, opts.Args[start:])
+	if kept := dropTrusted(ctx, opts.Trust, parsed.Specs); len(kept) < len(parsed.Specs) {
+		parsed.Specs = kept
+		// Every named package was trusted. Without this the empty spec list
+		// would read as a bare install and scan the whole project instead.
+		if len(kept) == 0 {
+			// What was trusted first, then what that means for the install.
+			fmt.Fprint(errOut, warn.Drain(ctx))
+			fmt.Fprintf(errOut, "ossprey: every package named is from a trusted source; forwarding `%s %s` unchecked\n",
+				m.Bin, strings.Join(opts.Args, " "))
+			return forwardTo()
+		}
+	}
 
 	switch {
 	case len(parsed.Specs) > 0:
@@ -410,7 +428,7 @@ func Run(ctx context.Context, opts Options) error {
 			return passiveAlongside(ctx, m, opts, 0, func(ctx context.Context) (*ossbom.SBOM, error) {
 				return scanProjectFn(ctx, scanRequest{
 					Dir: ".", APIURL: opts.APIURL, APIKey: opts.APIKey,
-					MonitorID: opts.MonitorID, SubmitOnly: true,
+					MonitorID: opts.MonitorID, SubmitOnly: true, Trust: opts.Trust,
 				})
 			})
 		}
@@ -421,6 +439,7 @@ func Run(ctx context.Context, opts Options) error {
 		stop := progress.Start(progressOut, "ossprey: scan in progress")
 		sbom, err := scanProjectFn(ctx, scanRequest{
 			Dir: ".", APIURL: opts.APIURL, APIKey: opts.APIKey, MonitorID: opts.MonitorID,
+			Trust: opts.Trust,
 		})
 		stop()
 		return finish(sbom, err)
@@ -432,6 +451,26 @@ func Run(ctx context.Context, opts Options) error {
 			strings.Join(parsed.NonPackages, ", "))
 		return forwardTo()
 	}
+}
+
+// dropTrusted removes the specs the policy trusts by name, recording each. It
+// runs before version resolution so a private package is never looked up on
+// the public registry, which is where the noise it exists to remove came from.
+//
+// Only the npm scope rule can apply here; see Options.Trust.
+func dropTrusted(ctx context.Context, policy trust.Policy, specs []check.Spec) []check.Spec {
+	if policy.Empty() {
+		return specs
+	}
+	kept := make([]check.Spec, 0, len(specs))
+	for _, s := range specs {
+		if policy.Trusts(s.Ecosystem, s.Name, nil) {
+			warn.Add(ctx, scan.TrustedEntry(s.Ecosystem, s.Name, s.Version))
+			continue
+		}
+		kept = append(kept, s)
+	}
+	return kept
 }
 
 // resolveSpecs fills concrete versions for unpinned specs. Fail open: a registry
@@ -538,10 +577,12 @@ type scanRequest struct {
 	// the lockfile already names the whole resolved tree, so re-resolving it
 	// would only repeat, slower, work the manager has just finished.
 	Installed bool
+	// Trust is passed to the scan; trusted packages are not sent.
+	Trust trust.Policy
 }
 
 func scanProject(ctx context.Context, req scanRequest) (*ossbom.SBOM, error) {
-	sbom, err := scan.Run(ctx, scan.Options{Path: req.Dir, NoExec: req.Installed})
+	sbom, err := scan.Run(ctx, scan.Options{Path: req.Dir, NoExec: req.Installed, Trust: req.Trust})
 	if err != nil {
 		return nil, err
 	}
@@ -550,7 +591,7 @@ func scanProject(ctx context.Context, req scanRequest) (*ossbom.SBOM, error) {
 		// a failed install). Fall back to the declaring scan rather than
 		// reporting a project with no dependencies: passive mode's whole job is
 		// to see this machine's installs.
-		if sbom, err = scan.Run(ctx, scan.Options{Path: req.Dir}); err != nil {
+		if sbom, err = scan.Run(ctx, scan.Options{Path: req.Dir, Trust: req.Trust}); err != nil {
 			return nil, err
 		}
 	}
@@ -604,6 +645,7 @@ func passiveAfterInstall(ctx context.Context, m *Manager, opts Options) error {
 		MonitorID:  opts.MonitorID,
 		SubmitOnly: true,
 		Installed:  true,
+		Trust:      opts.Trust,
 	})
 	stop()
 

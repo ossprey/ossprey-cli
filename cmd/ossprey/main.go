@@ -103,6 +103,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newWhoamiCmd())
 	root.AddCommand(newUpdateCmd())
 	root.AddCommand(newShimCmd())
+	root.AddCommand(newTrustCmd())
 	root.AddCommand(newPrecommitCmdWithHooks())
 	for _, bin := range forward.Managers() {
 		root.AddCommand(newForwardCmd(bin))
@@ -224,6 +225,7 @@ func newScanCmd() *cobra.Command {
 				Verbose:           verbose,
 				SkipVersionLookup: noVersionLookup,
 				Timeout:           scanTimeout(timeout),
+				Trust:             loadTrust(os.Stderr),
 			})
 			catalogued()
 			if err != nil {
@@ -464,6 +466,7 @@ func newForwardCmd(bin string) *cobra.Command {
 				SkipCI:    env.SkipCI(),
 				Passive:   env.Passive() || monitor != "",
 				MonitorID: monitor,
+				Trust:     loadTrust(os.Stderr),
 			})
 			return forwardResult(err)
 		},

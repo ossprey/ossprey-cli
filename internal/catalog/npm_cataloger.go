@@ -162,6 +162,7 @@ func parseNpmLock(data []byte, loc file.Location) ([]pkg.Package, error) {
 			Version:   entry.Version,
 			Type:      pkg.NpmPkg,
 			Locations: file.NewLocationSet(loc),
+			Metadata:  registrySource{URL: entry.Resolved},
 		})
 	}
 	return pkgs, nil

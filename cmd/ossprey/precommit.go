@@ -44,7 +44,9 @@ func precommitCheckTimeout() time.Duration {
 
 // Test seams, mirroring internal/forward's execFn/checkFn pattern.
 var (
-	precommitDeltaFn = precommit.StagedDelta
+	precommitDeltaFn = func(ctx context.Context, dir string) (precommit.Delta, error) {
+		return precommit.StagedDelta(ctx, dir, loadTrust(os.Stderr))
+	}
 	precommitCheckFn = checkMalwarePurls
 	// precommitLoginFn reports whether an `ossprey login` session is stored.
 	// A seam so tests don't touch the real credential store.
@@ -152,6 +154,9 @@ func runPrecommit(ctx context.Context, apiURL, apiKey string, verbose bool, w io
 	// declares a range with no lockfile pinning it — resolving "latest" here
 	// could block a commit over a version the developer will never install.
 	// Commit-time false blocks are the product risk, so skip them.
+	if delta.Trusted > 0 && verbose {
+		fmt.Fprintf(w, "ossprey: %d staged package(s) from trusted sources; not checked\n", delta.Trusted)
+	}
 	byPurl := make(map[string]staged)
 	var purls []string
 	for _, p := range delta.Packages {

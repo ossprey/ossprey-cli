@@ -174,6 +174,10 @@ install instead. Either way nothing is blocked and nothing waits.
 | JavaScript | `package.json`, `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml` |
 | Rust | `Cargo.lock` |
 
+**Internal packages?** `ossprey trust add --registry <url>` or
+`--npm-scope @org` skips packages from your private registries, and never
+sends them. See [docs/trust.md](docs/trust.md).
+
 **Commit a lockfile if you can.** A lockfile lists the whole transitive tree; a
 bare manifest gives direct dependencies only, and Ossprey has to guess versions
 for unpinned ranges. Details, including how unpinned versions are resolved, in
@@ -197,7 +201,8 @@ Everything above in depth: **[docs/](docs/README.md)** — [install](docs/instal
 [forwarder](docs/forwarder.md) · [shims](docs/shims.md) · [git](docs/git.md) ·
 [passive monitoring](docs/passive-monitoring.md) ·
 [pre-commit](docs/precommit.md) · [CI](docs/ci.md) · [output](docs/output.md) ·
-[ecosystems](docs/ecosystems.md) · [how it works](docs/architecture.md)
+[ecosystems](docs/ecosystems.md) · [trusted sources](docs/trust.md) ·
+[how it works](docs/architecture.md)
 
 ## Status
 
