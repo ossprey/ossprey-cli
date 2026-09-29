@@ -117,7 +117,13 @@ func poetryPythonFloor(path string) string {
 	return pythonConstraintFloor(spec)
 }
 
-var pyFloorClause = regexp.MustCompile(`^(\^|~=|~|>=|==)?\s*v?(\d+)\.(\d+)`)
+var (
+	pyFloorClause = regexp.MustCompile(`^(\^|~=|~|>=|==)?v?(\d+)\.(\d+)`)
+	// Poetry allows whitespace after an operator ("< 4.0"); closing the gap
+	// before splitting on spaces keeps each operator on its own version, so an
+	// upper bound can never be read as a bare-version floor.
+	pyOperatorGap = regexp.MustCompile(`([<>=!~^])\s+`)
+)
 
 // pythonConstraintFloor reads the lower bound out of a Poetry version
 // constraint ("^3.12", "~3.11", ">=3.10,<4.0", "3.12.*", "^3.9 || ^3.11").
@@ -127,6 +133,7 @@ var pyFloorClause = regexp.MustCompile(`^(\^|~=|~|>=|==)?\s*v?(\d+)\.(\d+)`)
 func pythonConstraintFloor(spec string) string {
 	var best [2]int
 	found := false
+	spec = pyOperatorGap.ReplaceAllString(spec, "$1")
 	for _, alt := range strings.Split(strings.ReplaceAll(spec, "||", "|"), "|") {
 		var floor [2]int
 		ok := false
