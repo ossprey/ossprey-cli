@@ -90,12 +90,76 @@ func uvArgsForPyProject(dir string) []string {
 			"--no-progress",
 		}
 	}
-	return []string{
-		"pip", "compile",
-		"--universal",
-		"--no-progress",
-		filepath.Join(dir, "pyproject.toml"),
+	pyproject := filepath.Join(dir, "pyproject.toml")
+	args := []string{"pip", "compile", "--universal", "--no-progress"}
+	if floor := poetryPythonFloor(pyproject); floor != "" {
+		args = append(args, "--python-version", floor)
 	}
+	return append(args, pyproject)
+}
+
+// poetryPythonFloor returns the minimum Python (as "major.minor") a Poetry
+// project declares, for projects that carry no PEP 621 requires-python.
+//
+// `uv pip compile --universal` takes its Python floor from requires-python
+// alone. A Poetry project states it as `[tool.poetry.dependencies] python =
+// "^3.12"` instead, so uv falls back to its own default floor and a
+// dependency requiring the project's real floor (e.g. Python>=3.12) comes back
+// unsatisfiable, failing the whole manifest. "" leaves uv's behaviour as is:
+// requires-python present, no Poetry python, or a constraint with no
+// lower bound.
+func poetryPythonFloor(path string) string {
+	pp, err := readPyProject(path)
+	if err != nil || pp == nil || pp.Project.RequiresPython != "" {
+		return ""
+	}
+	spec, _ := pp.Tool.Poetry.Dependencies["python"].(string)
+	return pythonConstraintFloor(spec)
+}
+
+var (
+	pyFloorClause = regexp.MustCompile(`^(\^|~=|~|>=|==)?v?(\d+)\.(\d+)`)
+	// Poetry allows whitespace after an operator ("< 4.0"); closing the gap
+	// before splitting on spaces keeps each operator on its own version, so an
+	// upper bound can never be read as a bare-version floor.
+	pyOperatorGap = regexp.MustCompile(`([<>=!~^])\s+`)
+)
+
+// pythonConstraintFloor reads the lower bound out of a Poetry version
+// constraint ("^3.12", "~3.11", ">=3.10,<4.0", "3.12.*", "^3.9 || ^3.11").
+// With alternatives the lowest floor wins; if any alternative is unbounded
+// below ("*", "<4", ">3.11"), the result is "" so uv is never constrained
+// tighter than the project itself.
+func pythonConstraintFloor(spec string) string {
+	var best [2]int
+	found := false
+	spec = pyOperatorGap.ReplaceAllString(spec, "$1")
+	for _, alt := range strings.Split(strings.ReplaceAll(spec, "||", "|"), "|") {
+		var floor [2]int
+		ok := false
+		for _, clause := range strings.FieldsFunc(alt, func(r rune) bool { return r == ',' || r == ' ' }) {
+			m := pyFloorClause.FindStringSubmatch(clause)
+			if m == nil {
+				continue
+			}
+			var v [2]int
+			fmt.Sscan(m[2], &v[0])
+			fmt.Sscan(m[3], &v[1])
+			if !ok || v[0] > floor[0] || (v[0] == floor[0] && v[1] > floor[1]) {
+				floor, ok = v, true
+			}
+		}
+		if !ok {
+			return ""
+		}
+		if !found || floor[0] < best[0] || (floor[0] == best[0] && floor[1] < best[1]) {
+			best, found = floor, true
+		}
+	}
+	if !found {
+		return ""
+	}
+	return fmt.Sprintf("%d.%d", best[0], best[1])
 }
 
 func runUV(ctx context.Context, uv, cache, dir string, args []string, loc file.Location) ([]pkg.Package, error) {
