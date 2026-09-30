@@ -28,10 +28,11 @@ func TestUnrecognisedIsUnknownAndFails(t *testing.T) {
 	}
 }
 
-func TestOnlyInfoPasses(t *testing.T) {
+// Info is the default floor, so nothing sits below it and every level fails.
+func TestEverythingFailsAtTheDefaultFloor(t *testing.T) {
 	cases := map[Level]bool{
 		Unknown:  true,
-		Info:     false,
+		Info:     true,
 		Low:      true,
 		Medium:   true,
 		High:     true,
@@ -48,8 +49,8 @@ func TestScaleIsOrdered(t *testing.T) {
 	if !(Info < Low && Low < Medium && Medium < High && High < Critical) {
 		t.Error("levels are not ordered Info < Low < Medium < High < Critical")
 	}
-	if FailingFloor != Low {
-		t.Errorf("FailingFloor = %v, want Low", FailingFloor)
+	if FailingFloor != Info {
+		t.Errorf("FailingFloor = %v, want Info", FailingFloor)
 	}
 }
 
@@ -86,9 +87,14 @@ func TestFailsAt(t *testing.T) {
 			t.Errorf("Critical.FailsAt(%v) = false, want true", floor)
 		}
 	}
-	// An unset floor falls back to the default rather than passing everything.
-	if Info.FailsAt(Unknown) {
-		t.Error("Info.FailsAt(Unknown) = true, want false (falls back to FailingFloor)")
+	// An unset floor falls back to the default rather than passing everything,
+	// and the default is Info, so even Info fails.
+	if !Info.FailsAt(Unknown) {
+		t.Error("Info.FailsAt(Unknown) = false, want true (falls back to FailingFloor)")
+	}
+	// A named floor above the default still lets what is below it pass.
+	if Info.FailsAt(Low) {
+		t.Error("Info.FailsAt(Low) = true, want false")
 	}
 	if !Low.FailsAt(Unknown) {
 		t.Error("Low.FailsAt(Unknown) = false, want true")

@@ -118,7 +118,9 @@ func TestNewReportInformationalVerdict(t *testing.T) {
 		Severity:    "Info",
 	})
 
-	r := NewReport(s, severity.FailingFloor)
+	// Low, not the default: the default floor is Info, where nothing is below it
+	// and there is no informational verdict to reach.
+	r := NewReport(s, severity.Low)
 	if r.Verdict != VerdictInformational {
 		t.Errorf("verdict = %q, want %q", r.Verdict, VerdictInformational)
 	}
@@ -142,7 +144,7 @@ func TestNewReportSplitsMixedFindings(t *testing.T) {
 	s.AddVulnerability(ossbom.Vulnerability{ID: "Z", Purl: "pkg:npm/removed@0.0.1-security", Severity: "Info"})
 	s.AddVulnerability(ossbom.Vulnerability{ID: "X", Purl: "pkg:pypi/evil@1.0.0", Severity: "Critical"})
 
-	r := NewReport(s, severity.FailingFloor)
+	r := NewReport(s, severity.Low)
 	if r.Verdict != VerdictMalware {
 		t.Errorf("verdict = %q, want %q", r.Verdict, VerdictMalware)
 	}

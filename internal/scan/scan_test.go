@@ -315,7 +315,9 @@ func TestMalwareReports(t *testing.T) {
 			for _, v := range tt.vulns {
 				s.AddVulnerability(v)
 			}
-			summary, has := MalwareReports(s, severity.FailingFloor)
+			// Graded at Low, not the default: the default is Info, where nothing
+			// is below the floor and every case would collapse to failing.
+			summary, has := MalwareReports(s, severity.Low)
 			reports, informational := summary.Failing, summary.Informational
 			if has != tt.wantHas {
 				t.Errorf("has: got %v, want %v", has, tt.wantHas)
@@ -414,10 +416,11 @@ func TestMalwareReportsSanitisesInformationalDescription(t *testing.T) {
 		Severity:    "Info",
 	})
 
-	summary, hasMalware := MalwareReports(s, severity.FailingFloor)
+	// Low, so the finding lands on the informational line this test sanitises.
+	summary, hasMalware := MalwareReports(s, severity.Low)
 	informational := summary.Informational
 	if hasMalware {
-		t.Fatal("an informational finding must not fail the scan")
+		t.Fatal("a finding below the floor must not fail the scan")
 	}
 	if len(informational) != 1 {
 		t.Fatalf("informational = %d, want 1", len(informational))
@@ -478,7 +481,9 @@ func TestMalwareReportsExposesFailingFindings(t *testing.T) {
 		{ID: "Y", Purl: "pkg:npm/%40scope/lodash@4.17.21", Severity: "Info"},
 		{ID: "Z", Purl: "pkg:npm/left-pad@1.3.0"},
 	}
-	summary, _ := MalwareReports(sbom, severity.FailingFloor)
+	// Low, so the Info finding is excluded from the alert by the floor rather
+	// than by anything specific to Info.
+	summary, _ := MalwareReports(sbom, severity.Low)
 	got := summary.Alert()
 	want := []alert.Finding{
 		{Name: "requests", Version: "2.31.0", Ecosystem: "pypi"},
