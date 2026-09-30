@@ -159,22 +159,36 @@ there the same failure is a warning and the install proceeds.)
 
 To check they took, run `type npm`. Non-install commands (`npm run build`, `pip
 list`, `poetry run pytest`) go straight through untouched, so an
-ordinary-looking `npm --version` means the handoff works. An install prints to
-stderr before it forwards:
+ordinary-looking `npm --version` means the handoff works. An install prints
+one line of its own to stderr before it forwards; the manager's own output
+follows exactly as it would without Ossprey:
 
 ```console
 $ npm install left-pad
-ossprey: no malware found, forwarding to npm
+ossprey: no malware found in 1 package, forwarding to npm
 
 added 1 package in 525ms
 ```
 
-While the check runs, the forwarder holds a live `ossprey: scan in progress...
-4s` line on the terminal and erases it once the verdict is in; in a CI log or a
-pipe that becomes a single plain line.
+That one line is the whole of what a forwarder says by default: the verdict,
+the block, or why it did not check (`skip-ci set`, `found no dependencies to
+check`, a passive `scan posted`). A platform error is reported as a single
+`error:` line instead. While the check runs, a terminal gets a live `ossprey:
+scan in progress... 4s` indicator that erases itself once the verdict is in;
+a CI log or a pipe gets nothing.
 
-If a check comes back dirty you get the finding, a blocked line naming the
-command, and an exit code of `1`. The real manager never starts.
+If a check comes back dirty you get one red line naming the command and every
+malicious package, and an exit code of `1`. The real manager never starts:
+
+```console
+$ npm install left-pad@1.3.0
+ossprey: blocked `npm install left-pad@1.3.0`: left-pad:1.3.0 contains malware
+```
+
+Set `OSSPREY_VERBOSE=1` for everything else: what is being scanned,
+collected warnings (packages that could not be resolved, trusted packages
+left out), informational findings, the full malware alert box with its
+`Error: WARNING:` lines, the progress line in a CI log, and the update notice.
 
 An alias inherits the forwarder's scope: an install that names packages checks
 those packages, not their dependencies. Run `ossprey scan` afterwards for the

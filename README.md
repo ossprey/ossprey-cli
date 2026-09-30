@@ -188,7 +188,7 @@ for unpinned ranges. Details, including how unpinned versions are resolved, in
 | Variable | Effect |
 | -------- | ------ |
 | `OSSPREY_API_KEY` | Your API key (a stored `ossprey login` takes precedence) |
-| `OSSPREY_VERBOSE=1` | Explain every warning, including a failed resolver's own output |
+| `OSSPREY_VERBOSE=1` | Explain every warning, including a failed resolver's own output; forwarders print only their one outcome line without it |
 | `OSSPREY_SKIP_CI=1` | Kill switch: no scan runs at all |
 | `OSSPREY_PASSIVE=1` | Observe-only: submit scans, never fail a build or block an install |
 

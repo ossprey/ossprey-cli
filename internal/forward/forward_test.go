@@ -854,6 +854,7 @@ func TestRun_MalwareBlockPrintsBannerBeforeErrorLines(t *testing.T) {
 	for _, k := range []string{"FORCE_COLOR", "CLICOLOR_FORCE", "GITHUB_ACTIONS", "GITLAB_CI", "TF_BUILD", "BUILDKITE"} {
 		t.Setenv(k, "")
 	}
+	t.Setenv("OSSPREY_VERBOSE", "1") // the full alert is verbose-only
 	var buf bytes.Buffer
 	old := errOut
 	errOut = &buf
@@ -889,6 +890,7 @@ func TestRun_MalwareBlockErrorLinesAreRedWhenColoured(t *testing.T) {
 	t.Setenv("FORCE_COLOR", "1")
 	t.Setenv("COLORTERM", "")
 	t.Setenv("TERM", "xterm")
+	t.Setenv("OSSPREY_VERBOSE", "1")
 	var buf bytes.Buffer
 	old := errOut
 	errOut = &buf
@@ -915,9 +917,11 @@ func TestForwardWarningsAreCountedAndPrecedeTheVerdict(t *testing.T) {
 		s.AddVulnerability(ossbom.NewMalwareVulnerability("V1", "pkg:npm/evil@1.0.0", "bad"))
 		return s, nil
 	})
-	for _, k := range []string{"FORCE_COLOR", "CLICOLOR_FORCE", "GITHUB_ACTIONS", "GITLAB_CI", "TF_BUILD", "BUILDKITE", "OSSPREY_VERBOSE"} {
+	for _, k := range []string{"FORCE_COLOR", "CLICOLOR_FORCE", "GITHUB_ACTIONS", "GITLAB_CI", "TF_BUILD", "BUILDKITE"} {
 		t.Setenv(k, "")
 	}
+	// Quiet forwarders print no warnings at all; see TestQuietForwarder_*.
+	t.Setenv("OSSPREY_VERBOSE", "1")
 	var buf bytes.Buffer
 	old := errOut
 	errOut = &buf
@@ -947,17 +951,15 @@ func TestForwardWarningsAreCountedAndPrecedeTheVerdict(t *testing.T) {
 	if verdict < 0 || counted > verdict {
 		t.Errorf("warnings must precede the verdict:\n%s", out)
 	}
-	// The blocked line echoes the original argv, so look for the indented item
-	// line specifically rather than the package name anywhere.
-	if strings.Contains(out, "ossprey:   npm/@acme/one") {
-		t.Errorf("per-package detail must stay behind OSSPREY_VERBOSE:\n%s", out)
-	}
 }
 
 // captureProgress swaps the indicator's writer for a buffer. Not a terminal, so
 // progress.Start takes its plain-line branch and the test reads one stable line.
+// That line is verbose-only (a quiet forwarder draws only on a terminal, where
+// the indicator erases itself), so this also turns verbose on.
 func captureProgress(t *testing.T) *bytes.Buffer {
 	t.Helper()
+	t.Setenv("OSSPREY_VERBOSE", "1")
 	var buf bytes.Buffer
 	old := progressOut
 	progressOut = &buf
@@ -1046,7 +1048,7 @@ func TestPassiveFlushesWarningsBeforeReturning(t *testing.T) {
 	old := errOut
 	errOut = &buf
 	t.Cleanup(func() { errOut = old })
-	t.Setenv("OSSPREY_VERBOSE", "")
+	t.Setenv("OSSPREY_VERBOSE", "1") // quiet prints no warnings to lose
 
 	swap(t, func(_ context.Context, bin string, _ []string) error {
 		fmt.Fprintln(&buf, "<the real "+bin+" runs here>")
@@ -1077,5 +1079,134 @@ func TestPassiveFlushesWarningsBeforeReturning(t *testing.T) {
 	}
 	if manager < 0 || warning < manager {
 		t.Errorf("the install must run first, and the warning must still be printed:\n%s", out)
+	}
+}
+
+// quietOutput runs the forwarder with OSSPREY_VERBOSE unset and returns
+// everything ossprey wrote — errOut and the progress writer, which is a buffer
+// and so not a terminal — with the real manager's own output kept apart.
+func quietOutput(t *testing.T, ctx context.Context, opts Options) (string, error) {
+	t.Helper()
+	for _, k := range []string{"OSSPREY_VERBOSE", "FORCE_COLOR", "CLICOLOR_FORCE", "GITHUB_ACTIONS", "GITLAB_CI", "TF_BUILD", "BUILDKITE"} {
+		t.Setenv(k, "")
+	}
+	var buf bytes.Buffer
+	oldErr, oldProg := errOut, progressOut
+	errOut, progressOut = &buf, &buf
+	t.Cleanup(func() { errOut, progressOut = oldErr, oldProg })
+	err := Run(ctx, opts)
+	return buf.String(), err
+}
+
+func lines(s string) []string {
+	return strings.Split(strings.TrimSuffix(s, "\n"), "\n")
+}
+
+// warnedResolve fails every @acme/ lookup, so the run collects a warning that a
+// quiet forwarder must not print.
+func warnedResolve(_ context.Context, _, name string) (string, error) {
+	if strings.HasPrefix(name, "@acme/") {
+		return "", fmt.Errorf("%w (registry returned status 404)", registry.ErrNotFound)
+	}
+	return "1.0.0", nil
+}
+
+// Quiet, a clean install is one line from ossprey — no progress line, no
+// warnings, no informational notes — and the manager still runs.
+func TestQuietForwarder_CleanInstallIsOneLine(t *testing.T) {
+	ex := &stubExec{}
+	swap(t, ex.fn, func(context.Context, check.Options) (*ossbom.SBOM, error) {
+		s := ossbom.New(ossbom.Environment{})
+		s.AddComponent(ossbom.Component{Name: "lodash", Version: "1.0.0", Type: "npm"})
+		v := ossbom.NewMalwareVulnerability("V1", "pkg:npm/lodash@1.0.0", "fyi")
+		v.Severity = "info"
+		s.AddVulnerability(v)
+		return s, nil
+	})
+
+	out, err := quietOutput(t, warn.NewContext(context.Background(), false), Options{
+		Bin: "npm", Args: []string{"install", "lodash", "@acme/one", "./local.tgz"},
+		ResolveLatest: warnedResolve,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !ex.called {
+		t.Fatal("install was not forwarded")
+	}
+	if got := lines(out); len(got) != 1 || got[0] != "ossprey: no malware found in 1 package, forwarding to npm" {
+		t.Errorf("want exactly the verdict line, got:\n%s", out)
+	}
+}
+
+// Quiet, a block is one line that still names what was blocked and what
+// contains malware — the two things scripts and the smoke tests grep for.
+func TestQuietForwarder_MalwareIsOneLine(t *testing.T) {
+	ex := &stubExec{}
+	swap(t, ex.fn, func(context.Context, check.Options) (*ossbom.SBOM, error) {
+		s := ossbom.New(ossbom.Environment{})
+		s.AddVulnerability(ossbom.NewMalwareVulnerability("V1", "pkg:npm/evil@1.0.0", "bad"))
+		s.AddVulnerability(ossbom.NewMalwareVulnerability("V2", "pkg:npm/worse@2.0.0", "bad"))
+		return s, nil
+	})
+
+	out, err := quietOutput(t, warn.NewContext(context.Background(), false), Options{
+		Bin: "npm", Args: []string{"install", "evil@1.0.0", "worse@2.0.0", "@acme/one"},
+		ResolveLatest: warnedResolve,
+	})
+	if !errors.Is(err, ErrBlocked) {
+		t.Fatalf("err: got %v, want ErrBlocked", err)
+	}
+	if ex.called {
+		t.Fatal("a blocked install must not run the manager")
+	}
+	want := "ossprey: blocked `npm install evil@1.0.0 worse@2.0.0 @acme/one`: evil:1.0.0, worse:2.0.0 contain malware"
+	if got := lines(out); len(got) != 1 || got[0] != want {
+		t.Errorf("want exactly\n%s\ngot:\n%s", want, out)
+	}
+}
+
+// Quiet, a bare install's project scan does not announce itself either.
+func TestQuietForwarder_ManifestInstallIsOneLine(t *testing.T) {
+	ex := &stubExec{}
+	swap(t, ex.fn, cleanSBOM)
+	swapScan(t, func(context.Context, scanRequest) (*ossbom.SBOM, error) {
+		s := ossbom.New(ossbom.Environment{})
+		s.AddComponent(ossbom.Component{Name: "a", Version: "1.0.0", Type: "npm"})
+		s.AddComponent(ossbom.Component{Name: "b", Version: "1.0.0", Type: "npm"})
+		return s, nil
+	})
+
+	out, err := quietOutput(t, context.Background(), Options{Bin: "npm", Args: []string{"install"}})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := lines(out); len(got) != 1 || got[0] != "ossprey: no malware found in 2 packages, forwarding to npm" {
+		t.Errorf("want exactly the verdict line, got:\n%s", out)
+	}
+}
+
+// Quiet, a passive install says only what happened to the submission.
+func TestQuietForwarder_PassiveIsOneLine(t *testing.T) {
+	ex := &stubExec{}
+	swap(t, ex.fn, cleanSBOM)
+	swapScan(t, func(ctx context.Context, _ scanRequest) (*ossbom.SBOM, error) {
+		warn.Add(ctx, registry.UnresolvedEntry("npm", "@acme/private",
+			fmt.Errorf("%w (registry returned status 404)", registry.ErrNotFound), "left unversioned"))
+		s := ossbom.New(ossbom.Environment{})
+		s.AddComponent(ossbom.Component{Name: "a", Version: "1.0.0", Type: "npm"})
+		return s, nil
+	})
+
+	ctx := warn.NewContext(context.Background(), false)
+	out, err := quietOutput(t, ctx, Options{Bin: "npm", Args: []string{"install"}, Passive: true})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := lines(out); len(got) != 1 || !strings.HasPrefix(got[0], "ossprey: scan posted to the Ossprey dashboard") {
+		t.Errorf("want exactly the submission line, got:\n%s", out)
+	}
+	if left := warn.Drain(ctx); left != "" {
+		t.Errorf("quiet must still drain the collector, or main's safety net prints it:\n%s", left)
 	}
 }

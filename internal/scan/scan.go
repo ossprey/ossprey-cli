@@ -161,6 +161,23 @@ type MalwareSummary struct {
 
 func (s MalwareSummary) Alert() []alert.Finding { return s.Detected }
 
+// Headline names every failing finding in one line — "a:1.0 contains malware",
+// "a:1.0, b:2.0 contain malware" — for callers that report a block in a single
+// line rather than with the full alert. "" when nothing fails.
+func (s MalwareSummary) Headline() string {
+	names := make([]string, 0, len(s.Detected))
+	for _, f := range s.Detected {
+		names = append(names, f.Name+":"+f.Version)
+	}
+	switch len(names) {
+	case 0:
+		return ""
+	case 1:
+		return names[0] + " contains malware"
+	}
+	return strings.Join(names, ", ") + " contain malware"
+}
+
 // MalwareReports renders a scanned SBOM's findings and reports whether any of
 // them fail at the given floor.
 //

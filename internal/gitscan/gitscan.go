@@ -21,6 +21,7 @@ import (
 	"github.com/ossprey/ossprey-cli/internal/alert"
 	"github.com/ossprey/ossprey-cli/internal/ansi"
 	"github.com/ossprey/ossprey-cli/internal/check"
+	"github.com/ossprey/ossprey-cli/internal/env"
 	"github.com/ossprey/ossprey-cli/internal/forward"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
 	"github.com/ossprey/ossprey-cli/internal/progress"
@@ -63,12 +64,29 @@ type Repo struct {
 
 func (r Repo) String() string { return r.Owner + "/" + r.Name }
 
+// Quiet by default, like the package forwarders: one outcome line, with the
+// narration (warnings, informational findings, the full malware alert) behind
+// OSSPREY_VERBOSE. git's own output is untouched.
+
+func flushWarnings(ctx context.Context) {
+	if s := warn.Drain(ctx); env.Verbose() {
+		fmt.Fprint(errOut, s)
+	}
+}
+
+func progressTo() io.Writer {
+	if env.Verbose() {
+		return progressOut
+	}
+	return progress.Transient(progressOut)
+}
+
 // Run checks the repository a clone/pull fetches, then execs the real git.
 // Everything else (and any repo that is not public on GitHub) passes through.
 // Returns forward.ErrBlocked on malware or *exec.ExitError from git.
 func Run(ctx context.Context, opts Options) error {
 	forwardTo := func() error {
-		fmt.Fprint(errOut, warn.Drain(ctx))
+		flushWarnings(ctx)
 		return execFn(ctx, "git", opts.Args)
 	}
 
@@ -98,7 +116,7 @@ func Run(ctx context.Context, opts Options) error {
 	if opts.Passive {
 		execErr := forwardTo()
 		copts.SubmitOnly = true
-		stop := progress.Submit(progressOut, 1)
+		stop := progress.Submit(progressTo(), 1)
 		_, err := checkFn(ctx, copts)
 		stop()
 		if err != nil {
@@ -109,7 +127,7 @@ func Run(ctx context.Context, opts Options) error {
 		return execErr
 	}
 
-	stop := progress.Scan(progressOut, 1)
+	stop := progress.Scan(progressTo(), 1)
 	sbom, err := checkFn(ctx, copts)
 	stop()
 	if err != nil {
@@ -121,13 +139,20 @@ func Run(ctx context.Context, opts Options) error {
 }
 
 func report(ctx context.Context, opts Options, repo Repo, sbom *ossbom.SBOM) error {
-	fmt.Fprint(errOut, warn.Drain(ctx))
+	flushWarnings(ctx)
 	summary, hasMalware := scan.MalwareReports(sbom, severity.FailingFloor)
-	for _, msg := range summary.Informational {
-		fmt.Fprintln(errOut, "ossprey: "+msg)
+	if env.Verbose() {
+		for _, msg := range summary.Informational {
+			fmt.Fprintln(errOut, "ossprey: "+msg)
+		}
 	}
 	if hasMalware {
 		profile := ansi.Detect(errOut)
+		if !env.Verbose() {
+			fmt.Fprintln(errOut, profile.Red(fmt.Sprintf("ossprey: blocked `git %s`: %s",
+				strings.Join(opts.Args, " "), summary.Headline())))
+			return forward.ErrBlocked
+		}
 		fmt.Fprint(errOut, alert.Malware(summary.Alert(), "Git command blocked.", profile))
 		for _, msg := range summary.Failing {
 			fmt.Fprintln(errOut, profile.Red("Error: "+msg))

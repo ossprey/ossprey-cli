@@ -157,6 +157,15 @@ func runForward(t *testing.T, dir, apiURL string, args ...string) runResult {
 	return runForwardEnv(t, dir, forwardEnv(home, apiURL, os.Getenv("PATH")), binPath, args...)
 }
 
+// runForwardVerbose is runForward with OSSPREY_VERBOSE=1, for tests that assert
+// on the forwarder's narration ("no packages named; ..."), which is otherwise
+// suppressed.
+func runForwardVerbose(t *testing.T, dir, apiURL string, args ...string) runResult {
+	t.Helper()
+	env := append(forwardEnv(t.TempDir(), apiURL, os.Getenv("PATH")), "OSSPREY_VERBOSE=1")
+	return runForwardEnv(t, dir, env, binPath, args...)
+}
+
 // forwardEnv is the environment a forwarded invocation runs under: the real
 // environment with the home directory redirected into a scratch dir, so the test
 // never touches the developer's pnpm store, config or shell profiles.
@@ -169,6 +178,9 @@ func forwardEnv(home, apiURL, path string) []string {
 		"HOME": true, "PATH": true, "PNPM_HOME": true,
 		"OSSPREY_API_URL": true, "OSSPREY_API_KEY": true, "API_KEY": true,
 		"OSSPREY_SHIM_DIR": true, "OSSPREY_SHIM_BYPASS": true,
+		// Forwarders are quiet by default; a developer's own setting must not
+		// change what the assertions see.
+		"OSSPREY_VERBOSE": true,
 		// Windows home resolution (os.UserHomeDir) reads USERPROFILE.
 		"USERPROFILE": true,
 		// Leaving these pointed at the real home would defeat the redirect.
@@ -346,7 +358,7 @@ func TestPnpmBareInstallScansManifest(t *testing.T) {
 	api := newFakeAPI(t, "")
 	dir := pnpmProject(t, map[string]string{"left-pad": "1.3.0"})
 
-	res := runForward(t, dir, api.URL, "pnpm", "install")
+	res := runForwardVerbose(t, dir, api.URL, "pnpm", "install")
 	if res.exitCode != 0 {
 		t.Fatalf("expected exit 0, got %d\nstdout: %s\nstderr: %s", res.exitCode, res.stdout, res.stderr)
 	}

@@ -51,7 +51,7 @@ a `verdict`, only when the scan actually reached one.
 | `OSSPREY_API_KEY` | `--api-key` | API key. A stored `ossprey login` still wins. |
 | `API_KEY` | — | Legacy spelling of the above, lowest precedence. |
 | `OSSPREY_API_URL` | `--url` | Override the API URL. |
-| `OSSPREY_VERBOSE=1` | `-v` | Explain every warning, including a failed resolver's output. Works on the forwarders and shims, which parse no flags. |
+| `OSSPREY_VERBOSE=1` | `-v` | Explain every warning, including a failed resolver's output. On the forwarders and shims, which parse no flags, it also turns on everything beyond their one outcome line: warnings, scan narration, informational findings and the full malware alert. |
 | `OSSPREY_SKIP_CI=1` | `--skip-ci` | Kill switch: no scan runs at all. |
 | `OSSPREY_PASSIVE=1` | `--passive` | Observe-only: submit, never block or fail. |
 | `OSSPREY_MONITOR_ID` | `--monitor` | Submit through a monitor id. Implies passive. |
