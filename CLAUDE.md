@@ -292,6 +292,18 @@ Output is deduped by `(type, name, version)`. `mergeVersionless` then collapses
 a package emitted both versionless (direct-deps fallback) and pinned (uv-resolved)
 into the pinned one. Vendored paths (`node_modules/`) are skipped (`isVendoredPath`).
 
+**Package sinks are excluded from the syft index itself** (`packageSinks`,
+`newDirectorySource`). Filtering `node_modules` packages after cataloguing was
+not enough: syft's directory resolver opens every file it indexes, and a
+customer's passive pnpm install spent ~180s under "submitting scan" walking
+`node_modules` (reproduced: 273s vs 0s on a 76k-file tree, same 1707
+components). Two traps: syft **rewrites the exclusion slice in place**, so
+`packageSinkExcludes` returns a fresh one per call; and syft walks the
+**symlink-resolved** root but anchors exclusions to the path as given, so the
+root is `EvalSymlinks`ed first or no exclusion matches under macOS `/var`.
+`TestDirectorySourceSkipsPackageSinks` asserts on the index, not on catalog
+output, because catalog output was already clean before the fix.
+
 #### Why the npm resolve skips workspace members (OSS-1353)
 
 `NpmResolveCataloger` stands down for a manifest whose own dir ships a lockfile,
