@@ -1097,10 +1097,6 @@ func quietOutput(t *testing.T, ctx context.Context, opts Options) (string, error
 	return buf.String(), err
 }
 
-func lines(s string) []string {
-	return strings.Split(strings.TrimSuffix(s, "\n"), "\n")
-}
-
 // warnedResolve fails every @acme/ lookup, so the run collects a warning that a
 // quiet forwarder must not print.
 func warnedResolve(_ context.Context, _, name string) (string, error) {
@@ -1110,9 +1106,9 @@ func warnedResolve(_ context.Context, _, name string) (string, error) {
 	return "1.0.0", nil
 }
 
-// Quiet, a clean install is one line from ossprey — no progress line, no
-// warnings, no informational notes — and the manager still runs.
-func TestQuietForwarder_CleanInstallIsOneLine(t *testing.T) {
+// Quiet, a clean install prints nothing from ossprey — no verdict, no progress
+// line, no warnings, no informational notes — and the manager still runs.
+func TestQuietForwarder_CleanInstallIsSilent(t *testing.T) {
 	ex := &stubExec{}
 	swap(t, ex.fn, func(context.Context, check.Options) (*ossbom.SBOM, error) {
 		s := ossbom.New(ossbom.Environment{})
@@ -1133,8 +1129,28 @@ func TestQuietForwarder_CleanInstallIsOneLine(t *testing.T) {
 	if !ex.called {
 		t.Fatal("install was not forwarded")
 	}
-	if got := lines(out); len(got) != 1 || got[0] != "ossprey: no malware found in 1 package, forwarding to npm" {
-		t.Errorf("want exactly the verdict line, got:\n%s", out)
+	if out != "" {
+		t.Errorf("a clean quiet install must print nothing, got:\n%s", out)
+	}
+}
+
+// Quiet, the outcomes that are not a check at all are silent too.
+func TestQuietForwarder_UncheckedOutcomesAreSilent(t *testing.T) {
+	ex := &stubExec{}
+	swap(t, ex.fn, cleanSBOM)
+	for _, opts := range []Options{
+		{Bin: "npm", Args: []string{"install", "lodash@1.0.0"}, SkipCI: true},
+		{Bin: "npm", Args: []string{"install", "./local.tgz"}},
+		{Bin: "npm", Args: []string{"install", "lodash@1.0.0"}}, // no components back
+		{Bin: "npm", Args: []string{"install", "@acme/one"}, ResolveLatest: warnedResolve},
+	} {
+		out, err := quietOutput(t, warn.NewContext(context.Background(), false), opts)
+		if err != nil {
+			t.Fatalf("%v: %v", opts.Args, err)
+		}
+		if out != "" {
+			t.Errorf("%v: want silence, got:\n%s", opts.Args, out)
+		}
 	}
 }
 
@@ -1175,7 +1191,7 @@ func TestQuietForwarder_MalwareKeepsTheFullReport(t *testing.T) {
 }
 
 // Quiet, a bare install's project scan does not announce itself either.
-func TestQuietForwarder_ManifestInstallIsOneLine(t *testing.T) {
+func TestQuietForwarder_ManifestInstallIsSilent(t *testing.T) {
 	ex := &stubExec{}
 	swap(t, ex.fn, cleanSBOM)
 	swapScan(t, func(context.Context, scanRequest) (*ossbom.SBOM, error) {
@@ -1189,13 +1205,13 @@ func TestQuietForwarder_ManifestInstallIsOneLine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if got := lines(out); len(got) != 1 || got[0] != "ossprey: no malware found in 2 packages, forwarding to npm" {
-		t.Errorf("want exactly the verdict line, got:\n%s", out)
+	if out != "" {
+		t.Errorf("want silence, got:\n%s", out)
 	}
 }
 
-// Quiet, a passive install says only what happened to the submission.
-func TestQuietForwarder_PassiveIsOneLine(t *testing.T) {
+// Quiet, a passive install that posted says nothing.
+func TestQuietForwarder_PassiveIsSilent(t *testing.T) {
 	ex := &stubExec{}
 	swap(t, ex.fn, cleanSBOM)
 	swapScan(t, func(ctx context.Context, _ scanRequest) (*ossbom.SBOM, error) {
@@ -1211,10 +1227,27 @@ func TestQuietForwarder_PassiveIsOneLine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if got := lines(out); len(got) != 1 || !strings.HasPrefix(got[0], "ossprey: scan posted to the Ossprey dashboard") {
-		t.Errorf("want exactly the submission line, got:\n%s", out)
+	if out != "" {
+		t.Errorf("want silence, got:\n%s", out)
 	}
 	if left := warn.Drain(ctx); left != "" {
 		t.Errorf("quiet must still drain the collector, or main's safety net prints it:\n%s", left)
+	}
+}
+
+// Quiet is not a way to lose a platform failure: a passive submission that
+// could not be posted still says so, in one line.
+func TestQuietForwarder_PlatformErrorStillPrints(t *testing.T) {
+	ex := &stubExec{}
+	swap(t, ex.fn, cleanSBOM)
+	swapScan(t, func(context.Context, scanRequest) (*ossbom.SBOM, error) {
+		return nil, errors.New("api unreachable")
+	})
+	out, err := quietOutput(t, context.Background(), Options{Bin: "npm", Args: []string{"install"}, Passive: true})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if want := "ossprey: warning: could not post scan (api unreachable); the install was not blocked (passive)\n"; out != want {
+		t.Errorf("got %q, want %q", out, want)
 	}
 }

@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -158,8 +159,7 @@ func runForward(t *testing.T, dir, apiURL string, args ...string) runResult {
 }
 
 // runForwardVerbose is runForward with OSSPREY_VERBOSE=1, for tests that assert
-// on the forwarder's narration ("no packages named; ..."), which is otherwise
-// suppressed.
+// on anything but a block: a clean forward is otherwise silent.
 func runForwardVerbose(t *testing.T, dir, apiURL string, args ...string) runResult {
 	t.Helper()
 	env := append(forwardEnv(t.TempDir(), apiURL, os.Getenv("PATH")), "OSSPREY_VERBOSE=1")
@@ -281,9 +281,13 @@ func TestPnpmForwardCleanInstall(t *testing.T) {
 	if res.exitCode != 0 {
 		t.Fatalf("expected exit 0, got %d\nstdout: %s\nstderr: %s", res.exitCode, res.stdout, res.stderr)
 	}
-	// The count pins that one package was actually checked, not zero.
-	if !strings.Contains(res.stderr, "no malware found in 1 package, forwarding to pnpm") {
-		t.Errorf("missing forward notice in stderr:\n%s", res.stderr)
+	// Without OSSPREY_VERBOSE a clean forward prints nothing of its own; the
+	// fake API is what proves the package was checked rather than skipped.
+	if strings.Contains(res.stderr, "ossprey:") {
+		t.Errorf("a clean forward must be silent, got:\n%s", res.stderr)
+	}
+	if _, purls := api.stats(); !slices.Contains(purls, "pkg:npm/left-pad@1.3.0") {
+		t.Errorf("left-pad was never checked; purls submitted: %v", purls)
 	}
 	if !installed(dir, "left-pad") {
 		t.Error("pnpm did not install left-pad — the forward to the real pnpm failed")
@@ -443,7 +447,8 @@ func TestPnpmThroughShim(t *testing.T) {
 	// the shim itself — the file PATH resolution would land on.
 	shimPATH := shimDir + string(os.PathListSeparator) + filepath.Dir(realPnpm) +
 		string(os.PathListSeparator) + os.Getenv("PATH")
-	res := runForwardEnv(t, dir, forwardEnv(home, api.URL, shimPATH), shimPath, "add", "left-pad@1.3.0")
+	shimEnv := append(forwardEnv(home, api.URL, shimPATH), "OSSPREY_VERBOSE=1") // a clean forward is otherwise silent
+	res := runForwardEnv(t, dir, shimEnv, shimPath, "add", "left-pad@1.3.0")
 	if res.exitCode != 0 {
 		t.Fatalf("pnpm through the shim exited %d\nstdout: %s\nstderr: %s", res.exitCode, res.stdout, res.stderr)
 	}

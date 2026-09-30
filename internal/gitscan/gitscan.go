@@ -64,9 +64,15 @@ type Repo struct {
 
 func (r Repo) String() string { return r.Owner + "/" + r.Name }
 
-// Quiet by default, like the package forwarders: one outcome line, with the
-// narration (warnings, informational findings, the full malware alert) behind
-// OSSPREY_VERBOSE. git's own output is untouched.
+// Silent by default, like the package forwarders: only a malware block and a
+// failure to check print; everything else is behind OSSPREY_VERBOSE. git's own
+// output is untouched.
+
+func note(format string, a ...any) {
+	if env.Verbose() {
+		fmt.Fprintf(errOut, format, a...)
+	}
+}
 
 func flushWarnings(ctx context.Context) {
 	if s := warn.Drain(ctx); env.Verbose() {
@@ -95,7 +101,7 @@ func Run(ctx context.Context, opts Options) error {
 		return forwardTo()
 	}
 	if opts.SkipCI {
-		fmt.Fprintf(errOut, "ossprey: skip-ci set; forwarding `git %s` without checking\n", strings.Join(opts.Args, " "))
+		note("ossprey: skip-ci set; forwarding `git %s` without checking\n", strings.Join(opts.Args, " "))
 		return forwardTo()
 	}
 
@@ -122,7 +128,7 @@ func Run(ctx context.Context, opts Options) error {
 		if err != nil {
 			fmt.Fprintf(errOut, "ossprey: warning: could not post scan of %s (%v)\n", repo, err)
 		} else {
-			fmt.Fprintf(errOut, "ossprey: scan of %s posted to the Ossprey dashboard (passive)\n", repo)
+			note("ossprey: scan of %s posted to the Ossprey dashboard (passive)\n", repo)
 		}
 		return execErr
 	}
@@ -155,7 +161,7 @@ func report(ctx context.Context, opts Options, repo Repo, sbom *ossbom.SBOM) err
 		fmt.Fprintf(errOut, "ossprey: blocked `git %s`\n", strings.Join(opts.Args, " "))
 		return forward.ErrBlocked
 	}
-	fmt.Fprintf(errOut, "ossprey: no malware found in %s, forwarding to git\n", repo)
+	note("ossprey: no malware found in %s, forwarding to git\n", repo)
 	return execFn(ctx, "git", opts.Args)
 }
 

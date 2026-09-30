@@ -159,31 +159,31 @@ there the same failure is a warning and the install proceeds.)
 
 To check they took, run `type npm`. Non-install commands (`npm run build`, `pip
 list`, `poetry run pytest`) go straight through untouched, so an
-ordinary-looking `npm --version` means the handoff works. An install prints
-one line of its own to **stderr** before it forwards; stdout carries only the
-manager's own output, exactly as it would without Ossprey:
+ordinary-looking `npm --version` means the handoff works. A clean install
+prints nothing of its own: stdout and stderr carry only the manager's output,
+exactly as they would without Ossprey:
 
 ```console
 $ npm install left-pad
-ossprey: no malware found in 1 package, forwarding to npm
 
 added 1 package in 525ms
 ```
 
-That one line is the whole of what a forwarder says by default: the verdict,
-the block, or why it did not check (`skip-ci set`, `found no dependencies to
-check`, a passive `scan posted`). A platform error is reported as a single
-`error:` line instead. While the check runs, a terminal gets a live `ossprey:
-scan in progress... 4s` indicator that erases itself once the verdict is in;
-a CI log or a pipe gets nothing.
+By default a forwarder speaks only for a malware block (below) or a platform
+error — the API refusing a credential, a passive scan that could not be
+posted — each reported on stderr. While the check runs, a terminal gets a live
+`ossprey: scan in progress... 4s` indicator that erases itself once the
+verdict is in; a CI log or a pipe gets nothing.
 
 If a check comes back dirty you get the full malware report on stderr — the
 alert box, an `Error: WARNING:` line per finding, and a blocked line naming
 the command (see [Output](output.md)) — and an exit code of `1`. The real
 manager never starts.
 
-Set `OSSPREY_VERBOSE=1` for everything else: what is being scanned,
-collected warnings (packages that could not be resolved, trusted packages
+Set `OSSPREY_VERBOSE=1` for everything else: the clean verdict
+(`ossprey: no malware found in 1 package, forwarding to npm`), why an install
+was not checked (`skip-ci set`, `found no dependencies to check`, a passive
+`scan posted`), what is being scanned, collected warnings (packages that could not be resolved, trusted packages
 left out), informational findings, the progress line in a CI log, and the
 update notice.
 

@@ -10,7 +10,8 @@ verdict it draws an alert box naming every malicious package, followed by one
 `Error: WARNING: <pkg>:<ver> contains malware. Remediate this immediately` line
 per finding, so anything that greps the old one-line form keeps working. The
 forwarders and shims print the same box to stderr before their
-`ossprey: blocked ...` line; otherwise they print a single line (see
+`ossprey: blocked ...` line; otherwise they print nothing unless a platform
+error occurs (see
 [forwarder output](forwarder.md#shell-aliases--drop-the-ossprey-prefix-in-your-terminal)).
 
 ```text

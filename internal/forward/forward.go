@@ -55,10 +55,10 @@ var errOut io.Writer = os.Stderr
 // animation; both default to stderr.
 var progressOut io.Writer = os.Stderr
 
-// A forwarder sits in front of every install, so by default it says one thing:
-// the outcome — checked and clean, blocked, or why it did not check. Everything
-// else ossprey would say on the way there (what it is scanning, collected
-// warnings, informational findings, the full malware alert) is narration, and
+// A forwarder sits in front of every install, so by default it is silent: the
+// only things it prints are a malware block (the full report) and a platform
+// error. Everything else — a clean verdict, why it did not check, what it is
+// scanning, collected warnings, informational findings — is narration, and
 // only OSSPREY_VERBOSE shows it. The forwarders parse no flags of their own, so
 // the env var is the only switch. The real manager's own output is never
 // touched: it inherits our stdio.
@@ -373,7 +373,7 @@ func Run(ctx context.Context, opts Options) error {
 	}
 
 	if opts.SkipCI {
-		fmt.Fprintf(errOut, "ossprey: skip-ci set; forwarding `%s %s` without checking\n",
+		note("ossprey: skip-ci set; forwarding `%s %s` without checking\n",
 			m.Bin, strings.Join(opts.Args, " "))
 		return forwardTo()
 	}
@@ -398,7 +398,7 @@ func Run(ctx context.Context, opts Options) error {
 		if len(kept) == 0 {
 			// What was trusted first, then what that means for the install.
 			flushWarnings(ctx)
-			fmt.Fprintf(errOut, "ossprey: every package named is from a trusted source; forwarding `%s %s` unchecked\n",
+			note("ossprey: every package named is from a trusted source; forwarding `%s %s` unchecked\n",
 				m.Bin, strings.Join(opts.Args, " "))
 			return forwardTo()
 		}
@@ -432,7 +432,7 @@ func Run(ctx context.Context, opts Options) error {
 		}
 		resolved := resolveSpecs(ctx, resolve, parsed.Specs)
 		if len(resolved) == 0 {
-			fmt.Fprintln(errOut, "ossprey: nothing left to check after version resolution; forwarding")
+			note("ossprey: nothing left to check after version resolution; forwarding\n")
 			return forwardTo()
 		}
 		// The scan is the one part of a forwarded install that takes visible
@@ -480,7 +480,7 @@ func Run(ctx context.Context, opts Options) error {
 	default:
 		// Only un-checkable explicit targets (local paths, archives, URLs, VCS
 		// refs). Can't verify them against a registry — forward with a warning.
-		fmt.Fprintf(errOut, "ossprey: not checking non-registry install targets: %s; forwarding (run `ossprey scan` after install)\n",
+		note("ossprey: not checking non-registry install targets: %s; forwarding (run `ossprey scan` after install)\n",
 			strings.Join(parsed.NonPackages, ", "))
 		return forwardTo()
 	}
@@ -560,12 +560,12 @@ func reportAndForward(ctx context.Context, m *Manager, opts Options, sbom *ossbo
 		// Nothing catalogued means nothing verified, whether the project declares
 		// nothing or every cataloger failed. "No malware found" would read as a
 		// clean bill of health for an install that was never checked.
-		fmt.Fprintf(errOut, "ossprey: found no dependencies to check; forwarding `%s %s` unchecked\n",
+		note("ossprey: found no dependencies to check; forwarding `%s %s` unchecked\n",
 			m.Bin, strings.Join(opts.Args, " "))
 	} else {
 		// The count is load-bearing: "no malware found" alone read the same
 		// whether 40 packages were checked or none were.
-		fmt.Fprintf(errOut, "ossprey: no malware found in %s, forwarding to %s\n",
+		note("ossprey: no malware found in %s, forwarding to %s\n",
 			countPackages(n), m.Bin)
 	}
 	// Already drained at the top of this function, ahead of the verdict.
@@ -739,15 +739,15 @@ func reportPassive(opts Options, sbom *ossbom.SBOM, err error) {
 	}
 	switch {
 	case errors.Is(err, errNothingToCheck):
-		fmt.Fprintf(errOut, "ossprey: nothing left to check after version resolution; nothing posted (%s)\n", mode)
+		note("ossprey: nothing left to check after version resolution; nothing posted (%s)\n", mode)
 	case err != nil:
 		fmt.Fprintf(errOut, "ossprey: warning: could not post scan (%v); the install was not blocked (%s)\n", err, mode)
 	case sbom != nil && len(sbom.Components) == 0:
 		// "Scan posted" would claim coverage of an install we catalogued
 		// nothing from.
-		fmt.Fprintf(errOut, "ossprey: found no dependencies to report; nothing posted (%s)\n", mode)
+		note("ossprey: found no dependencies to report; nothing posted (%s)\n", mode)
 	default:
-		fmt.Fprintf(errOut, "ossprey: scan posted to the Ossprey dashboard; the install was not blocked (%s)\n", mode)
+		note("ossprey: scan posted to the Ossprey dashboard; the install was not blocked (%s)\n", mode)
 	}
 }
 
