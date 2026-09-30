@@ -89,7 +89,8 @@ func TestCatalogStillReadsLockfileBesideSinks(t *testing.T) {
   "name": "app", "version": "1.0.0", "lockfileVersion": 3,
   "packages": {
     "": {"name": "app", "version": "1.0.0", "dependencies": {"left-pad": "1.3.0"}},
-    "node_modules/left-pad": {"version": "1.3.0", "resolved": "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"}
+    "node_modules/left-pad": {"version": "1.3.0", "resolved": "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz", "dependencies": {"is-odd": "3.0.1"}},
+    "node_modules/is-odd": {"version": "3.0.1", "resolved": "https://registry.npmjs.org/is-odd/-/is-odd-3.0.1.tgz"}
   }
 }`)
 	sinkFixture(t, proj, "node_modules/left-pad/package.json", `{"name":"left-pad","version":"1.3.0"}`)
@@ -99,11 +100,13 @@ func TestCatalogStillReadsLockfileBesideSinks(t *testing.T) {
 		t.Fatalf("Catalog: %v", err)
 	}
 	for _, p := range pkgs {
-		if p.Name == "left-pad" && p.Version == "1.3.0" {
+		// Transitive, so only the lockfile can have supplied it; the
+		// package.json fallback would name left-pad on its own.
+		if p.Name == "is-odd" && p.Version == "3.0.1" {
 			return
 		}
 	}
-	t.Fatalf("left-pad@1.3.0 from package-lock.json missing: %+v", pkgs)
+	t.Fatalf("is-odd@3.0.1 from package-lock.json missing: %+v", pkgs)
 }
 
 func sinkFixture(t *testing.T, root, rel, content string) {
