@@ -1251,3 +1251,27 @@ func TestQuietForwarder_PlatformErrorStillPrints(t *testing.T) {
 		t.Errorf("got %q, want %q", out, want)
 	}
 }
+
+// A failed check is a platform error, returned to main to print. Warnings the
+// run collected on the way must still be drained here, or main's safety-net
+// drain prints them after all, in quiet mode.
+func TestQuietForwarder_FailedCheckDrainsWarnings(t *testing.T) {
+	ex := &stubExec{}
+	swap(t, ex.fn, func(context.Context, check.Options) (*ossbom.SBOM, error) {
+		return nil, errors.New("api unreachable")
+	})
+	ctx := warn.NewContext(context.Background(), false)
+	out, err := quietOutput(t, ctx, Options{
+		Bin: "npm", Args: []string{"install", "lodash@1.0.0", "@acme/one"},
+		ResolveLatest: warnedResolve,
+	})
+	if err == nil || err.Error() != "api unreachable" {
+		t.Fatalf("err = %v, want the platform error returned for main to print", err)
+	}
+	if out != "" {
+		t.Errorf("quiet must print nothing itself, got:\n%s", out)
+	}
+	if left := warn.Drain(ctx); left != "" {
+		t.Errorf("collector not drained; main's safety net would print:\n%s", left)
+	}
+}

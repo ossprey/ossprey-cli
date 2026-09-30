@@ -356,6 +356,9 @@ func Run(ctx context.Context, opts Options) error {
 
 	finish := func(sbom *ossbom.SBOM, err error) error {
 		if err != nil {
+			// Main prints the error; drain here so its safety-net drain does
+			// not print the warnings too, which quiet mode keeps hidden.
+			flushWarnings(ctx)
 			return err
 		}
 		return reportAndForward(ctx, m, opts, sbom)
