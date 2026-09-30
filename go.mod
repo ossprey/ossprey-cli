@@ -4,6 +4,7 @@ go 1.26.6
 
 require (
 	github.com/BurntSushi/toml v1.6.0
+	github.com/Masterminds/semver/v3 v3.4.0
 	github.com/anchore/packageurl-go v0.2.0
 	github.com/anchore/syft v1.44.0
 	github.com/bmatcuk/doublestar/v4 v4.10.0
