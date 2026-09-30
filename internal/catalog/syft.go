@@ -69,6 +69,65 @@ type Options struct {
 	Trust trust.Policy
 }
 
+// packageSinks are directories package managers install into, cache in, or
+// build into. Syft's directory resolver opens every file it indexes, and an
+// installed node_modules alone can be 75k+ files: minutes of I/O before any
+// cataloger runs, for components the lockfile beside it already names. They
+// also hold manifests of installed dependencies, which catalog as if the
+// project declared them.
+//
+// Nothing here is a project manifest location, so no lockfile is lost; the
+// one coverage cost is a project whose only record of its dependencies is an
+// installed tree (node_modules or a virtualenv with no lockfile or manifest).
+var packageSinks = []string{
+	// JavaScript
+	"node_modules",
+	"bower_components",
+	".pnpm-store",
+	".yarn",
+	// Python
+	".venv",
+	"venv",
+	"site-packages",
+	"dist-packages",
+	"__pypackages__",
+	".tox",
+	".nox",
+	// Rust build output (Cargo.lock sits beside it, not in it)
+	"target",
+	// VCS metadata
+	".git",
+}
+
+// packageSinkExcludes returns packageSinks as syft exclusion globs matching
+// the directory at any depth. A fresh slice every call: syft rewrites the
+// slice it is given in place, prefixing each entry with the scan root.
+func packageSinkExcludes() []string {
+	out := make([]string, len(packageSinks))
+	for i, s := range packageSinks {
+		out[i] = "**/" + s
+	}
+	return out
+}
+
+// newDirectorySource is the syft source every cataloger reads through, with
+// the package sinks left out of its index.
+//
+// The root is symlink-resolved first. Syft walks the resolved root but anchors
+// exclusions to the path as given, so under a symlinked root (macOS /var, /tmp)
+// no exclusion would ever match. Resolver paths are root-relative, so nothing
+// downstream sees the difference.
+func newDirectorySource(absRoot string) (source.Source, error) {
+	root := absRoot
+	if resolved, err := filepath.EvalSymlinks(absRoot); err == nil {
+		root = resolved
+	}
+	return directorysource.New(directorysource.Config{
+		Path:    root,
+		Exclude: source.ExcludeConfig{Paths: packageSinkExcludes()},
+	})
+}
+
 // Catalog returns Python + JavaScript packages under path.
 //
 // Bypasses syft.CreateSBOM (which transitively imports every cataloger Anchore
@@ -84,7 +143,7 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 	if err != nil {
 		return nil, fmt.Errorf("resolve path: %w", err)
 	}
-	src, err := directorysource.NewFromPath(absRoot)
+	src, err := newDirectorySource(absRoot)
 	if err != nil {
 		return nil, fmt.Errorf("syft source: %w", err)
 	}

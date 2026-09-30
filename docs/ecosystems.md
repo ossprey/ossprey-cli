@@ -19,6 +19,14 @@ supply a lockfile for full transitive coverage. Rust is the exception: with no
 `Cargo.lock` it catalogues nothing at all, so a crate that gitignores its
 lockfile needs one committed to be scanned.
 
+Directories that hold installed or built packages rather than your project's
+own manifests are not read at all: `node_modules`, `bower_components`,
+`.pnpm-store`, `.yarn`, `.venv`, `venv`, `site-packages`, `dist-packages`,
+`__pypackages__`, `.tox`, `.nox`, `target` and `.git`, at any depth. The
+lockfile beside them already names what they contain, and walking them could
+add minutes to a scan. A project whose only record of its dependencies is an
+installed tree, with no lockfile or manifest, catalogues nothing from it.
+
 When a dependency's version can't be determined — an unpinned range in a
 manifest (`click = "^8"`) with no lockfile or resolver to pin it against — the
 scan defaults that component to the **latest published version** from its
