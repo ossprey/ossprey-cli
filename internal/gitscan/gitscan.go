@@ -148,11 +148,6 @@ func report(ctx context.Context, opts Options, repo Repo, sbom *ossbom.SBOM) err
 	}
 	if hasMalware {
 		profile := ansi.Detect(errOut)
-		if !env.Verbose() {
-			fmt.Fprintln(errOut, profile.Red(fmt.Sprintf("ossprey: blocked `git %s`: %s",
-				strings.Join(opts.Args, " "), summary.Headline())))
-			return forward.ErrBlocked
-		}
 		fmt.Fprint(errOut, alert.Malware(summary.Alert(), "Git command blocked.", profile))
 		for _, msg := range summary.Failing {
 			fmt.Fprintln(errOut, profile.Red("Error: "+msg))

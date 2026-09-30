@@ -9,11 +9,9 @@ was sent (see [`unscanned`](#machine-readable-verdict---report)). On a malware
 verdict it draws an alert box naming every malicious package, followed by one
 `Error: WARNING: <pkg>:<ver> contains malware. Remediate this immediately` line
 per finding, so anything that greps the old one-line form keeps working. The
-forwarders and shims are quieter: by default they print one line, and a block
-is ``ossprey: blocked `<command>`: <pkg>:<ver> contains malware`` (see
+forwarders and shims print the same box to stderr before their
+`ossprey: blocked ...` line; otherwise they print a single line (see
 [forwarder output](forwarder.md#shell-aliases--drop-the-ossprey-prefix-in-your-terminal)).
-With `OSSPREY_VERBOSE=1` they print the same box to stderr before their
-`ossprey: blocked ...` line.
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────┐

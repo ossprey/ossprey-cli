@@ -166,33 +166,6 @@ func TestRun_MaliciousRepoBlocksGit(t *testing.T) {
 	}
 }
 
-// Quiet (OSSPREY_VERBOSE unset), a block is one line naming the command and
-// the finding; verbose keeps the full alert.
-func TestRun_MaliciousRepoQuietIsOneLine(t *testing.T) {
-	fakeGitHub(t)
-	for _, k := range []string{"FORCE_COLOR", "CLICOLOR_FORCE", "GITHUB_ACTIONS", "GITLAB_CI", "TF_BUILD", "BUILDKITE"} {
-		t.Setenv(k, "")
-	}
-	for _, verbose := range []string{"", "1"} {
-		t.Setenv("OSSPREY_VERBOSE", verbose)
-		stub(t, true)
-		var buf bytes.Buffer
-		errOut, progressOut = &buf, &buf
-		err := Run(context.Background(), Options{Args: []string{"clone", "https://github.com/o/pub"}})
-		if !errors.Is(err, forward.ErrBlocked) {
-			t.Fatalf("verbose=%q: err = %v, want ErrBlocked", verbose, err)
-		}
-		out := buf.String()
-		n := strings.Count(out, "\n")
-		switch {
-		case verbose == "" && (n != 1 || !strings.HasPrefix(out, "ossprey: blocked `git clone https://github.com/o/pub`: ") || !strings.Contains(out, "contains malware")):
-			t.Errorf("quiet: want one blocked line, got:\n%s", out)
-		case verbose != "" && !strings.Contains(out, "Git command blocked."):
-			t.Errorf("verbose: want the full alert, got:\n%s", out)
-		}
-	}
-}
-
 func TestRun_PrivateAndUnknownReposAreNotChecked(t *testing.T) {
 	fakeGitHub(t)
 	c := stub(t, true)

@@ -543,14 +543,9 @@ func reportAndForward(ctx context.Context, m *Manager, opts Options, sbom *ossbo
 		note("ossprey: %s\n", msg)
 	}
 	if hasMalware {
+		// The full report even when quiet: a block is the one outcome worth
+		// more than a line.
 		profile := ansi.Detect(errOut)
-		if !env.Verbose() {
-			// One line, and it still carries both things the full report's
-			// greps key on: what contains malware, and what was blocked.
-			fmt.Fprintln(errOut, profile.Red(fmt.Sprintf("ossprey: blocked `%s %s`: %s",
-				m.Bin, strings.Join(opts.Args, " "), summary.Headline())))
-			return ErrBlocked
-		}
 		fmt.Fprint(errOut, alert.Malware(summary.Alert(), "Installation blocked.", profile))
 		for _, msg := range summary.Failing {
 			fmt.Fprintln(errOut, profile.Red("Error: "+msg))

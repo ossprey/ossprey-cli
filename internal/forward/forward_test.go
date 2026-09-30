@@ -854,7 +854,6 @@ func TestRun_MalwareBlockPrintsBannerBeforeErrorLines(t *testing.T) {
 	for _, k := range []string{"FORCE_COLOR", "CLICOLOR_FORCE", "GITHUB_ACTIONS", "GITLAB_CI", "TF_BUILD", "BUILDKITE"} {
 		t.Setenv(k, "")
 	}
-	t.Setenv("OSSPREY_VERBOSE", "1") // the full alert is verbose-only
 	var buf bytes.Buffer
 	old := errOut
 	errOut = &buf
@@ -1139,9 +1138,9 @@ func TestQuietForwarder_CleanInstallIsOneLine(t *testing.T) {
 	}
 }
 
-// Quiet, a block is one line that still names what was blocked and what
-// contains malware — the two things scripts and the smoke tests grep for.
-func TestQuietForwarder_MalwareIsOneLine(t *testing.T) {
+// Quiet, a block still gets the full report — alert box, one `Error: WARNING:`
+// line per finding, the blocked line — and nothing else: no warnings.
+func TestQuietForwarder_MalwareKeepsTheFullReport(t *testing.T) {
 	ex := &stubExec{}
 	swap(t, ex.fn, func(context.Context, check.Options) (*ossbom.SBOM, error) {
 		s := ossbom.New(ossbom.Environment{})
@@ -1160,9 +1159,18 @@ func TestQuietForwarder_MalwareIsOneLine(t *testing.T) {
 	if ex.called {
 		t.Fatal("a blocked install must not run the manager")
 	}
-	want := "ossprey: blocked `npm install evil@1.0.0 worse@2.0.0 @acme/one`: evil:1.0.0, worse:2.0.0 contain malware"
-	if got := lines(out); len(got) != 1 || got[0] != want {
-		t.Errorf("want exactly\n%s\ngot:\n%s", want, out)
+	for _, want := range []string{
+		"Ossprey found 2 malicious packages. Installation blocked.",
+		"Error: WARNING: evil:1.0.0 contains malware",
+		"Error: WARNING: worse:2.0.0 contains malware",
+		"ossprey: blocked `npm install evil@1.0.0 worse@2.0.0 @acme/one`",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "not on the public registry") {
+		t.Errorf("quiet must not print warnings, even on a block:\n%s", out)
 	}
 }
 
