@@ -95,6 +95,10 @@ var packageSinks = []string{
 	".nox",
 	// Rust build output (Cargo.lock sits beside it, not in it)
 	"target",
+	// Framework build caches (Gatsby/Parcel, Next.js, Nuxt)
+	".cache",
+	".next",
+	".nuxt",
 	// VCS metadata
 	".git",
 }

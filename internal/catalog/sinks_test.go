@@ -25,6 +25,9 @@ func TestDirectorySourceSkipsPackageSinks(t *testing.T) {
 		".venv/lib/python3.12/site-packages/c/package.json",
 		"target/debug/package.json",
 		".git/package.json",
+		".cache/gatsby/package.json",
+		".next/dev/node_modules/d/package.json",
+		".nuxt/package.json",
 	} {
 		sinkFixture(t, proj, rel, `{"name":"x","version":"1.0.0"}`)
 	}
@@ -43,9 +46,17 @@ func TestDirectorySourceSkipsPackageSinks(t *testing.T) {
 		t.Fatalf("FilesByGlob: %v", err)
 	}
 
+	// RealPath is root-relative ("/package.json") on Unix but absolute under
+	// the resolved root on Windows ("C:/.../package.json").
+	root, err := filepath.EvalSymlinks(proj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootPrefix := filepath.ToSlash(root) + "/"
 	var got []string
 	for _, l := range locs {
-		got = append(got, strings.TrimPrefix(filepath.ToSlash(l.RealPath), "/"))
+		p := strings.TrimPrefix(filepath.ToSlash(l.RealPath), rootPrefix)
+		got = append(got, strings.TrimPrefix(p, "/"))
 	}
 	want := map[string]bool{"package.json": true, "packages/web/package.json": true}
 	if len(got) != len(want) {

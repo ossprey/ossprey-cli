@@ -22,7 +22,8 @@ lockfile needs one committed to be scanned.
 Directories that hold installed or built packages rather than your project's
 own manifests are not read at all: `node_modules`, `bower_components`,
 `.pnpm-store`, `.yarn`, `.venv`, `venv`, `site-packages`, `dist-packages`,
-`__pypackages__`, `.tox`, `.nox`, `target` and `.git`, at any depth. The
+`__pypackages__`, `.tox`, `.nox`, `target`, the framework caches `.cache`,
+`.next` and `.nuxt`, and `.git`, at any depth. The
 lockfile beside them already names what they contain, and walking them could
 add minutes to a scan. A project whose only record of its dependencies is an
 installed tree, with no lockfile or manifest, catalogues nothing from it.
