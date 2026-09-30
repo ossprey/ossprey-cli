@@ -22,8 +22,11 @@ func acmePolicy(t *testing.T) trust.Policy {
 	return p
 }
 
+// captureErrOut also turns verbose on: the trusted-source lines under test are
+// collected warnings, which a quiet forwarder does not print.
 func captureErrOut(t *testing.T) *bytes.Buffer {
 	t.Helper()
+	t.Setenv("OSSPREY_VERBOSE", "1")
 	var buf bytes.Buffer
 	old := errOut
 	errOut = &buf

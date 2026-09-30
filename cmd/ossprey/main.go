@@ -119,6 +119,13 @@ func notifyLatestVersion(cmd *cobra.Command) {
 	if cmd.Name() == "update" {
 		return
 	}
+	// A forwarder's budget is one line of its own (see internal/forward), and a
+	// "new version available" notice after every `npm install` would be a
+	// second. Verbose runs still see it. The wrappers (package managers, git) are
+	// the only commands that disable flag parsing.
+	if cmd.DisableFlagParsing && !env.Verbose() {
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	_ = updateNoticeFn(ctx, update.NoticeOptions{
