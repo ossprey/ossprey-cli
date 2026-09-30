@@ -319,6 +319,7 @@ func TestRun_Npx_TagAndBeforeReachTheResolver(t *testing.T) {
 // affected check is skipped with a warning, never reported clean. An exact
 // version does not depend on the date and is still checked.
 func TestRun_Npx_UnreadableBeforeSkipsTheCheck(t *testing.T) {
+	t.Setenv("OSSPREY_VERBOSE", "1")
 	var buf bytes.Buffer
 	old := errOut
 	errOut = &buf
@@ -358,6 +359,7 @@ func TestParseNpmDate(t *testing.T) {
 // An unresolvable specifier is never reported as checked.
 func TestRun_Npx_UnresolvableSpecifierIsNotReportedClean(t *testing.T) {
 	noLocalBins(t)
+	t.Setenv("OSSPREY_VERBOSE", "1")
 	ex := &stubExec{}
 	swap(t, ex.fn, func(context.Context, check.Options) (*ossbom.SBOM, error) {
 		t.Error("nothing resolved, so nothing should be checked")

@@ -411,12 +411,21 @@ func Run(ctx context.Context, opts Options) error {
 		return passiveAfterInstall(ctx, m, opts)
 	}
 
-<<<<<<< HEAD
 	var parsed installArgs
 	if m.parse != nil {
 		parsed = m.parse(opts.Args[start:])
 	} else {
 		parsed = ParseSpecs(m, opts.Args[start:])
+	}
+	hadSpecs := len(parsed.Specs) > 0
+	parsed.Specs = dropTrusted(ctx, opts.Trust, parsed.Specs)
+	// Every named package was trusted. Without this the empty spec list
+	// would read as a bare install and scan the whole project instead.
+	if hadSpecs && len(parsed.Specs) == 0 {
+		flushWarnings(ctx)
+		note("ossprey: every package named is from a trusted source; forwarding `%s %s` unchecked\n",
+			m.Bin, strings.Join(opts.Args, " "))
+		return forwardTo()
 	}
 	// resolveAll pins every named package to the release that will actually be
 	// installed or run.
@@ -426,20 +435,6 @@ func Run(ctx context.Context, opts Options) error {
 			specs = resolveNpxSpecifiers(ctx, resolveSpec, parsed.npmPick, specs)
 		}
 		return resolveSpecs(ctx, resolve, specs)
-=======
-	parsed := ParseSpecs(m, opts.Args[start:])
-	if kept := dropTrusted(ctx, opts.Trust, parsed.Specs); len(kept) < len(parsed.Specs) {
-		parsed.Specs = kept
-		// Every named package was trusted. Without this the empty spec list
-		// would read as a bare install and scan the whole project instead.
-		if len(kept) == 0 {
-			// What was trusted first, then what that means for the install.
-			flushWarnings(ctx)
-			note("ossprey: every package named is from a trusted source; forwarding `%s %s` unchecked\n",
-				m.Bin, strings.Join(opts.Args, " "))
-			return forwardTo()
-		}
->>>>>>> origin/main
 	}
 
 	switch {
