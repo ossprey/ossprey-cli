@@ -18,6 +18,7 @@ var ciVars = []string{
 	"GITHUB_REPOSITORY",
 	"GITHUB_REF_NAME",
 	"GITHUB_HEAD_REF",
+	"RUNNER_ENVIRONMENT",
 }
 
 func TestOverlay(t *testing.T) {
@@ -196,5 +197,50 @@ func TestOverlayNamesTheScanAfterTheRepositoryNotTheCheckoutDirectory(t *testing
 	}
 	if got.Project != "Ossprey" {
 		t.Errorf("Project = %q, want %q", got.Project, "Ossprey")
+	}
+}
+
+func TestOverlayMachineName(t *testing.T) {
+	tests := []struct {
+		name   string
+		runner string
+		want   string
+	}{
+		{name: "github-hosted runner gets a stable name", runner: "github-hosted", want: MachineGitHubHosted},
+		{name: "self-hosted runner keeps its hostname", runner: "self-hosted", want: "fv-az123"},
+		{name: "unknown runner environment keeps its hostname", runner: "", want: "fv-az123"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, k := range ciVars {
+				t.Setenv(k, "")
+			}
+			t.Setenv("GITHUB_ACTIONS", "true")
+			t.Setenv("GITHUB_REPOSITORY", "acme/widget")
+			t.Setenv("RUNNER_ENVIRONMENT", tt.runner)
+
+			got := ossbom.Environment{Path: "/src", MachineName: "fv-az123"}
+			Overlay(&got)
+
+			if got.MachineName != tt.want {
+				t.Errorf("MachineName = %q, want %q", got.MachineName, tt.want)
+			}
+		})
+	}
+}
+
+// Outside CI the hostname is the only thing naming a local scan.
+func TestOverlayKeepsTheHostnameOutsideCI(t *testing.T) {
+	for _, k := range ciVars {
+		t.Setenv(k, "")
+	}
+	t.Setenv("RUNNER_ENVIRONMENT", "github-hosted")
+
+	got := ossbom.Environment{MachineName: "laptop"}
+	Overlay(&got)
+
+	if got.MachineName != "laptop" {
+		t.Errorf("MachineName = %q, want %q", got.MachineName, "laptop")
 	}
 }

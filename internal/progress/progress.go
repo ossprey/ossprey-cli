@@ -129,3 +129,15 @@ func isTerminal(w io.Writer) bool {
 	f, ok := w.(interface{ Fd() uintptr })
 	return ok && term.IsTerminal(int(f.Fd()))
 }
+
+// Transient returns w when an indicator drawn there leaves nothing behind (a
+// terminal, where it erases itself on stop), and io.Discard otherwise, where
+// Start would print a plain line that stays. For callers whose output budget is
+// a single line, such as the quiet forwarders: they keep the animation that
+// says a wait is not a hang, and drop the line that would outlive it.
+func Transient(w io.Writer) io.Writer {
+	if isTerminal(w) {
+		return w
+	}
+	return io.Discard
+}

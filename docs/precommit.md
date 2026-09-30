@@ -71,6 +71,8 @@ framework manage both.
   install. Pin the version or commit a lockfile — a lockfile also gives the
   hook the full transitive tree, where a bare manifest yields direct
   dependencies only.
+- **Packages from [trusted sources](trust.md).** They are left out of the
+  lookup; `-v` reports how many.
 - **Packages already committed.** The hook diffs the staged manifests against
   `HEAD`, so it only sees what this commit introduces. Auditing what's already
   in the tree is `ossprey scan`'s job.

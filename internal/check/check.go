@@ -111,7 +111,7 @@ func scanName(specs []Spec) string {
 
 func (s Spec) validate() error {
 	if normalizeEcosystem(s.Ecosystem) == "" {
-		return fmt.Errorf("unsupported ecosystem %q (want pypi or npm)", s.Ecosystem)
+		return fmt.Errorf("unsupported ecosystem %q (want pypi, npm or github)", s.Ecosystem)
 	}
 	if s.Name == "" {
 		return errors.New("package name is required")
@@ -130,6 +130,8 @@ func normalizeEcosystem(eco string) string {
 		return "pypi"
 	case "npm", "node", "javascript", "js", "yarn":
 		return "npm"
+	case "github":
+		return "github"
 	default:
 		return ""
 	}
@@ -142,12 +144,12 @@ func normalizeEcosystem(eco string) string {
 func ParseSpec(ecosystem, token string) (Spec, error) {
 	eco := normalizeEcosystem(ecosystem)
 	if eco == "" {
-		return Spec{}, fmt.Errorf("unsupported ecosystem %q (want pypi or npm)", ecosystem)
+		return Spec{}, fmt.Errorf("unsupported ecosystem %q (want pypi, npm or github)", ecosystem)
 	}
 
 	var name, version string
 	switch eco {
-	case "npm":
+	case "npm", "github":
 		name, version = splitNpm(token)
 	case "pypi":
 		name, version = splitPyPI(token)

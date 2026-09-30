@@ -40,6 +40,7 @@ func newShimInstallCmd() *cobra.Command {
 		watchdog  bool
 		monitorID string
 		noPassive bool
+		git       bool
 	)
 
 	cmd := &cobra.Command{
@@ -64,7 +65,10 @@ Create one in the dashboard under Ingest tokens.
 
 Re-running without a mode keeps whichever mode is already installed, so an
 upgrade never silently starts blocking a fleet that chose not to. Use
---no-passive to go back to blocking on purpose.`,
+--no-passive to go back to blocking on purpose.
+
+--git also shims git (opt-in): a clone or pull of a public GitHub repository
+checks the repository itself before git runs. Private repos pass through.`,
 		Example: `  # Shim every package manager found on this machine
   ossprey shim install
 
@@ -73,6 +77,9 @@ upgrade never silently starts blocking a fleet that chose not to. Use
 
   # Show what would be written, change nothing
   ossprey shim install --dry-run
+
+  # Also check public GitHub repos on git clone / git pull
+  ossprey shim install --git
 
   # Passive monitoring using this machine's login; installs are never blocked
   ossprey shim install --watchdog
@@ -96,6 +103,7 @@ upgrade never silently starts blocking a fleet that chose not to. Use
 				Mode:         mode,
 				MonitorID:    monitorID,
 				ClearMode:    noPassive,
+				Git:          git,
 			}
 			if printOnly {
 				return previewInstall(opts)
@@ -111,7 +119,7 @@ upgrade never silently starts blocking a fleet that chose not to. Use
 	}
 
 	cmd.Flags().StringSliceVar(&managers, "managers", nil,
-		"only shim these commands (default: every supported manager found on PATH; supported: "+strings.Join(shim.DefaultManagers(), ", ")+")")
+		"only shim these commands (default: every supported manager found on PATH; supported: "+strings.Join(shim.SupportedManagers(), ", ")+")")
 	cmd.Flags().BoolVar(&all, "all", false, "also shim supported managers that aren't installed yet")
 	cmd.Flags().BoolVar(&noPath, "no-path", false, "write the shims but don't touch shell profiles (set PATH yourself — for containers and CI)")
 	cmd.Flags().StringVar(&dir, "dir", "", "shim directory (default: ~/.ossprey/shims, or $"+shim.DirEnv+")")
@@ -119,6 +127,7 @@ upgrade never silently starts blocking a fleet that chose not to. Use
 	cmd.Flags().BoolVar(&printOnly, "dry-run", false, "print what would be installed and exit")
 	cmd.Flags().BoolVar(&watchdog, "watchdog", false, "passive mode: submit scans with this machine's login and never block an install")
 	cmd.Flags().StringVar(&monitorID, "monitor", "", "passive mode: submit scans through a monitor's id, needing no login or API key")
+	cmd.Flags().BoolVar(&git, "git", false, "also shim git: check public GitHub repos on clone/pull (opt-in)")
 	cmd.Flags().BoolVar(&noPassive, "no-passive", false, "go back to blocking installs, dropping a watchdog or monitor mode already installed")
 	cmd.MarkFlagsMutuallyExclusive("watchdog", "monitor")
 	cmd.MarkFlagsMutuallyExclusive("no-passive", "watchdog")

@@ -10,7 +10,9 @@ verdict it draws an alert box naming every malicious package, followed by one
 `Error: WARNING: <pkg>:<ver> contains malware. Remediate this immediately` line
 per finding, so anything that greps the old one-line form keeps working. The
 forwarders and shims print the same box to stderr before their
-`ossprey: blocked ...` line.
+`ossprey: blocked ...` line; otherwise they print nothing unless a platform
+error occurs (see
+[forwarder output](forwarder.md#shell-aliases--drop-the-ossprey-prefix-in-your-terminal)).
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────┐
@@ -84,7 +86,9 @@ ossprey: (end of uv output)
 ```
 
 `OSSPREY_VERBOSE` works on every path, including the forwarders and shims,
-which parse no flags of their own.
+which parse no flags of their own. Without it the forwarders print no
+warnings at all, and a clean or unchecked install is silent; a malware block
+still gets the full report, and platform errors are still shown.
 
 A package left unversioned is still submitted and still checked against what
 the registry knows; one dropped by a forwarder (`skipping its check`) is not

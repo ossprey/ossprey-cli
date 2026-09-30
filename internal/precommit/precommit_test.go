@@ -8,6 +8,9 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/ossprey/ossprey-cli/internal/catalog"
+	"github.com/ossprey/ossprey-cli/internal/trust"
 )
 
 // --- git scratch-repo helpers ---
@@ -203,7 +206,7 @@ func TestStagedDelta(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := initRepo(t)
 			tc.setup(t, dir)
-			got, err := StagedDelta(ctx, dir)
+			got, err := StagedDelta(ctx, dir, trust.Policy{})
 			if err != nil {
 				t.Fatalf("StagedDelta: %v", err)
 			}
@@ -221,7 +224,7 @@ func TestStagedDeltaSubdirectoryPathPreserved(t *testing.T) {
 	writeRepoFile(t, dir, "web/package-lock.json", npmLock(map[string]string{"left-pad": "1.3.0", "is-odd": "3.0.1"}))
 	gitT(t, dir, "add", "web/package-lock.json")
 
-	got, err := StagedDelta(context.Background(), dir)
+	got, err := StagedDelta(context.Background(), dir, trust.Policy{})
 	if err != nil {
 		t.Fatalf("StagedDelta: %v", err)
 	}
@@ -336,5 +339,18 @@ func TestIsManifestPath(t *testing.T) {
 		if got := isManifestPath(tc.p); got != tc.want {
 			t.Errorf("isManifestPath(%q) = %v, want %v", tc.p, got, tc.want)
 		}
+	}
+}
+
+// A trusted package is neither in the delta nor sent to the malware check; it
+// is counted so a verbose hook can say so.
+func TestDiffPackagesLeavesTrustedOut(t *testing.T) {
+	staged := []catalog.Package{
+		{Type: "npm", Name: "@acme/web", Version: "1.0.0", Trusted: true},
+		{Type: "npm", Name: "left-pad", Version: "1.3.0"},
+	}
+	got := diffPackages(staged, nil, t.TempDir(), nil)
+	if len(got.Packages) != 1 || got.Packages[0].Name != "left-pad" || got.Trusted != 1 {
+		t.Errorf("delta = %+v", got)
 	}
 }

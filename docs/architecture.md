@@ -24,8 +24,10 @@ flowchart LR
 
     A --> D["internal/catalog<br/>lockfiles + manifests"]
     D -. "no lockfile" .-> E["uv / npm resolvers<br/>resolve ranges to versions"]
-    E --> F
-    D --> F["OSSBOM"]
+    E --> T
+    D --> T{"trusted source?<br/>(internal/trust)"}
+    T -- "yes" --> X["dropped: not checked, not sent"]
+    T -- "no" --> F["OSSBOM"]
     B --> F
     C --> F
     F --> G["MiniBOM<br/>purl + source + env + location"]
