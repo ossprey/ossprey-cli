@@ -68,18 +68,23 @@ func (r Repo) String() string { return r.Owner + "/" + r.Name }
 // failure to check print; everything else is behind OSSPREY_VERBOSE. git's own
 // output is untouched.
 
+// note prints a line of narration, shown only when verbose.
 func note(format string, a ...any) {
 	if env.Verbose() {
 		fmt.Fprintf(errOut, format, a...)
 	}
 }
 
+// flushWarnings empties the collector, printing it only when verbose. It must
+// still drain when quiet, or main's safety-net drain would print it anyway.
 func flushWarnings(ctx context.Context) {
 	if s := warn.Drain(ctx); env.Verbose() {
 		fmt.Fprint(errOut, s)
 	}
 }
 
+// progressTo is where a wait is announced: a terminal always, where the
+// animation erases itself; a pipe or CI log only when verbose.
 func progressTo() io.Writer {
 	if env.Verbose() {
 		return progressOut
@@ -144,6 +149,8 @@ func Run(ctx context.Context, opts Options) error {
 	return report(ctx, opts, repo, sbom)
 }
 
+// report blocks git (forward.ErrBlocked) with the full malware report if sbom
+// carries a failing finding, else execs the real git.
 func report(ctx context.Context, opts Options, repo Repo, sbom *ossbom.SBOM) error {
 	flushWarnings(ctx)
 	summary, hasMalware := scan.MalwareReports(sbom, severity.FailingFloor)

@@ -86,8 +86,9 @@ ossprey: (end of uv output)
 ```
 
 `OSSPREY_VERBOSE` works on every path, including the forwarders and shims,
-which parse no flags of their own. The forwarders print no warnings at all
-without it: their default output is the single outcome line.
+which parse no flags of their own. Without it the forwarders print no
+warnings at all, and a clean or unchecked install is silent; a malware block
+still gets the full report, and platform errors are still shown.
 
 A package left unversioned is still submitted and still checked against what
 the registry knows; one dropped by a forwarder (`skipping its check`) is not
