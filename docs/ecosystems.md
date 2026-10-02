@@ -8,16 +8,15 @@ Python, JavaScript and Rust, via syft's static catalogers.
 |-----------|--------------|
 | Python | `requirements.txt`, `Pipfile.lock`, `poetry.lock`, `uv.lock`, `pdm.lock`, `setup.py`, `pyproject.toml`, wheel / egg metadata |
 | JavaScript | `package.json`, `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml` |
-| Rust | `Cargo.lock` only, there is no support for parsing cargo.toml. |
+| Rust | `Cargo.lock`, and `Cargo.toml` for direct dependencies when no lockfile is committed. |
 
 The CLI never installs your dependencies. It does run a resolver — `npm install
 --package-lock-only` (in a temporary directory) or `uv pip compile` — when a
 project ships a manifest with no lockfile, purely to work out which versions an
 install would pull; nothing is installed and your project is not modified. When
 that resolver is missing from PATH or disabled, expect direct deps only —
-supply a lockfile for full transitive coverage. Rust is the exception: with no
-`Cargo.lock` it catalogues nothing at all, so a crate that gitignores its
-lockfile needs one committed to be scanned.
+supply a lockfile for full transitive coverage. Rust has no resolver tier, so a
+crate with no `Cargo.lock` always catalogues direct dependencies only.
 
 Directories that hold installed or built packages rather than your project's
 own manifests are not read at all: `node_modules`, `bower_components`,
