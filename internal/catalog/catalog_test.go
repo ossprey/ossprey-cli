@@ -1492,3 +1492,51 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 		t.Errorf("emitted %v, want only [serde]", names)
 	}
 }
+
+func TestCatalogCargoNestedWorkspaceDoesNotInheritTheOuterPool(t *testing.T) {
+	// Cargo roots a workspace on the [workspace] table, not on it having
+	// dependencies. A nested workspace declaring an empty one is still the root
+	// for its members, so taking the outer pool would resolve the member's
+	// inherited keys to pins Cargo never uses for it.
+	dir := t.TempDir()
+	writeFile(t, dir, "Cargo.toml", `[workspace]
+members = ["nested"]
+
+[workspace.dependencies]
+pinned = "=1.2.3"
+`)
+	nested := filepath.Join(dir, "nested")
+	if err := os.MkdirAll(filepath.Join(nested, "app"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	writeFile(t, nested, "Cargo.toml", `[workspace]
+members = ["app"]
+`)
+	writeFile(t, filepath.Join(nested, "app"), "Cargo.toml", `[package]
+name = "app"
+
+[dependencies]
+pinned = { workspace = true }
+`)
+
+	got, err := Catalog(context.Background(), dir, Options{SkipVersionLookup: true, NoExec: true})
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	for _, p := range got {
+		if p.Name == "pinned" {
+			t.Errorf("inherited %q from the outer workspace across a nested root", p.Name)
+		}
+	}
+}
+
+func TestCargoDropReasonNamesTheRuleThatFailed(t *testing.T) {
+	// Both halves of validCargoComponent drop a component; reporting the name
+	// rule for a version failure sends the reader after the wrong thing.
+	if got := cargoDropReason("longver"); !strings.Contains(got, "version") {
+		t.Errorf("valid name, bad version: reason = %q", got)
+	}
+	if got := cargoDropReason("not a crate name"); !strings.Contains(got, "crate name") {
+		t.Errorf("impossible name: reason = %q", got)
+	}
+}

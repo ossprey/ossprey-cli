@@ -75,11 +75,12 @@ func parseCargoTomlFile(ctx context.Context, path string, loc file.Location, sca
 		return nil, err
 	}
 	var m cargoManifest
-	if err := toml.Unmarshal(data, &m); err != nil {
+	md, err := toml.Decode(string(data), &m)
+	if err != nil {
 		return nil, err
 	}
 
-	pool := workspacePool(m, path, scanRoot)
+	pool := workspacePool(m, md.IsDefined("workspace"), path, scanRoot)
 	seen := make(map[string]struct{})
 	var out []pkg.Package
 	add := func(alias string, spec any) {
@@ -136,8 +137,12 @@ func readManifest(path string) ([]byte, error) {
 // manifest: its own when it declares one, else the nearest ancestor manifest
 // that does, since a workspace member conventionally holds only the opt-in.
 // Bounded by the scan root, so it never reads outside what was asked for.
-func workspacePool(m cargoManifest, manifestPath, scanRoot string) map[string]any {
-	if len(m.Workspace.Dependencies) > 0 {
+//
+// isRoot is whether this manifest declares [workspace] at all. Cargo roots a
+// workspace on that table, not on it having dependencies, so a nested workspace
+// that declares an empty one must not inherit an outer workspace's pool.
+func workspacePool(m cargoManifest, isRoot bool, manifestPath, scanRoot string) map[string]any {
+	if isRoot {
 		return m.Workspace.Dependencies
 	}
 	root := filepath.Clean(scanRoot)
@@ -154,12 +159,12 @@ func workspacePool(m cargoManifest, manifestPath, scanRoot string) map[string]an
 		if !withinRoot(ancestorPath, root) {
 			continue
 		}
-		data, err := os.ReadFile(ancestorPath)
+		data, err := readManifest(ancestorPath)
 		if err != nil {
 			continue
 		}
 		var ancestor cargoManifest
-		if toml.Unmarshal(data, &ancestor) == nil && len(ancestor.Workspace.Dependencies) > 0 {
+		if md, err := toml.Decode(string(data), &ancestor); err == nil && md.IsDefined("workspace") {
 			return ancestor.Workspace.Dependencies
 		}
 	}
@@ -230,6 +235,15 @@ var cargoName = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 // source is held to this, not just the manifest cataloguer.
 func validCargoComponent(name, version string) bool {
 	return cargoName.MatchString(name) && len(version) <= maxCargoVersion
+}
+
+// cargoDropReason names which half of validCargoComponent failed, so a real
+// crate carrying an over-long version is not reported as an impossible name.
+func cargoDropReason(name string) string {
+	if cargoName.MatchString(name) {
+		return "its version is over the API's length limit"
+	}
+	return "it cannot be a crates.io crate name"
 }
 
 // vouched drops a dependency whose key cannot name a crate on crates.io.

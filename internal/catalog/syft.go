@@ -254,7 +254,7 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 			// version rule, so gate every cargo source here: one component the
 			// API rejects fails the customer's whole SBOM, npm and pypi included.
 			if t == "cargo" && !validCargoComponent(p.Name, version) {
-				warn.Add(ctx, cargoDropEntry("it cannot be a crates.io crate name", p.Name))
+				warn.Add(ctx, cargoDropEntry(cargoDropReason(p.Name), p.Name))
 				continue
 			}
 			key := dedupKey(t, p.Name, version)
