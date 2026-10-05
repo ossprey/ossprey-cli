@@ -73,10 +73,11 @@ ossprey check -e npm left-pad@1.3.0 # or just ask about one package
 | Exit | Meaning |
 | ---- | ------- |
 | `0` | Nothing malicious found (or the scan was skipped, e.g. quota exhausted) |
-| `1` | Malware found — **or** the scan itself failed |
+| `1` | Malware found |
+| `2` | The scan itself failed (bad path, network/API error, missing key) |
 
 So `ossprey scan .` in a CI job fails the build on malware, with no extra
-plumbing. If you need to tell "clean" apart from "errored", or want the findings
+plumbing. If you need to tell "clean" apart from "skipped", or want the findings
 as JSON, use [`--report report.json`](docs/output.md#machine-readable-verdict---report).
 
 ---
@@ -173,6 +174,10 @@ install instead. Either way nothing is blocked and nothing waits.
 | JavaScript | `package.json`, `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml` |
 | Rust | `Cargo.lock` |
 
+**Internal packages?** `ossprey trust add --registry <url>` or
+`--npm-scope @org` skips packages from your private registries, and never
+sends them. See [docs/trust.md](docs/trust.md).
+
 **Commit a lockfile if you can.** A lockfile lists the whole transitive tree; a
 bare manifest gives direct dependencies only, and Ossprey has to guess versions
 for unpinned ranges. Details, including how unpinned versions are resolved, in
@@ -183,7 +188,7 @@ for unpinned ranges. Details, including how unpinned versions are resolved, in
 | Variable | Effect |
 | -------- | ------ |
 | `OSSPREY_API_KEY` | Your API key (a stored `ossprey login` takes precedence) |
-| `OSSPREY_VERBOSE=1` | Explain every warning, including a failed resolver's own output |
+| `OSSPREY_VERBOSE=1` | Explain every warning, including a failed resolver's own output; forwarders are silent without it unless they block malware or hit an error |
 | `OSSPREY_SKIP_CI=1` | Kill switch: no scan runs at all |
 | `OSSPREY_PASSIVE=1` | Observe-only: submit scans, never fail a build or block an install |
 
@@ -196,7 +201,8 @@ Everything above in depth: **[docs/](docs/README.md)** — [install](docs/instal
 [forwarder](docs/forwarder.md) · [shims](docs/shims.md) · [git](docs/git.md) ·
 [passive monitoring](docs/passive-monitoring.md) ·
 [pre-commit](docs/precommit.md) · [CI](docs/ci.md) · [output](docs/output.md) ·
-[ecosystems](docs/ecosystems.md) · [how it works](docs/architecture.md)
+[ecosystems](docs/ecosystems.md) · [trusted sources](docs/trust.md) ·
+[how it works](docs/architecture.md)
 
 ## Status
 

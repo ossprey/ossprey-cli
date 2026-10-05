@@ -18,7 +18,7 @@ is, install, `init`, scan, and one short section per way of using it, each
 linking onward. Keep it that way — every flag table, edge case and rationale
 belongs in `docs/`, which is the reference set (`install`, `init`,
 `cli-reference`, `forwarder`, `shims`, `passive-monitoring`, `precommit`, `ci`,
-`output`, `ecosystems`, `architecture`, indexed by `docs/README.md`). When a
+`output`, `ecosystems`, `trust`, `architecture`, indexed by `docs/README.md`). When a
 behaviour changes, the user-facing statement of it lives in exactly one of those
 pages; this file keeps the *why*. `docs/architecture.md` holds the mermaid
 diagrams, so a change to the forwarder's decisions or the scan pipeline needs
@@ -133,6 +133,8 @@ Windows resolves it under `%LOCALAPPDATA%`.
 
 5. **`git`** (`internal/gitscan`) — before `git clone`/`git pull` of a **public** GitHub repo, checks the repo itself as `pkg:github/<owner>/<repo>@<sha>` via `check.Run` (ecosystem `github`), not its deps. **Opt-in**: git is in `shim.optInManagers`, not `DefaultManagers()`, so `shim install` only writes it with `--git` or `--managers git`; a flagless re-run re-points an existing git shim, and `shim status` lists git only once shimmed. Why opt-in: it puts a GitHub API round trip in front of every pull. "Public" = unauthenticated `GET /repos/o/r` returns 200 with `private:false`; never send a token, or a private repo would read as checkable. It **fails open** on any GitHub/API error (unlike the package forwarders) because breaking `git pull` in an outage gets the shim ripped out. `pull` resolves remote/ref by running the *real* git (`shim.LookPathReal` + `OSSPREY_SHIM_BYPASS=1`), never PATH `git`, for the same recursion reason as `lookTool`. Value-flag tables carry the forwarder's asymmetry: a boolean wrongly listed swallows the URL and skips the check.
 
+   **Forwarders are silent by default.** A forwarder sits in front of every install a developer, script or agent runs, so without `OSSPREY_VERBOSE` a clean install prints nothing of ossprey's at all — only the manager's own output. It speaks only for a platform error (main's `error:` line, or a passive `could not post scan` / git `could not look up` warning — fail-open must never also be silent) and for a block, which always gets the full malware report (alert box, `Error: WARNING:` lines, blocked line) — a one-line block was tried and rejected, because that is the outcome a developer must not scroll past. Everything else — the clean verdict, why an install went unchecked, scan narration, collected warnings, informational findings, the update notice — is verbose-only. Smoke tests prove a silent check ran through the fake API's submitted purls, not a stderr line. The real manager's output is never touched (it inherits stdio). Three rules: route narration through `note`, never `Fprintf(errOut, ...)`; drain through `flushWarnings`, which **still drains** when quiet, or main's safety-net drain prints the warnings anyway; and draw progress through `progressTo()`, which keeps the self-erasing terminal animation but drops the plain line a pipe or CI log would keep. `gitscan` follows the same rules. `TestQuietForwarder_*` pins the contract; smoke tests that assert on narration use `runForwardVerbose`.
+
 ### Passive modes and monitor ids
 
 `--passive` submits the scan and returns without polling for a verdict, always exiting 0. It is not new behaviour: `--ci-cache-scan-only` already did exactly this (`submit.Post`, no polling, warn-don't-fail), under a name that reads as "only check the cache" when in fact it runs the full pipeline. The old flag and `OSSPREY_CI_CACHE_SCAN_ONLY` are kept working indefinitely — they are set in pipelines we do not control — but the flag is `Hidden` so there is one name to teach. One behaviour did change: `--passive --report` is now **refused** rather than silently writing nothing, because a consumer reading a stale report from an earlier run cannot tell it apart from this run's.
@@ -166,6 +168,49 @@ A shim is a generated `/bin/sh` script (`.cmd` on Windows) named after the manag
 - **Only our files.** `Uninstall` deletes only marker-carrying files; profile edits live between `# >>> ossprey shims >>>` markers.
 
 `shim` must stay a leaf package (`forward` imports it) — its only first-party dependency is `internal/monitor`, which is itself dependency-free. Do **not** reach for `internal/client` from here to validate a monitor id, which is what `internal/monitor` exists to avoid. `DefaultManagers()` and `forward.Managers()` are kept in agreement by an external test in `internal/shim/forward_agreement_test.go`.
+
+### Trusted sources (`internal/trust`)
+
+A customer's internal packages live on private registries (a CodeArtifact
+"internal" PyPI index beside a "public-proxy" one on the **same host**; npm via
+`@org:registry=`). They cannot be resolved publicly, so they filled scans with
+NOT_FOUND noise and sent internal names off the machine. `trust.Policy` holds
+registry URL prefixes and npm scopes; trusted packages are **dropped before the
+SBOM is built** (`scan.Run`, after `catalog` marks `Package.Trusted`), so the
+submission, `--local` and `-o` agree, and one counted `warn` class
+(`scan.TrustedEntry`) says how many were left out. `ossprey trust
+list|add|remove` writes `trust.json` beside `credentials.json`;
+`OSSPREY_TRUSTED_REGISTRIES` / `OSSPREY_TRUSTED_NPM_SCOPES` add to it.
+
+Every rule is a hole in the scan by design, so the rules are narrow:
+
+- **No name rule for PyPI**, even though a name prefix was the first thing asked for.
+  Anyone can publish that name to PyPI, and an internal name resolved from
+  the public index (dependency confusion) is exactly what an ignore must never
+  hide. npm scopes are the one name rule, because a mapped scope *is* how npm
+  picks the registry and it never falls back to the public one.
+- **Prefix, never host.** Both CodeArtifact repos share a host; host matching
+  would trust the proxy. Paths are `path.Clean`ed after decoding, so
+  `/internal/../public-proxy/` (or `%2e%2e`) is judged where it lands.
+- **Provenance is what the lockfile recorded** (`registryOf`: npm/yarn
+  `resolved`, uv/poetry `Index`, pip `download_info.url`, our npm resolver's
+  lock). Unrecorded means checked. Trusted needs **every** recorded sighting
+  trusted: dedup and `mergeVersionless` fold sightings' `Registries` together
+  rather than keeping the first, since one lockfile fetching it publicly is
+  enough to need a check. Don't add pnpm (no URL) or Pipfile.lock (index
+  *name*) without real URLs.
+- **Named forwarded installs apply only the scope rule** (`dropTrusted`, before
+  `resolveSpecs` so nothing private is looked up publicly). Inferring the
+  registry from `pip.conf`/`.npmrc` was rejected: missing an `extra-index-url`
+  would trust a package pip then fetches publicly. The status quo there is
+  already right — a private-only name 404s and is skipped once; a squatted
+  public one gets checked. An all-trusted named install must forward directly:
+  an empty spec list otherwise reads as a bare install and scans the project.
+- **Machine-level only, never from the repo** — a PR could otherwise trust its
+  own registry. A bad entry is dropped with a warning (`loadTrust`), which only
+  means more is checked; `trust add/remove` refuse to rewrite a file they could
+  not fully parse, since writing back what parsed would delete the rest.
+- `check` ignores trust: naming a package is asking for it to be checked.
 
 ### Core data flow (scan)
 
@@ -246,6 +291,18 @@ cover.
 Output is deduped by `(type, name, version)`. `mergeVersionless` then collapses
 a package emitted both versionless (direct-deps fallback) and pinned (uv-resolved)
 into the pinned one. Vendored paths (`node_modules/`) are skipped (`isVendoredPath`).
+
+**Package sinks are excluded from the syft index itself** (`packageSinks`,
+`newDirectorySource`). Filtering `node_modules` packages after cataloguing was
+not enough: syft's directory resolver opens every file it indexes, and a
+customer's passive pnpm install spent ~180s under "submitting scan" walking
+`node_modules` (reproduced: 273s vs 0s on a 76k-file tree, same 1707
+components). Two traps: syft **rewrites the exclusion slice in place**, so
+`packageSinkExcludes` returns a fresh one per call; and syft walks the
+**symlink-resolved** root but anchors exclusions to the path as given, so the
+root is `EvalSymlinks`ed first or no exclusion matches under macOS `/var`.
+`TestDirectorySourceSkipsPackageSinks` asserts on the index, not on catalog
+output, because catalog output was already clean before the fix.
 
 #### Why the npm resolve skips workspace members (OSS-1353)
 
@@ -404,7 +461,7 @@ told a user with an expired key nothing about how to recover.
 
 ## Conventions worth knowing
 
-- **Exit codes:** `0` = clean / informational-only / `--local` dump / quota-skipped; `1` = malware found OR scan errored; `2` = panic (recovered in main). "Clean" and "errored" are not distinguishable by exit code alone — that is what `--report` is for (below).
+- **Exit codes:** `0` = clean / informational-only / `--local` dump / quota-skipped; `1` = malware found, and nothing else; `2` = scan errored (any error returned to cobra) or panic (recovered in main). Errors used to share `1` with malware, so a network blip in CI read as a detection; keep `1` reserved for a verdict. "Clean" and "skipped" still share `0` — that is what `--report` is for (below). Forwarders still pass the real manager's own exit code through, which may itself be `1`.
 - **Severity** (`internal/severity`) grades a finding `Info < Low < Medium < High < Critical`, and `FailingFloor` is `Low`. `Info` is the only level below it: the finding is printed as a `Note:` line and the scan still exits 0 (OSS-1432). `--fail-on-informational` on `scan`/`check` lowers the floor to `Info` so those fail too, and it lowers it for the `--report` verdict at the same time so the file cannot disagree with the exit status. The floor can only ever be lowered — there is no flag to raise it, since that would let a real detection pass. The forwarders parse no flags of their own (`DisableFlagParsing`), so they always use the default floor. Parsing is deliberately **fail-closed** — an empty or unrecognised grade is `Unknown`, and `Unknown.Fails()` is true, so an older API that sends no severity and an OSV-sourced finding that carries none both behave exactly as they did before. Never invert that default for convenience; it is the one thing standing between "we could not grade it" and "we passed it".
 - **`--report <file>`** (`internal/scan/report.go`, on `scan` and `check`) writes the machine-readable verdict — `clean` / `malware` / `informational` / `skipped` plus per-finding name, version, ecosystem, severity and description — for CI to act on. `findings` holds only what **fails**, so a consumer counting it to say "N malicious packages" stays correct without knowing what a severity is; anything below the failing floor goes in `informational`, which is omitted when empty; `ossprey/gh-action` renders its PR comment from it. Three rules hold it together. It never touches **stdout**, which `--local` owns for the OSSBOM (the two flags are rejected together, because `--local` returns before any verdict exists). It is written **before** the `os.Exit(1)`, since a malware run is the one CI most needs it on. And `skipped` is its own verdict, not a flavour of clean: a quota-exhausted scan checked nothing, and a consumer that renders it as "no malware found" is lying. `informational` exists for the same reason: that scan *did* find something and said so, so folding it into `clean` would hide a finding we deliberately surfaced. A consumer that only knows the older three should treat it as non-failing. The JSON keys are a contract with the action — `test/smoke/report_smoke_test.go` redeclares the struct so a rename breaks a test instead of the action.
 - **Where the CLI stops.** `--report` states the verdict; that is the whole of what the CLI owes CI. Rendering it (Markdown tables, pull-request comments, job summaries, `::error::` annotations) belongs in the consumer — `ossprey/gh-action` does its own, in bash. Do not move that back here, even when a `--report-format markdown` or a `render` subcommand would delete a hundred lines of someone's shell: every such feature is dead weight to the users installing this CLI for `scan`, `check` and the forwarders, and it makes the CLI's release cadence a dependency of one CI vendor's UI. The test for a new flag is whether a GitLab or Jenkins user would reach for it too.

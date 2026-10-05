@@ -21,6 +21,7 @@ import (
 	"github.com/ossprey/ossprey-cli/internal/alert"
 	"github.com/ossprey/ossprey-cli/internal/ansi"
 	"github.com/ossprey/ossprey-cli/internal/check"
+	"github.com/ossprey/ossprey-cli/internal/env"
 	"github.com/ossprey/ossprey-cli/internal/forward"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
 	"github.com/ossprey/ossprey-cli/internal/progress"
@@ -63,12 +64,40 @@ type Repo struct {
 
 func (r Repo) String() string { return r.Owner + "/" + r.Name }
 
+// Silent by default, like the package forwarders: only a malware block and a
+// failure to check print; everything else is behind OSSPREY_VERBOSE. git's own
+// output is untouched.
+
+// note prints a line of narration, shown only when verbose.
+func note(format string, a ...any) {
+	if env.Verbose() {
+		fmt.Fprintf(errOut, format, a...)
+	}
+}
+
+// flushWarnings empties the collector, printing it only when verbose. It must
+// still drain when quiet, or main's safety-net drain would print it anyway.
+func flushWarnings(ctx context.Context) {
+	if s := warn.Drain(ctx); env.Verbose() {
+		fmt.Fprint(errOut, s)
+	}
+}
+
+// progressTo is where a wait is announced: a terminal always, where the
+// animation erases itself; a pipe or CI log only when verbose.
+func progressTo() io.Writer {
+	if env.Verbose() {
+		return progressOut
+	}
+	return progress.Transient(progressOut)
+}
+
 // Run checks the repository a clone/pull fetches, then execs the real git.
 // Everything else (and any repo that is not public on GitHub) passes through.
 // Returns forward.ErrBlocked on malware or *exec.ExitError from git.
 func Run(ctx context.Context, opts Options) error {
 	forwardTo := func() error {
-		fmt.Fprint(errOut, warn.Drain(ctx))
+		flushWarnings(ctx)
 		return execFn(ctx, "git", opts.Args)
 	}
 
@@ -77,7 +106,7 @@ func Run(ctx context.Context, opts Options) error {
 		return forwardTo()
 	}
 	if opts.SkipCI {
-		fmt.Fprintf(errOut, "ossprey: skip-ci set; forwarding `git %s` without checking\n", strings.Join(opts.Args, " "))
+		note("ossprey: skip-ci set; forwarding `git %s` without checking\n", strings.Join(opts.Args, " "))
 		return forwardTo()
 	}
 
@@ -98,18 +127,18 @@ func Run(ctx context.Context, opts Options) error {
 	if opts.Passive {
 		execErr := forwardTo()
 		copts.SubmitOnly = true
-		stop := progress.Submit(progressOut, 1)
+		stop := progress.Submit(progressTo(), 1)
 		_, err := checkFn(ctx, copts)
 		stop()
 		if err != nil {
 			fmt.Fprintf(errOut, "ossprey: warning: could not post scan of %s (%v)\n", repo, err)
 		} else {
-			fmt.Fprintf(errOut, "ossprey: scan of %s posted to the Ossprey dashboard (passive)\n", repo)
+			note("ossprey: scan of %s posted to the Ossprey dashboard (passive)\n", repo)
 		}
 		return execErr
 	}
 
-	stop := progress.Scan(progressOut, 1)
+	stop := progress.Scan(progressTo(), 1)
 	sbom, err := checkFn(ctx, copts)
 	stop()
 	if err != nil {
@@ -120,11 +149,15 @@ func Run(ctx context.Context, opts Options) error {
 	return report(ctx, opts, repo, sbom)
 }
 
+// report blocks git (forward.ErrBlocked) with the full malware report if sbom
+// carries a failing finding, else execs the real git.
 func report(ctx context.Context, opts Options, repo Repo, sbom *ossbom.SBOM) error {
-	fmt.Fprint(errOut, warn.Drain(ctx))
+	flushWarnings(ctx)
 	summary, hasMalware := scan.MalwareReports(sbom, severity.FailingFloor)
-	for _, msg := range summary.Informational {
-		fmt.Fprintln(errOut, "ossprey: "+msg)
+	if env.Verbose() {
+		for _, msg := range summary.Informational {
+			fmt.Fprintln(errOut, "ossprey: "+msg)
+		}
 	}
 	if hasMalware {
 		profile := ansi.Detect(errOut)
@@ -135,7 +168,7 @@ func report(ctx context.Context, opts Options, repo Repo, sbom *ossbom.SBOM) err
 		fmt.Fprintf(errOut, "ossprey: blocked `git %s`\n", strings.Join(opts.Args, " "))
 		return forward.ErrBlocked
 	}
-	fmt.Fprintf(errOut, "ossprey: no malware found in %s, forwarding to git\n", repo)
+	note("ossprey: no malware found in %s, forwarding to git\n", repo)
 	return execFn(ctx, "git", opts.Args)
 }
 

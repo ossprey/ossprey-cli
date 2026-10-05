@@ -16,6 +16,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/ossprey/ossprey-cli/internal/registry"
+	"github.com/ossprey/ossprey-cli/internal/trust"
 	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
@@ -31,6 +32,15 @@ type Package struct {
 	// never published, so scanning them only yields spurious NOT_FOUND warnings
 	// (OSS-1389).
 	Local bool
+	// Registries are the sources the lockfiles recorded this package being
+	// fetched from (a tarball or index URL), one per cataloger sighting that
+	// had one. Empty when nothing recorded a source — a manifest, a
+	// requirements file, a pnpm lock — which trust treats as "not trusted".
+	Registries []string
+	// Trusted marks a package from a source the user trusts (see
+	// internal/trust). It is not version-resolved against the public registry
+	// and callers leave it out of the SBOM.
+	Trusted bool
 }
 
 // Options tunes a Catalog run.
@@ -53,6 +63,73 @@ type Options struct {
 	// projects (bare package.json / pyproject.toml / setup.py) degrade to
 	// direct deps — resolving their transitives is what the skipped catalogers do.
 	NoExec bool
+
+	// Trust names the sources whose packages are marked Trusted. The zero
+	// value trusts nothing.
+	Trust trust.Policy
+}
+
+// packageSinks are directories package managers install into, cache in, or
+// build into. Syft's directory resolver opens every file it indexes, and an
+// installed node_modules alone can be 75k+ files: minutes of I/O before any
+// cataloger runs, for components the lockfile beside it already names. They
+// also hold manifests of installed dependencies, which catalog as if the
+// project declared them.
+//
+// Nothing here is a project manifest location, so no lockfile is lost; the
+// one coverage cost is a project whose only record of its dependencies is an
+// installed tree (node_modules or a virtualenv with no lockfile or manifest).
+var packageSinks = []string{
+	// JavaScript
+	"node_modules",
+	"bower_components",
+	".pnpm-store",
+	".yarn",
+	// Python
+	".venv",
+	"venv",
+	"site-packages",
+	"dist-packages",
+	"__pypackages__",
+	".tox",
+	".nox",
+	// Rust build output (Cargo.lock sits beside it, not in it)
+	"target",
+	// Framework build caches (Gatsby/Parcel, Next.js, Nuxt)
+	".cache",
+	".next",
+	".nuxt",
+	// VCS metadata
+	".git",
+}
+
+// packageSinkExcludes returns packageSinks as syft exclusion globs matching
+// the directory at any depth. A fresh slice every call: syft rewrites the
+// slice it is given in place, prefixing each entry with the scan root.
+func packageSinkExcludes() []string {
+	out := make([]string, len(packageSinks))
+	for i, s := range packageSinks {
+		out[i] = "**/" + s
+	}
+	return out
+}
+
+// newDirectorySource is the syft source every cataloger reads through, with
+// the package sinks left out of its index.
+//
+// The root is symlink-resolved first. Syft walks the resolved root but anchors
+// exclusions to the path as given, so under a symlinked root (macOS /var, /tmp)
+// no exclusion would ever match. Resolver paths are root-relative, so nothing
+// downstream sees the difference.
+func newDirectorySource(absRoot string) (source.Source, error) {
+	root := absRoot
+	if resolved, err := filepath.EvalSymlinks(absRoot); err == nil {
+		root = resolved
+	}
+	return directorysource.New(directorysource.Config{
+		Path:    root,
+		Exclude: source.ExcludeConfig{Paths: packageSinkExcludes()},
+	})
 }
 
 // Catalog returns Python + JavaScript packages under path.
@@ -70,7 +147,7 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 	if err != nil {
 		return nil, fmt.Errorf("resolve path: %w", err)
 	}
-	src, err := directorysource.NewFromPath(absRoot)
+	src, err := newDirectorySource(absRoot)
 	if err != nil {
 		return nil, fmt.Errorf("syft source: %w", err)
 	}
@@ -130,7 +207,7 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 	// root project from package.json, not its deps).
 	catalogers = append(catalogers, NewPackageJSONCataloger(absRoot))
 
-	seen := map[string]struct{}{}
+	seen := map[string]int{} // dedup key -> index in out
 	locks := newNpmLockClassifier(absRoot)
 	pins := newRequirementPins(absRoot)
 	var out []Package
@@ -171,22 +248,28 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 				version = v
 			}
 			key := dedupKey(t, p.Name, version)
-			if _, ok := seen[key]; ok {
+			if i, ok := seen[key]; ok {
+				// Every sighting's source counts toward trust, not just the
+				// first: one lockfile fetching it from the public index is
+				// enough to need a check.
+				out[i].Registries = mergeUnique(out[i].Registries, []string{registryOf(p)})
 				continue
 			}
-			seen[key] = struct{}{}
+			seen[key] = len(out)
 			out = append(out, Package{
-				Name:      p.Name,
-				Version:   version,
-				Type:      t,
-				Source:    []string{c.Name()},
-				Locations: locations(p),
+				Name:       p.Name,
+				Version:    version,
+				Type:       t,
+				Source:     []string{c.Name()},
+				Locations:  locations(p),
+				Registries: mergeUnique(nil, []string{registryOf(p)}),
 			})
 		}
 	}
 
 	merged := mergeVersionless(out)
 	markLocalPackages(merged, findLocalPackageNames(resolver, absRoot))
+	markTrustedPackages(merged, opts.Trust)
 	resolveVersionless(ctx, merged, opts)
 	return merged, nil
 }
@@ -222,7 +305,9 @@ func resolveVersionless(ctx context.Context, pkgs []Package, opts Options) {
 	g := new(errgroup.Group)
 	g.SetLimit(catalogConcurrency())
 	for i := range pkgs {
-		if pkgs[i].Version != "" || pkgs[i].Local {
+		// A trusted package is by definition one the public registry may not
+		// have, and it is not going to be checked anyway.
+		if pkgs[i].Version != "" || pkgs[i].Local || pkgs[i].Trusted {
 			continue
 		}
 		// Skip anything registry.ResolveLatest cannot answer for.
@@ -281,6 +366,44 @@ func markLocalPackages(pkgs []Package, local map[string]struct{}) {
 	}
 }
 
+// markTrustedPackages sets Trusted on every package the policy trusts, from
+// its name (an npm scope) or from the sources its lockfiles recorded.
+func markTrustedPackages(pkgs []Package, policy trust.Policy) {
+	if policy.Empty() {
+		return
+	}
+	for i := range pkgs {
+		pkgs[i].Trusted = policy.Trusts(pkgs[i].Type, pkgs[i].Name, pkgs[i].Registries)
+	}
+}
+
+// registrySource is the metadata our own catalogers attach when the resolver
+// reported where a package came from and syft has no type for it.
+type registrySource struct{ URL string }
+
+// registryOf returns the source a lockfile recorded for p — the URL it is
+// fetched from — or "" when none was recorded.
+//
+// Only fields that name where the package manager will actually fetch from
+// belong here. A pnpm lock records an integrity hash but no tarball URL for
+// registry packages, and a Pipfile.lock records an index *name*; neither is
+// read, so their packages are checked as before.
+func registryOf(p pkg.Package) string {
+	switch m := p.Metadata.(type) {
+	case pkg.NpmPackageLockEntry:
+		return m.Resolved
+	case pkg.YarnLockEntry:
+		return m.Resolved
+	case pkg.PythonPoetryLockEntry:
+		return m.Index
+	case pkg.PythonUvLockEntry:
+		return m.Index
+	case registrySource:
+		return m.URL
+	}
+	return ""
+}
+
 // mergeVersionless collapses a package emitted both with and without a version.
 // The direct-deps catalogers (pyproject/package.json) can only report a name
 // when the version is unpinned (e.g. "click" from `dependencies = ["click"]`),
@@ -318,6 +441,7 @@ func mergeVersionless(pkgs []Package) []Package {
 			for _, i := range groupIdx[gkey(p)] {
 				out[i].Source = mergeUnique(out[i].Source, p.Source)
 				out[i].Locations = mergeUnique(out[i].Locations, p.Locations)
+				out[i].Registries = mergeUnique(out[i].Registries, p.Registries)
 			}
 		}
 	}

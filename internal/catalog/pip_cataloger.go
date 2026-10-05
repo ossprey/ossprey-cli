@@ -270,6 +270,8 @@ func parsePipReport(data []byte, loc file.Location) ([]pkg.Package, error) {
 			Version:   version,
 			Type:      pkg.PythonPkg,
 			Locations: file.NewLocationSet(loc),
+			// Where pip would download it from, which is what trust decides on.
+			Metadata: registrySource{URL: entry.DownloadInfo.URL},
 		})
 	}
 	return pkgs, nil

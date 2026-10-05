@@ -22,6 +22,7 @@ detail behind it.
 - [CI usage](ci.md) — API keys, a complete GitHub Actions workflow, and rollout switches
 - [Output](output.md) — the alert box, warnings, and the `--report` JSON verdict
 - [Supported ecosystems](ecosystems.md) — what is parsed, and what happens to unpinned versions
+- [Trusted sources](trust.md) — skip, and never send, packages from your private registries and npm scopes
 
 ## Under the hood
 

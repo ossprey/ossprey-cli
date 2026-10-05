@@ -29,7 +29,8 @@ func TestPnpmWorkspaceRootAddIsChecked(t *testing.T) {
 	api := newFakeAPI(t, "")
 	dir := pnpmWorkspace(t)
 
-	res := runForward(t, dir, api.URL, "pnpm", "add", "-w", "left-pad@1.3.0")
+	// Verbose, so the negative check on the manifest-scan line below can fire.
+	res := runForwardVerbose(t, dir, api.URL, "pnpm", "add", "-w", "left-pad@1.3.0")
 	if res.exitCode != 0 {
 		t.Fatalf("expected exit 0, got %d\nstdout: %s\nstderr: %s", res.exitCode, res.stdout, res.stderr)
 	}

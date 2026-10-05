@@ -11,6 +11,7 @@ Every command, flag and credential the CLI understands.
 | [`ossprey git clone\|pull ...`](git.md) | Check a public GitHub repo, then run git. Blocks on malware. |
 | [`ossprey shim install`](shims.md) | Put shims on `PATH` so installs are checked without the `ossprey` prefix. |
 | [`ossprey precommit`](precommit.md) | Git pre-commit hook: block commits that stage known-malicious packages. |
+| [`ossprey trust list\|add\|remove`](trust.md) | Manage trusted registries and npm scopes, whose packages are neither checked nor sent. |
 | [`ossprey login`](#authentication) | Browser login via Auth0. Stores tokens locally. |
 | [`ossprey whoami`](#authentication) | Show who the stored login belongs to. |
 | [`ossprey logout`](#authentication) | Remove the stored login. |
@@ -25,8 +26,9 @@ To have the forwarders run without typing `ossprey` every time, see
 
 - `0` — no malware found, a finding below the failing floor, `--local` dump, or
   scan skipped by the API (e.g. quota exhausted)
-- `1` — malware found, **or** the scan itself failed (bad path, catalog error,
-  API/network error, missing key)
+- `1` — malware found, and nothing else
+- `2` — the scan itself failed (bad path, catalog error, API/network error,
+  missing key, bad flag), or ossprey crashed
 
 A finding below the failing floor is reported as a `Note:` line and does not
 fail the scan. The default floor is `Info`, the bottom of the scale, so nothing
@@ -36,8 +38,8 @@ finding the API could not grade fails at every floor.
 `--fail-on-informational` sets the floor to `Info`, which is now the default, so
 it no longer changes anything.
 
-"Clean" and "errored" share exit code `0` and `1` respectively with other
-outcomes, so if CI needs to tell them apart, write a
+Exit `0` covers both "clean" and "skipped" (nothing was checked), so if CI
+needs to tell those apart, write a
 [`--report` file](output.md#machine-readable-verdict---report): it exists, with
 a `verdict`, only when the scan actually reached one.
 
@@ -48,7 +50,7 @@ a `verdict`, only when the scan actually reached one.
 | `OSSPREY_API_KEY` | `--api-key` | API key. A stored `ossprey login` still wins. |
 | `API_KEY` | — | Legacy spelling of the above, lowest precedence. |
 | `OSSPREY_API_URL` | `--url` | Override the API URL. |
-| `OSSPREY_VERBOSE=1` | `-v` | Explain every warning, including a failed resolver's output. Works on the forwarders and shims, which parse no flags. |
+| `OSSPREY_VERBOSE=1` | `-v` | Explain every warning, including a failed resolver's output. On the forwarders and shims, which parse no flags, it also turns on everything they print besides a malware block or a platform error: the clean verdict, warnings, scan narration and informational findings. |
 | `OSSPREY_SKIP_CI=1` | `--skip-ci` | Kill switch: no scan runs at all. |
 | `OSSPREY_PASSIVE=1` | `--passive` | Observe-only: submit, never block or fail. |
 | `OSSPREY_MONITOR_ID` | `--monitor` | Submit through a monitor id. Implies passive. |
@@ -56,7 +58,9 @@ a `verdict`, only when the scan actually reached one.
 | `OSSPREY_RESOLVE_TIMEOUT` | — | Cap one uv/npm resolver invocation (default `2m`). |
 | `OSSPREY_SCAN_CONCURRENCY` | — | How many catalogers run at once (default `8`). |
 | `OSSPREY_RESOLVE_LATEST=0` | `--no-version-lookup` | Don't resolve unpinned versions from the registry. |
-| `OSSPREY_CONFIG_DIR` | — | Where the stored login lives. |
+| `OSSPREY_CONFIG_DIR` | — | Where the stored login and `trust.json` live. |
+| `OSSPREY_TRUSTED_REGISTRIES` | `trust add --registry` | Extra [trusted registry](trust.md) URL prefixes, comma-separated. |
+| `OSSPREY_TRUSTED_NPM_SCOPES` | `trust add --npm-scope` | Extra [trusted npm scopes](trust.md), comma-separated. |
 | `OSSPREY_SHIM_DIR` | `--dir` | Where [shims](shims.md) are written. |
 | `OSSPREY_SHIM_BYPASS=1` | — | Skip the check for one shimmed command. |
 | `OSSPREY_PRECOMMIT_TIMEOUT` | — | Budget for the [pre-commit](precommit.md) lookup (default `10s`). |
@@ -111,8 +115,10 @@ registry (PyPI / npm) and checked. Both `name@version` and pip's
 | `--dry-run-safe` | Skip the API; report an empty vulnerability list. |
 | `--dry-run-malicious` | Skip the API; inject a test finding against the first package. |
 
-Exit codes match `scan`: `1` on a malware verdict or error, `0` otherwise
+Exit codes match `scan`: `1` on a malware verdict, `2` on error, `0` otherwise
 (an `Info` finding is reported but does not fail).
+
+`check` ignores [trusted sources](trust.md): a package you name is checked.
 
 ## Authentication
 

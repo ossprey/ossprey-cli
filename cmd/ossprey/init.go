@@ -414,7 +414,7 @@ func runFirstScan(ctx context.Context, path, apiURL, apiKey string) error {
 	// is that scan, and it is the first thing a new user ever watches this tool
 	// do, so it is the last place that should sit silent for a minute.
 	catalogued := progress.Catalog(progressOut)
-	sbom, err := scan.Run(ctx, scan.Options{Path: path})
+	sbom, err := scan.Run(ctx, scan.Options{Path: path, Trust: loadTrust(os.Stderr)})
 	catalogued()
 	// Ahead of the verdict, not deferred behind it.
 	fmt.Fprint(os.Stderr, warn.Drain(ctx))

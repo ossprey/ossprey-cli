@@ -72,7 +72,9 @@ func main() {
 	fmt.Fprint(os.Stderr, warn.Drain(ctx))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
-		os.Exit(1)
+		// 2, not 1: exit 1 means malware and nothing else, so a failed scan
+		// must never read as a detection (or a detection as a failed scan).
+		os.Exit(2)
 	}
 }
 
@@ -101,6 +103,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newWhoamiCmd())
 	root.AddCommand(newUpdateCmd())
 	root.AddCommand(newShimCmd())
+	root.AddCommand(newTrustCmd())
 	root.AddCommand(newPrecommitCmdWithHooks())
 	for _, bin := range forward.Managers() {
 		root.AddCommand(newForwardCmd(bin))
@@ -114,6 +117,13 @@ var updateNoticeFn = update.Notice
 
 func notifyLatestVersion(cmd *cobra.Command) {
 	if cmd.Name() == "update" {
+		return
+	}
+	// A forwarder's budget is one line of its own (see internal/forward), and a
+	// "new version available" notice after every `npm install` would be a
+	// second. Verbose runs still see it. The wrappers (package managers, git) are
+	// the only commands that disable flag parsing.
+	if cmd.DisableFlagParsing && !env.Verbose() {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -222,6 +232,7 @@ func newScanCmd() *cobra.Command {
 				Verbose:           verbose,
 				SkipVersionLookup: noVersionLookup,
 				Timeout:           scanTimeout(timeout),
+				Trust:             loadTrust(os.Stderr),
 			})
 			catalogued()
 			if err != nil {
@@ -462,6 +473,7 @@ func newForwardCmd(bin string) *cobra.Command {
 				SkipCI:    env.SkipCI(),
 				Passive:   env.Passive() || monitor != "",
 				MonitorID: monitor,
+				Trust:     loadTrust(os.Stderr),
 			})
 			return forwardResult(err)
 		},

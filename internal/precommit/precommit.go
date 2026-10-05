@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/ossprey/ossprey-cli/internal/catalog"
+	"github.com/ossprey/ossprey-cli/internal/trust"
 )
 
 // Package is one dependency introduced (or version-changed) by the staged
@@ -44,6 +45,9 @@ type Package struct {
 // but not in the HEAD set, keyed by (type, name, version).
 type Delta struct {
 	Packages []Package
+	// Trusted counts staged packages that would have been new but come from a
+	// trusted source (internal/trust), so they are neither in Packages nor sent.
+	Trusted int
 }
 
 // catalogFn is a test seam for the tree cataloging step.
@@ -53,7 +57,9 @@ var catalogFn = catalog.Catalog
 // repository at repoDir. On an unborn branch (initial commit) everything
 // staged counts as added. Cataloging is pure parsing: it never shells out to
 // a package manager and never touches the network.
-func StagedDelta(ctx context.Context, repoDir string) (Delta, error) {
+//
+// Packages the policy trusts are left out of the delta and counted instead.
+func StagedDelta(ctx context.Context, repoDir string, policy trust.Policy) (Delta, error) {
 	hasHead := gitHasHead(ctx, repoDir)
 
 	paths, err := stagedManifestPaths(ctx, repoDir, hasHead)
@@ -101,7 +107,7 @@ func StagedDelta(ctx context.Context, repoDir string) (Delta, error) {
 
 	// No-exec + no version lookup: a pre-commit hook must be fast, offline,
 	// and must never run npm/uv against a synthetic tree.
-	opts := catalog.Options{SkipVersionLookup: true, NoExec: true}
+	opts := catalog.Options{SkipVersionLookup: true, NoExec: true, Trust: policy}
 	stagedPkgs, err := catalogFn(ctx, stagedRoot, opts)
 	if err != nil {
 		return Delta{}, fmt.Errorf("precommit: catalog staged tree: %w", err)
@@ -133,6 +139,7 @@ func diffPackages(staged, head []catalog.Package, stagedRoot string, repoPaths [
 	}
 
 	var out []Package
+	trusted := 0
 	seen := map[string]struct{}{}
 	for _, p := range staged {
 		if p.Local {
@@ -151,6 +158,10 @@ func diffPackages(staged, head []catalog.Package, stagedRoot string, repoPaths [
 			continue
 		}
 		seen[key] = struct{}{}
+		if p.Trusted {
+			trusted++
+			continue
+		}
 		out = append(out, Package{
 			Type:    p.Type,
 			Name:    p.Name,
@@ -168,7 +179,7 @@ func diffPackages(staged, head []catalog.Package, stagedRoot string, repoPaths [
 		}
 		return out[a].Version < out[b].Version
 	})
-	return Delta{Packages: out}
+	return Delta{Packages: out, Trusted: trusted}
 }
 
 // pkgKey matches catalog's dedup identity: (type, normalized name, version).

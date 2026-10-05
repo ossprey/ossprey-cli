@@ -31,6 +31,7 @@ import (
 	"github.com/ossprey/ossprey-cli/internal/severity"
 	"github.com/ossprey/ossprey-cli/internal/shim"
 	"github.com/ossprey/ossprey-cli/internal/submit"
+	"github.com/ossprey/ossprey-cli/internal/trust"
 	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
@@ -53,6 +54,39 @@ var errOut io.Writer = os.Stderr
 // errOut so a test capturing the verdict lines is not also handed the
 // animation; both default to stderr.
 var progressOut io.Writer = os.Stderr
+
+// A forwarder sits in front of every install, so by default it is silent: the
+// only things it prints are a malware block (the full report) and a platform
+// error. Everything else — a clean verdict, why it did not check, what it is
+// scanning, collected warnings, informational findings — is narration, and
+// only OSSPREY_VERBOSE shows it. The forwarders parse no flags of their own, so
+// the env var is the only switch. The real manager's own output is never
+// touched: it inherits our stdio.
+
+// note prints a line of narration, shown only when verbose.
+func note(format string, a ...any) {
+	if env.Verbose() {
+		fmt.Fprintf(errOut, format, a...)
+	}
+}
+
+// flushWarnings empties the collector, printing it only when verbose. It must
+// still drain when quiet, or main's safety-net drain would print it anyway.
+func flushWarnings(ctx context.Context) {
+	if s := warn.Drain(ctx); env.Verbose() {
+		fmt.Fprint(errOut, s)
+	}
+}
+
+// progressTo is where a wait is announced. Quiet, only a terminal gets one: the
+// animation erases itself, whereas into a pipe or CI log it is a line that
+// stays, and that would be a second line.
+func progressTo() io.Writer {
+	if env.Verbose() {
+		return progressOut
+	}
+	return progress.Transient(progressOut)
+}
 
 // Manager describes a supported package manager and how to recognise its
 // install command.
@@ -285,6 +319,11 @@ type Options struct {
 	// MonitorID sends a passive submission through a monitor's ingest token, so
 	// the machine needs no login and no API key. Ignored unless Passive.
 	MonitorID string
+	// Trust names sources whose packages are neither checked nor sent. A named
+	// install applies only its npm scopes: which registry a package not yet
+	// installed will be fetched from is recorded nowhere until the lockfile is
+	// written. Project scans apply all of it.
+	Trust trust.Policy
 }
 
 // Run executes the forwarder flow:
@@ -311,12 +350,15 @@ func Run(ctx context.Context, opts Options) error {
 	// forwarder exits via os.Exit on a non-zero code, so a warning not printed
 	// here is either buried or lost outright (OSS-2001).
 	forwardTo := func() error {
-		fmt.Fprint(errOut, warn.Drain(ctx))
+		flushWarnings(ctx)
 		return execFn(ctx, m.Bin, opts.Args)
 	}
 
 	finish := func(sbom *ossbom.SBOM, err error) error {
 		if err != nil {
+			// Main prints the error; drain here so its safety-net drain does
+			// not print the warnings too, which quiet mode keeps hidden.
+			flushWarnings(ctx)
 			return err
 		}
 		return reportAndForward(ctx, m, opts, sbom)
@@ -334,7 +376,7 @@ func Run(ctx context.Context, opts Options) error {
 	}
 
 	if opts.SkipCI {
-		fmt.Fprintf(errOut, "ossprey: skip-ci set; forwarding `%s %s` without checking\n",
+		note("ossprey: skip-ci set; forwarding `%s %s` without checking\n",
 			m.Bin, strings.Join(opts.Args, " "))
 		return forwardTo()
 	}
@@ -352,12 +394,24 @@ func Run(ctx context.Context, opts Options) error {
 	}
 
 	parsed := ParseSpecs(m, opts.Args[start:])
+	if kept := dropTrusted(ctx, opts.Trust, parsed.Specs); len(kept) < len(parsed.Specs) {
+		parsed.Specs = kept
+		// Every named package was trusted. Without this the empty spec list
+		// would read as a bare install and scan the whole project instead.
+		if len(kept) == 0 {
+			// What was trusted first, then what that means for the install.
+			flushWarnings(ctx)
+			note("ossprey: every package named is from a trusted source; forwarding `%s %s` unchecked\n",
+				m.Bin, strings.Join(opts.Args, " "))
+			return forwardTo()
+		}
+	}
 
 	switch {
 	case len(parsed.Specs) > 0:
 		// Explicit packages named — check exactly those.
 		if other := slices.Concat(parsed.NonPackages, parsed.ReqFiles); len(other) > 0 {
-			fmt.Fprintf(errOut, "ossprey: not checking non-registry install targets: %s (run `ossprey scan` for full coverage)\n",
+			note("ossprey: not checking non-registry install targets: %s (run `ossprey scan` for full coverage)\n",
 				strings.Join(other, ", "))
 		}
 		if opts.Passive {
@@ -381,12 +435,12 @@ func Run(ctx context.Context, opts Options) error {
 		}
 		resolved := resolveSpecs(ctx, resolve, parsed.Specs)
 		if len(resolved) == 0 {
-			fmt.Fprintln(errOut, "ossprey: nothing left to check after version resolution; forwarding")
+			note("ossprey: nothing left to check after version resolution; forwarding\n")
 			return forwardTo()
 		}
 		// The scan is the one part of a forwarded install that takes visible
 		// time, and until it prints something the terminal looks hung.
-		stop := progress.Scan(progressOut, len(resolved))
+		stop := progress.Scan(progressTo(), len(resolved))
 		sbom, err := checkFn(ctx, check.Options{
 			Specs:     resolved,
 			APIURL:    opts.APIURL,
@@ -405,22 +459,23 @@ func Run(ctx context.Context, opts Options) error {
 			// project's own manifest is the best description of this install,
 			// and it exists before it as well as after. Scan beside the
 			// install rather than in front of it.
-			fmt.Fprintf(errOut, "ossprey: no packages named; scanning project manifest alongside `%s %s`\n",
+			note("ossprey: no packages named; scanning project manifest alongside `%s %s`\n",
 				m.Bin, strings.Join(opts.Args, " "))
 			return passiveAlongside(ctx, m, opts, 0, func(ctx context.Context) (*ossbom.SBOM, error) {
 				return scanProjectFn(ctx, scanRequest{
 					Dir: ".", APIURL: opts.APIURL, APIKey: opts.APIKey,
-					MonitorID: opts.MonitorID, SubmitOnly: true,
+					MonitorID: opts.MonitorID, SubmitOnly: true, Trust: opts.Trust,
 				})
 			})
 		}
-		fmt.Fprintf(errOut, "ossprey: no packages named; scanning project manifest before `%s %s`\n",
+		note("ossprey: no packages named; scanning project manifest before `%s %s`\n",
 			m.Bin, strings.Join(opts.Args, " "))
 		// Cataloguing a whole project can take longer than the API scan itself
 		// (npm range resolution, uv), so the indicator wraps both.
-		stop := progress.Start(progressOut, "ossprey: scan in progress")
+		stop := progress.Start(progressTo(), "ossprey: scan in progress")
 		sbom, err := scanProjectFn(ctx, scanRequest{
 			Dir: ".", APIURL: opts.APIURL, APIKey: opts.APIKey, MonitorID: opts.MonitorID,
+			Trust: opts.Trust,
 		})
 		stop()
 		return finish(sbom, err)
@@ -428,10 +483,30 @@ func Run(ctx context.Context, opts Options) error {
 	default:
 		// Only un-checkable explicit targets (local paths, archives, URLs, VCS
 		// refs). Can't verify them against a registry — forward with a warning.
-		fmt.Fprintf(errOut, "ossprey: not checking non-registry install targets: %s; forwarding (run `ossprey scan` after install)\n",
+		note("ossprey: not checking non-registry install targets: %s; forwarding (run `ossprey scan` after install)\n",
 			strings.Join(parsed.NonPackages, ", "))
 		return forwardTo()
 	}
+}
+
+// dropTrusted removes the specs the policy trusts by name, recording each. It
+// runs before version resolution so a private package is never looked up on
+// the public registry, which is where the noise it exists to remove came from.
+//
+// Only the npm scope rule can apply here; see Options.Trust.
+func dropTrusted(ctx context.Context, policy trust.Policy, specs []check.Spec) []check.Spec {
+	if policy.Empty() {
+		return specs
+	}
+	kept := make([]check.Spec, 0, len(specs))
+	for _, s := range specs {
+		if policy.Trusts(s.Ecosystem, s.Name, nil) {
+			warn.Add(ctx, scan.TrustedEntry(s.Ecosystem, s.Name, s.Version))
+			continue
+		}
+		kept = append(kept, s)
+	}
+	return kept
 }
 
 // resolveSpecs fills concrete versions for unpinned specs. Fail open: a registry
@@ -462,15 +537,17 @@ func reportAndForward(ctx context.Context, m *Manager, opts Options, sbom *ossbo
 	// Warnings gathered while cataloguing and resolving go out first, so the
 	// verdict is the last thing on screen rather than the first thing scrolled
 	// past (OSS-2001).
-	fmt.Fprint(errOut, warn.Drain(ctx))
+	flushWarnings(ctx)
 
 	// The forwarders parse no flags of their own (DisableFlagParsing), so there
 	// is nowhere to opt into a stricter floor; the default applies.
 	summary, hasMalware := scan.MalwareReports(sbom, severity.FailingFloor)
 	for _, msg := range summary.Informational {
-		fmt.Fprintln(errOut, "ossprey: "+msg)
+		note("ossprey: %s\n", msg)
 	}
 	if hasMalware {
+		// The full report even when quiet: a block is the one outcome worth
+		// more than a line.
 		profile := ansi.Detect(errOut)
 		fmt.Fprint(errOut, alert.Malware(summary.Alert(), "Installation blocked.", profile))
 		for _, msg := range summary.Failing {
@@ -486,12 +563,12 @@ func reportAndForward(ctx context.Context, m *Manager, opts Options, sbom *ossbo
 		// Nothing catalogued means nothing verified, whether the project declares
 		// nothing or every cataloger failed. "No malware found" would read as a
 		// clean bill of health for an install that was never checked.
-		fmt.Fprintf(errOut, "ossprey: found no dependencies to check; forwarding `%s %s` unchecked\n",
+		note("ossprey: found no dependencies to check; forwarding `%s %s` unchecked\n",
 			m.Bin, strings.Join(opts.Args, " "))
 	} else {
 		// The count is load-bearing: "no malware found" alone read the same
 		// whether 40 packages were checked or none were.
-		fmt.Fprintf(errOut, "ossprey: no malware found in %s, forwarding to %s\n",
+		note("ossprey: no malware found in %s, forwarding to %s\n",
 			countPackages(n), m.Bin)
 	}
 	// Already drained at the top of this function, ahead of the verdict.
@@ -538,10 +615,12 @@ type scanRequest struct {
 	// the lockfile already names the whole resolved tree, so re-resolving it
 	// would only repeat, slower, work the manager has just finished.
 	Installed bool
+	// Trust is passed to the scan; trusted packages are not sent.
+	Trust trust.Policy
 }
 
 func scanProject(ctx context.Context, req scanRequest) (*ossbom.SBOM, error) {
-	sbom, err := scan.Run(ctx, scan.Options{Path: req.Dir, NoExec: req.Installed})
+	sbom, err := scan.Run(ctx, scan.Options{Path: req.Dir, NoExec: req.Installed, Trust: req.Trust})
 	if err != nil {
 		return nil, err
 	}
@@ -550,7 +629,7 @@ func scanProject(ctx context.Context, req scanRequest) (*ossbom.SBOM, error) {
 		// a failed install). Fall back to the declaring scan rather than
 		// reporting a project with no dependencies: passive mode's whole job is
 		// to see this machine's installs.
-		if sbom, err = scan.Run(ctx, scan.Options{Path: req.Dir}); err != nil {
+		if sbom, err = scan.Run(ctx, scan.Options{Path: req.Dir, Trust: req.Trust}); err != nil {
 			return nil, err
 		}
 	}
@@ -591,12 +670,12 @@ var errNothingToCheck = errors.New("nothing left to check after version resoluti
 func passiveAfterInstall(ctx context.Context, m *Manager, opts Options) error {
 	// Nothing of ours has run yet, so this drain is normally empty — it is here
 	// so that no path execs the real manager without flushing first.
-	fmt.Fprint(errOut, warn.Drain(ctx))
+	flushWarnings(ctx)
 	execErr := execFn(ctx, m.Bin, opts.Args)
 
 	// Only now is there a wait to announce, and it is a short one: parsing a
 	// lockfile and posting it, with no resolver in the way.
-	stop := progress.Submit(progressOut, 0)
+	stop := progress.Submit(progressTo(), 0)
 	sbom, err := scanProjectFn(ctx, scanRequest{
 		Dir:        ".",
 		APIURL:     opts.APIURL,
@@ -604,10 +683,11 @@ func passiveAfterInstall(ctx context.Context, m *Manager, opts Options) error {
 		MonitorID:  opts.MonitorID,
 		SubmitOnly: true,
 		Installed:  true,
+		Trust:      opts.Trust,
 	})
 	stop()
 
-	fmt.Fprint(errOut, warn.Drain(ctx))
+	flushWarnings(ctx)
 	reportPassive(opts, sbom, err)
 	return execErr
 }
@@ -639,12 +719,12 @@ func passiveAlongside(ctx context.Context, m *Manager, opts Options, n int, work
 		// The install finished first, so there is a residual wait and it is
 		// worth announcing. Nothing was drawn earlier, when the manager's own
 		// output would have been fighting it.
-		stop := progress.Submit(progressOut, n)
+		stop := progress.Submit(progressTo(), n)
 		res = <-done
 		stop()
 	}
 
-	fmt.Fprint(errOut, warn.Drain(ctx))
+	flushWarnings(ctx)
 	reportPassive(opts, res.sbom, res.err)
 	return execErr
 }
@@ -662,15 +742,15 @@ func reportPassive(opts Options, sbom *ossbom.SBOM, err error) {
 	}
 	switch {
 	case errors.Is(err, errNothingToCheck):
-		fmt.Fprintf(errOut, "ossprey: nothing left to check after version resolution; nothing posted (%s)\n", mode)
+		note("ossprey: nothing left to check after version resolution; nothing posted (%s)\n", mode)
 	case err != nil:
 		fmt.Fprintf(errOut, "ossprey: warning: could not post scan (%v); the install was not blocked (%s)\n", err, mode)
 	case sbom != nil && len(sbom.Components) == 0:
 		// "Scan posted" would claim coverage of an install we catalogued
 		// nothing from.
-		fmt.Fprintf(errOut, "ossprey: found no dependencies to report; nothing posted (%s)\n", mode)
+		note("ossprey: found no dependencies to report; nothing posted (%s)\n", mode)
 	default:
-		fmt.Fprintf(errOut, "ossprey: scan posted to the Ossprey dashboard; the install was not blocked (%s)\n", mode)
+		note("ossprey: scan posted to the Ossprey dashboard; the install was not blocked (%s)\n", mode)
 	}
 }
 
