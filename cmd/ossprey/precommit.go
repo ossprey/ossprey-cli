@@ -109,13 +109,13 @@ Intended to be run from a git pre-commit hook. Silent when the commit is
 clean.
 
 Exit codes:
-  0  no known-malicious packages staged, only informational findings, or
-     the check was skipped (no API key or login session, network/API error,
-     not a git repo) — the check fails open so it can never break committing
+  0  no known-malicious packages staged, or the check was skipped (no API key
+     or login session, network/API error, not a git repo) — the check fails
+     open so it can never break committing
   1  one or more staged packages are known-malicious
 
-An informational finding (severity Info) is printed but does not block the
-commit. Anything we cannot grade does block.`,
+This hook grades at the compiled-in default floor, Info, so a known-malicious
+package blocks whatever its grade. Anything we cannot grade blocks too.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if runPrecommit(cmd.Context(), apiURL, apiKey, verbose, os.Stderr) {
@@ -179,9 +179,8 @@ func runPrecommit(ctx context.Context, apiURL, apiKey string, verbose bool, w io
 		fmt.Fprintf(w, "ossprey: malware check unavailable (%v); allowing commit\n", err)
 		return false
 	}
-	// An informational hit is reported but must not block a commit, which is
-	// consistent with this hook's documented fail-open posture. A hit the server
-	// could not grade blocks, so an older server behaves exactly as before.
+	// A hit below the floor is reported without blocking; at the default floor,
+	// Info, nothing is below it. An ungradable hit blocks whatever the floor.
 	var blocking []client.MalwareHit
 	for _, h := range hits {
 		if severity.Parse(h.Severity).Fails() {
