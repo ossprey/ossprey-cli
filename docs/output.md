@@ -101,9 +101,10 @@ machine sent the identical SBOM — the same packages at the same versions, from
 the same project path and branch, with the same credential, to the same API —
 within the last hour, the CLI reuses what happened last time:
 
-- A **blocking** scan (`scan`, `check`, `init`, a forwarded install) whose
-  last result was **clean** replays that result locally. Nothing is sent, and
-  one line on stderr says so:
+- A **blocking** scan (`scan`, `check`, a forwarded install) whose last
+  result was **clean** replays that result locally. Nothing is sent, and one
+  line on stderr says so (`ossprey init` is the exception: its scan exists to
+  prove the new key works, so it always asks the API):
 
   ```text
   ossprey: clean result reused from a scan 12m ago (--no-cache or OSSPREY_SCAN_CACHE_TTL=0 to rescan)

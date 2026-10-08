@@ -183,6 +183,29 @@ func TestCacheErrorsAreReportedOnlyWhenVerbose(t *testing.T) {
 	}
 }
 
+// A verdict entry is only ever written for a clean response, so one that is
+// not clean on re-reading was edited, drifted or corrupted. It is a miss,
+// never a pass, and a verbose run hears why.
+func TestLookupRejectsAStoredVerdictThatIsNotClean(t *testing.T) {
+	ctx, dir := lookupCtx(t)
+	in := baseInput(t)
+	store := &Store{Dir: dir}
+	for _, response := range []string{`{}`, `null`, `{"vulnerabilities":null}`,
+		`{"vulnerabilities":[{"id":"V1","purl":"pkg:npm/x@1"}]}`} {
+		if err := store.Put(Key(in), Verdict, json.RawMessage(response)); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, ok := New(ctx, in).Get(); ok {
+			t.Errorf("%s: a non-clean stored verdict was served", response)
+		}
+		verbose := warn.NewContext(context.Background(), true)
+		New(verbose, in).Get()
+		if out := warn.Drain(verbose); !strings.Contains(out, "scan cache") {
+			t.Errorf("%s: verbose run did not explain the rejected entry: %q", response, out)
+		}
+	}
+}
+
 func TestCorruptEntryIsReportedOnlyWhenVerbose(t *testing.T) {
 	ctx, dir := lookupCtx(t)
 	in := baseInput(t)

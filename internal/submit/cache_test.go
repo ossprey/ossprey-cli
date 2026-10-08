@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ossprey/ossprey-cli/internal/auth"
+	"github.com/ossprey/ossprey-cli/internal/client"
 	"github.com/ossprey/ossprey-cli/internal/scancache"
 	"github.com/ossprey/ossprey-cli/internal/warn"
 )
@@ -315,29 +316,69 @@ func TestValidate_StoredLoginIsCachedByIdentityOnly(t *testing.T) {
 	})
 }
 
+// A stored response that is not, on re-reading, a clean verdict — hand
+// edited, truncated, drifted, or simply not the shape Clean accepts — is a
+// miss and the scan goes live. The read path must apply the same test the
+// write path did; json.Unmarshal alone accepts most of these without error.
 func TestValidate_CorruptEntryGoesLive(t *testing.T) {
-	ctx, dir := cacheEnv(t)
-	srv := newAPI(t, http.StatusOK, cleanBody)
-	if err := Validate(ctx, newSBOM(), srv.URL, "test-key"); err != nil {
-		t.Fatal(err)
-	}
-	files := cacheFiles(t, dir)
-	if len(files) != 1 {
-		t.Fatalf("want one entry, got %v", files)
-	}
-	if err := os.WriteFile(filepath.Join(dir, files[0]), []byte(`{"kind":"verdict","stored_at":"2026-10-08T00:00:00Z","response":"not an object"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	for _, response := range []string{
+		`"not an object"`,
+		`null`,
+		`{}`,
+		`{"vulnerabilities":null}`,
+		`{"findings":[]}`,
+		`{"vulnerabilities":[{"id":"V1","purl":"pkg:pypi/requests@2.31.0"}]}`,
+	} {
+		t.Run(response, func(t *testing.T) {
+			ctx, dir := cacheEnv(t)
+			srv := newAPI(t, http.StatusOK, cleanBody)
+			if err := Validate(ctx, newSBOM(), srv.URL, "test-key"); err != nil {
+				t.Fatal(err)
+			}
+			files := cacheFiles(t, dir)
+			if len(files) != 1 {
+				t.Fatalf("want one entry, got %v", files)
+			}
+			entry := `{"kind":"verdict","stored_at":"` + time.Now().UTC().Format(time.RFC3339) + `","response":` + response + `}`
+			if err := os.WriteFile(filepath.Join(dir, files[0]), []byte(entry), 0o600); err != nil {
+				t.Fatal(err)
+			}
 
-	sbom := newSBOM()
-	if err := Validate(ctx, sbom, srv.URL, "test-key"); err != nil {
-		t.Fatalf("Validate after corrupting the entry: %v", err)
+			sbom := newSBOM()
+			if err := Validate(ctx, sbom, srv.URL, "test-key"); err != nil {
+				t.Fatalf("Validate after corrupting the entry: %v", err)
+			}
+			if got := srv.posts.Load(); got != 2 {
+				t.Errorf("the entry was served instead of going live (%d posts)", got)
+			}
+			if len(sbom.Vulnerabilities) != 0 || len(sbom.Findings) != 1 {
+				t.Errorf("live response not applied cleanly: %d vulnerabilities, %d findings",
+					len(sbom.Vulnerabilities), len(sbom.Findings))
+			}
+		})
 	}
-	if got := srv.posts.Load(); got != 2 {
-		t.Errorf("a corrupt entry was served instead of going live (%d posts)", got)
+}
+
+// The key is built from the client's resolved BaseURL, so leaving --url unset
+// and spelling out the default are the same server and the same entry.
+func TestResolveClient_DefaultURLMatchesTheExplicitDefault(t *testing.T) {
+	ctx, _ := cacheEnv(t)
+	implicit, id1, err := resolveClient(ctx, "", "test-key")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if len(sbom.Findings) != 1 {
-		t.Errorf("live response not applied after a corrupt entry: %d findings", len(sbom.Findings))
+	explicit, id2, err := resolveClient(ctx, "https://api.ossprey.com", "test-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if implicit.BaseURL != explicit.BaseURL || implicit.BaseURL == "" {
+		t.Fatalf("BaseURL: implicit %q, explicit %q", implicit.BaseURL, explicit.BaseURL)
+	}
+	mb := newSBOM().ToMiniBOM()
+	k1 := scancache.Key(scancache.KeyInput{Kind: scancache.Verdict, APIURL: implicit.BaseURL, Identity: id1, CLIVersion: client.Version, BOM: mb})
+	k2 := scancache.Key(scancache.KeyInput{Kind: scancache.Verdict, APIURL: explicit.BaseURL, Identity: id2, CLIVersion: client.Version, BOM: mb})
+	if k1 != k2 {
+		t.Error("an unset --url and the explicit default produced different keys")
 	}
 }
 

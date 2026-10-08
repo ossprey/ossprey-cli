@@ -65,6 +65,14 @@ func (l *Lookup) Get() (raw json.RawMessage, age time.Duration, ok bool) {
 	if hit == nil {
 		return nil, 0, false
 	}
+	// A verdict entry was only ever written for a clean response, so the
+	// same test is applied on the way out. Anything else — a hand edit, a
+	// truncated write, a schema that drifted — is a miss, never a pass; the
+	// live run that follows overwrites it.
+	if l.kind == Verdict && !Clean(hit.Response) {
+		l.debug(fmt.Errorf("stored verdict for %s is not a clean response; ignoring it", l.key[:12]))
+		return nil, 0, false
+	}
 	return hit.Response, hit.Age, true
 }
 
@@ -102,7 +110,7 @@ func (l *Lookup) debug(err error) {
 	warn.Add(l.ctx, warn.Entry{
 		Class: "scan-cache-error",
 		One:   "scan cache: " + err.Error() + " (the scan ran as if there were no cache)",
-		Many:  "scan cache: %d problems (listed above); the scan ran as if there were no cache",
+		Many:  "scan cache: %d problems (listed below); the scan ran as if there were no cache",
 		Item:  err.Error(),
 	})
 }

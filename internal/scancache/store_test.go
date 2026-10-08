@@ -208,8 +208,15 @@ func TestUnusableDirIsAnError(t *testing.T) {
 	if err := s.Put(keyA, Verdict, json.RawMessage(cleanResponse)); err == nil {
 		t.Error("Put into a file succeeded")
 	}
-	if hit, err := s.Get(keyA, Verdict, time.Hour); hit != nil || err == nil {
-		t.Errorf("Get from a file = %v, %v; want nil and an error", hit, err)
+	hit, err := s.Get(keyA, Verdict, time.Hour)
+	if hit != nil {
+		t.Errorf("Get from a file served %v", hit)
+	}
+	// Windows reports a path under a regular file as "not found", which Get
+	// correctly reads as a plain miss; elsewhere it is ENOTDIR, an error worth
+	// a verbose line. Either way nothing is served.
+	if err == nil && runtime.GOOS != "windows" {
+		t.Error("Get from a file was not reported as an error")
 	}
 }
 

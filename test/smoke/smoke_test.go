@@ -46,8 +46,11 @@ func TestMain(m *testing.M) {
 	}
 
 	// Every subprocess inherits this, so the scan cache the binary now keeps
-	// lands here rather than in the developer's real cache directory, and no
-	// test can be answered by an entry another test wrote.
+	// lands here rather than in the developer's real cache directory. Tests
+	// still share this one directory; what keeps one test's entry from
+	// answering another is that each stub server has its own port, and the
+	// API URL is part of the cache key. A test that counts requests against a
+	// shared URL must set its own OSSPREY_CACHE_DIR.
 	os.Setenv("OSSPREY_CACHE_DIR", filepath.Join(tmp, "cache"))
 
 	os.Exit(m.Run())
