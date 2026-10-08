@@ -133,6 +133,17 @@ func FingerprintMonitor(id string) string { return fingerprint("monitor", id) }
 // fingerprint domain-separates the three credential kinds so the same bytes
 // used as, say, both an API key and a monitor id would still be two
 // identities.
+//
+// A single SHA-256 is the right tool here, and CodeQL's
+// go/weak-sensitive-data-hashing alert on it is dismissed as a false
+// positive. That rule is about low-entropy human passwords stored for later
+// verification, where a fast hash lets an attacker try millions of guesses.
+// This input is an API key or a monitor id, both backend-generated random
+// tokens (a monitor id carries 256 bits of randomness), or a login's email,
+// which is an identifier rather than a secret. The output is folded into a
+// cache filename in a 0700 directory, which anyone able to read is already
+// this user and could read credentials.json instead. A slow KDF would add
+// latency to every CLI invocation and protect nothing.
 func fingerprint(kind, secret string) string {
 	if secret == "" {
 		return ""
