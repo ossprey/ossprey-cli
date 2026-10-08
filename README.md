@@ -80,6 +80,15 @@ So `ossprey scan .` in a CI job fails the build on malware, with no extra
 plumbing. If you need to tell "clean" apart from "skipped", or want the findings
 as JSON, use [`--report report.json`](docs/output.md#machine-readable-verdict---report).
 
+Which findings count as malware is your account's **failing severity floor**,
+served with the scan so every integration follows one setting. It defaults to
+`Info`, the bottom of the scale, so every graded finding fails; raise it and
+anything below is reported as a `Note:` without failing the scan. A finding the
+API could not grade fails at every floor.
+
+`--fail-on <level>` overrides the floor for a single run, in either direction,
+so CI can be stricter or more lenient than the account without changing it.
+
 ---
 
 ## Stopping malware before it lands

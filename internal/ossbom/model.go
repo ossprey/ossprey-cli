@@ -73,6 +73,11 @@ type SBOM struct {
 	Components      []Component     `json:"components"`
 	Vulnerabilities []Vulnerability `json:"vulnerabilities"`
 	Findings        []Finding       `json:"findings,omitempty"`
+	// FailingSeverityFloor is the floor the API graded this scan at, taken from
+	// the scan response envelope and set here so it reaches the -o output. Empty
+	// on a local or dry-run SBOM and on a server that served none; see
+	// severity.ParseFloor for what an empty or unreadable value falls back to.
+	FailingSeverityFloor string `json:"failing_severity_floor,omitempty"`
 
 	dedupe map[string]int
 }
