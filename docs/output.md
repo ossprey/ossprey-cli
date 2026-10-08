@@ -94,6 +94,53 @@ A package left unversioned is still submitted and still checked against what
 the registry knows; one dropped by a forwarder (`skipping its check`) is not
 checked at all. The wording differs for that reason.
 
+## The local scan cache
+
+Repeating a scan that changed nothing does not reach the platform. When this
+machine sent the identical SBOM — the same packages at the same versions, from
+the same project path and branch, with the same credential, to the same API —
+within the last hour, the CLI reuses what happened last time:
+
+- A **blocking** scan (`scan`, `check`, `init`, a forwarded install) whose
+  last result was **clean** replays that result locally. Nothing is sent, and
+  one line on stderr says so:
+
+  ```text
+  ossprey: clean result reused from a scan 12m ago (--no-cache or OSSPREY_SCAN_CACHE_TTL=0 to rescan)
+  ```
+
+- A **passive** submission (`--passive`, `--monitor`, a watchdog or monitor
+  shim) that was already accepted is not sent again:
+
+  ```text
+  ossprey: identical scan already sent 12m ago; not sent again
+  ```
+
+Only a clean verdict is ever reused. Malware, an informational finding, a
+quota skip, a failed scan and any error always go to the platform next time,
+so the cache can neither hide nor freeze a detection. The two kinds of entry
+are kept apart: a passive acceptance carries no verdict and can never let a
+blocking scan pass.
+
+`--no-cache` on `scan` and `check` skips the lookup for one run (the fresh
+result is still stored). `OSSPREY_SCAN_CACHE_TTL` sets the window — a Go
+duration such as `30m`, capped at `24h`, with `0` or `off` turning the cache
+off for every command, including the forwarders and shims, which take no
+flags. The forwarders print the reuse line only under `OSSPREY_VERBOSE=1`, as
+they do every other non-blocking line.
+
+Entries live under `OSSPREY_CACHE_DIR` (default: your user cache directory,
+`~/.cache/ossprey` on Linux), in a `scans/` subdirectory, as one small file per
+scan readable only by you. No credential is written: the key is a hash, and
+the file holds only the API's answer. A cache that cannot be read or written
+is simply not used; nothing about the scan's outcome or exit code changes.
+
+Two things to know. A reused result leaves no new scan in the dashboard — that
+is the point, but it means the dashboard's "last scanned" time does not move
+on a cache hit. And a passive submission the platform accepted but later
+skipped for quota is not retried until the window expires; passive mode never
+blocks anything, so nothing is lost but a dashboard row.
+
 ## Machine-readable verdict (`--report`)
 
 `--report report.json` writes the verdict and the malicious packages to a file,
@@ -143,6 +190,12 @@ rather than this field.
 A `clean` verdict with a non-zero `unscanned` means nothing was flagged in the
 part that was scanned, and the summary line says so: `No malware found in 410 of
 412 packages`.
+
+`cached: true` and `cached_age_seconds` are present when the verdict was
+replayed from [the local scan cache](#the-local-scan-cache) rather than fetched:
+the identical scan was found clean that many seconds ago. Both are absent on a
+live verdict, so a consumer that predates them sees no change. A cached verdict
+is always `clean`, because nothing else is ever cached.
 
 `findings` is always present, empty on a clean scan, so
 `jq '.findings | length'` works either way. The file is written before the

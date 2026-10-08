@@ -14,6 +14,13 @@ all.
 Nothing here installs anything. The one exception is the resolver step marked
 below, which runs only when a manifest ships without a lockfile.
 
+Before anything is posted, [the local scan cache](output.md#the-local-scan-cache)
+(`internal/scancache`) asks whether this machine already sent the identical
+MiniBOM, to the same API with the same credential, within the last hour. A
+blocking run whose last answer was clean replays it; a passive run that was
+already accepted stops there. Anything else — a first scan, a changed
+dependency, a last result that was not clean — goes to the platform.
+
 ```mermaid
 flowchart LR
     subgraph sources["Where the packages come from"]
@@ -31,7 +38,9 @@ flowchart LR
     B --> F
     C --> F
     F --> G["MiniBOM<br/>purl + source + env + location"]
-    G --> H["POST /scans"]
+    G --> CC{"identical SBOM sent from<br/>this machine in the last hour?<br/>(internal/scancache)"}
+    CC -- "yes: clean verdict replayed,<br/>or passive post skipped" --> L
+    CC -- "no" --> H["POST /scans"]
     H --> I["poll for a verdict<br/>(gating mode only)"]
     I --> J{"malware?"}
     J -- "yes" --> K["banner + exit 1"]
