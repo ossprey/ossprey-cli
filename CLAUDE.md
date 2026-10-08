@@ -470,7 +470,12 @@ things hold it together:
   deduplicated post, how `--report` gets `cached`/`cached_age_seconds`, and
   how `forward.reportPassive` avoids saying "scan posted" about a post that
   was not made. `--no-cache` is `WithBypass(ctx)`: skip the read, still
-  write, so the next ordinary run reuses the fresh result.
+  write, so the next ordinary run reuses the fresh result. `init`'s first
+  scan runs under `WithBypass` unconditionally: it exists to prove the key
+  it just minted works and sends the user to the dashboard to see the scan,
+  and a replayed verdict does neither (`TestInitFirstScanAlwaysGoesLive`;
+  the init smoke stub mints the same key value every run, which is how this
+  surfaced).
 - **TTL semantics.** `OSSPREY_SCAN_CACHE_TTL`: a Go duration, `0`/`off`
   disables reads and writes alike, above 24h clamps to 24h, unparseable or
   negative warns (through `warn`, once per run) and uses the default. The

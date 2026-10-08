@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -185,6 +186,27 @@ func TestScanDryRunAndLocalNeverTouchTheCache(t *testing.T) {
 	}
 	if _, err := os.Stat(scans); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("a dry run or --local created the cache dir (stat err %v)", err)
+	}
+}
+
+// init's scan exists to prove the credential it just minted works, and it
+// tells the user to look for the scan in the dashboard. A replayed verdict
+// does neither, so init always asks the API — and still stores the result,
+// so the user's next `ossprey scan` reuses it.
+func TestInitFirstScanAlwaysGoesLive(t *testing.T) {
+	isolatedCache(t)
+	srv, posts := countingAPI(t, http.StatusOK, cleanScanBody)
+	dir := pythonProject(t)
+
+	for i := 0; i < 2; i++ {
+		captureStdout(t, func() {
+			if err := runFirstScan(context.Background(), dir, srv.URL, "ospy_same_key_each_run"); err != nil {
+				t.Fatalf("run %d: %v", i+1, err)
+			}
+		})
+	}
+	if got := posts.Load(); got != 2 {
+		t.Errorf("init's scan was served from the cache (%d requests, want 2)", got)
 	}
 }
 

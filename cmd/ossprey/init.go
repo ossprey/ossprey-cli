@@ -20,6 +20,7 @@ import (
 	"github.com/ossprey/ossprey-cli/internal/client"
 	"github.com/ossprey/ossprey-cli/internal/progress"
 	"github.com/ossprey/ossprey-cli/internal/scan"
+	"github.com/ossprey/ossprey-cli/internal/scancache"
 	"github.com/ossprey/ossprey-cli/internal/severity"
 	"github.com/ossprey/ossprey-cli/internal/submit"
 	"github.com/ossprey/ossprey-cli/internal/warn"
@@ -410,6 +411,12 @@ func printNextStepsTo(out io.Writer, haveKey bool) {
 // `ossprey scan`. apiKey is the key just minted: passing it makes a clean scan
 // proof the credential works. Empty falls back to the stored login.
 func runFirstScan(ctx context.Context, path, apiURL, apiKey string) error {
+	// Always a real round trip, never a replay from the local scan cache: this
+	// scan exists to prove the credential works, and the closing line sends
+	// the user to the dashboard to see it. The fresh verdict is still stored,
+	// so the user's next `ossprey scan` reuses it.
+	ctx = scancache.WithBypass(ctx)
+
 	// Announced the same way `ossprey scan` announces them: init's third step
 	// is that scan, and it is the first thing a new user ever watches this tool
 	// do, so it is the last place that should sit silent for a minute.
