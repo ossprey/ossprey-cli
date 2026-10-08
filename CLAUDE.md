@@ -47,7 +47,10 @@ Requires Go 1.25+.
 
 One smoke job also runs in CI: `pnpm-smoke` runs `-run TestPnpm` against a real
 pnpm on both OSes, because that path can only be verified with the real binary
-(pnpm on Windows is a `.cmd`, as are the shims). Tests that need the shim
+(pnpm on Windows is a `.cmd`, as are the shims). On Linux it also runs the
+failing-floor smoke tests (`floor_smoke_test.go`, matched by
+`-run 'Floor|FailOn|EmptyProjectResponse'`) against a local stub API, so name a
+new test there to match. Tests that need the shim
 directory must ask `ossprey shim dir` rather than assuming `~/.ossprey/shims` —
 Windows resolves it under `%LOCALAPPDATA%`.
 
