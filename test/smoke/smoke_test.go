@@ -45,6 +45,11 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
+	// Every subprocess inherits this, so the scan cache the binary now keeps
+	// lands here rather than in the developer's real cache directory, and no
+	// test can be answered by an entry another test wrote.
+	os.Setenv("OSSPREY_CACHE_DIR", filepath.Join(tmp, "cache"))
+
 	os.Exit(m.Run())
 }
 
