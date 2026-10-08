@@ -174,6 +174,21 @@ func SetVerbose(ctx context.Context) {
 	c.verbose = true
 }
 
+// Verbose reports whether diagnostics on ctx are being shown in full. It lets
+// a package decide whether to record a line at all, not only how much of it
+// to show: a cache that could not be read is worth a line to someone
+// debugging and nothing to anyone else. Without a collector it answers for
+// the environment, the same way NewContext would.
+func Verbose(ctx context.Context) bool {
+	c, ok := ctx.Value(ctxKey{}).(*collector)
+	if !ok {
+		return env.Verbose()
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.verbose
+}
+
 // truncate caps a headline. len(prefix) is a byte count compared against a rune
 // count, which is only correct because prefix is pure ASCII — keep it that way.
 func truncate(s string) string {
