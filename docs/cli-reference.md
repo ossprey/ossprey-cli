@@ -24,20 +24,19 @@ To have the forwarders run without typing `ossprey` every time, see
 
 ## Exit codes and severity
 
-- `0` — no malware found, only informational findings, `--local` dump, or scan
-  skipped by the API (e.g. quota exhausted)
+- `0` — no malware found, a finding below the failing floor, `--local` dump, or
+  scan skipped by the API (e.g. quota exhausted)
 - `1` — malware found, and nothing else
 - `2` — the scan itself failed (bad path, catalog error, API/network error,
   missing key, bad flag), or ossprey crashed
 
-A finding graded `Info` is reported as a `Note:` line and does not fail the
-scan. Every other grade fails, and so does a finding the API could not grade,
-so an older server that sends no grade behaves exactly as before.
+A finding below the failing floor is reported as a `Note:` line and does not
+fail the scan. The default floor is `Info`, the bottom of the scale, so nothing
+is below it and every graded finding fails until an account raises its floor. A
+finding the API could not grade fails at every floor.
 
-Pass `--fail-on-informational` to fail on those too, if you would rather your
-build stopped on anything Ossprey reports at all. It only ever makes the check
-stricter; there is deliberately no flag to raise the threshold, because that
-would let a real detection through.
+`--fail-on-informational` sets the floor to `Info`, which is now the default, so
+it no longer changes anything.
 
 Exit `0` covers both "clean" and "skipped" (nothing was checked), so if CI
 needs to tell those apart, write a
@@ -84,7 +83,7 @@ ossprey scan [path] [flags]
 | `--timeout <dur>` | Give up cataloguing after this long and emit whatever resolved (or `OSSPREY_SCAN_TIMEOUT`). Off by default. |
 | `--url <url>` | Override the Ossprey API URL (default `https://api.ossprey.com`). |
 | `--api-key <key>` | Provide the API key on the command line instead of an env var. |
-| `--fail-on-informational` | Also fail on informational findings, which are reported but exit 0 by default. |
+| `--fail-on-informational` | Sets the floor to `Info`. That is the default, so this no longer changes anything. |
 | `--dry-run-safe` | Skip the API; report an empty vulnerability list. |
 | `--dry-run-malicious` | Skip the API; inject a test finding against the first component. |
 | `--skip-ci` | Skip the Ossprey scan entirely and exit 0. Also settable as `OSSPREY_SKIP_CI=1`. |

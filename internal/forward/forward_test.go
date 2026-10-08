@@ -1107,15 +1107,15 @@ func warnedResolve(_ context.Context, _, name string) (string, error) {
 }
 
 // Quiet, a clean install prints nothing from ossprey — no verdict, no progress
-// line, no warnings, no informational notes — and the manager still runs.
+// line, no warnings — and the manager still runs.
+//
+// Genuinely clean rather than carrying an Info finding: the forwarder grades at
+// the compiled-in floor, now Info, so no finding is below it to be noted.
 func TestQuietForwarder_CleanInstallIsSilent(t *testing.T) {
 	ex := &stubExec{}
 	swap(t, ex.fn, func(context.Context, check.Options) (*ossbom.SBOM, error) {
 		s := ossbom.New(ossbom.Environment{})
 		s.AddComponent(ossbom.Component{Name: "lodash", Version: "1.0.0", Type: "npm"})
-		v := ossbom.NewMalwareVulnerability("V1", "pkg:npm/lodash@1.0.0", "fyi")
-		v.Severity = "info"
-		s.AddVulnerability(v)
 		return s, nil
 	})
 

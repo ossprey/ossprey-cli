@@ -317,7 +317,10 @@ func TestPrecommitVerboseCleanReportsCount(t *testing.T) {
 
 // An Info hit is reported but must not block, consistent with this hook's
 // documented fail-open posture.
-func TestPrecommitInformationalHitDoesNotBlock(t *testing.T) {
+// The hook grades at the compiled-in default, which is Info, so a known-malicious
+// package blocks whatever its grade. It cannot see an account floor: /malware/check
+// does not serve one (OSS-1994).
+func TestPrecommitInformationalHitBlocksAtTheDefaultFloor(t *testing.T) {
 	stubPrecommit(t, oneStagedPackage(),
 		func(context.Context, string, string, []string) ([]client.MalwareHit, error) {
 			return []client.MalwareHit{{
@@ -328,15 +331,12 @@ func TestPrecommitInformationalHitDoesNotBlock(t *testing.T) {
 		})
 
 	var out bytes.Buffer
-	if blocked := runPrecommit(context.Background(), "https://api.test", "key", false, &out); blocked {
-		t.Fatal("an informational hit must not block the commit")
+	if blocked := runPrecommit(context.Background(), "https://api.test", "key", false, &out); !blocked {
+		t.Fatal("a known-malicious hit must block at the default floor")
 	}
 	got := out.String()
-	if !strings.Contains(got, "flagged for information only") {
-		t.Errorf("output missing the informational notice:\n%s", got)
-	}
-	if strings.Contains(got, "commit blocked") {
-		t.Errorf("output must not claim the commit was blocked:\n%s", got)
+	if !strings.Contains(got, "commit blocked") {
+		t.Errorf("output missing the block notice:\n%s", got)
 	}
 }
 
@@ -364,9 +364,6 @@ func TestPrecommitInformationalAlongsideRealHitStillBlocks(t *testing.T) {
 	if !strings.Contains(got, "evil-pkg@1.2.3 (npm, from package-lock.json): exfiltrates env vars") {
 		t.Errorf("output missing the blocking hit:\n%s", got)
 	}
-	if !strings.Contains(got, "flagged for information only") {
-		t.Errorf("output missing the informational notice:\n%s", got)
-	}
 }
 
 // An ungraded hit is exactly what an older server sends, so it must block.
@@ -391,7 +388,7 @@ func TestPrecommitSanitisesHitReason(t *testing.T) {
 		blocks   bool
 	}{
 		{"blocking", "Critical", true},
-		{"informational", "Info", false},
+		{"informational", "Info", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stubPrecommit(t, oneStagedPackage(),

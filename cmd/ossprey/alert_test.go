@@ -71,8 +71,10 @@ func TestReportMalwareInformationalHasNoBanner(t *testing.T) {
 	v.Severity = "Info"
 	sbom.AddVulnerability(v)
 
-	if reportMalware(sbom, severity.FailingFloor) {
-		t.Fatal("informational finding must not fail")
+	// Graded at Low, not the default: the default floor is Info, where nothing
+	// sits below it and there is no informational line to render.
+	if reportMalware(sbom, severity.Low) {
+		t.Fatal("a finding below the floor must not fail")
 	}
 	out := buf.String()
 	if strings.Contains(out, "Ossprey found") || strings.Contains(out, "███") {
