@@ -42,6 +42,14 @@ func TestNoMalwareLine(t *testing.T) {
 		{Purl: "pkg:cargo/rand@0.8.5", Type: "UNSUPPORTED"},
 	}
 
+	cratesOnly := ossbom.New(ossbom.Environment{})
+	cratesOnly.AddComponent(ossbom.Component{Name: "serde", Version: "1.0.200", Type: "cargo"})
+	cratesOnly.AddComponent(ossbom.Component{Name: "rand", Version: "0.8.5", Type: "cargo"})
+	cratesOnly.Findings = []ossbom.Finding{
+		{Purl: "pkg:cargo/serde@1.0.200", Type: "LOOKUP_ONLY"},
+		{Purl: "pkg:cargo/rand@0.8.5", Type: "LOOKUP_ONLY"},
+	}
+
 	full := ossbom.New(ossbom.Environment{})
 	full.AddComponent(ossbom.Component{Name: "left-pad", Version: "1.3.0", Type: "npm"})
 
@@ -52,6 +60,7 @@ func TestNoMalwareLine(t *testing.T) {
 	}{
 		{"everything scanned", full, "No malware found"},
 		{"two of three unscanned", mixed, "No malware found in 1 of 3 packages"},
+		{"lookup-only crates", cratesOnly, "No malware found in 0 of 2 packages"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

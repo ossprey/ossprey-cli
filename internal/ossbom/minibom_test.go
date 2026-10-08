@@ -150,12 +150,14 @@ func TestApplyAPIResponseReadsFindings(t *testing.T) {
 	s.AddComponent(Component{Name: "serde", Version: "1.0.200", Type: "cargo"})
 	s.AddComponent(Component{Name: "ghost", Version: "9.9.9", Type: "npm"})
 	s.AddComponent(Component{Name: "fine", Version: "1.0.0", Type: "npm"})
+	s.AddComponent(Component{Name: "rand", Version: "0.8.5", Type: "cargo"})
 	raw := []byte(`{
 		"vulnerabilities": [{"id": "MAL-1", "purl": "pkg:npm/evil@1.0.0"}],
 		"findings": [
 			{"purl": "pkg:cargo/serde@1.0.200", "type": "UNSUPPORTED"},
 			{"purl": "pkg:npm/ghost@9.9.9", "type": "NOT_FOUND"},
-			{"purl": "pkg:npm/fine@1.0.0", "type": "SCANNED"}
+			{"purl": "pkg:npm/fine@1.0.0", "type": "SCANNED"},
+			{"purl": "pkg:cargo/rand@0.8.5", "type": "LOOKUP_ONLY"}
 		]
 	}`)
 	if err := s.ApplyAPIResponse(raw); err != nil {
@@ -164,12 +166,12 @@ func TestApplyAPIResponseReadsFindings(t *testing.T) {
 	if len(s.Vulnerabilities) != 1 {
 		t.Errorf("vulnerabilities: got %d, want 1", len(s.Vulnerabilities))
 	}
-	if len(s.Findings) != 3 {
-		t.Fatalf("findings: got %d, want 3", len(s.Findings))
+	if len(s.Findings) != 4 {
+		t.Fatalf("findings: got %d, want 4", len(s.Findings))
 	}
-	// Only the two skip types mean the component went unchecked.
-	if got := s.Unscanned(); got != 2 {
-		t.Errorf("Unscanned: got %d, want 2", got)
+	// Only the skip types mean the component went unchecked.
+	if got := s.Unscanned(); got != 3 {
+		t.Errorf("Unscanned: got %d, want 3", got)
 	}
 }
 
