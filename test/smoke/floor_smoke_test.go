@@ -102,10 +102,10 @@ func TestServedFloorDecidesTheVerdict(t *testing.T) {
 		{name: "medium below a High floor", severity: "Medium", floor: "High", wantCode: 0, wantVerd: "informational"},
 		{name: "high at a High floor", severity: "High", floor: "High", wantCode: 1, wantVerd: "malware"},
 		{name: "info at an Info floor", severity: "Info", floor: "Info", wantCode: 1, wantVerd: "malware"},
-		{name: "info at the default floor", severity: "Info", floor: "Low", wantCode: 0, wantVerd: "informational"},
-		{name: "an unreadable floor is the default", severity: "Info", floor: "Banana", wantCode: 0, wantVerd: "informational"},
+		{name: "info below a Low floor", severity: "Info", floor: "Low", wantCode: 0, wantVerd: "informational"},
+		{name: "an unreadable floor is the default", severity: "Info", floor: "Banana", wantCode: 1, wantVerd: "malware"},
 		{name: "an unreadable floor still fails a Low", severity: "Low", floor: "Banana", wantCode: 1, wantVerd: "malware"},
-		{name: "no floor served behaves as today", severity: "Info", wantCode: 0, wantVerd: "informational"},
+		{name: "no floor served grades at the default", severity: "Info", wantCode: 1, wantVerd: "malware"},
 		{name: "nothing found at a raised floor is clean", severity: "", floor: "Critical", wantCode: 0, wantVerd: "clean"},
 		{
 			name: "an override lowers a raised floor to the bottom", severity: "Medium", floor: "High",
