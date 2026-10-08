@@ -28,6 +28,7 @@ import (
 	"github.com/ossprey/ossprey-cli/internal/progress"
 	"github.com/ossprey/ossprey-cli/internal/registry"
 	"github.com/ossprey/ossprey-cli/internal/scan"
+	"github.com/ossprey/ossprey-cli/internal/scancache"
 	"github.com/ossprey/ossprey-cli/internal/severity"
 	"github.com/ossprey/ossprey-cli/internal/shim"
 	"github.com/ossprey/ossprey-cli/internal/submit"
@@ -673,6 +674,10 @@ func passiveAfterInstall(ctx context.Context, m *Manager, opts Options) error {
 	flushWarnings(ctx)
 	execErr := execFn(ctx, m.Bin, opts.Args)
 
+	// Observed so the summary below can tell a post from a post the scan
+	// cache deduplicated (internal/scancache).
+	ctx, cached := scancache.Observe(ctx)
+
 	// Only now is there a wait to announce, and it is a short one: parsing a
 	// lockfile and posting it, with no resolver in the way.
 	stop := progress.Submit(progressTo(), 0)
@@ -688,7 +693,7 @@ func passiveAfterInstall(ctx context.Context, m *Manager, opts Options) error {
 	stop()
 
 	flushWarnings(ctx)
-	reportPassive(opts, sbom, err)
+	reportPassive(opts, sbom, err, cached.Hit)
 	return execErr
 }
 
@@ -700,6 +705,9 @@ func passiveAlongside(ctx context.Context, m *Manager, opts Options, n int, work
 		sbom *ossbom.SBOM
 		err  error
 	}
+	// Observed before the goroutine starts; read only after it has sent on
+	// done, which is what makes the Outcome safe to read.
+	ctx, cached := scancache.Observe(ctx)
 	done := make(chan outcome, 1)
 	go func() {
 		sbom, err := work(ctx)
@@ -725,14 +733,17 @@ func passiveAlongside(ctx context.Context, m *Manager, opts Options, n int, work
 	}
 
 	flushWarnings(ctx)
-	reportPassive(opts, res.sbom, res.err)
+	reportPassive(opts, res.sbom, res.err, cached.Hit)
 	return execErr
 }
 
 // reportPassive states what the passive submission did. It never returns an
 // error: passive mode never blocks an install, not even on a failed submission
 // — a monitor that can break `npm install` is a monitor people rip out.
-func reportPassive(opts Options, sbom *ossbom.SBOM, err error) {
+//
+// deduplicated says the scan cache found an identical submission within its
+// TTL and nothing was posted this time.
+func reportPassive(opts Options, sbom *ossbom.SBOM, err error, deduplicated bool) {
 	mode := "passive"
 	if opts.MonitorID != "" {
 		// Named because a monitor also decides whose account this lands in, and
@@ -745,6 +756,10 @@ func reportPassive(opts Options, sbom *ossbom.SBOM, err error) {
 		note("ossprey: nothing left to check after version resolution; nothing posted (%s)\n", mode)
 	case err != nil:
 		fmt.Fprintf(errOut, "ossprey: warning: could not post scan (%v); the install was not blocked (%s)\n", err, mode)
+	case deduplicated:
+		// The collector's "identical scan already sent" line, drained just
+		// before this, has said what happened. "Scan posted" would contradict
+		// it.
 	case sbom != nil && len(sbom.Components) == 0:
 		// "Scan posted" would claim coverage of an install we catalogued
 		// nothing from.

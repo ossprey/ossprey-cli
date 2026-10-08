@@ -84,6 +84,31 @@ curl -fsSL https://github.com/ossprey/ossprey-cli/releases/latest/download/insta
 `ossprey shim status` says which mode each shim is in, so you can tell a
 blocking install from a passive one at a glance.
 
+## Repeat installs are sent once
+
+A fleet re-running the same install — a dev container rebuilt from the same
+lockfile, `npm ci` on every commit — produces the same SBOM every time, and
+the platform does not need to hear it again. When this machine already
+submitted the identical SBOM (same packages and versions, same project path
+and branch, same credential or monitor id) within the last hour, the shim says
+so and sends nothing:
+
+```text
+ossprey: identical scan already sent 12m ago; not sent again
+```
+
+The forwarders and shims print that line only under `OSSPREY_VERBOSE=1`, like
+everything else they say short of a block. Change a dependency, switch branch,
+or wait an hour and the next install is submitted as usual. Set
+`OSSPREY_SCAN_CACHE_TTL=0` to send every install, or point `OSSPREY_CACHE_DIR`
+at a persisted volume so an ephemeral container still benefits; the details
+are in [the local scan cache](output.md#the-local-scan-cache).
+
+One trade-off is accepted on purpose: if a submission was accepted but the
+platform then skipped the scan for quota, the CLI never learns, so an identical
+install within the hour is not resent. Passive mode blocks nothing, so the
+only thing missing is a dashboard row.
+
 ## What passive mode costs you
 
 - **Nothing is blocked.** A passive shim reports malware to the dashboard; it

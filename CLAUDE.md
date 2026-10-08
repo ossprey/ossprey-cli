@@ -421,6 +421,83 @@ as `pkgs, _, _` and discarded, so a malformed requirement went missing from the
 SBOM in silence. Those errors are partial by design (OSS-1869) — keep taking the
 packages, and now report the rest.
 
+### Scan cache (`internal/scancache`)
+
+A repeat of the identical scan from this machine within the TTL (default 1h)
+never reaches the platform (OSS-2229, the CLI side of OPS-2026-002; the server
+side is ossprey#1295). Both `submit.Validate` and `submit.Post` consult it, so
+every command, forwarder and shim gets it with no per-command logic. Six
+things hold it together:
+
+- **Two entry kinds that never cross.** A `verdict` entry is written only by
+  `Validate`, only when the response has zero `vulnerabilities` (any severity
+  — an informational finding is not clean), and stores the raw response so a
+  hit replays through `ApplyAPIResponse` exactly as live, findings and any
+  future served floor included. A `posted` entry is written only by `Post`
+  after a 200/202 and holds no verdict at all, because a passive post returns
+  before one exists. The kind is in the filename, in the entry *and* in the
+  key, so a posted entry cannot answer a blocking lookup even if two of the
+  three were wrong. `TestPostedAndVerdictEntriesNeverCross` pins it through
+  the real seams. Never store an error, an `ErrSkipped`, a FAILED or a
+  timeout: `TestValidate_StoresOnlyCleanVerdicts` is the table.
+- **The key is a hash of everything that must match.** Schema version, kind,
+  the client's resolved `BaseURL` (not the raw flag, so `""` and the default
+  agree), an identity fingerprint, `client.Version` and the MiniBOM with
+  `Created` blanked. Note `Creators` is the constant `ossprey-cli-v2`, not the
+  version, which is why the version is passed explicitly. All of `Env` is in,
+  so a different path, branch or machine is a miss. Components are sorted on
+  a copy so the key does not depend on callers having sorted.
+- **Nothing a user typed reaches disk.** Identity is `sha256` of the API key,
+  of the login's tenant plus Auth0 subject (`submit.loginIdentity`: domain,
+  audience and the ID token's `sub`), or of the monitor id, domain-separated.
+  Subject, not email: Auth0 only makes an email unique within one connection
+  (CodeRabbit, PR #77), and the same subject format exists in prod and QA, so
+  the tenant goes in too. A login whose ID token names no subject has
+  identity `""`, and `""` means "do not cache" rather than "cache under the
+  hash of nothing". `auth.Session` exists so `submit` can see the whole
+  credential; `AccessToken` is now a wrapper over it, and
+  `Credentials.Subject` sits beside the display-only `Identity`.
+- **Best-effort, and invisible when it is not working.** Any read or write
+  error is a miss or a no-op, reported through `warn` only when the collector
+  is verbose (`warn.Verbose` was added for this). The directory is 0700 and
+  files 0600; writes go temp-file-then-rename so concurrent CLI processes
+  cannot tear an entry. Pruning (entries older than 24h, then a 1000-file
+  cap, oldest first) deletes **only** files matching our own name pattern,
+  because `OSSPREY_CACHE_DIR` may be pointed at a shared cache root — which is
+  also why entries sit in a `scans/` subdirectory of it.
+- **The hit line travels through `warn`, not stderr.** `Lookup.Hit` adds a
+  collector entry, so the line prints where warnings print: before the
+  verdict in `scan`/`check`, and only under `OSSPREY_VERBOSE` in the
+  forwarders, whose quiet contract a direct `Fprintf` would break. The same
+  call fills the `scancache.Outcome` a caller attached with `Observe(ctx)`;
+  that is how `scan` keeps the passive "Scan submitted" line off stdout on a
+  deduplicated post, how `--report` gets `cached`/`cached_age_seconds`, and
+  how `forward.reportPassive` avoids saying "scan posted" about a post that
+  was not made. `--no-cache` is `WithBypass(ctx)`: skip the read, still
+  write, so the next ordinary run reuses the fresh result. `init`'s first
+  scan runs under `WithBypass` unconditionally: it exists to prove the key
+  it just minted works and sends the user to the dashboard to see the scan,
+  and a replayed verdict does neither (`TestInitFirstScanAlwaysGoesLive`;
+  the init smoke stub mints the same key value every run, which is how this
+  surfaced).
+- **TTL semantics.** `OSSPREY_SCAN_CACHE_TTL`: a Go duration, `0`/`off`
+  disables reads and writes alike, above 24h clamps to 24h, unparseable or
+  negative warns (through `warn`, once per run) and uses the default. The
+  forwarders have no flags, so the env var is their only control.
+
+Test seams: `OSSPREY_CACHE_DIR` (every package whose tests submit to an
+httptest server now has a `TestMain` pointing it at a temp dir, as does the
+smoke harness — without that the suite would write into the developer's real
+cache and a test could be answered by another test's entry), `scancache.now`
+for expiry without sleeping, and `scancache.maxEntries` for the cap.
+
+Accepted, deliberately: a hit leaves no new row in the dashboard; a passive
+post the platform accepted and then quota-skipped is not retried within the
+TTL (passive never blocks); once a served floor exists (ossprey-cli#52), a
+floor change can lag by up to the TTL on cached verdicts. A hosted CI runner
+starts from a clean disk, so the cache helps only where `OSSPREY_CACHE_DIR`
+persists — `docs/ci.md` says how.
+
 ### OSSBOM model (`internal/ossbom`)
 
 `SBOM` is the rich internal model. `MiniBOM` (`minibom.go`) is the compressed

@@ -222,26 +222,36 @@ func (c Config) credentials(tr tokenResponse) *Credentials {
 	}
 }
 
-// AccessToken returns a valid access token from the stored login, silently
+// Session returns the stored login with a valid access token, silently
 // refreshing (and re-saving) it when expired. Returns ErrNotLoggedIn when no
-// login is stored.
-func AccessToken(ctx context.Context, hc *http.Client) (string, error) {
+// login is stored. Callers that need more than the token — who the login
+// belongs to, via Identity — use this; the rest use AccessToken.
+func Session(ctx context.Context, hc *http.Client) (*Credentials, error) {
 	creds, err := Load()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if creds.Valid() {
-		return creds.AccessToken, nil
+		return creds, nil
 	}
 	cfg := Config{Domain: creds.Domain, ClientID: creds.ClientID, Audience: creds.Audience}
 	next, err := cfg.Refresh(ctx, hc, creds)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if err := Save(next); err != nil {
+		return nil, err
+	}
+	return next, nil
+}
+
+// AccessToken is Session narrowed to the one field most callers want.
+func AccessToken(ctx context.Context, hc *http.Client) (string, error) {
+	creds, err := Session(ctx, hc)
+	if err != nil {
 		return "", err
 	}
-	return next.AccessToken, nil
+	return creds.AccessToken, nil
 }
 
 // postForm sends a form-encoded POST and returns the body and status. The
