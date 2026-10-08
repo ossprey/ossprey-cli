@@ -448,11 +448,15 @@ things hold it together:
   so a different path, branch or machine is a miss. Components are sorted on
   a copy so the key does not depend on callers having sorted.
 - **Nothing a user typed reaches disk.** Identity is `sha256` of the API key,
-  of the login's `Credentials.Identity()` (email/sub), or of the monitor id,
-  domain-separated. A login whose ID token names nobody has identity `""`,
-  and `""` means "do not cache" rather than "cache under the hash of nothing".
-  `auth.Session` exists so `submit` can see the whole credential;
-  `AccessToken` is now a wrapper over it.
+  of the login's tenant plus Auth0 subject (`submit.loginIdentity`: domain,
+  audience and the ID token's `sub`), or of the monitor id, domain-separated.
+  Subject, not email: Auth0 only makes an email unique within one connection
+  (CodeRabbit, PR #77), and the same subject format exists in prod and QA, so
+  the tenant goes in too. A login whose ID token names no subject has
+  identity `""`, and `""` means "do not cache" rather than "cache under the
+  hash of nothing". `auth.Session` exists so `submit` can see the whole
+  credential; `AccessToken` is now a wrapper over it, and
+  `Credentials.Subject` sits beside the display-only `Identity`.
 - **Best-effort, and invisible when it is not working.** Any read or write
   error is a miss or a no-op, reported through `warn` only when the collector
   is verbose (`warn.Verbose` was added for this). The directory is 0700 and

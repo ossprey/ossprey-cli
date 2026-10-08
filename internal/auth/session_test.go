@@ -41,6 +41,21 @@ func TestSessionReturnsTheValidStoredLogin(t *testing.T) {
 	}
 }
 
+// Subject is the Auth0 account id (the sub claim), the one identifier that is
+// unique and stable for a login; email is only unique within a connection.
+func TestSubjectReadsTheSubClaim(t *testing.T) {
+	c := &Credentials{IDToken: sessionIDToken("dev@ossprey.com")}
+	if got := c.Subject(); got != "auth0|1" {
+		t.Errorf("Subject() = %q, want auth0|1", got)
+	}
+	if got := (&Credentials{}).Subject(); got != "" {
+		t.Errorf("Subject() with no ID token = %q, want empty", got)
+	}
+	if got := (&Credentials{IDToken: "not.a.jwt"}).Subject(); got != "" {
+		t.Errorf("Subject() with a malformed token = %q, want empty", got)
+	}
+}
+
 func TestSessionWhenNotLoggedIn(t *testing.T) {
 	t.Setenv("OSSPREY_CONFIG_DIR", t.TempDir())
 	if _, err := Session(context.Background(), nil); !errors.Is(err, ErrNotLoggedIn) {

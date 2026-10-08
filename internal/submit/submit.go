@@ -140,9 +140,9 @@ func NewClient(ctx context.Context, apiURL, apiKey string) (*client.Client, erro
 
 // resolveClient is NewClient plus the cache identity of the credential it
 // chose. The identity is a fingerprint, never the credential: the hash of an
-// API key, or of the login's email/subject. A stored login whose ID token
-// names nobody has no identity, and "" tells the cache to stand down rather
-// than file every such login under the same key.
+// API key, or of the login's tenant and subject (see loginIdentity). A stored
+// login whose ID token names no subject has no identity, and "" tells the
+// cache to stand down rather than file every such login under the same key.
 func resolveClient(ctx context.Context, apiURL, apiKey string) (*client.Client, string, error) {
 	if apiKey != "" {
 		c, err := client.New(apiURL, apiKey)
@@ -157,7 +157,7 @@ func resolveClient(ctx context.Context, apiURL, apiKey string) (*client.Client, 
 		if err != nil {
 			return nil, "", err
 		}
-		return c, scancache.FingerprintLogin(session.Identity()), nil
+		return c, scancache.FingerprintLogin(loginIdentity(session)), nil
 	}
 	if envKey := client.APIKeyFromEnv(); envKey != "" {
 		c, err := client.New(apiURL, envKey)
@@ -170,4 +170,18 @@ func resolveClient(ctx context.Context, apiURL, apiKey string) (*client.Client, 
 		return nil, "", errors.New("no credentials: run `ossprey login`, or set OSSPREY_API_KEY / --api-key")
 	}
 	return nil, "", fmt.Errorf("stored login: %w", loginErr)
+}
+
+// loginIdentity is what tells one stored login's cache entries from another's:
+// the Auth0 tenant (domain and audience) and the account's subject. The
+// subject rather than the email, because Auth0 only makes an email unique
+// within one connection, so two accounts can share one; and the tenant,
+// because the same subject format exists in prod and QA. Empty when the ID
+// token carries no subject, which the cache reads as "do not cache".
+func loginIdentity(s *auth.Credentials) string {
+	sub := s.Subject()
+	if sub == "" {
+		return ""
+	}
+	return s.Domain + "\x00" + s.Audience + "\x00" + sub
 }

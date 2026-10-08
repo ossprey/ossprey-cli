@@ -261,12 +261,48 @@ func TestPostedAndVerdictEntriesNeverCross(t *testing.T) {
 	})
 }
 
-// idToken builds an unsigned JWT whose payload carries email, which is all
-// Credentials.Identity reads.
-func idToken(email string) string {
-	payload, _ := json.Marshal(map[string]string{"email": email, "sub": "auth0|1"})
+// idToken builds an unsigned JWT whose payload carries an email and a subject,
+// which is all the credential readers look at.
+func idToken(email string) string { return idTokenFor(email, "auth0|1") }
+
+func idTokenFor(email, sub string) string {
+	payload, _ := json.Marshal(map[string]string{"email": email, "sub": sub})
 	enc := base64.RawURLEncoding.EncodeToString
 	return enc([]byte(`{"alg":"none"}`)) + "." + enc(payload) + ".sig"
+}
+
+// Auth0 only makes an email unique within one connection, so two accounts can
+// share one. The cache tells logins apart by subject and tenant, never by
+// email alone.
+func TestValidate_LoginsAreKeyedBySubjectAndTenantNotEmail(t *testing.T) {
+	ctx, _ := cacheEnv(t)
+	srv := newAPI(t, http.StatusOK, cleanBody)
+	login := func(sub, domain, audience string) {
+		t.Helper()
+		if err := auth.Save(&auth.Credentials{
+			Domain: domain, Audience: audience, AccessToken: "at-" + sub,
+			IDToken: idTokenFor("dev@ossprey.com", sub), ExpiresAt: time.Now().Add(time.Hour),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := Validate(ctx, newSBOM(), srv.URL, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	login("auth0|1", "auth.ossprey.com", "https://api.ossprey.com")
+	login("auth0|1", "auth.ossprey.com", "https://api.ossprey.com")
+	if got := srv.posts.Load(); got != 1 {
+		t.Fatalf("the same login twice was not cached (%d posts)", got)
+	}
+	login("auth0|2", "auth.ossprey.com", "https://api.ossprey.com")
+	if got := srv.posts.Load(); got != 2 {
+		t.Errorf("a different subject with the same email shared the entry (%d posts)", got)
+	}
+	login("auth0|1", "auth.qa.ossprey.com", "https://api.ossprey.com")
+	if got := srv.posts.Load(); got != 3 {
+		t.Errorf("the same subject on a different tenant shared the entry (%d posts)", got)
+	}
 }
 
 func TestValidate_StoredLoginIsCachedByIdentityOnly(t *testing.T) {

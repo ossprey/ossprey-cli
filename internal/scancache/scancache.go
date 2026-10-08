@@ -121,9 +121,9 @@ func Key(in KeyInput) string {
 // FingerprintAPIKey identifies an API-key credential without recording it.
 func FingerprintAPIKey(key string) string { return fingerprint("apikey", key) }
 
-// FingerprintLogin identifies a stored login by what Credentials.Identity()
-// returned (an email or subject). "" in, "" out: a login with no identity is
-// not cached.
+// FingerprintLogin identifies a stored login by the identity the caller
+// derived for it (the Auth0 tenant and subject; see submit.loginIdentity).
+// "" in, "" out: a login with no identity is not cached.
 func FingerprintLogin(identity string) string { return fingerprint("login", identity) }
 
 // FingerprintMonitor identifies a monitor id. The id is the credential, so it
