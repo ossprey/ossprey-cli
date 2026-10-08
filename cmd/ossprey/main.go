@@ -25,6 +25,7 @@ import (
 	"github.com/ossprey/ossprey-cli/internal/progress"
 	"github.com/ossprey/ossprey-cli/internal/registry"
 	"github.com/ossprey/ossprey-cli/internal/scan"
+	"github.com/ossprey/ossprey-cli/internal/scancache"
 	"github.com/ossprey/ossprey-cli/internal/severity"
 	"github.com/ossprey/ossprey-cli/internal/submit"
 	"github.com/ossprey/ossprey-cli/internal/update"
@@ -150,6 +151,7 @@ func newScanCmd() *cobra.Command {
 		passive             bool
 		cacheScanOnly       bool
 		monitorID           string
+		noCache             bool
 		timeout             time.Duration
 	)
 
@@ -192,6 +194,14 @@ func newScanCmd() *cobra.Command {
 				path = args[0]
 			}
 
+			// The scan cache rides on the context: Observe lets this command
+			// learn afterwards whether the verdict was reused (for the report
+			// and the passive line), and WithBypass is what --no-cache means.
+			ctx, cached := scancache.Observe(cmd.Context())
+			if noCache {
+				ctx = scancache.WithBypass(ctx)
+			}
+
 			// --local owns stdout and never reaches a verdict, so there is no
 			// report to write; refuse the combination rather than leave an
 			// empty or stale file behind for CI to read as "clean".
@@ -227,7 +237,7 @@ func newScanCmd() *cobra.Command {
 			if !local {
 				catalogued = progress.Catalog(progressOut)
 			}
-			sbom, err := scan.Run(cmd.Context(), scan.Options{
+			sbom, err := scan.Run(ctx, scan.Options{
 				Path:              path,
 				Verbose:           verbose,
 				SkipVersionLookup: noVersionLookup,
@@ -245,7 +255,7 @@ func newScanCmd() *cobra.Command {
 				}
 				return err
 			}
-			flushWarnings(cmd.Context())
+			flushWarnings(ctx)
 
 			// --local: dump SBOM JSON to stdout and exit. Nothing else.
 			if local {
@@ -268,16 +278,24 @@ func newScanCmd() *cobra.Command {
 				// no-op
 			case passiveMode:
 				stop := progress.Submit(progressOut, len(sbom.Components))
-				err := submit.Post(cmd.Context(), sbom, apiURL, apiKey, monitor)
+				err := submit.Post(ctx, sbom, apiURL, apiKey, monitor)
 				stop()
-				if err != nil {
+				// The cache's "already sent" line, when there is one, goes
+				// out before the outcome below so the two read in order.
+				flushWarnings(ctx)
+				switch {
+				case err != nil:
 					fmt.Fprintf(os.Stderr, "ossprey: warning: could not post scan: %v\n", err)
-				} else {
+				case cached.Hit:
+					// Nothing was submitted this time: an identical scan went
+					// within the TTL, and the line above has said so. Claiming
+					// a submission here would contradict it.
+				default:
 					fmt.Println("Scan submitted; results will appear in the Ossprey dashboard")
 				}
 			default:
 				stop := progress.Scan(progressOut, len(sbom.Components))
-				err := submit.Validate(cmd.Context(), sbom, apiURL, apiKey)
+				err := submit.Validate(ctx, sbom, apiURL, apiKey)
 				stop()
 				if err != nil {
 					if skipped, ok := printSkipped(err); ok {
@@ -306,9 +324,13 @@ func newScanCmd() *cobra.Command {
 
 			// Written before the exit below: a malware verdict is exactly the
 			// one CI most needs the report for.
-			flushWarnings(cmd.Context())
+			flushWarnings(ctx)
 
-			if err := writeReport(reportPath, scan.NewReport(sbom, failingFloor(failOnInformational))); err != nil {
+			report := scan.NewReport(sbom, failingFloor(failOnInformational))
+			if cached.Hit {
+				report.MarkCached(cached.Age)
+			}
+			if err := writeReport(reportPath, report); err != nil {
 				return err
 			}
 
@@ -330,6 +352,7 @@ func newScanCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&dryRunMalicious, "dry-run-malicious", false, "skip API submission; inject test vulnerability against first component")
 	cmd.Flags().BoolVar(&noVersionLookup, "no-version-lookup", false, "don't query the registry to resolve unpinned dependencies; leave them versionless")
 	cmd.Flags().DurationVar(&timeout, "timeout", 0, "give up cataloging after this long and emit what resolved (or OSSPREY_SCAN_TIMEOUT; 0 disables)")
+	cmd.Flags().BoolVar(&noCache, "no-cache", false, "always ask the API, even if this exact scan was found clean within the last hour (or set OSSPREY_SCAN_CACHE_TTL=0)")
 	cmd.Flags().StringVar(&apiURL, "url", defaultAPIURL, "Ossprey API URL")
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "Ossprey API key (or OSSPREY_API_KEY / API_KEY env var; optional after `ossprey login`)")
 	cmd.Flags().BoolVar(&skipCI, "skip-ci", false, "skip the Ossprey scan entirely and exit 0 (or OSSPREY_SKIP_CI env var)")
@@ -361,6 +384,7 @@ func newCheckCmd() *cobra.Command {
 		dryRunSafe          bool
 		dryRunMalicious     bool
 		failOnInformational bool
+		noCache             bool
 	)
 
 	cmd := &cobra.Command{
@@ -372,6 +396,12 @@ func newCheckCmd() *cobra.Command {
 				return errors.New("--eco-system is required (pypi or npm)")
 			}
 
+			// As in scan: the cache rides on the context.
+			ctx, cached := scancache.Observe(cmd.Context())
+			if noCache {
+				ctx = scancache.WithBypass(ctx)
+			}
+
 			specs := make([]check.Spec, 0, len(args))
 			for _, a := range args {
 				s, err := check.ParseSpec(ecosystem, a)
@@ -381,7 +411,7 @@ func newCheckCmd() *cobra.Command {
 				// `check` resolves latest for unpinned packages, failing closed:
 				// if we can't pin a version we can't honestly check it.
 				if s.Version == "" {
-					v, err := registry.ResolveLatest(cmd.Context(), s.Ecosystem, s.Name)
+					v, err := registry.ResolveLatest(ctx, s.Ecosystem, s.Name)
 					if err != nil {
 						return fmt.Errorf("resolve latest version of %s: %w", s.Name, err)
 					}
@@ -396,7 +426,7 @@ func newCheckCmd() *cobra.Command {
 			if !dryRunSafe && !dryRunMalicious {
 				stop = progress.Scan(progressOut, len(specs))
 			}
-			sbom, err := check.Run(cmd.Context(), check.Options{
+			sbom, err := check.Run(ctx, check.Options{
 				Specs:           specs,
 				APIURL:          apiURL,
 				APIKey:          apiKey,
@@ -414,9 +444,13 @@ func newCheckCmd() *cobra.Command {
 				return err
 			}
 
-			flushWarnings(cmd.Context())
+			flushWarnings(ctx)
 
-			if err := writeReport(reportPath, scan.NewReport(sbom, failingFloor(failOnInformational))); err != nil {
+			report := scan.NewReport(sbom, failingFloor(failOnInformational))
+			if cached.Hit {
+				report.MarkCached(cached.Age)
+			}
+			if err := writeReport(reportPath, report); err != nil {
 				return err
 			}
 
@@ -430,6 +464,7 @@ func newCheckCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVarP(&ecosystem, "eco-system", "e", "", "package ecosystem: pypi or npm (required)")
+	cmd.Flags().BoolVar(&noCache, "no-cache", false, "always ask the API, even if this exact check was found clean within the last hour (or set OSSPREY_SCAN_CACHE_TTL=0)")
 	cmd.Flags().StringVar(&reportPath, "report", "", "write a JSON verdict report (verdict + findings) to file")
 	cmd.Flags().StringVar(&apiURL, "url", defaultAPIURL, "Ossprey API URL")
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "Ossprey API key (or OSSPREY_API_KEY / API_KEY env var; optional after `ossprey login`)")
