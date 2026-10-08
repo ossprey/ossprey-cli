@@ -19,7 +19,8 @@ import (
 
 // Defaults target the production Ossprey Auth0 tenant. Override via the
 // OSSPREY_AUTH0_* env vars or the `ossprey login` flags (e.g. for QA:
-// domain auth.qa.ossprey.com, audience https://api.qa.ossprey.com).
+// domain auth.qa.ossprey.com, client ID oT9sXzeqPTyZnRDzpgQ3YjUfd11Xj0Mh,
+// audience https://api.qa.ossprey.com).
 const (
 	DefaultDomain   = "auth.ossprey.com"
 	DefaultClientID = "IosLlMhilXmQDmGcRgDfwfoumgcLFN41"
