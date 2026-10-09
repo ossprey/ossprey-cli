@@ -35,7 +35,7 @@ check and no API call.
 | `yarn` | `add`, `install`, `upgrade`, `up` |
 | `pip`, `pip3` | `install` |
 | `poetry` | `add`, `install`, `sync`, `update`, `lock` |
-| `uv` | `add`, `sync`, `pip install` |
+| `uv` | `add`, `sync`, `lock`, `pip install`, `pip sync`, `tool install` |
 
 Each manager's global options are understood before the subcommand, so
 `pnpm --filter web add x` and `npm --prefix ./app install x` are checked like any
@@ -51,8 +51,10 @@ still put code on your machine:
   download a package and run it. They name a package, but it is not an install
   verb, so it is forwarded unchecked. `npx` and `uvx` are separate binaries and
   are not shimmed at all, so they bypass Ossprey entirely.
-- **Script runners.** `npm run`, `pnpm run`, `poetry run` and equivalents. The
-  scripts themselves are not inspected.
+- **Script runners.** `npm run`, `pnpm run`, `poetry run`, `uv run` and
+  equivalents. The scripts themselves are not inspected. Note that `uv run`
+  syncs the project environment before running (as `uv sync` would) and
+  installs any `--with` packages, and none of that is checked.
 - **Anything the manager resolves that was not named and is not in the
   manifest.** Transitive dependencies of a named install are not resolved here;
   run `ossprey scan` for full-tree coverage.
@@ -69,10 +71,13 @@ from the lockfile.
   foo==1 bar`): every package named on the command line is checked. Multiple
   packages, flags, flag-values, local paths, archives and VCS/URL targets are
   all handled — only the real registry packages are checked, the rest are noted
-  and forwarded. Transitive dependencies are **not** resolved here; run `ossprey
+  and forwarded. `uv tool install` counts its `--with` packages as named too,
+  and with `--from 'ruff==0.6.0' ruff` checks the `--from` package rather than
+  the bare name. Transitive dependencies are **not** resolved here; run `ossprey
   scan` after install for full-tree coverage.
 - **Manifest install** (bare `ossprey npm install`, `npm ci`, `yarn install`,
-  `poetry install`, `poetry sync`, `uv sync`, or `pip install -r requirements.txt`): no
+  `poetry install`, `poetry sync`, `uv sync`, `uv pip sync requirements.txt`, or
+  `pip install -r requirements.txt`): no
   packages are named, so the manager installs from the project's
   manifest/lockfile. The forwarder scans the current directory and checks every
   declared dependency before forwarding — it does **not** fall through

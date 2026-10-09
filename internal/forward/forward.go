@@ -103,6 +103,9 @@ type Manager struct {
 	// decides, so route on writesLocalLockfile rather than on this flag.
 	Lockfile  bool
 	installAt func(args []string) (specStart int, ok bool)
+	// reqFileArgs reports whether this invocation's positional arguments are
+	// requirements files rather than packages (`uv pip sync req.txt`).
+	reqFileArgs func(args []string) bool
 }
 
 // noLocalLockfileFlags name the options that stop an install from updating a
@@ -143,9 +146,10 @@ func writesLocalLockfile(m *Manager, args []string) bool {
 	if !m.Lockfile {
 		return false
 	}
-	// `uv pip install` is pip wearing uv's coat. `uv add` / `uv sync` do lock.
+	// `uv pip install` is pip wearing uv's coat, and `uv tool install` puts
+	// the tool in uv's own tool directory. `uv add` / `uv sync` / `uv lock` lock.
 	if m.Bin == "uv" {
-		if i := verbIndex("uv", args); i >= 0 && args[i] == "pip" {
+		if i := verbIndex("uv", args); i >= 0 && (args[i] == "pip" || args[i] == "tool") {
 			return false
 		}
 	}
@@ -195,8 +199,9 @@ var managers = map[string]*Manager{
 	"pip":    {Bin: "pip", Ecosystem: "pypi", installAt: verbAt("pip", "install")},
 	"pip3":   {Bin: "pip3", Ecosystem: "pypi", installAt: verbAt("pip3", "install")},
 	"poetry": {Bin: "poetry", Ecosystem: "pypi", Lockfile: true, installAt: verbAt("poetry", "add", "install", "sync", "update", "lock")},
-	// uv: `uv add <pkg>`, `uv sync`, and `uv pip install <pkg>`.
-	"uv": {Bin: "uv", Ecosystem: "pypi", Lockfile: true, installAt: uvInstallAt},
+	// uv: `uv add <pkg>`, `uv sync`, `uv lock`, `uv pip install <pkg>`,
+	// `uv pip sync <req.txt>` and `uv tool install <pkg>`.
+	"uv": {Bin: "uv", Ecosystem: "pypi", Lockfile: true, installAt: uvInstallAt, reqFileArgs: uvPipSync},
 }
 
 // Managers returns the names of every supported forwarder, for CLI wiring.
@@ -262,21 +267,36 @@ func verbIndex(bin string, args []string) int {
 	return -1
 }
 
-// uvInstallAt matches `uv add ...`, `uv sync`, and `uv pip install ...`, with
-// uv's global flags allowed before the verb.
+// uvInstallAt matches `uv add ...`, `uv sync`, `uv lock`, `uv pip install
+// ...`, `uv pip sync ...` and `uv tool install ...`, with uv's global flags
+// allowed before the verb.
+//
+// `uv tool run` is deliberately absent: it is fetch-and-execute, where only the
+// first token is a package and the rest is the program's own argv.
 func uvInstallAt(args []string) (int, bool) {
 	idx := verbIndex("uv", args)
 	if idx < 0 {
 		return 0, false
 	}
 	rest := args[idx:]
-	if len(rest) >= 1 && (rest[0] == "add" || rest[0] == "sync") {
+	if len(rest) >= 1 && (rest[0] == "add" || rest[0] == "sync" || rest[0] == "lock") {
 		return idx + 1, true
 	}
-	if len(rest) >= 2 && rest[0] == "pip" && rest[1] == "install" {
+	if len(rest) >= 2 && rest[0] == "pip" && (rest[1] == "install" || rest[1] == "sync") {
+		return idx + 2, true
+	}
+	if len(rest) >= 2 && rest[0] == "tool" && rest[1] == "install" {
 		return idx + 2, true
 	}
 	return 0, false
+}
+
+// uvPipSync reports whether args are `uv pip sync`, whose positional arguments
+// are requirements files: it installs exactly what they list, so it is a
+// manifest install like `pip install -r`, not a named one.
+func uvPipSync(args []string) bool {
+	idx := verbIndex("uv", args)
+	return idx >= 0 && idx+1 < len(args) && args[idx] == "pip" && args[idx+1] == "sync"
 }
 
 // globalValueFlags lists, per manager, the flags valid *before* the verb whose
@@ -393,7 +413,7 @@ func Run(ctx context.Context, opts Options) error {
 		return passiveAfterInstall(ctx, m, opts)
 	}
 
-	parsed := ParseSpecs(m, opts.Args[start:])
+	parsed := parseInstallArgs(m, opts.Args[start:], m.reqFileArgs != nil && m.reqFileArgs(opts.Args))
 	if kept := dropTrusted(ctx, opts.Trust, parsed.Specs); len(kept) < len(parsed.Specs) {
 		parsed.Specs = kept
 		// Every named package was trusted. Without this the empty spec list
@@ -777,9 +797,34 @@ type installArgs struct {
 // requirements-file values separately, and (c) structurally separates tokens
 // that can't be a registry package from the real package specs.
 func ParseSpecs(m *Manager, args []string) installArgs {
+	return parseInstallArgs(m, args, false)
+}
+
+// parseInstallArgs is ParseSpecs, except that with positionalReqFiles every
+// positional argument is a requirements file (`uv pip sync req.txt`).
+func parseInstallArgs(m *Manager, args []string, positionalReqFiles bool) installArgs {
 	valFlags := valueFlags[m.Bin]
 	reqFlags := requirementFileFlags[m.Bin]
+	pkgFlags := packageValueFlags[m.Bin]
+	srcFlags := sourceFlags[m.Bin]
 	var out installArgs
+	var positional []string
+	sourceNamed := false
+
+	// classify sorts one package-or-target token into Specs or NonPackages.
+	classify := func(a string) {
+		// Local paths, archives, URLs and VCS refs aren't registry packages.
+		if isNonPackageToken(a) {
+			out.NonPackages = append(out.NonPackages, a)
+			return
+		}
+		s, err := check.ParseSpec(m.Ecosystem, a)
+		if err != nil {
+			out.NonPackages = append(out.NonPackages, a)
+			return
+		}
+		out.Specs = append(out.Specs, s)
+	}
 
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -798,24 +843,40 @@ func ParseSpecs(m *Manager, args []string) installArgs {
 					out.ReqFiles = append(out.ReqFiles, args[i+1])
 					i++
 				}
+			case srcFlags[flag]:
+				// The value is the package installed; the positional only names it.
+				sourceNamed = true
+				if hasInline {
+					classify(inlineVal)
+				} else if i+1 < len(args) {
+					classify(args[i+1])
+					i++
+				}
+			case pkgFlags[flag]:
+				// The value is another package being installed: check it too.
+				if hasInline {
+					classify(inlineVal)
+				} else if i+1 < len(args) {
+					classify(args[i+1])
+					i++
+				}
 			case valFlags[flag] && !hasInline && i+1 < len(args):
 				i++ // consume the flag's value so it isn't read as a package
 			}
 			continue
 		}
 
-		// Local paths, archives, URLs and VCS refs aren't registry packages.
-		if isNonPackageToken(a) {
-			out.NonPackages = append(out.NonPackages, a)
+		positional = append(positional, a)
+	}
+	if sourceNamed {
+		return out // a source flag named the package; positionals are not packages
+	}
+	for _, a := range positional {
+		if positionalReqFiles {
+			out.ReqFiles = append(out.ReqFiles, a)
 			continue
 		}
-
-		s, err := check.ParseSpec(m.Ecosystem, a)
-		if err != nil {
-			out.NonPackages = append(out.NonPackages, a)
-			continue
-		}
-		out.Specs = append(out.Specs, s)
+		classify(a)
 	}
 	return out
 }
@@ -905,10 +966,32 @@ var valueFlags = map[string]map[string]bool{
 	"poetry": flagSet("--source", "-G", "--group", "--python", "-P", "--project", "-C",
 		"--with", "--without", "--only", "-E", "--extras"),
 	// uv covers both `uv add` (uv-native flags) and `uv pip install` (pip-style flags).
+	// `uv sync`/`uv lock` take no packages at all, so an unlisted value there
+	// (`uv sync --package api`) turns a project scan into a check of one wrong
+	// name; the workspace and group selectors below are listed for that reason.
 	"uv": flagSet("-i", "--index-url", "--extra-index-url", "--index", "--default-index",
 		"-f", "--find-links", "--cache-dir", "-p", "--python", "--project", "-c",
 		"--constraint", "-o", "--override", "--group", "--index-strategy",
-		"-t", "--target", "--prefix", "-e", "--editable", "--optional", "--extra"),
+		"-t", "--target", "--prefix", "-e", "--editable", "--optional", "--extra",
+		"--package", "--no-group", "--only-group", "--tag", "--branch", "--rev",
+		"-m", "--marker", "-P", "--upgrade-package", "--reinstall-package",
+		"--no-install-package", "--prerelease", "--resolution", "--with-editable"),
+}
+
+// packageValueFlags name the flags whose value is itself a package being
+// installed, so it is checked like a positional one: `uv tool install ruff
+// --with ruff-lsp` installs both.
+var packageValueFlags = map[string]map[string]bool{
+	"uv": flagSet("--with"),
+}
+
+// sourceFlags name the flags whose value is the package actually installed,
+// leaving the positional as just the name of what it provides: `uv tool install
+// --from 'ruff==0.6.0' ruff`. The value is checked in the positional's place —
+// checking the positional too would resolve it to latest and check a release
+// that is not being installed.
+var sourceFlags = map[string]map[string]bool{
+	"uv": flagSet("--from"),
 }
 
 // pip3 is pip under another name, so it shares every table. pnpm is not npm and
@@ -924,7 +1007,7 @@ func init() {
 // scan` for full coverage), so the value is reported as skipped to warn the user.
 var requirementFileFlags = map[string]map[string]bool{
 	"pip": flagSet("-r", "--requirement"),
-	"uv":  flagSet("-r", "--requirement"),
+	"uv":  flagSet("-r", "--requirement", "--with-requirements"),
 }
 
 // Exec runs the real package manager, inheriting stdio. The child's exit code

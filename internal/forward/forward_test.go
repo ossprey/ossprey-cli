@@ -61,6 +61,12 @@ func TestInstallDetection(t *testing.T) {
 		{"uv", []string{"pip", "install", "httpx"}, 2, true},
 		{"uv", []string{"pip", "list"}, 0, false},
 		{"uv", []string{"sync"}, 1, true}, // lockfile-based manifest install
+		{"uv", []string{"lock"}, 1, true},
+		{"uv", []string{"pip", "sync", "requirements.txt"}, 2, true},
+		{"uv", []string{"tool", "install", "ruff"}, 2, true},
+		{"uv", []string{"tool", "run", "ruff"}, 0, false}, // fetch-and-execute, not an install
+		{"uv", []string{"tool", "list"}, 0, false},
+		{"uv", []string{"run", "pytest"}, 0, false},
 
 		// Global flags before the verb. pnpm workspaces put them there as a matter
 		// of course (`pnpm --filter web add x`), and an install that slips through
@@ -397,7 +403,12 @@ func TestRun_ManifestInstallVerbs_ScanProject(t *testing.T) {
 		{"poetry", []string{"sync", "--with", "dev"}},
 		{"poetry", []string{"install", "--only", "main"}},
 		{"uv", []string{"sync"}},
+		{"uv", []string{"sync", "--package", "api"}},
+		{"uv", []string{"sync", "--only-group", "dev"}},
+		{"uv", []string{"lock"}},
 		{"uv", []string{"pip", "install", "-r", "requirements.txt"}},
+		{"uv", []string{"pip", "sync", "requirements.txt"}},
+		{"uv", []string{"pip", "sync", "--python", "3.12", "requirements.txt", "dev.txt"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.bin+" "+strings.Join(tc.args, " "), func(t *testing.T) {
@@ -747,7 +758,10 @@ func TestWritesLocalLockfile(t *testing.T) {
 		{"poetry", []string{"-C", "../svc", "add", "flask"}, false},
 		{"uv", []string{"add", "flask"}, true},
 		{"uv", []string{"sync"}, true},
+		{"uv", []string{"lock"}, true},
 		{"uv", []string{"pip", "install", "flask"}, false}, // installs into an env, no uv.lock
+		{"uv", []string{"pip", "sync", "requirements.txt"}, false},
+		{"uv", []string{"tool", "install", "ruff"}, false}, // uv's tool dir, not here
 		{"uv", []string{"--directory", "../svc", "add", "flask"}, false},
 		{"pip", []string{"install", "flask"}, false}, // no lockfile at all
 	}
@@ -1277,5 +1291,41 @@ func TestQuietForwarder_FailedCheckDrainsWarnings(t *testing.T) {
 	}
 	if left := warn.Drain(ctx); left != "" {
 		t.Errorf("collector not drained; main's safety net would print:\n%s", left)
+	}
+}
+
+// `uv tool install` installs the named tool plus anything passed with --with,
+// so every one of them is checked. With --from, that value is the package and
+// the positional only names it, so the positional is not checked separately.
+func TestRun_UVToolInstall_ChecksToolAndWithPackages(t *testing.T) {
+	ex := &stubExec{}
+	var gotSpecs []check.Spec
+	swap(t, ex.fn, func(_ context.Context, o check.Options) (*ossbom.SBOM, error) {
+		gotSpecs = o.Specs
+		return ossbom.New(ossbom.Environment{}), nil
+	})
+	swapScan(t, func(_ context.Context, _ scanRequest) (*ossbom.SBOM, error) {
+		t.Fatal("uv tool install names its packages; it must not scan the project")
+		return nil, nil
+	})
+
+	args := []string{"tool", "install", "--from", "ruff==0.6.0", "ruff", "--with", "ruff-lsp==0.0.1", "--with=black==24.1.0"}
+	noNetwork := func(_ context.Context, _, name string) (string, error) {
+		t.Errorf("resolved %s against the registry; every package here is pinned", name)
+		return "", nil
+	}
+	if err := Run(context.Background(), Options{Bin: "uv", Args: args, ResolveLatest: noNetwork}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	want := []check.Spec{
+		{Ecosystem: "pypi", Name: "ruff", Version: "0.6.0"},
+		{Ecosystem: "pypi", Name: "ruff-lsp", Version: "0.0.1"},
+		{Ecosystem: "pypi", Name: "black", Version: "24.1.0"},
+	}
+	if !reflect.DeepEqual(gotSpecs, want) {
+		t.Errorf("checked specs = %+v, want %+v", gotSpecs, want)
+	}
+	if !ex.called || !reflect.DeepEqual(ex.args, args) {
+		t.Errorf("exec args = %v, want %v (called=%v)", ex.args, args, ex.called)
 	}
 }
