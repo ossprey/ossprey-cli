@@ -186,7 +186,7 @@ func isDirFlag(flag string) bool {
 // managers is the registry of supported forwarders. Install verbs include both
 // the package-adding forms (`npm install <pkg>`, `yarn add <pkg>`) and the
 // manifest-installing forms with no named packages (`npm install`, `npm ci`,
-// `yarn install`, `poetry install`, `uv sync`); the latter trigger a project
+// `yarn install`, `poetry install`, `poetry sync`, `uv sync`); the latter trigger a project
 // manifest scan instead of falling through unchecked (OSS-1284).
 var managers = map[string]*Manager{
 	"npm":    {Bin: "npm", Ecosystem: "npm", Lockfile: true, installAt: verbAt("npm", "install", "i", "add", "ci", "update", "up")},
@@ -194,7 +194,7 @@ var managers = map[string]*Manager{
 	"yarn":   {Bin: "yarn", Ecosystem: "npm", Lockfile: true, installAt: verbAt("yarn", "add", "install", "upgrade", "up")},
 	"pip":    {Bin: "pip", Ecosystem: "pypi", installAt: verbAt("pip", "install")},
 	"pip3":   {Bin: "pip3", Ecosystem: "pypi", installAt: verbAt("pip3", "install")},
-	"poetry": {Bin: "poetry", Ecosystem: "pypi", Lockfile: true, installAt: verbAt("poetry", "add", "install", "update", "lock")},
+	"poetry": {Bin: "poetry", Ecosystem: "pypi", Lockfile: true, installAt: verbAt("poetry", "add", "install", "sync", "update", "lock")},
 	// uv: `uv add <pkg>`, `uv sync`, and `uv pip install <pkg>`.
 	"uv": {Bin: "uv", Ecosystem: "pypi", Lockfile: true, installAt: uvInstallAt},
 }
@@ -899,7 +899,11 @@ var valueFlags = map[string]map[string]bool{
 		"--root", "--src", "--python", "--cache-dir", "--log", "--no-binary",
 		"--only-binary", "--platform", "--python-version", "--implementation",
 		"--abi", "--progress-bar", "--report"),
-	"poetry": flagSet("--source", "-G", "--group", "--python", "-P", "--project", "-C"),
+	// --with/--without/--only/-E are install/sync's group and extras selectors:
+	// unlisted, `poetry sync --with dev` reads "dev" as a named package and
+	// checks it instead of scanning the project.
+	"poetry": flagSet("--source", "-G", "--group", "--python", "-P", "--project", "-C",
+		"--with", "--without", "--only", "-E", "--extras"),
 	// uv covers both `uv add` (uv-native flags) and `uv pip install` (pip-style flags).
 	"uv": flagSet("-i", "--index-url", "--extra-index-url", "--index", "--default-index",
 		"-f", "--find-links", "--cache-dir", "-p", "--python", "--project", "-c",

@@ -34,7 +34,7 @@ check and no API call.
 | `pnpm` | `install`, `i`, `add`, `update`, `up` |
 | `yarn` | `add`, `install`, `upgrade`, `up` |
 | `pip`, `pip3` | `install` |
-| `poetry` | `add`, `install`, `update`, `lock` |
+| `poetry` | `add`, `install`, `sync`, `update`, `lock` |
 | `uv` | `add`, `sync`, `pip install` |
 
 Each manager's global options are understood before the subcommand, so
@@ -72,7 +72,7 @@ from the lockfile.
   and forwarded. Transitive dependencies are **not** resolved here; run `ossprey
   scan` after install for full-tree coverage.
 - **Manifest install** (bare `ossprey npm install`, `npm ci`, `yarn install`,
-  `poetry install`, `uv sync`, or `pip install -r requirements.txt`): no
+  `poetry install`, `poetry sync`, `uv sync`, or `pip install -r requirements.txt`): no
   packages are named, so the manager installs from the project's
   manifest/lockfile. The forwarder scans the current directory and checks every
   declared dependency before forwarding — it does **not** fall through

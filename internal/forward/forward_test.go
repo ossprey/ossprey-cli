@@ -56,6 +56,7 @@ func TestInstallDetection(t *testing.T) {
 		{"pip", []string{"list"}, 0, false},
 		{"poetry", []string{"add", "flask"}, 1, true},
 		{"poetry", []string{"install"}, 1, true}, // bare manifest install
+		{"poetry", []string{"sync"}, 1, true},    // lockfile-based manifest install (poetry 2)
 		{"uv", []string{"add", "httpx"}, 1, true},
 		{"uv", []string{"pip", "install", "httpx"}, 2, true},
 		{"uv", []string{"pip", "list"}, 0, false},
@@ -392,11 +393,14 @@ func TestRun_ManifestInstallVerbs_ScanProject(t *testing.T) {
 		{"npm", []string{"ci"}},
 		{"yarn", []string{"install"}},
 		{"poetry", []string{"install"}},
+		{"poetry", []string{"sync"}},
+		{"poetry", []string{"sync", "--with", "dev"}},
+		{"poetry", []string{"install", "--only", "main"}},
 		{"uv", []string{"sync"}},
 		{"uv", []string{"pip", "install", "-r", "requirements.txt"}},
 	}
 	for _, tc := range cases {
-		t.Run(tc.bin+" "+tc.args[0], func(t *testing.T) {
+		t.Run(tc.bin+" "+strings.Join(tc.args, " "), func(t *testing.T) {
 			ex := &stubExec{}
 			swap(t, ex.fn, cleanSBOM)
 			var scanCalled bool
