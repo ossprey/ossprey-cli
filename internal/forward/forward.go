@@ -106,6 +106,10 @@ type Manager struct {
 	// reqFileArgs reports whether this invocation's positional arguments are
 	// requirements files rather than packages (`uv pip sync req.txt`).
 	reqFileArgs func(args []string) bool
+	// toolRunAt matches fetch-and-execute (`uvx ruff`, `uv tool run ruff`):
+	// one package is fetched and run, and everything after it is the
+	// program's own argv. Parsed by parseToolRun, never ParseSpecs.
+	toolRunAt func(args []string) (start int, ok bool)
 }
 
 // noLocalLockfileFlags name the options that stop an install from updating a
@@ -201,8 +205,14 @@ var managers = map[string]*Manager{
 	"poetry": {Bin: "poetry", Ecosystem: "pypi", Lockfile: true, installAt: verbAt("poetry", "add", "install", "sync", "update", "lock")},
 	// uv: `uv add <pkg>`, `uv sync`, `uv lock`, `uv pip install <pkg>`,
 	// `uv pip sync <req.txt>` and `uv tool install <pkg>`.
-	"uv": {Bin: "uv", Ecosystem: "pypi", Lockfile: true, installAt: uvInstallAt, reqFileArgs: uvPipSync},
+	"uv": {Bin: "uv", Ecosystem: "pypi", Lockfile: true, installAt: uvInstallAt, reqFileArgs: uvPipSync,
+		toolRunAt: uvToolRunAt},
+	// uvx is `uv tool run` under its own name: every invocation fetches and runs.
+	"uvx": {Bin: "uvx", Ecosystem: "pypi", installAt: noInstall,
+		toolRunAt: func([]string) (int, bool) { return 0, true }},
 }
+
+func noInstall([]string) (int, bool) { return 0, false }
 
 // Managers returns the names of every supported forwarder, for CLI wiring.
 func Managers() []string {
@@ -286,6 +296,15 @@ func uvInstallAt(args []string) (int, bool) {
 		return idx + 2, true
 	}
 	if len(rest) >= 2 && rest[0] == "tool" && rest[1] == "install" {
+		return idx + 2, true
+	}
+	return 0, false
+}
+
+// uvToolRunAt matches `uv tool run ...`, the long form of uvx.
+func uvToolRunAt(args []string) (int, bool) {
+	idx := verbIndex("uv", args)
+	if idx >= 0 && idx+1 < len(args) && args[idx] == "tool" && args[idx+1] == "run" {
 		return idx + 2, true
 	}
 	return 0, false
@@ -390,6 +409,11 @@ func Run(ctx context.Context, opts Options) error {
 	}
 
 	start, isInstall := m.installAt(opts.Args)
+	toolRun := false
+	if !isInstall && m.toolRunAt != nil {
+		start, toolRun = m.toolRunAt(opts.Args)
+		isInstall = toolRun
+	}
 	if !isInstall {
 		// Not an install (e.g. `npm run`, `pip list`) — nothing to check.
 		return forwardTo()
@@ -413,7 +437,12 @@ func Run(ctx context.Context, opts Options) error {
 		return passiveAfterInstall(ctx, m, opts)
 	}
 
-	parsed := parseInstallArgs(m, opts.Args[start:], m.reqFileArgs != nil && m.reqFileArgs(opts.Args))
+	var parsed installArgs
+	if toolRun {
+		parsed = parseToolRun(m, opts.Args[start:])
+	} else {
+		parsed = parseInstallArgs(m, opts.Args[start:], m.reqFileArgs != nil && m.reqFileArgs(opts.Args))
+	}
 	if kept := dropTrusted(ctx, opts.Trust, parsed.Specs); len(kept) < len(parsed.Specs) {
 		parsed.Specs = kept
 		// Every named package was trusted. Without this the empty spec list
@@ -425,6 +454,15 @@ func Run(ctx context.Context, opts Options) error {
 				m.Bin, strings.Join(opts.Args, " "))
 			return forwardTo()
 		}
+	}
+
+	if toolRun && len(parsed.Specs) == 0 {
+		// A tool run with no registry package (`uvx --from git+https://… cmd`,
+		// `uvx --help`) has nothing to check, and it is not a manifest install:
+		// scanning the project here would check something it never runs.
+		note("ossprey: no registry package to check; forwarding `%s %s` unchecked\n",
+			m.Bin, strings.Join(opts.Args, " "))
+		return forwardTo()
 	}
 
 	switch {
@@ -810,21 +848,7 @@ func parseInstallArgs(m *Manager, args []string, positionalReqFiles bool) instal
 	var out installArgs
 	var positional []string
 	sourceNamed := false
-
-	// classify sorts one package-or-target token into Specs or NonPackages.
-	classify := func(a string) {
-		// Local paths, archives, URLs and VCS refs aren't registry packages.
-		if isNonPackageToken(a) {
-			out.NonPackages = append(out.NonPackages, a)
-			return
-		}
-		s, err := check.ParseSpec(m.Ecosystem, a)
-		if err != nil {
-			out.NonPackages = append(out.NonPackages, a)
-			return
-		}
-		out.Specs = append(out.Specs, s)
-	}
+	classify := func(a string) { out.addTarget(m.Ecosystem, a) }
 
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -880,6 +904,94 @@ func parseInstallArgs(m *Manager, args []string, positionalReqFiles bool) instal
 	}
 	return out
 }
+
+// addTarget sorts one package-or-target token into Specs or NonPackages.
+func (p *installArgs) addTarget(ecosystem, token string) {
+	// Local paths, archives, URLs and VCS refs aren't registry packages.
+	if isNonPackageToken(token) {
+		p.NonPackages = append(p.NonPackages, token)
+		return
+	}
+	s, err := check.ParseSpec(ecosystem, token)
+	if err != nil {
+		p.NonPackages = append(p.NonPackages, token)
+		return
+	}
+	p.Specs = append(p.Specs, s)
+}
+
+// parseToolRun classifies fetch-and-execute arguments (`uvx [opts] <cmd>
+// [args...]`). Unlike an install, only the first positional is a package — the
+// command, which uv takes as the package name unless --from names one — and
+// everything after it is the program's own argv: `uvx cowsay moo` must not
+// check a package called "moo". --with adds packages to the run's environment,
+// so those are checked too.
+//
+// The flag table here is not the install one, and the asymmetry is worse than
+// it is for installs: a value-taking flag left out makes its value read as the
+// command, so the real package goes unchecked, and a boolean wrongly listed
+// swallows the command the same way. toolRunValueFlags is therefore taken
+// verbatim from `uv tool run --help`, not guessed.
+func parseToolRun(m *Manager, args []string) installArgs {
+	var out installArgs
+	sourceNamed := false
+	addPkg := func(tok string) {
+		// uvx's `ruff@latest` means "the newest release", which is what an
+		// unpinned spec already resolves to.
+		out.addTarget(m.Ecosystem, strings.TrimSuffix(tok, "@latest"))
+	}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "" {
+			continue
+		}
+		if a == "--" {
+			if i+1 < len(args) && !sourceNamed {
+				addPkg(args[i+1])
+			}
+			break
+		}
+		if strings.HasPrefix(a, "-") {
+			flag, inlineVal, hasInline := splitFlagValue(a)
+			value := inlineVal
+			if !hasInline && toolRunValueFlags[flag] && i+1 < len(args) {
+				value = args[i+1]
+				i++
+			}
+			switch flag {
+			case "--from":
+				sourceNamed = true
+				addPkg(value)
+			case "-w", "--with":
+				addPkg(value)
+			case "--with-requirements":
+				out.ReqFiles = append(out.ReqFiles, value)
+			}
+			continue
+		}
+		// The command. Without --from it is also the package; either way the
+		// rest of args belongs to the program.
+		if !sourceNamed {
+			addPkg(a)
+		}
+		break
+	}
+	return out
+}
+
+// toolRunValueFlags are the options of `uv tool run` / uvx that take a value,
+// from `uv tool run --help` (uv 0.11). Keep it complete; see parseToolRun.
+var toolRunValueFlags = flagSet("--from", "-w", "--with", "--with-editable",
+	"--with-requirements", "-c", "--constraints", "-b", "--build-constraints",
+	"--overrides", "--env-file", "--python-platform", "--torch-backend", "--index",
+	"--default-index", "-i", "--index-url", "--extra-index-url", "-f", "--find-links",
+	"--index-strategy", "--keyring-provider", "-P", "--upgrade-package",
+	"--upgrade-group", "--resolution", "--prerelease", "--fork-strategy",
+	"--exclude-newer", "--exclude-newer-package", "--no-sources-package",
+	"--reinstall-package", "--link-mode", "-C", "--config-setting",
+	"--config-settings-package", "--no-build-isolation-package", "--no-build-package",
+	"--no-binary-package", "--cache-dir", "--refresh-package", "-p", "--python",
+	"--color", "--allow-insecure-host", "--directory", "--project", "--config-file")
 
 // splitFlagValue splits "--flag=value" into ("--flag", "value", true). A flag
 // with no inline value returns (flag, "", false).

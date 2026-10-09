@@ -21,7 +21,7 @@ ossprey poetry add foo
 ossprey uv pip install foo==1.2.3
 ```
 
-Supported managers: `npm`, `pnpm`, `yarn`, `pip`, `pip3`, `poetry`, `uv`.
+Supported managers: `npm`, `pnpm`, `yarn`, `pip`, `pip3`, `poetry`, `uv`, `uvx`.
 
 ## What is checked
 
@@ -35,11 +35,19 @@ check and no API call.
 | `yarn` | `add`, `install`, `upgrade`, `up` |
 | `pip`, `pip3` | `install` |
 | `poetry` | `add`, `install`, `sync`, `update`, `lock` |
-| `uv` | `add`, `sync`, `lock`, `pip install`, `pip sync`, `tool install` |
+| `uv` | `add`, `sync`, `lock`, `pip install`, `pip sync`, `tool install`, `tool run` |
+| `uvx` | every invocation (`uvx` is `uv tool run`) |
 
 Each manager's global options are understood before the subcommand, so
 `pnpm --filter web add x` and `npm --prefix ./app install x` are checked like any
 other install.
+
+`uvx` and `uv tool run` fetch a package and run it, so only the package is
+checked, never the arguments after the command: `uvx cowsay moo` checks
+`cowsay`, not `moo`. `--from` names the package when it differs from the command
+(`uvx --from httpie http`), `ruff@0.6.0` pins it, and `--with` packages are
+checked too. A run with no registry package (`uvx --from git+https://…`) is
+forwarded unchecked.
 
 ## What is not checked
 
@@ -47,10 +55,11 @@ Pass-through commands are not checked, which is intended for `npm run`,
 `pip list` and friends. Three groups are worth calling out, because they can
 still put code on your machine:
 
-- **Fetch-and-execute.** `npm exec`, `pnpm dlx`, `yarn dlx` and `uv tool run`
+- **npm-side fetch-and-execute.** `npm exec`, `pnpm dlx` and `yarn dlx`
   download a package and run it. They name a package, but it is not an install
-  verb, so it is forwarded unchecked. `npx` and `uvx` are separate binaries and
-  are not shimmed at all, so they bypass Ossprey entirely.
+  verb, so it is forwarded unchecked. `npx` is a separate binary and is not
+  shimmed at all, so it bypasses Ossprey entirely. (The Python side, `uvx` and
+  `uv tool run`, is checked; see below.)
 - **Script runners.** `npm run`, `pnpm run`, `poetry run`, `uv run` and
   equivalents. The scripts themselves are not inspected. Note that `uv run`
   syncs the project environment before running (as `uv sync` would) and
@@ -127,13 +136,13 @@ alias per manager removes that step in your own terminal.
 Bash or Zsh, in `~/.bashrc` / `~/.zshrc`:
 
 ```sh
-for mgr in npm pnpm yarn pip pip3 poetry uv; do alias "$mgr=ossprey $mgr"; done
+for mgr in npm pnpm yarn pip pip3 poetry uv uvx; do alias "$mgr=ossprey $mgr"; done
 ```
 
 Fish, in `~/.config/fish/config.fish`:
 
 ```fish
-for mgr in npm pnpm yarn pip pip3 poetry uv
+for mgr in npm pnpm yarn pip pip3 poetry uv uvx
     alias $mgr "ossprey $mgr"
 end
 ```
@@ -149,6 +158,7 @@ function pip    { ossprey pip    @args }
 function pip3   { ossprey pip3   @args }
 function poetry { ossprey poetry @args }
 function uv     { ossprey uv     @args }
+function uvx    { ossprey uvx    @args }
 ```
 
 Open a new shell to pick them up. There's no recursion to worry about:

@@ -10,7 +10,7 @@
 #
 # Flags:
 #   --override-package-managers  Install PATH shims so npm, pnpm, yarn, pip,
-#                                pip3, poetry and uv route through ossprey
+#                                pip3, poetry, uv and uvx route through ossprey
 #                                without being prefixed. Equivalent to running
 #                                `ossprey shim install` afterwards.
 #   --watchdog                   With the shims, submit scans passively using
@@ -51,7 +51,7 @@ Ossprey CLI installer.
 
 Flags:
   --override-package-managers   Install PATH shims so npm, pnpm, yarn, pip,
-                                pip3, poetry and uv route through ossprey
+                                pip3, poetry, uv and uvx route through ossprey
                                 without being prefixed (`ossprey shim install`).
   --watchdog                    Passive mode for the shims: submit scans with
                                 this machine's login, never block an install.
