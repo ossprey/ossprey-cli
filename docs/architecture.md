@@ -65,7 +65,7 @@ flowchart TD
     AC -- "yes: npm install,<br/>poetry add, uv sync, ..." --> AD["exec the real manager first"]
     AD --> AE["catalog the lockfile it wrote"]
     AE --> AF["post the scan, never block"]
-    AC -- "no: pip, uv pip,<br/>-g, --prefix ../x" --> AG["exec the real manager<br/>and submit the named<br/>packages alongside it"]
+    AC -- "no: pip, uv pip,<br/>uv tool install,<br/>-g, --prefix ../x" --> AG["exec the real manager<br/>and submit the named<br/>packages alongside it"]
     AG --> AF
 ```
 
@@ -73,7 +73,7 @@ The passive branch is the one worth reading twice. It never gates, so it never
 sits in front of the install: where a lockfile will land, the install runs
 first and Ossprey reads what it wrote, which is both faster and more accurate
 than predicting the tree beforehand. Where one will not — pip, `uv pip
-install`, a global or redirected install — there would be nothing to read, so
+install`, `uv tool install`, a global or redirected install — there would be nothing to read, so
 the named packages are submitted beside the install instead (`writesLocalLockfile`
 in `internal/forward/forward.go` is the one place that decides).
 

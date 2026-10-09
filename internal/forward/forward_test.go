@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os/exec"
 	"reflect"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -19,7 +21,7 @@ import (
 )
 
 func TestLookup(t *testing.T) {
-	for _, bin := range []string{"npm", "pnpm", "yarn", "pip", "pip3", "poetry", "uv"} {
+	for _, bin := range []string{"npm", "pnpm", "yarn", "pip", "pip3", "poetry", "uv", "uvx"} {
 		if _, ok := Lookup(bin); !ok {
 			t.Errorf("Lookup(%q): not found", bin)
 		}
@@ -56,10 +58,17 @@ func TestInstallDetection(t *testing.T) {
 		{"pip", []string{"list"}, 0, false},
 		{"poetry", []string{"add", "flask"}, 1, true},
 		{"poetry", []string{"install"}, 1, true}, // bare manifest install
+		{"poetry", []string{"sync"}, 1, true},    // lockfile-based manifest install (poetry 2)
 		{"uv", []string{"add", "httpx"}, 1, true},
 		{"uv", []string{"pip", "install", "httpx"}, 2, true},
 		{"uv", []string{"pip", "list"}, 0, false},
 		{"uv", []string{"sync"}, 1, true}, // lockfile-based manifest install
+		{"uv", []string{"lock"}, 1, true},
+		{"uv", []string{"pip", "sync", "requirements.txt"}, 2, true},
+		{"uv", []string{"tool", "install", "ruff"}, 2, true},
+		{"uv", []string{"tool", "run", "ruff"}, 0, false}, // fetch-and-execute: toolRunAt, not installAt
+		{"uv", []string{"tool", "list"}, 0, false},
+		{"uv", []string{"run", "pytest"}, 0, false},
 
 		// Global flags before the verb. pnpm workspaces put them there as a matter
 		// of course (`pnpm --filter web add x`), and an install that slips through
@@ -392,11 +401,19 @@ func TestRun_ManifestInstallVerbs_ScanProject(t *testing.T) {
 		{"npm", []string{"ci"}},
 		{"yarn", []string{"install"}},
 		{"poetry", []string{"install"}},
+		{"poetry", []string{"sync"}},
+		{"poetry", []string{"sync", "--with", "dev"}},
+		{"poetry", []string{"install", "--only", "main"}},
 		{"uv", []string{"sync"}},
+		{"uv", []string{"sync", "--package", "api"}},
+		{"uv", []string{"sync", "--only-group", "dev"}},
+		{"uv", []string{"lock"}},
 		{"uv", []string{"pip", "install", "-r", "requirements.txt"}},
+		{"uv", []string{"pip", "sync", "requirements.txt"}},
+		{"uv", []string{"pip", "sync", "--python", "3.12", "requirements.txt", "dev.txt"}},
 	}
 	for _, tc := range cases {
-		t.Run(tc.bin+" "+tc.args[0], func(t *testing.T) {
+		t.Run(tc.bin+" "+strings.Join(tc.args, " "), func(t *testing.T) {
 			ex := &stubExec{}
 			swap(t, ex.fn, cleanSBOM)
 			var scanCalled bool
@@ -743,7 +760,12 @@ func TestWritesLocalLockfile(t *testing.T) {
 		{"poetry", []string{"-C", "../svc", "add", "flask"}, false},
 		{"uv", []string{"add", "flask"}, true},
 		{"uv", []string{"sync"}, true},
+		{"uv", []string{"lock"}, true},
 		{"uv", []string{"pip", "install", "flask"}, false}, // installs into an env, no uv.lock
+		{"uv", []string{"pip", "sync", "requirements.txt"}, false},
+		{"uv", []string{"tool", "install", "ruff"}, false}, // uv's tool dir, not here
+		{"uv", []string{"tool", "run", "ruff"}, false},
+		{"uvx", []string{"ruff"}, false},
 		{"uv", []string{"--directory", "../svc", "add", "flask"}, false},
 		{"pip", []string{"install", "flask"}, false}, // no lockfile at all
 	}
@@ -1273,5 +1295,169 @@ func TestQuietForwarder_FailedCheckDrainsWarnings(t *testing.T) {
 	}
 	if left := warn.Drain(ctx); left != "" {
 		t.Errorf("collector not drained; main's safety net would print:\n%s", left)
+	}
+}
+
+// `uv tool install` installs the named tool plus anything passed with --with,
+// so every one of them is checked. With --from, that value is the package and
+// the positional only names it, so the positional is not checked separately.
+func TestRun_UVToolInstall_ChecksToolAndWithPackages(t *testing.T) {
+	ex := &stubExec{}
+	var gotSpecs []check.Spec
+	swap(t, ex.fn, func(_ context.Context, o check.Options) (*ossbom.SBOM, error) {
+		gotSpecs = o.Specs
+		return ossbom.New(ossbom.Environment{}), nil
+	})
+	swapScan(t, func(_ context.Context, _ scanRequest) (*ossbom.SBOM, error) {
+		t.Fatal("uv tool install names its packages; it must not scan the project")
+		return nil, nil
+	})
+
+	args := []string{"tool", "install", "--from", "ruff==0.6.0", "ruff", "--with", "ruff-lsp==0.0.1", "--with=black==24.1.0"}
+	noNetwork := func(_ context.Context, _, name string) (string, error) {
+		t.Errorf("resolved %s against the registry; every package here is pinned", name)
+		return "", nil
+	}
+	if err := Run(context.Background(), Options{Bin: "uv", Args: args, ResolveLatest: noNetwork}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	want := []check.Spec{
+		{Ecosystem: "pypi", Name: "ruff", Version: "0.6.0"},
+		{Ecosystem: "pypi", Name: "ruff-lsp", Version: "0.0.1"},
+		{Ecosystem: "pypi", Name: "black", Version: "24.1.0"},
+	}
+	if !reflect.DeepEqual(gotSpecs, want) {
+		t.Errorf("checked specs = %+v, want %+v", gotSpecs, want)
+	}
+	if !ex.called || !reflect.DeepEqual(ex.args, args) {
+		t.Errorf("exec args = %v, want %v (called=%v)", ex.args, args, ex.called)
+	}
+}
+
+func TestParseToolRun(t *testing.T) {
+	uvx, _ := Lookup("uvx")
+	pkg := func(name, version string) check.Spec {
+		return check.Spec{Ecosystem: "pypi", Name: name, Version: version}
+	}
+	tests := []struct {
+		args        []string
+		wantSpecs   []check.Spec
+		wantNonPkgs []string
+	}{
+		{[]string{"ruff", "check", "."}, []check.Spec{pkg("ruff", "")}, nil},
+		{[]string{"ruff@0.6.0"}, []check.Spec{pkg("ruff", "0.6.0")}, nil},
+		{[]string{"ruff@latest"}, []check.Spec{pkg("ruff", "")}, nil},
+		// Only the command is a package; the rest is the program's argv.
+		{[]string{"cowsay", "moo"}, []check.Spec{pkg("cowsay", "")}, nil},
+		{[]string{"cowsay", "--with", "moo"}, []check.Spec{pkg("cowsay", "")}, nil},
+		// --from names the package; the command is just an entry point.
+		{[]string{"--from", "httpie==3.2.2", "http", "GET", "example.com"}, []check.Spec{pkg("httpie", "3.2.2")}, nil},
+		{[]string{"--from=httpie==3.2.2", "http"}, []check.Spec{pkg("httpie", "3.2.2")}, nil},
+		// Value flags must not leave their value standing in for the command.
+		{[]string{"--python", "3.12", "ruff"}, []check.Spec{pkg("ruff", "")}, nil},
+		{[]string{"-p", "3.12", "--index-url", "https://pypi.org/simple", "ruff"}, []check.Spec{pkg("ruff", "")}, nil},
+		// Booleans must not swallow it either.
+		{[]string{"-q", "--isolated", "--offline", "ruff"}, []check.Spec{pkg("ruff", "")}, nil},
+		// --with adds packages to the environment the command runs in.
+		{[]string{"-w", "ruff-lsp==0.0.1", "--with=black==24.1.0", "ruff"},
+			[]check.Spec{pkg("ruff-lsp", "0.0.1"), pkg("black", "24.1.0"), pkg("ruff", "")}, nil},
+		{[]string{"--", "ruff", "check"}, []check.Spec{pkg("ruff", "")}, nil},
+		{[]string{"--from", "git+https://github.com/astral-sh/ruff", "ruff"}, nil,
+			[]string{"git+https://github.com/astral-sh/ruff"}},
+		{[]string{"--help"}, nil, nil},
+	}
+	for _, tc := range tests {
+		got := parseToolRun(uvx, tc.args)
+		if !reflect.DeepEqual(got.Specs, tc.wantSpecs) || !reflect.DeepEqual(got.NonPackages, tc.wantNonPkgs) {
+			t.Errorf("parseToolRun(%v) = specs %+v, non-packages %v; want %+v, %v",
+				tc.args, got.Specs, got.NonPackages, tc.wantSpecs, tc.wantNonPkgs)
+		}
+	}
+}
+
+// Every value-taking flag of `uv tool run` must be in the table, or its value
+// reads as the command and the real package goes unchecked. The installed uv
+// is the source of truth; skip when there is none.
+func TestToolRunValueFlagsMatchUV(t *testing.T) {
+	uv, err := exec.LookPath("uv")
+	if err != nil {
+		t.Skip("uv not installed")
+	}
+	out, err := exec.Command(uv, "tool", "run", "--help").Output()
+	if err != nil {
+		t.Skipf("uv tool run --help: %v", err)
+	}
+	re := regexp.MustCompile(`(?m)^\s+(?:(-[a-zA-Z]), )?(--[a-z][a-z-]*) <`)
+	for _, m := range re.FindAllStringSubmatch(string(out), -1) {
+		for _, flag := range m[1:] {
+			if flag != "" && !toolRunValueFlags[flag] {
+				t.Errorf("uv tool run %s takes a value but is missing from toolRunValueFlags", flag)
+			}
+		}
+	}
+}
+
+func TestRun_ToolRun_ChecksOnlyTheTool(t *testing.T) {
+	for _, tc := range []struct {
+		bin  string
+		args []string
+	}{
+		{"uvx", []string{"cowsay", "moo"}},
+		{"uv", []string{"tool", "run", "cowsay", "moo"}},
+		{"uv", []string{"--directory", "sub", "tool", "run", "cowsay", "moo"}},
+	} {
+		t.Run(tc.bin+" "+strings.Join(tc.args, " "), func(t *testing.T) {
+			ex := &stubExec{}
+			var gotSpecs []check.Spec
+			swap(t, ex.fn, func(_ context.Context, o check.Options) (*ossbom.SBOM, error) {
+				gotSpecs = o.Specs
+				return ossbom.New(ossbom.Environment{}), nil
+			})
+			pin := func(context.Context, string, string) (string, error) { return "1.0.0", nil }
+			if err := Run(context.Background(), Options{Bin: tc.bin, Args: tc.args, ResolveLatest: pin}); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			want := []check.Spec{{Ecosystem: "pypi", Name: "cowsay", Version: "1.0.0"}}
+			if !reflect.DeepEqual(gotSpecs, want) {
+				t.Errorf("checked specs = %+v, want %+v", gotSpecs, want)
+			}
+			if !ex.called || ex.bin != tc.bin || !reflect.DeepEqual(ex.args, tc.args) {
+				t.Errorf("exec = %s %v (called=%v), want %s %v", ex.bin, ex.args, ex.called, tc.bin, tc.args)
+			}
+		})
+	}
+}
+
+func TestRun_ToolRun_MalwareBlocks(t *testing.T) {
+	ex := &stubExec{}
+	swap(t, ex.fn, malwareSBOM)
+	err := Run(context.Background(), Options{Bin: "uvx", Args: []string{"evil==1.0.0"}})
+	if !errors.Is(err, ErrBlocked) {
+		t.Fatalf("Run = %v, want ErrBlocked", err)
+	}
+	if ex.called {
+		t.Error("a blocked tool run must not exec uvx")
+	}
+}
+
+// With no registry package there is nothing to check, and a tool run is not a
+// manifest install: swap fails the test if the project is scanned.
+func TestRun_ToolRun_NoRegistryPackageForwardsWithoutScan(t *testing.T) {
+	for _, args := range [][]string{
+		{"--from", "git+https://github.com/astral-sh/ruff", "ruff"},
+		{"--help"},
+		{"--with-requirements", "requirements.txt", "--from", "./local", "tool"},
+	} {
+		ex := &stubExec{}
+		swap(t, ex.fn, func(context.Context, check.Options) (*ossbom.SBOM, error) {
+			t.Errorf("uvx %v: nothing to check, but the check ran", args)
+			return ossbom.New(ossbom.Environment{}), nil
+		})
+		if err := Run(context.Background(), Options{Bin: "uvx", Args: args}); err != nil {
+			t.Fatalf("Run(uvx %v): %v", args, err)
+		}
+		if !ex.called {
+			t.Errorf("uvx %v must forward", args)
+		}
 	}
 }

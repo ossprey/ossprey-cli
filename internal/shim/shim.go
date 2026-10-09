@@ -33,7 +33,7 @@ const (
 	blockEnd   = "# <<< ossprey shims <<<"
 )
 
-var defaultManagers = []string{"npm", "pnpm", "yarn", "pip", "pip3", "poetry", "uv"}
+var defaultManagers = []string{"npm", "pnpm", "yarn", "pip", "pip3", "poetry", "uv", "uvx"}
 
 // optInManagers are shimmed only when asked for by name (or --git): shimming
 // git by default would put a network lookup in front of every pull.
