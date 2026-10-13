@@ -156,7 +156,7 @@ type Finding struct {
 }
 
 // Mirrors the platform's SKIP_FINDING_TYPES.
-var unscannedTypes = map[string]bool{"NOT_FOUND": true, "UNSUPPORTED": true}
+var unscannedTypes = map[string]bool{"NOT_FOUND": true, "UNSUPPORTED": true, "LOOKUP_ONLY": true}
 
 // Unscanned counts the components the scan did not check. Clamped, because a
 // backend that expands one submitted purl into several can report more skips
