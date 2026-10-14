@@ -74,7 +74,10 @@ ENV PATH="/root/.ossprey/shims:${PATH}"
 
 > **Note on latency:** a package Ossprey has never seen before takes a scan to
 > come back, so the first install of a brand-new version is slower than an
-> unprotected one. Subsequent installs hit a cached verdict.
+> unprotected one. Subsequent installs hit a cached verdict on the platform,
+> and an identical install repeated on this machine within an hour is answered
+> from [the local scan cache](output.md#the-local-scan-cache) without a round
+> trip at all.
 
 ---
 

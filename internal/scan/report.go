@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
 	"github.com/ossprey/ossprey-cli/internal/severity"
@@ -81,6 +82,21 @@ type Report struct {
 	Findings      []Finding `json:"findings"`
 	Informational []Finding `json:"informational,omitempty"`
 	Skipped       *Skip     `json:"skipped,omitempty"`
+	// Cached is set when the verdict was replayed from the local scan cache
+	// rather than fetched: the identical SBOM was found clean within the TTL
+	// (internal/scancache). CachedAgeSeconds is how old that result was. Both
+	// are omitted on a live verdict so a consumer that predates them sees no
+	// change; the age is a pointer so a hit within the same second still
+	// reports 0 rather than disappearing.
+	Cached           bool `json:"cached,omitempty"`
+	CachedAgeSeconds *int `json:"cached_age_seconds,omitempty"`
+}
+
+// MarkCached records that this verdict came from the local cache, age ago.
+func (r *Report) MarkCached(age time.Duration) {
+	secs := int(age.Seconds())
+	r.Cached = true
+	r.CachedAgeSeconds = &secs
 }
 
 // NewReport summarises a scanned SBOM: "malware" when any finding is at or

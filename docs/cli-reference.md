@@ -59,6 +59,8 @@ a `verdict`, only when the scan actually reached one.
 | `OSSPREY_SCAN_CONCURRENCY` | — | How many catalogers run at once (default `8`). |
 | `OSSPREY_RESOLVE_LATEST=0` | `--no-version-lookup` | Don't resolve unpinned versions from the registry. |
 | `OSSPREY_CONFIG_DIR` | — | Where the stored login and `trust.json` live. |
+| `OSSPREY_SCAN_CACHE_TTL` | `--no-cache` | How long a clean verdict, or a passive submission, is reused for an identical scan from this machine (default `1h`, capped at `24h`; `0` or `off` disables the [scan cache](output.md#the-local-scan-cache)). |
+| `OSSPREY_CACHE_DIR` | — | Where the scan cache lives (default: the platform's user cache dir, e.g. `~/.cache/ossprey`). Entries go in its `scans/` subdirectory. |
 | `OSSPREY_TRUSTED_REGISTRIES` | `trust add --registry` | Extra [trusted registry](trust.md) URL prefixes, comma-separated. |
 | `OSSPREY_TRUSTED_NPM_SCOPES` | `trust add --npm-scope` | Extra [trusted npm scopes](trust.md), comma-separated. |
 | `OSSPREY_SHIM_DIR` | `--dir` | Where [shims](shims.md) are written. |
@@ -81,6 +83,7 @@ ossprey scan [path] [flags]
 | `--local` | Catalogue only. Dump the OSSBOM to stdout and exit — no API submission, no malware verdict. |
 | `--no-version-lookup` | Don't query the registry to resolve unpinned dependencies; leave them versionless. |
 | `--timeout <dur>` | Give up cataloguing after this long and emit whatever resolved (or `OSSPREY_SCAN_TIMEOUT`). Off by default. |
+| `--no-cache` | Always ask the API, even if this exact scan was found clean within the last hour. The fresh result is still cached for later runs. See [the local scan cache](output.md#the-local-scan-cache). |
 | `--url <url>` | Override the Ossprey API URL (default `https://api.ossprey.com`). |
 | `--api-key <key>` | Provide the API key on the command line instead of an env var. |
 | `--fail-on-informational` | Sets the floor to `Info`. That is the default, so this no longer changes anything. |
@@ -112,6 +115,7 @@ registry (PyPI / npm) and checked. Both `name@version` and pip's
 | `-e, --eco-system <pypi\|npm>` | Package ecosystem (required). |
 | `--url <url>` | Override the Ossprey API URL. |
 | `--api-key <key>` | API key (or env var). |
+| `--no-cache` | Always ask the API, even if this exact check was found clean within the last hour. |
 | `--dry-run-safe` | Skip the API; report an empty vulnerability list. |
 | `--dry-run-malicious` | Skip the API; inject a test finding against the first package. |
 

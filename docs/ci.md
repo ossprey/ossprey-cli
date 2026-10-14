@@ -99,6 +99,29 @@ for `ossprey scan` and the package-manager forwarders/shims alike:
 `OSSPREY_CI_CACHE_SCAN_ONLY=1` and `--ci-cache-scan-only` are the original
 spelling of `--passive` and keep working unchanged.
 
+## Repeat scans and the local cache
+
+A scan identical to one this machine sent within the last hour — same
+packages, same path and branch, same credential — is answered from
+[the local scan cache](output.md#the-local-scan-cache) instead of the
+platform. On a hosted runner every job starts from a clean disk, so the cache
+rarely applies there and nothing needs configuring. It pays off on machines
+that persist: self-hosted runners, and dev containers that rebuild or
+re-install on every start. Put the cache on a volume that survives the
+container:
+
+```dockerfile
+ENV OSSPREY_CACHE_DIR=/var/cache/ossprey
+```
+
+```sh
+docker run -v ossprey-cache:/var/cache/ossprey ...
+```
+
+A `--report` written from a cached verdict carries `cached: true` and
+`cached_age_seconds`, so a pipeline that wants to know can tell. Set
+`OSSPREY_SCAN_CACHE_TTL=0` to turn the cache off entirely.
+
 ---
 
 [← Back to the docs index](README.md)

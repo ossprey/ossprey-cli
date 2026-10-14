@@ -30,6 +30,9 @@ type report struct {
 		Name     string `json:"name"`
 		Severity string `json:"severity"`
 	} `json:"informational"`
+	// Set only when the verdict was replayed from the local scan cache.
+	Cached           bool `json:"cached"`
+	CachedAgeSeconds *int `json:"cached_age_seconds"`
 }
 
 func readReport(t *testing.T, path string) report {

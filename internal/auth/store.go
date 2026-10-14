@@ -38,27 +38,51 @@ func (c *Credentials) Valid() bool {
 	return c != nil && c.AccessToken != "" && time.Now().Add(expiryLeeway).Before(c.ExpiresAt)
 }
 
-// Identity returns a human-readable identity ("email" falling back to "sub")
-// from the ID token's claims, or "" when unavailable. The payload is decoded
-// without signature verification — this is display-only, never authorization.
-func (c *Credentials) Identity() string {
+// idClaims is the part of the ID token's payload the CLI reads.
+type idClaims struct {
+	Email string `json:"email"`
+	Sub   string `json:"sub"`
+}
+
+// claims decodes the ID token's payload without signature verification. It
+// serves display and local cache keying only, never authorization.
+func (c *Credentials) claims() (idClaims, bool) {
 	parts := strings.Split(c.IDToken, ".")
 	if len(parts) != 3 {
-		return ""
+		return idClaims{}, false
 	}
 	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
-		return ""
+		return idClaims{}, false
 	}
-	var claims struct {
-		Email string `json:"email"`
-		Sub   string `json:"sub"`
-	}
+	var claims idClaims
 	if err := json.Unmarshal(payload, &claims); err != nil {
+		return idClaims{}, false
+	}
+	return claims, true
+}
+
+// Identity returns a human-readable identity ("email" falling back to "sub")
+// from the ID token's claims, or "" when unavailable.
+func (c *Credentials) Identity() string {
+	claims, ok := c.claims()
+	if !ok {
 		return ""
 	}
 	if claims.Email != "" {
 		return claims.Email
+	}
+	return claims.Sub
+}
+
+// Subject returns the ID token's sub claim, Auth0's stable account id, or ""
+// when unavailable. Prefer it to Identity wherever two logins must be told
+// apart: Auth0 only makes an email unique within one connection, so two
+// accounts can share one.
+func (c *Credentials) Subject() string {
+	claims, ok := c.claims()
+	if !ok {
+		return ""
 	}
 	return claims.Sub
 }
