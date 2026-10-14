@@ -26,6 +26,7 @@ install still starts immediately. That covers:
 
 - `pip` and `pip3`, which write no lockfile at all, and `uv pip install`, which
   resolves into an environment rather than into `uv.lock`;
+- `npx`, which fetches into npm's cache and writes no project lockfile;
 - global installs (`npm install -g`, `--location=global`);
 - installs with the lockfile turned off (`npm install --no-package-lock`,
   `pnpm add --no-lockfile`);
