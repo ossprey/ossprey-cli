@@ -21,7 +21,8 @@ ossprey poetry add foo
 ossprey uv pip install foo==1.2.3
 ```
 
-Supported managers: `npm`, `pnpm`, `yarn`, `pip`, `pip3`, `poetry`, `uv`, `uvx`.
+Supported managers: `npm`, `npx`, `pnpm`, `yarn`, `bun`, `bunx`, `pip`, `pip3`,
+`poetry`, `uv`, `uvx`.
 
 ## What is checked
 
@@ -30,9 +31,12 @@ check and no API call.
 
 | Manager | Checked subcommands |
 | ------- | ------------------- |
-| `npm` | `install`, `i`, `add`, `ci`, `update`, `up` |
+| `npm` | `install`, `i`, `add`, `ci`, `update`, `up`, `exec`, `x` |
+| `npx` | every invocation (`npx` is `npm exec`) |
 | `pnpm` | `install`, `i`, `add`, `update`, `up` |
 | `yarn` | `add`, `install`, `upgrade`, `up` |
+| `bun` | `install`, `i`, `ci`, `add`, `a`, `update`, `up`, `x` |
+| `bunx` | every invocation (`bunx` is `bun x`) |
 | `pip`, `pip3` | `install` |
 | `poetry` | `add`, `install`, `sync`, `update`, `lock` |
 | `uv` | `add`, `sync`, `lock`, `pip install`, `pip sync`, `tool install`, `tool run` |
@@ -49,21 +53,42 @@ checked, never the arguments after the command: `uvx cowsay moo` checks
 checked too. A run with no registry package (`uvx --from git+https://…`) is
 forwarded unchecked.
 
+`npx`, `npm exec`, `bunx` and `bun x` work the same way: `npx cowsay moo` checks
+`cowsay`, not `moo`. `--package` / `-p` names what is fetched when it differs
+from the command (`npx -p @angular/cli ng new app`), `cowsay@1.5.0` pins it, and
+`npx -c '…'` with no `--package` fetches nothing and is forwarded. Which token
+is the command follows the tool's own parsing, so `npm exec cowsay --package
+left-pad` checks `left-pad` (npm reads options after the command too), and
+`bunx tsc` checks `typescript`, the package bunx actually fetches for it.
+
+A bare command that the project already has in `node_modules/.bin` — `npx
+eslint .` in a project that depends on eslint — is run from there rather than
+fetched, so it is forwarded unchecked: checking the registry package called
+`eslint` would check something that is not being run. The project is the
+nearest directory up from here with a `package.json` or `node_modules`, as for
+npm. A pinned version or a `--package` is always checked.
+
+Bare `bun install` and `bun ci` are manifest installs (below). Ossprey cannot
+read `bun.lock` yet, so the scan resolves the project's `package.json` the way
+it does for a project with no lockfile.
+
 ## What is not checked
 
 Pass-through commands are not checked, which is intended for `npm run`,
 `pip list` and friends. Three groups are worth calling out, because they can
 still put code on your machine:
 
-- **npm-side fetch-and-execute.** `npm exec`, `pnpm dlx` and `yarn dlx`
-  download a package and run it. They name a package, but it is not an install
-  verb, so it is forwarded unchecked. `npx` is a separate binary and is not
-  shimmed at all, so it bypasses Ossprey entirely. (The Python side, `uvx` and
-  `uv tool run`, is checked; see below.)
-- **Script runners.** `npm run`, `pnpm run`, `poetry run`, `uv run` and
-  equivalents. The scripts themselves are not inspected. Note that `uv run`
+- **pnpm and yarn fetch-and-execute, and initializers.** `pnpm dlx` and
+  `yarn dlx` download a package and run it, as do `npm init <initializer>`,
+  `npm create`, `bun create` and `yarn create`, which fetch `create-<name>`.
+  They name a package, but it is not an install verb, so it is forwarded
+  unchecked. (`npx`, `npm exec`, `bunx`, `bun x`, `uvx` and `uv tool run` are
+  checked; see above.)
+- **Script runners.** `npm run`, `pnpm run`, `bun run`, `poetry run`, `uv run`
+  and equivalents. The scripts themselves are not inspected. Note that `uv run`
   syncs the project environment before running (as `uv sync` would) and
-  installs any `--with` packages, and none of that is checked.
+  installs any `--with` packages, and that `bun` running a file with no
+  `node_modules` auto-installs its imports; none of that is checked.
 - **Anything the manager resolves that was not named and is not in the
   manifest.** Transitive dependencies of a named install are not resolved here;
   run `ossprey scan` for full-tree coverage.
@@ -85,7 +110,7 @@ from the lockfile.
   the bare name. Transitive dependencies are **not** resolved here; run `ossprey
   scan` after install for full-tree coverage.
 - **Manifest install** (bare `ossprey npm install`, `npm ci`, `yarn install`,
-  `poetry install`, `poetry sync`, `uv sync`, `uv pip sync requirements.txt`, or
+  `bun install`, `poetry install`, `poetry sync`, `uv sync`, `uv pip sync requirements.txt`, or
   `pip install -r requirements.txt`): no
   packages are named, so the manager installs from the project's
   manifest/lockfile. The forwarder scans the current directory and checks every
@@ -136,13 +161,13 @@ alias per manager removes that step in your own terminal.
 Bash or Zsh, in `~/.bashrc` / `~/.zshrc`:
 
 ```sh
-for mgr in npm pnpm yarn pip pip3 poetry uv uvx; do alias "$mgr=ossprey $mgr"; done
+for mgr in npm npx pnpm yarn bun bunx pip pip3 poetry uv uvx; do alias "$mgr=ossprey $mgr"; done
 ```
 
 Fish, in `~/.config/fish/config.fish`:
 
 ```fish
-for mgr in npm pnpm yarn pip pip3 poetry uv uvx
+for mgr in npm npx pnpm yarn bun bunx pip pip3 poetry uv uvx
     alias $mgr "ossprey $mgr"
 end
 ```
@@ -152,8 +177,11 @@ functions):
 
 ```powershell
 function npm    { ossprey npm    @args }
+function npx    { ossprey npx    @args }
 function pnpm   { ossprey pnpm   @args }
 function yarn   { ossprey yarn   @args }
+function bun    { ossprey bun    @args }
+function bunx   { ossprey bunx   @args }
 function pip    { ossprey pip    @args }
 function pip3   { ossprey pip3   @args }
 function poetry { ossprey poetry @args }

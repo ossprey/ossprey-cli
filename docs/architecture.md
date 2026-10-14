@@ -47,11 +47,13 @@ install still works".
 
 ```mermaid
 flowchart TD
-    S["ossprey npm install ..."] --> T{"an install verb?"}
+    S["ossprey npm install ..."] --> T{"an install verb, or a<br/>tool run (npx, bunx, uvx)?"}
     T -- "no, e.g. npm run" --> U["exec the real manager"]
     T -- "yes" --> V{"OSSPREY_SKIP_CI?"}
     V -- "set" --> U
-    V -- "unset" --> W{"passive mode?"}
+    V -- "unset" --> L{"a tool run of the<br/>project's own binary?"}
+    L -- "yes: npx eslint" --> U
+    L -- "no" --> W{"passive mode?"}
 
     W -- "no: gating" --> X{"packages named?"}
     X -- "yes" --> Y["check those packages"]
@@ -65,7 +67,7 @@ flowchart TD
     AC -- "yes: npm install,<br/>poetry add, uv sync, ..." --> AD["exec the real manager first"]
     AD --> AE["catalog the lockfile it wrote"]
     AE --> AF["post the scan, never block"]
-    AC -- "no: pip, uv pip,<br/>uv tool install,<br/>-g, --prefix ../x" --> AG["exec the real manager<br/>and submit the named<br/>packages alongside it"]
+    AC -- "no: pip, uv pip, bun,<br/>uv tool install, npx,<br/>-g, --prefix ../x" --> AG["exec the real manager<br/>and submit the named<br/>packages alongside it"]
     AG --> AF
 ```
 
@@ -73,7 +75,8 @@ The passive branch is the one worth reading twice. It never gates, so it never
 sits in front of the install: where a lockfile will land, the install runs
 first and Ossprey reads what it wrote, which is both faster and more accurate
 than predicting the tree beforehand. Where one will not — pip, `uv pip
-install`, `uv tool install`, a global or redirected install — there would be nothing to read, so
+install`, `uv tool install`, bun (whose `bun.lock` is not read yet), a tool
+run, a global or redirected install — there would be nothing to read, so
 the named packages are submitted beside the install instead (`writesLocalLockfile`
 in `internal/forward/forward.go` is the one place that decides).
 

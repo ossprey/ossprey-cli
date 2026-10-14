@@ -1,5 +1,5 @@
 // Package forward implements the package-manager forwarder: it inspects an
-// install command (npm/yarn/pip/poetry/uv), checks the named packages against
+// install command (npm/yarn/bun/pip/poetry/uv), checks the named packages against
 // the Ossprey API, blocks the install if any are malicious, and otherwise execs
 // the real package manager with the original arguments untouched.
 //
@@ -106,10 +106,13 @@ type Manager struct {
 	// reqFileArgs reports whether this invocation's positional arguments are
 	// requirements files rather than packages (`uv pip sync req.txt`).
 	reqFileArgs func(args []string) bool
-	// toolRunAt matches fetch-and-execute (`uvx ruff`, `uv tool run ruff`):
-	// one package is fetched and run, and everything after it is the
-	// program's own argv. Parsed by parseToolRun, never ParseSpecs.
+	// toolRunAt matches fetch-and-execute (`uvx ruff`, `npx cowsay`): one
+	// package is fetched and run, and everything after it is the program's own
+	// argv. Parsed by parseRun, never ParseSpecs.
 	toolRunAt func(args []string) (start int, ok bool)
+	// parseRun classifies a tool run's arguments from start on. Unset means
+	// uv's syntax, parseToolRun.
+	parseRun func(args []string) installArgs
 }
 
 // noLocalLockfileFlags name the options that stop an install from updating a
@@ -197,7 +200,18 @@ func isDirFlag(flag string) bool {
 // `yarn install`, `poetry install`, `poetry sync`, `uv sync`); the latter trigger a project
 // manifest scan instead of falling through unchecked (OSS-1284).
 var managers = map[string]*Manager{
-	"npm":    {Bin: "npm", Ecosystem: "npm", Lockfile: true, installAt: verbAt("npm", "install", "i", "add", "ci", "update", "up")},
+	"npm": {Bin: "npm", Ecosystem: "npm", Lockfile: true, installAt: verbAt("npm", "install", "i", "add", "ci", "update", "up"),
+		toolRunAt: npmExecAt, parseRun: npmExecRun},
+	// npx is `npm exec` under its own name: every invocation fetches and runs.
+	"npx": {Bin: "npx", Ecosystem: "npm", installAt: noInstall,
+		toolRunAt: func([]string) (int, bool) { return 0, true }, parseRun: npxRun},
+	// bun writes bun.lock, which the catalogue cannot read yet, so it has no
+	// Lockfile: a passive install submits what it names, or the declaring
+	// scan, alongside the install. `bun install -g` is an add.
+	"bun": {Bin: "bun", Ecosystem: "npm", installAt: verbAt("bun", "install", "i", "ci", "add", "a", "update", "up"),
+		toolRunAt: verbAt("bun", "x"), parseRun: bunxRun},
+	"bunx": {Bin: "bunx", Ecosystem: "npm", installAt: noInstall,
+		toolRunAt: func([]string) (int, bool) { return 0, true }, parseRun: bunxRun},
 	"pnpm":   {Bin: "pnpm", Ecosystem: "npm", Lockfile: true, installAt: verbAt("pnpm", "install", "i", "add", "update", "up")},
 	"yarn":   {Bin: "yarn", Ecosystem: "npm", Lockfile: true, installAt: verbAt("yarn", "add", "install", "upgrade", "up")},
 	"pip":    {Bin: "pip", Ecosystem: "pypi", installAt: verbAt("pip", "install")},
@@ -335,6 +349,8 @@ var globalValueFlags = map[string]map[string]bool{
 		"--use-node-version", "--package-import-method", "--workspace-concurrency",
 		"--network-concurrency", "--registry"),
 	"yarn": flagSet("--cwd", "--registry", "--cache-folder", "--modules-folder"),
+	// bun has no entry: it finds its command by skipping options without
+	// reading values, so in `bun --cwd web add x` the command is "web".
 	"pip": flagSet("--log", "--proxy", "--timeout", "--retries", "--cache-dir",
 		"--python", "-i", "--index-url"),
 	"poetry": flagSet("-C", "--directory", "--project", "-P"),
@@ -433,13 +449,27 @@ func Run(ctx context.Context, opts Options) error {
 	// it describes what was installed rather than what we predicted. An
 	// invocation that locks somewhere else — or nowhere — falls through to the
 	// spec path below, which submits the packages it can name.
-	if opts.Passive && writesLocalLockfile(m, opts.Args) {
+	// A tool run writes no lockfile here, whatever its manager can do: `npm
+	// exec` installs into npm's cache.
+	if opts.Passive && !toolRun && writesLocalLockfile(m, opts.Args) {
 		return passiveAfterInstall(ctx, m, opts)
 	}
 
 	var parsed installArgs
 	if toolRun {
-		parsed = parseToolRun(m, opts.Args[start:])
+		if m.parseRun != nil {
+			parsed = m.parseRun(opts.Args[start:])
+		} else {
+			parsed = parseToolRun(m, opts.Args[start:])
+		}
+		if parsed.LocalCommand != "" && localBinFn(parsed.LocalCommand) {
+			// npx and bunx run the project's own binary and fetch nothing.
+			// Checking the registry package of that name would check
+			// something else, and could block a run that installs nothing.
+			note("ossprey: `%s` is the project's own binary; forwarding `%s %s` unchecked\n",
+				parsed.LocalCommand, m.Bin, strings.Join(opts.Args, " "))
+			return forwardTo()
+		}
 	} else {
 		parsed = parseInstallArgs(m, opts.Args[start:], m.reqFileArgs != nil && m.reqFileArgs(opts.Args))
 	}
@@ -823,6 +853,10 @@ type installArgs struct {
 	// ReqFiles are requirements files referenced via -r/--requirement. Their
 	// packages live in the file, not on the command line.
 	ReqFiles []string
+	// LocalCommand is the bare command of an npm-side tool run, which npx and
+	// bunx take from the project's node_modules/.bin when it is there instead
+	// of fetching the package of that name.
+	LocalCommand string
 }
 
 // ParseSpecs classifies install arguments. A real-world multi-package install
@@ -1067,6 +1101,12 @@ var valueFlags = map[string]map[string]bool{
 		"--resolution-mode", "--use-node-version", "--package-import-method",
 		"--workspace-concurrency", "--network-concurrency"),
 	"yarn": flagSet("--registry", "--cache-folder", "--modules-folder", "--cwd"),
+	// From bun's install/add/update parameters. `-c/--config` and `--catalog`
+	// are absent on purpose: their value is optional, so the token after them
+	// may be the package.
+	"bun": flagSet("--ca", "--cafile", "--cache-dir", "--cwd", "--backend", "--registry",
+		"--concurrent-scripts", "--network-concurrency", "--omit", "--linker",
+		"--minimum-release-age", "--cpu", "--os", "-F", "--filter"),
 	"pip": flagSet("-t", "--target", "-e", "--editable", "-i", "--index-url",
 		"--extra-index-url", "-f", "--find-links", "-c", "--constraint", "--prefix",
 		"--root", "--src", "--python", "--cache-dir", "--log", "--no-binary",

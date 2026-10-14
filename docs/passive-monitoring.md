@@ -26,6 +26,9 @@ install still starts immediately. That covers:
 
 - `pip` and `pip3`, which write no lockfile at all, and `uv pip install`, which
   resolves into an environment rather than into `uv.lock`;
+- `bun`, whose `bun.lock` Ossprey cannot read yet;
+- fetch-and-execute (`npx`, `npm exec`, `bunx`, `uvx`), which installs into the
+  tool's own cache;
 - global installs (`npm install -g`, `--location=global`);
 - installs with the lockfile turned off (`npm install --no-package-lock`,
   `pnpm add --no-lockfile`);

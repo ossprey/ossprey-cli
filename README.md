@@ -94,7 +94,8 @@ ossprey npm install left-pad        # checks first, then runs npm
 ```
 
 If the package is flagged, the install is blocked and `npm` never starts. Works
-with `npm`, `pnpm`, `yarn`, `pip`, `pip3`, `poetry`, `uv` and `uvx`.
+with `npm`, `npx`, `pnpm`, `yarn`, `bun`, `bunx`, `pip`, `pip3`, `poetry`, `uv` and
+`uvx`.
 
 Tired of typing `ossprey` first?
 

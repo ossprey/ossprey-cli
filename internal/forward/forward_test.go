@@ -21,7 +21,7 @@ import (
 )
 
 func TestLookup(t *testing.T) {
-	for _, bin := range []string{"npm", "pnpm", "yarn", "pip", "pip3", "poetry", "uv", "uvx"} {
+	for _, bin := range []string{"npm", "npx", "pnpm", "yarn", "bun", "bunx", "pip", "pip3", "poetry", "uv", "uvx"} {
 		if _, ok := Lookup(bin); !ok {
 			t.Errorf("Lookup(%q): not found", bin)
 		}
