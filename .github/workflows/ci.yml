@@ -110,6 +110,11 @@ jobs:
       - name: go test -tags smoke -run TestPnpm
         run: go test -tags smoke -count=1 -timeout 15m -v -run TestPnpm ./test/smoke/...
 
+      # The served floor deciding the exit code runs against a local stub API, so it needs no network.
+      - name: go test -tags smoke (failing floor)
+        if: runner.os == 'Linux'
+        run: go test -tags smoke -count=1 -timeout 10m -v -run 'Floor|FailOn|EmptyProjectResponse' ./test/smoke/...
+
   # Aggregate gate for branch protection: reports a single "Test" check that
   # is green only when every matrix leg passed. `if: always()` is required —
   # a skipped job would satisfy the required check even when the matrix failed.
