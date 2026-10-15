@@ -16,6 +16,8 @@ type Status struct {
 	Bypass    bool
 	Managers  []ManagerStatus
 	Profiles  []ProfileStatus
+	// ClaudeHook is the Claude Code settings file carrying our PATH hook, or "".
+	ClaudeHook string
 }
 
 type ManagerStatus struct {
@@ -92,6 +94,9 @@ func Load(o Options) (*Status, error) {
 	}
 	for _, p := range Profiles(home) {
 		st.Profiles = append(st.Profiles, ProfileStatus{Path: p.Path, Managed: HasBlock(p.Path)})
+	}
+	if path := ClaudeSettingsPath(home); HasClaudeHook(path) {
+		st.ClaudeHook = path
 	}
 	return st, nil
 }

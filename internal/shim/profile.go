@@ -26,6 +26,9 @@ func Profiles(home string) []Profile {
 		{rel: ".bash_profile"},
 		{rel: ".zshrc", shell: "zsh"},
 		{rel: ".zprofile"},
+		// Every zsh reads ~/.zshenv, including `zsh -c` from scripts and
+		// agents, which read none of the files above.
+		{rel: ".zshenv", shell: "zsh"},
 		{rel: filepath.Join(".config", "fish", "config.fish"), shell: "fish", fish: true},
 	}
 
