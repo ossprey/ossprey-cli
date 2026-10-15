@@ -172,7 +172,8 @@ func TestCatalog_UnpinnedRequirementsAreNotWarnedAbout(t *testing.T) {
 	dir := t.TempDir()
 	// Separate files: syft reports only the first bad line of each.
 	writeTree(t, dir, map[string]string{"a/requirements.txt": "requests\n", "b/requirements.txt": "cee==1!2.0.0\n"})
-	ctx := warn.NewContext(context.Background(), false)
+	// Verbose: the headline is capped, and a long temp path (Windows) cuts the line off.
+	ctx := warn.NewContext(context.Background(), true)
 	if _, err := Catalog(ctx, dir, Options{NoExec: true, SkipVersionLookup: true}); err != nil {
 		t.Fatalf("Catalog: %v", err)
 	}

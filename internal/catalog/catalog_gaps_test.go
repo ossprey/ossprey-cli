@@ -223,7 +223,8 @@ func TestCatalog_RequirementsAwkwardShapes(t *testing.T) {
 			"cee==1!2.0.0\n"+
 			"dee===1.0+abc\n")
 
-	ctx := warn.NewContext(context.Background(), false)
+	// Verbose: the headline is capped, and a long temp path (Windows) cuts the line off.
+	ctx := warn.NewContext(context.Background(), true)
 	pkgs, err := Catalog(ctx, dir, Options{NoExec: true, SkipVersionLookup: true})
 	if err != nil {
 		t.Fatalf("Catalog: %v", err)

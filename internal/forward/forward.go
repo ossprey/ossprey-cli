@@ -1220,7 +1220,10 @@ var valueFlags = map[string]map[string]bool{
 		"--abi", "--progress-bar", "--report", "--upgrade-strategy", "-C", "--config-settings",
 		"--global-option", "--root-user-action", "--keyring-provider", "--proxy", "--retries",
 		"--timeout", "--exists-action", "--trusted-host", "--cert", "--client-cert",
-		"--use-feature", "--use-deprecated"),
+		"--use-feature", "--use-deprecated",
+		// pip 25+/26.
+		"--group", "--requirements-from-script", "--build-constraint", "--refresh-package",
+		"--all-releases", "--only-final", "--resume-retries", "--uploaded-prior-to"),
 	// --with/--without/--only/-E are install/sync's group and extras selectors:
 	// unlisted, `poetry sync --with dev` reads "dev" as a named package and
 	// checks it instead of scanning the project.
