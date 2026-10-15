@@ -15,8 +15,10 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/ossprey/ossprey-cli/internal/alert"
@@ -552,23 +554,30 @@ func Run(ctx context.Context, opts Options) error {
 	switch {
 	case len(parsed.Specs) > 0 && len(parsed.ReqFiles) > 0:
 		// Packages named *and* a requirements file (`pip install -r req.txt
-		// flask`): both are installed, so both are checked, in one submission —
-		// the project scan that covers the file, plus the named packages.
-		// Checking only the names left everything in the file unchecked.
+		// flask`, `uvx --with-requirements r.txt ruff`): both are installed, so
+		// both are checked, in one submission — the files named, plus the
+		// packages. Checking only the names left everything in the file
+		// unchecked.
 		req := scanRequest{
-			Dir: ".", APIURL: opts.APIURL, APIKey: opts.APIKey, MonitorID: opts.MonitorID,
+			APIURL: opts.APIURL, APIKey: opts.APIKey, MonitorID: opts.MonitorID,
 			Trust: opts.Trust,
 		}
 		if opts.Passive {
 			req.SubmitOnly = true
 			return passiveAlongside(ctx, m, opts, len(parsed.Specs), func(ctx context.Context) (*ossbom.SBOM, error) {
+				dir, cleanup := reqFilesDir(parsed.ReqFiles)
+				defer cleanup()
+				req.Dir = dir
 				req.Specs = resolveSpecs(ctx, resolve, parsed.Specs)
 				return scanProjectFn(ctx, req)
 			})
 		}
-		note("ossprey: scanning project manifest and %s before `%s %s`\n",
+		note("ossprey: scanning %s and %s before `%s %s`\n", strings.Join(parsed.ReqFiles, ", "),
 			countPackages(len(parsed.Specs)), m.Bin, strings.Join(opts.Args, " "))
 		stop := progress.Start(progressTo(), "ossprey: scan in progress")
+		dir, cleanup := reqFilesDir(parsed.ReqFiles)
+		defer cleanup()
+		req.Dir = dir
 		req.Specs = resolveSpecs(ctx, resolve, parsed.Specs)
 		sbom, err := scanProjectFn(ctx, req)
 		stop()
@@ -628,8 +637,10 @@ func Run(ctx context.Context, opts Options) error {
 			note("ossprey: no packages named; scanning project manifest alongside `%s %s`\n",
 				m.Bin, strings.Join(opts.Args, " "))
 			return passiveAlongside(ctx, m, opts, 0, func(ctx context.Context) (*ossbom.SBOM, error) {
+				dir, cleanup := reqFilesDir(parsed.ReqFiles)
+				defer cleanup()
 				return scanProjectFn(ctx, scanRequest{
-					Dir: ".", APIURL: opts.APIURL, APIKey: opts.APIKey,
+					Dir: dir, APIURL: opts.APIURL, APIKey: opts.APIKey,
 					MonitorID: opts.MonitorID, SubmitOnly: true, Trust: opts.Trust,
 				})
 			})
@@ -639,8 +650,10 @@ func Run(ctx context.Context, opts Options) error {
 		// Cataloguing a whole project can take longer than the API scan itself
 		// (npm range resolution, uv), so the indicator wraps both.
 		stop := progress.Start(progressTo(), "ossprey: scan in progress")
+		dir, cleanup := reqFilesDir(parsed.ReqFiles)
+		defer cleanup()
 		sbom, err := scanProjectFn(ctx, scanRequest{
-			Dir: ".", APIURL: opts.APIURL, APIKey: opts.APIKey, MonitorID: opts.MonitorID,
+			Dir: dir, APIURL: opts.APIURL, APIKey: opts.APIKey, MonitorID: opts.MonitorID,
 			Trust: opts.Trust,
 		})
 		stop()
@@ -768,6 +781,92 @@ func manifestInstall(p installArgs) bool {
 // dir forwards.
 
 // scanRequest describes one project scan-and-submit.
+// reqFilesDir is where a requirements-file install is scanned from: a fresh
+// dir holding each file it names as requirements.txt, nested -r includes
+// inlined. Scanning "." instead missed a file the catalogue's glob does not
+// match (requirements/prod.txt, deps.txt, ../shared/reqs.txt) and checked
+// unrelated manifests beside it. With no files named, or none readable (pip
+// then fails on its own), it is the project dir.
+func reqFilesDir(files []string) (string, func()) {
+	noop := func() {}
+	if len(files) == 0 {
+		return ".", noop
+	}
+	dir, err := os.MkdirTemp("", "ossprey-reqs-")
+	if err != nil {
+		return ".", noop
+	}
+	cleanup := func() { os.RemoveAll(dir) }
+	wrote := 0
+	for i, f := range files {
+		data, err := flattenRequirements(f, map[string]bool{})
+		if err != nil {
+			continue
+		}
+		sub := filepath.Join(dir, strconv.Itoa(i))
+		if os.MkdirAll(sub, 0o700) != nil || os.WriteFile(filepath.Join(sub, "requirements.txt"), data, 0o600) != nil {
+			continue
+		}
+		wrote++
+	}
+	if wrote == 0 {
+		cleanup()
+		return ".", noop
+	}
+	return dir, cleanup
+}
+
+// flattenRequirements reads a requirements file with its -r includes inlined
+// (relative to the including file, as pip resolves them). Constraint files are
+// dropped: they install nothing, and a relative path would not resolve from
+// the copy.
+func flattenRequirements(path string, seen map[string]bool) ([]byte, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	if seen[abs] {
+		return nil, nil
+	}
+	seen[abs] = true
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var out []byte
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+		if inc, ok := requirementInclude(trimmed, "-r", "--requirement"); ok {
+			if !filepath.IsAbs(inc) {
+				inc = filepath.Join(filepath.Dir(path), inc)
+			}
+			nested, err := flattenRequirements(inc, seen)
+			if err == nil {
+				out = append(out, nested...)
+			}
+			continue
+		}
+		if _, ok := requirementInclude(trimmed, "-c", "--constraint"); ok {
+			continue
+		}
+		out = append(out, line...)
+		out = append(out, '\n')
+	}
+	return out, nil
+}
+
+// requirementInclude reads "-r f", "-rf", "--requirement f" or "--requirement=f".
+func requirementInclude(line, short, long string) (string, bool) {
+	for _, p := range []string{long + "=", long + " ", long + "\t", short} {
+		if v, ok := strings.CutPrefix(line, p); ok {
+			if v = strings.TrimSpace(v); v != "" {
+				return v, true
+			}
+		}
+	}
+	return "", false
+}
+
 type scanRequest struct {
 	Dir       string
 	APIURL    string
@@ -1121,8 +1220,28 @@ var toolRunValueFlags = flagSet("--from", "-w", "--with", "--with-editable",
 // follows it continues a version specifier. A PEP 440 clause always opens with
 // an operator, so a leading digit is a new name (`3to2`), not a continuation.
 func splitRequirements(value string) []string {
+	// Commas inside extras ("black[d,jupyter]") belong to that requirement,
+	// as in uv's CommaSeparatedRequirements.
+	var parts []string
+	depth, start := 0, 0
+	for i, r := range value {
+		switch r {
+		case '[':
+			depth++
+		case ']':
+			if depth > 0 {
+				depth--
+			}
+		case ',':
+			if depth == 0 {
+				parts = append(parts, value[start:i])
+				start = i + 1
+			}
+		}
+	}
+	parts = append(parts, value[start:])
 	var out []string
-	for _, part := range strings.Split(value, ",") {
+	for _, part := range parts {
 		trimmed := strings.TrimSpace(part)
 		if len(out) > 0 && (trimmed == "" || strings.ContainsAny(trimmed[:1], "<>=!~")) {
 			out[len(out)-1] += "," + part

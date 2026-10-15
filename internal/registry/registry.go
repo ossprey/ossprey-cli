@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/ossprey/ossprey-cli/internal/warn"
@@ -86,8 +87,11 @@ func Resolve(ctx context.Context, ecosystem, name, constraint string) (string, e
 		return ResolveLatest(ctx, ecosystem, name)
 	}
 	var body struct {
-		DistTags map[string]string          `json:"dist-tags"`
-		Versions map[string]json.RawMessage `json:"versions"`
+		DistTags map[string]string `json:"dist-tags"`
+		Versions map[string]struct {
+			// A string message when deprecated; npm ranks these last.
+			Deprecated json.RawMessage `json:"deprecated"`
+		} `json:"versions"`
 	}
 	// The abbreviated packument npm itself installs from: versions and tags
 	// without every release's README.
@@ -97,10 +101,16 @@ func Resolve(ctx context.Context, ecosystem, name, constraint string) (string, e
 	}
 	latest := body.DistTags["latest"]
 	versions := make([]string, 0, len(body.Versions))
-	for v := range body.Versions {
+	deprecated := map[string]bool{}
+	for v, meta := range body.Versions {
 		versions = append(versions, v)
+		switch strings.TrimSpace(string(meta.Deprecated)) {
+		case "", "null", "false", `""`:
+		default:
+			deprecated[v] = true
+		}
 	}
-	if v, ok := pickNpmVersion(constraint, latest, versions); ok {
+	if v, ok := pickNpmVersion(constraint, latest, versions, deprecated); ok {
 		return v, nil
 	}
 	if v := body.DistTags[constraint]; v != "" {

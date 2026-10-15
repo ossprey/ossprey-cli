@@ -125,6 +125,32 @@ func TestResolve_NpmRangeAndTag(t *testing.T) {
 	}
 }
 
+// npm ranks deprecated versions last, and skips a deprecated latest: checking
+// the top match regardless would check a release npm does not install.
+func TestResolve_NpmSkipsDeprecated(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"dist-tags":{"latest":"1.2.5"},
+			"versions":{"1.2.3":{},"1.2.4":{"deprecated":false},"1.2.5":{"deprecated":"oops"},
+			"2.0.0":{"deprecated":"a"},"2.0.1":{"deprecated":"b"}}}`)
+	}))
+	defer srv.Close()
+	pointAt(t, srv)
+
+	for _, tc := range []struct{ constraint, want string }{
+		{"^1", "1.2.4"},    // deprecated latest and top match both skipped
+		{"^2", "2.0.1"},    // all deprecated: highest of them
+		{"1.2.5", "1.2.5"}, // an exact range still gets its one version
+	} {
+		got, err := Resolve(context.Background(), "npm", "x", tc.constraint)
+		if err != nil {
+			t.Fatalf("Resolve(%q): %v", tc.constraint, err)
+		}
+		if got != tc.want {
+			t.Errorf("Resolve(%q) = %q, want %q", tc.constraint, got, tc.want)
+		}
+	}
+}
+
 // A lookup failure is returned untouched, so the caller still grades a 404 apart
 // from an outage.
 func TestResolve_NpmNotFoundIsTyped(t *testing.T) {

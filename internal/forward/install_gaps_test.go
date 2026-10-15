@@ -2,8 +2,12 @@ package forward
 
 import (
 	"context"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/ossprey/ossprey-cli/internal/check"
@@ -165,5 +169,61 @@ func TestRun_RangeIsResolvedWithItsConstraint(t *testing.T) {
 	}
 	if !reflect.DeepEqual(checked, want) {
 		t.Errorf("checked %+v, want %+v", checked, want)
+	}
+}
+
+// The scan reads the requirements files the install names, nested -r included,
+// and nothing else in the project: a file outside the catalogue's glob was
+// missed, and an unrelated manifest beside it could block the install.
+func TestRun_RequirementsFileScanCoversOnlyTheNamedFiles(t *testing.T) {
+	dir := t.TempDir()
+	for name, body := range map[string]string{
+		"requirements/prod.txt": "-r base.txt\n-c constraints.txt\nevil==1.0\n",
+		"requirements/base.txt": "django==5.0\n",
+		"package.json":          `{"dependencies":{"left-pad":"1.0.0"}}`,
+	} {
+		p := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Chdir(dir)
+
+	for _, tc := range []struct {
+		bin  string
+		args []string
+	}{
+		{"pip", []string{"install", "-r", "requirements/prod.txt", "flask"}},
+		{"pip", []string{"install", "-r", "requirements/prod.txt"}},
+		{"uvx", []string{"--with-requirements", "requirements/prod.txt", "ruff", "check"}},
+		{"uv", []string{"tool", "install", "ruff", "--with-requirements", "requirements/prod.txt"}},
+	} {
+		swap(t, (&stubExec{}).fn, cleanSBOM)
+		var scanned []string
+		swapScan(t, func(_ context.Context, req scanRequest) (*ossbom.SBOM, error) {
+			filepath.WalkDir(req.Dir, func(p string, d fs.DirEntry, err error) error {
+				if err == nil && !d.IsDir() {
+					b, _ := os.ReadFile(p)
+					scanned = append(scanned, filepath.Base(p)+": "+string(b))
+				}
+				return nil
+			})
+			return ossbom.New(ossbom.Environment{}), nil
+		})
+		pin := func(context.Context, string, string) (string, error) { return "1.0.0", nil }
+		if err := Run(context.Background(), Options{Bin: tc.bin, Args: tc.args, ResolveLatest: pin}); err != nil {
+			t.Fatalf("%s %v: %v", tc.bin, tc.args, err)
+		}
+		if len(scanned) != 1 {
+			t.Fatalf("%s %v: scanned %q, want only the flattened requirements file", tc.bin, tc.args, scanned)
+		}
+		got := scanned[0]
+		if !strings.HasPrefix(got, "requirements.txt: ") || !strings.Contains(got, "django==5.0") ||
+			!strings.Contains(got, "evil==1.0") || strings.Contains(got, "constraints") {
+			t.Errorf("%s %v: scanned %q", tc.bin, tc.args, got)
+		}
 	}
 }

@@ -335,24 +335,27 @@ func testSet(set []comparator, v semver) bool {
 }
 
 // pickNpmVersion is npm-pick-manifest's choice for a range: the `latest` tag
-// when it satisfies the range, else the highest version that does. ok is false
-// when spec is not a range (it is a dist-tag) or nothing satisfies it.
-func pickNpmVersion(spec, latest string, versions []string) (string, bool) {
+// when it satisfies the range and is not deprecated, else the highest
+// non-deprecated version that does, else the highest deprecated one. Engine
+// compatibility, which npm also ranks on, is not modelled. ok is false when
+// spec is not a range (it is a dist-tag) or nothing satisfies it.
+func pickNpmVersion(spec, latest string, versions []string, deprecated map[string]bool) (string, bool) {
 	r, ok := parseNpmRange(spec)
 	if !ok {
 		return "", false
 	}
-	if lv, ok := parseSemver(latest); ok && r.satisfies(lv) {
+	if lv, ok := parseSemver(latest); ok && r.satisfies(lv) && !deprecated[latest] {
 		return latest, true
 	}
-	best, bestV := "", semver{}
+	best, bestV, bestDep := "", semver{}, false
 	for _, s := range versions {
 		v, ok := parseSemver(s)
 		if !ok || !r.satisfies(v) {
 			continue
 		}
-		if best == "" || v.compare(bestV) > 0 {
-			best, bestV = s, v
+		dep := deprecated[s]
+		if best == "" || (bestDep && !dep) || (dep == bestDep && v.compare(bestV) > 0) {
+			best, bestV, bestDep = s, v, dep
 		}
 	}
 	return best, best != ""

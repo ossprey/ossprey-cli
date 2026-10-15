@@ -235,7 +235,7 @@ var pypiExact = regexp.MustCompile(`^v?[0-9][0-9A-Za-z.+!_-]*$`)
 // wildcard, "===X", or "@X" with X a plain release (poetry's and the check
 // CLI's form). Anything else — a range, "==2.*", poetry's "@^7.0", "@latest" —
 // leaves it unpinned for the caller to resolve. ok is false for a direct
-// reference ("pkg @ https://…", "pkg@git+…"), which no registry serves.
+// reference ("pkg @ https://…", "pkg@git+…") or a path, which no registry serves.
 func splitPyPI(token string) (s Spec, ok bool) {
 	req, _, _ := strings.Cut(token, ";")
 	req = strings.TrimSpace(req)
@@ -245,6 +245,11 @@ func splitPyPI(token string) (s Spec, ok bool) {
 		if end := strings.IndexByte(rest, ']'); end >= 0 {
 			rest = strings.TrimSpace(rest[end+1:])
 		}
+	}
+	// After the name only extras, "@" or a version clause may follow. Anything
+	// else ("src/pkg", `C:\proj`) is a path, not a project name.
+	if rest != "" && !strings.ContainsAny(rest[:1], "@(<>=!~") {
+		return Spec{}, false
 	}
 	if v, at := strings.CutPrefix(rest, "@"); at {
 		v = strings.TrimSpace(v)

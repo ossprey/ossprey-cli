@@ -115,25 +115,27 @@ from the lockfile.
   exact pin is taken as the version: `foo@1.2.3` for npm, `foo==1.2` or
   `foo===1.2` for PyPI (also poetry's `foo@1.2`). Anything else is resolved from
   the registry: an npm range (`foo@^4.17.0`, `~1`, `1.x`, `>=1 <2`) to the
-  release npm would pick (`latest` if it satisfies the range, otherwise the
-  highest match), an npm dist-tag (`foo@next`) to that tag, and a PyPI range,
+  release npm would pick (`latest` if it satisfies the range and is not
+  deprecated, otherwise the highest non-deprecated match), an npm dist-tag (`foo@next`) to that tag, and a PyPI range,
   wildcard (`==2.*`) or poetry constraint (`foo@^7.0`) to the latest release.
   An npm range nothing satisfies, or a tag the registry does not have, falls
   back to `latest`. PyPI extras and markers (`foo[socks]; python_version>"3"`)
   are not part of the name, and an npm alias (`foo@npm:bar@1.0.0`) is checked
   as `bar`, the package actually installed.
 - **Named packages plus a requirements file** (`pip install -r
-  requirements.txt flask`, `uv pip install -r requirements.txt flask`): both
-  are installed, so both are checked in one submission — the current directory
-  is scanned as for a manifest install and the named packages are added to it.
+  requirements.txt flask`, `uv pip install -r requirements.txt flask`,
+  `uvx --with-requirements r.txt ruff`): both are installed, so both are
+  checked in one submission — the requirements files named, with their nested
+  `-r` includes, plus the named packages.
 - **Manifest install** (bare `ossprey npm install`, `npm ci`, `yarn install`,
   bare `yarn`, `bun install`, `poetry install`, `poetry sync`, `uv sync`,
   `uv pip sync requirements.txt`, or `pip install -r requirements.txt` /
   `uv pip install --requirements requirements.txt`): no
   packages are named, so the manager installs from the project's
-  manifest/lockfile. The forwarder scans the current directory and checks every
-  declared dependency before forwarding — it does **not** fall through
-  unchecked.
+  manifest/lockfile. The forwarder checks every declared dependency before
+  forwarding — it does **not** fall through unchecked. A requirements-file
+  install scans the files it names, whatever they are called; the others scan
+  the current directory.
 
 Global options before the subcommand are understood, so the workspace forms are
 checked like any other install:

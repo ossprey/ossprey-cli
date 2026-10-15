@@ -905,9 +905,10 @@ func TestPipInstallFlagTablesMatchPip(t *testing.T) {
 }
 
 // A clause after a comma opens with an operator; a digit starts a new name.
+// Commas inside extras do not split.
 func TestSplitRequirementsDigitStartsANewName(t *testing.T) {
-	got := splitRequirements("ok,3to2,b>=1,<2")
-	want := []string{"ok", "3to2", "b>=1,<2"}
+	got := splitRequirements("ok,3to2,b>=1,<2,black[d,jupyter],psycopg[binary,pool]>=3")
+	want := []string{"ok", "3to2", "b>=1,<2", "black[d,jupyter]", "psycopg[binary,pool]>=3"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("splitRequirements = %q, want %q", got, want)
 	}

@@ -227,6 +227,9 @@ func TestParseSpec_NonRegistrySpecsAreErrors(t *testing.T) {
 	for _, tc := range []struct{ eco, token string }{
 		{"pypi", "pkg @ https://example.com/pkg.whl"},
 		{"pypi", "pkg@file:///tmp/pkg"},
+		{"pypi", "src/mypkg"},
+		{"pypi", `C:\proj\pkg`},
+		{"pypi", "pkg/sub[extra]"},
 		{"npm", "pkg@github:user/repo"},
 		{"npm", "pkg@user/repo"},
 		{"npm", "pkg@file:../pkg"},
