@@ -62,6 +62,8 @@ func posixScript(o ScriptOptions) string {
 		"{{MARKER}}", Marker,
 		"{{BINPREFIX}}", binPrefix,
 		"{{BYPASS}}", BypassEnv,
+		"{{DEPTH}}", depthEnv,
+		"{{MAXDEPTH}}", maxDepth,
 		"{{MODELINE}}", modeHeader(o, "# "),
 		"{{MODEENV}}", modeEnv(o, shellQuote, func(k, v string) string {
 			return k + "=" + v + "\nexport " + k + "\n"
@@ -110,14 +112,41 @@ set -uf
 ossprey_shim_dir={{DIR}}
 ossprey_bin={{BIN}}
 
+# Last-resort re-entry guard: the fail-open paths below count how often they
+# have handed off. If PATH still leads back to a shim, stop with an error
+# rather than exec'ing each other forever.
+ossprey_depth=${{{DEPTH}}:-0}
+case $ossprey_depth in '' | *[!0-9]*) ossprey_depth=0 ;; esac
+if [ "$ossprey_depth" -ge {{MAXDEPTH}} ]; then
+	echo "ossprey: shim: {{MANAGER}} on PATH keeps resolving to an ossprey shim; giving up rather than looping." >&2
+	echo "ossprey: check PATH for another copy of the shim directory, or run 'ossprey shim uninstall'." >&2
+	exit 126
+fi
+
+# ossprey_norm collapses doubled slashes and drops trailing ones, so the PATH
+# entries "<dir>/" and "<dir>//" compare equal to "<dir>".
+ossprey_norm() {
+	ossprey_n=$1
+	while :; do
+		case $ossprey_n in
+		*//*) ossprey_n=${ossprey_n%%//*}/${ossprey_n#*//} ;;
+		?*/) ossprey_n=${ossprey_n%/} ;;
+		*) break ;;
+		esac
+	done
+}
+
 # Recursion guard: drop our own directory from PATH so that the exec below — and
 # ossprey's own lookup of the real {{MANAGER}} — find the genuine tool, not this
 # script again.
+ossprey_norm "$ossprey_shim_dir"
+ossprey_self=$ossprey_n
 ossprey_newpath=''
 ossprey_oldifs=$IFS
 IFS=':'
 for ossprey_entry in $PATH; do
-	if [ "$ossprey_entry" = "$ossprey_shim_dir" ]; then
+	ossprey_norm "$ossprey_entry"
+	if [ "$ossprey_n" = "$ossprey_self" ]; then
 		continue
 	fi
 	if [ -z "$ossprey_newpath" ]; then
@@ -129,17 +158,43 @@ done
 IFS=$ossprey_oldifs
 PATH=$ossprey_newpath
 export PATH
-unset ossprey_newpath ossprey_oldifs ossprey_entry ossprey_shim_dir
+unset ossprey_newpath ossprey_entry ossprey_shim_dir ossprey_self ossprey_n
+
+# ossprey_unchecked runs the real {{MANAGER}}. A symlinked alias of the shim
+# directory survives the strip above, so before exec'ing by name it also drops
+# every PATH entry whose {{MANAGER}} carries the shim marker. Only the fail-open
+# paths pay for the grep; ossprey's own lookup already skips marked files.
+ossprey_unchecked() {
+	ossprey_newpath=''
+	IFS=':'
+	for ossprey_entry in $PATH; do
+		ossprey_f=${ossprey_entry:-.}/{{MANAGER}}
+		if [ -f "$ossprey_f" ] && grep -q '{{MARKER}}' "$ossprey_f" 2>/dev/null; then
+			continue
+		fi
+		if [ -z "$ossprey_newpath" ]; then
+			ossprey_newpath=$ossprey_entry
+		else
+			ossprey_newpath=$ossprey_newpath:$ossprey_entry
+		fi
+	done
+	IFS=$ossprey_oldifs
+	PATH=$ossprey_newpath
+	export PATH
+	{{DEPTH}}=$((ossprey_depth + 1))
+	export {{DEPTH}}
+	exec {{MANAGER}} "$@"
+}
 
 # Fail open, always. A scanner that can break ` + "`npm install`" + ` when it is having a
 # bad day is a scanner people rip out.
 if [ -n "${{{BYPASS}}:-}" ]; then
-	exec {{MANAGER}} "$@"
+	ossprey_unchecked "$@"
 fi
 if [ ! -x "$ossprey_bin" ]; then
 	echo "ossprey: shim: $ossprey_bin is missing; running {{MANAGER}} unchecked." >&2
 	echo "ossprey: reinstall ossprey, or run 'ossprey shim uninstall' to remove the shims." >&2
-	exec {{MANAGER}} "$@"
+	ossprey_unchecked "$@"
 fi
 
 {{MODEENV}}exec "$ossprey_bin" {{MANAGER}} "$@"
@@ -154,6 +209,8 @@ func windowsScript(o ScriptOptions) string {
 		"{{MARKER}}", Marker,
 		"{{BINPREFIX}}", binPrefix,
 		"{{BYPASS}}", BypassEnv,
+		"{{DEPTH}}", depthEnv,
+		"{{MAXDEPTH}}", maxDepth,
 		"{{MODELINE}}", modeHeader(o, ":: "),
 		"{{MODEENV}}", modeEnv(o, func(v string) string { return v }, func(k, v string) string {
 			return "set \"" + k + "=" + v + "\"\n"
@@ -177,9 +234,20 @@ const windowsTemplate = `@echo off
 ::   set {{BYPASS}}=1         skip the check for this shell session
 setlocal
 
+:: Last-resort re-entry guard: the bypass path counts its hand-offs, so a PATH
+:: that still leads back to a shim errors out instead of looping.
+set "ossprey_depth=0"
+set /a "ossprey_depth={{DEPTH}}+0" >nul 2>&1
+if %ossprey_depth% GEQ {{MAXDEPTH}} (
+	echo ossprey: shim: {{MANAGER}} on PATH keeps resolving to an ossprey shim; giving up rather than looping.>&2
+	exit /b 126
+)
+
 :: Recursion guard: drop our own directory from PATH so the real {{MANAGER}} is what
-:: gets found downstream. The trailing ";" makes the last PATH entry match too.
+:: gets found downstream. The trailing ";" makes the last PATH entry match too,
+:: and the "\;" form catches the directory spelled with a trailing backslash.
 set "PATH=%PATH%;"
+call set "PATH=%%PATH:{{DIR}}\;=%%"
 call set "PATH=%%PATH:{{DIR}};=%%"
 
 if defined {{BYPASS}} goto ossprey_bypass
@@ -192,6 +260,7 @@ if not exist "{{BIN}}" (
 exit /b %ERRORLEVEL%
 
 :ossprey_bypass
+set /a "{{DEPTH}}=ossprey_depth+1" >nul
 call {{MANAGER}} %*
 exit /b %ERRORLEVEL%
 `

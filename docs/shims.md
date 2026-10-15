@@ -24,9 +24,12 @@ Then just use your package manager as normal:
 
 ```console
 $ npm install left-pad
-ossprey: no malware found, forwarding to npm
 added 1 package in 412ms
 ```
+
+The check is silent when it passes: only npm's own output appears. ossprey
+speaks up for a block (the full malware report) or a platform error; set
+`OSSPREY_VERBOSE=1` to see the verdict and narration for every install.
 
 | Command | What it does |
 |---------|--------------|
@@ -53,8 +56,12 @@ yourself, `--dir` / `$OSSPREY_SHIM_DIR` to relocate them.
   …` skips the check for one command, and `ossprey shim uninstall` removes them
   for good.
 - **It cannot recurse.** Each shim strips its own directory from PATH before
-  exec'ing, and ossprey independently refuses to exec any file carrying the shim
-  marker.
+  exec'ing (however it is spelled: `dir/` and `dir//` included), and ossprey
+  independently refuses to exec any file carrying the shim marker. When the
+  shim runs the manager itself (`OSSPREY_SHIM_BYPASS`, or a missing ossprey) it
+  also skips any PATH entry holding a shim, such as a symlink to the shim
+  directory. If PATH still leads back to a shim after all that, the shim stops
+  with an error rather than looping.
 - **It only touches its own files.** Shell profiles are edited inside a marked
   block that uninstall removes cleanly, and uninstall deletes only files ossprey
   generated.

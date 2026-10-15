@@ -9,7 +9,10 @@ curl -fsSL https://github.com/ossprey/ossprey-cli/releases/latest/download/insta
 ```
 
 The script detects your OS/arch, downloads the matching binary, verifies its
-sha256, and installs it to `/usr/local/bin/ossprey`.
+sha256, and installs it to `/usr/local/bin/ossprey`. Verification fails
+closed: if the `.sha256` sidecar cannot be downloaded or is malformed, the
+checksum does not match, or the machine has no `sha256sum`, `shasum` or
+`openssl` to compute it, nothing is installed.
 
 Override the defaults with env vars:
 
@@ -32,6 +35,28 @@ curl -fsSL https://github.com/ossprey/ossprey-cli/releases/latest/download/insta
   | sudo sh -s -- --override-package-managers
 ```
 
+### Installer settings
+
+Both installers (`install.sh` and `install.ps1`) read these env vars; the
+flags are the `install.sh` spelling, with the `install.ps1` parameter in
+brackets.
+
+| Env var | Flag | Effect |
+|---------|------|--------|
+| `OSSPREY_VERSION` | | Tag to install (e.g. `v0.1.0`). Default: latest. |
+| `OSSPREY_INSTALL_DIR` | | Install location. Default: `/usr/local/bin`, or `%LOCALAPPDATA%\Programs\ossprey` on Windows. |
+| `OSSPREY_OVERRIDE_PACKAGE_MANAGERS=1` | `--override-package-managers` (`-OverridePackageManagers`) | Also install the [PATH shims](shims.md). |
+| `OSSPREY_WATCHDOG=1` | `--watchdog` (`-Watchdog`) | Passive shims that submit with this machine's login. Implies the shims. |
+| `OSSPREY_MONITOR_ID=<id>` | `--monitor <id>` (`-MonitorId <id>`) | Passive shims that submit through a monitor's id. Implies the shims. |
+| `OSSPREY_SHIM_GIT=1` | `--git` (`-Git`) | Also shim git (opt-in, see [git.md](git.md)). Implies the shims. |
+| `OSSPREY_SKIP_CHECKSUM=1` | | Install **without** verifying the sha256. Not recommended; it exists for mirrors that do not carry the sidecar. |
+
+**Re-running to upgrade.** Without any shim setting, a re-run re-points the
+shims already installed at the new binary (`ossprey shim install --no-path
+--managers <the shimmed ones>`): each keeps its own mode, nothing new is
+shimmed and no shell profile is touched. With a shim setting it runs
+`ossprey shim install` with it, as on a first install.
+
 ## One-liner (Windows PowerShell)
 
 Runs natively on Windows — no WSL, no admin rights needed. From any
@@ -48,8 +73,10 @@ powershell -ExecutionPolicy Bypass -Command "irm https://github.com/ossprey/ossp
 ```
 
 The script detects your architecture, downloads the matching `ossprey.exe`,
-verifies its sha256, installs it to `%LOCALAPPDATA%\Programs\ossprey`, and
-adds that directory to your user `PATH` (open a new terminal to pick it up).
+verifies its sha256 (failing closed, as above), installs it to
+`%LOCALAPPDATA%\Programs\ossprey`, and adds that directory to your user
+`PATH` (open a new terminal to pick it up). It reads the same
+[settings](#installer-settings) as `install.sh`.
 
 Override the defaults with env vars:
 
@@ -112,7 +139,9 @@ ossprey update --force            # reinstall even if already on the target vers
 ```
 
 `update` downloads the release binary matching your OS/architecture, verifies
-its sha256, and atomically replaces the running executable. If the binary
+its sha256, and atomically replaces the running executable. Like the install
+scripts it refuses a release with no sha256 file unless `OSSPREY_SKIP_CHECKSUM=1`
+is set. If the binary
 lives in a root-owned directory (the `/usr/local/bin` default on Linux/macOS),
 run `sudo ossprey update`; the Windows default (`%LOCALAPPDATA%\Programs\ossprey`)
 is user-writable, so no elevation is needed.

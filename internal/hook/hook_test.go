@@ -13,6 +13,9 @@ import (
 // are needed: hook management only touches the hooks directory.
 func initRepo(t *testing.T) string {
 	t.Helper()
+	// A developer's global core.hooksPath would send Install outside the repo.
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	dir := t.TempDir()
 	run(t, dir, "init", "-q")
 	return dir

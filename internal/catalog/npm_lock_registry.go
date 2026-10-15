@@ -110,7 +110,12 @@ func (c *npmLockClassifier) registryEntries(lockPath string) map[string]struct{}
 }
 
 // isLocalNpmResolved reports whether a lockfile "resolved" value points at
-// local code instead of a registry tarball.
+// local code instead of a registry tarball. npm 7+ records a link entry's
+// (workspace member's) target as a bare relative path, e.g. "packages/lib":
+// anything without a scheme is a path, never a registry or git source.
 func isLocalNpmResolved(resolved string) bool {
-	return strings.HasPrefix(resolved, "file:") || strings.HasPrefix(resolved, "link:")
+	if strings.HasPrefix(resolved, "file:") || strings.HasPrefix(resolved, "link:") {
+		return true
+	}
+	return resolved != "" && !strings.Contains(resolved, ":")
 }
