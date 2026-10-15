@@ -236,11 +236,13 @@ func Run(ctx context.Context, opts Options) error {
 		return fmt.Errorf("download %s: %w", assetURL, err)
 	}
 
-	// Verify the sha256 sidecar when published; tolerate its absence,
-	// exactly like install.sh.
+	// Fail closed like install.sh: every release ships a sidecar, so a missing
+	// one is a mirror or tampering problem. OSSPREY_SKIP_CHECKSUM is the opt-out.
 	switch sum, err := fetch(ctx, assetURL+".sha256"); {
+	case errors.Is(err, errNotFound) && os.Getenv("OSSPREY_SKIP_CHECKSUM") != "":
+		fmt.Fprintln(out, "OSSPREY_SKIP_CHECKSUM is set: NOT verifying the sha256")
 	case errors.Is(err, errNotFound):
-		fmt.Fprintln(out, "no sha256 file found, skipping verification")
+		return fmt.Errorf("no sha256 file for %s; refusing to install an unverified binary (set OSSPREY_SKIP_CHECKSUM=1 to override)", tag)
 	case err != nil:
 		return fmt.Errorf("download checksum: %w", err)
 	default:

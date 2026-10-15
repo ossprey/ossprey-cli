@@ -139,7 +139,9 @@ ossprey update --force            # reinstall even if already on the target vers
 ```
 
 `update` downloads the release binary matching your OS/architecture, verifies
-its sha256, and atomically replaces the running executable. If the binary
+its sha256, and atomically replaces the running executable. Like the install
+scripts it refuses a release with no sha256 file unless `OSSPREY_SKIP_CHECKSUM=1`
+is set. If the binary
 lives in a root-owned directory (the `/usr/local/bin` default on Linux/macOS),
 run `sudo ossprey update`; the Windows default (`%LOCALAPPDATA%\Programs\ossprey`)
 is user-writable, so no elevation is needed.
