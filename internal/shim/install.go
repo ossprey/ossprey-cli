@@ -31,6 +31,9 @@ type Options struct {
 	ClearMode bool
 	// Git adds the opt-in git shim to whatever else is being installed.
 	Git bool
+	// Agents names coding agents whose own settings get the PATH entry, for
+	// agents that run shells reading no profile. See AgentClaude.
+	Agents []string
 }
 
 // ValidateMode checks the mode/monitor-id pairing before anything is written.
@@ -80,8 +83,11 @@ type Result struct {
 	Done      []ManagerResult
 	Skipped   []ManagerResult
 	Profiles  []string
-	OnPath    bool
-	PathHint  string
+	// Agents lists the agent settings files carrying (or, from Plan, about to
+	// carry) the PATH entry.
+	Agents   []string
+	OnPath   bool
+	PathHint string
 }
 
 // resolveMode keeps an installed passive mode across a re-run that names none.
@@ -102,6 +108,9 @@ func resolveMode(o Options, dir, manager string) (Mode, string) {
 
 func Plan(o Options) (*Result, error) {
 	if err := ValidateMode(o); err != nil {
+		return nil, err
+	}
+	if err := ValidateAgents(o.Agents); err != nil {
 		return nil, err
 	}
 	dir, bin, err := resolve(o)
@@ -137,11 +146,16 @@ func Plan(o Options) (*Result, error) {
 		})
 	}
 	res.Mode, res.MonitorID = summariseMode(res.Done, o)
-	if o.SkipProfiles || runtime.GOOS == "windows" {
-		return res, nil
-	}
 	home, err := homeDir(o)
 	if err != nil {
+		return res, nil
+	}
+	for _, path := range agentSettings(o, home) {
+		if !hasClaudeHookFor(path, dir) {
+			res.Agents = append(res.Agents, path)
+		}
+	}
+	if o.SkipProfiles || runtime.GOOS == "windows" {
 		return res, nil
 	}
 	for _, p := range Profiles(home) {
@@ -209,8 +223,33 @@ func Install(o Options) (*Result, error) {
 		}
 		res.Profiles, res.PathHint = profiles, hint
 	}
+	res.Agents = nil
+	if home, err := homeDir(o); err == nil {
+		for _, path := range agentSettings(o, home) {
+			wrote, err := WriteClaudeHook(path, res.Dir)
+			// Re-pointing an existing hook is best effort: a settings file the
+			// user has since broken must not fail a routine upgrade.
+			if err != nil && slices.Contains(o.Agents, AgentClaude) {
+				return nil, err
+			}
+			if wrote {
+				res.Agents = append(res.Agents, path)
+			}
+		}
+	}
 	res.OnPath = onPath(res.Dir)
 	return res, nil
+}
+
+// agentSettings returns the agent settings files to write: those asked for, plus
+// one already carrying our hook, so a flagless re-run re-points it rather than
+// leaving it naming a shim directory that may have moved.
+func agentSettings(o Options, home string) []string {
+	path := ClaudeSettingsPath(home)
+	if slices.Contains(o.Agents, AgentClaude) || HasClaudeHook(path) {
+		return []string{path}
+	}
+	return nil
 }
 
 func Uninstall(o Options) (*Result, error) {
@@ -261,6 +300,16 @@ func Uninstall(o Options) (*Result, error) {
 			return nil, err
 		}
 		res.Profiles = profiles
+		if home, err := homeDir(o); err == nil {
+			path := ClaudeSettingsPath(home)
+			removed, err := RemoveClaudeHook(path)
+			if err != nil {
+				return nil, err
+			}
+			if removed {
+				res.Profiles = append(res.Profiles, path)
+			}
+		}
 		if runtime.GOOS == "windows" {
 			if changed, err := windowsRemoveUserPath(dir); err == nil && changed {
 				res.Profiles = append(res.Profiles, "Windows user PATH")

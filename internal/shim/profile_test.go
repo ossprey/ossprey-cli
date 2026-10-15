@@ -101,6 +101,21 @@ func TestProfilesAlwaysIncludesDotProfile(t *testing.T) {
 	}
 }
 
+func TestProfilesIncludeZshenvWhenZshIsInstalled(t *testing.T) {
+	requirePOSIX(t)
+	home := t.TempDir()
+	t.Setenv("PATH", home)
+	writeExec(t, filepath.Join(home, "zsh"), "#!/bin/sh\n")
+
+	var paths []string
+	for _, p := range Profiles(home) {
+		paths = append(paths, p.Path)
+	}
+	if !contains(paths, filepath.Join(home, ".zshenv")) {
+		t.Fatalf("Profiles = %v, want ~/.zshenv, the one file `zsh -c` reads", paths)
+	}
+}
+
 func TestFishQuote(t *testing.T) {
 	if got := fishQuote(`/a'b\c`); got != `'/a\'b\\c'` {
 		t.Fatalf("fishQuote = %s", got)
