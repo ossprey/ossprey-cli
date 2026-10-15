@@ -2,6 +2,7 @@ package precommit
 
 import (
 	"context"
+	"path/filepath"
 	"reflect"
 	"testing"
 
@@ -128,5 +129,29 @@ func TestDiffPackagesRules(t *testing.T) {
 	}
 	if got.Trusted != 0 {
 		t.Fatalf("trusted = %d", got.Trusted)
+	}
+}
+
+// On an unborn branch, StagedDelta run from a subdirectory (a hook started in
+// one, `ossprey precommit` from sub/) still sees the whole index, with paths
+// git can read back.
+func TestStagedDeltaUnbornBranchFromSubdirectory(t *testing.T) {
+	dir := initRepo(t)
+	writeRepoFile(t, dir, "package-lock.json", npmLock(map[string]string{"left-pad": "1.3.0"}))
+	writeRepoFile(t, dir, "sub/package-lock.json", npmLock(map[string]string{"is-odd": "3.0.1"}))
+	writeRepoFile(t, dir, "my app/requirements.txt", "requests==2.31.0\n")
+	gitT(t, dir, "add", "-A") // no commit: unborn branch
+
+	got, err := StagedDelta(context.Background(), filepath.Join(dir, "sub"), trust.Policy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Package{
+		{Type: "npm", Name: "is-odd", Version: "3.0.1", Path: "sub/package-lock.json"},
+		{Type: "npm", Name: "left-pad", Version: "1.3.0", Path: "package-lock.json"},
+		{Type: "pypi", Name: "requests", Version: "2.31.0", Path: "my app/requirements.txt"},
+	}
+	if !reflect.DeepEqual(got.Packages, want) {
+		t.Fatalf("got %+v, want %+v", got.Packages, want)
 	}
 }

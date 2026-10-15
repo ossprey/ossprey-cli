@@ -57,6 +57,14 @@ func TestForwardGapsBlockBeforeTheManagerRuns(t *testing.T) {
 		{"uv add", "uv", pypiPurl, []string{"uv", "add", "--dev", "six==1.16.0"}, pyProject},
 		{"uvx", "uvx", pypiPurl, []string{"uvx", "--from", "six==1.16.0", "python"}, pyTarget},
 		{"poetry add", "poetry", pypiPurl, []string{"poetry", "add", "--group", "dev", "six==1.16.0"}, pyProject},
+		// Each of these used to install unchecked.
+		{"npm install typo alias", "npm", npmPurl, []string{"npm", "isntall", "left-pad@1.3.0"}, jsProject},
+		{"npm alias spec", "npm", npmPurl, []string{"npm", "install", "pad@npm:left-pad@1.3.0"}, jsProject},
+		{"yarn global add", "yarn", npmPurl, []string{"yarn", "global", "add", "left-pad@1.3.0"}, jsProject},
+		{"pip extras", "pip", pypiPurl, []string{"pip", "install", "--target", "site", "six[x]==1.16.0"}, pyTarget},
+		{"pip -r plus a named package", "pip", pypiPurl, []string{"pip", "install", "--target", "site", "-r", "requirements.txt", "idna==3.7"}, pyRequirements},
+		{"uv pip --requirements", "uv", pypiPurl, []string{"uv", "pip", "install", "--target", "site", "--requirements", "requirements.txt"}, pyRequirements},
+		{"uv tool install -w", "uv", pypiPurl, []string{"uv", "tool", "install", "--from", "idna==3.7", "idna", "-w", "six==1.16.0"}, pyTarget},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			needBin(t, tc.need)
@@ -96,6 +104,15 @@ func jsProject(t *testing.T, dir string) string {
 
 func pyTarget(t *testing.T, dir string) string {
 	t.Helper()
+	return "site"
+}
+
+// pyRequirements writes a requirements file naming the flagged package.
+func pyRequirements(t *testing.T, dir string) string {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, "requirements.txt"), []byte("six==1.16.0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	return "site"
 }
 

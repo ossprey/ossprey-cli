@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
@@ -22,6 +23,10 @@ type Spec struct {
 	Ecosystem string
 	Name      string
 	Version   string
+	// Constraint is what the token asked for when it names no single release:
+	// an npm range or dist-tag ("^4.17.0", "next"). A resolver uses it to pick
+	// the release the manager would install. Empty for a pin or a bare name.
+	Constraint string
 }
 
 func (s Spec) String() string { return fmt.Sprintf("%s/%s@%s", s.Ecosystem, s.Name, s.Version) }
@@ -138,31 +143,37 @@ func normalizeEcosystem(eco string) string {
 }
 
 // ParseSpec splits a package token ("name", "name@version", "name==version",
-// "@scope/name@version") into a Spec for the given ecosystem. Version is left
-// empty when the token is unpinned or uses a range specifier (>=, ~=, …); the
-// caller is expected to resolve a concrete version in that case.
+// "@scope/name@version") into a Spec for the given ecosystem. Version is set
+// only when the token pins exactly one release; a range, a tag or a wildcard
+// leaves it empty (npm keeps the range or tag in Constraint) and the caller
+// resolves a concrete version. A token naming no registry package (a URL, a
+// git or file spec) is an error.
 func ParseSpec(ecosystem, token string) (Spec, error) {
 	eco := normalizeEcosystem(ecosystem)
 	if eco == "" {
 		return Spec{}, fmt.Errorf("unsupported ecosystem %q (want pypi, npm or github)", ecosystem)
 	}
 
-	var name, version string
+	var s Spec
+	ok := true
 	switch eco {
-	case "npm", "github":
-		name, version = splitNpm(token)
+	case "npm":
+		s, ok = splitNpm(token)
+	case "github":
+		s.Name, s.Version = splitLastAt(token)
 	case "pypi":
-		name, version = splitPyPI(token)
+		s, ok = splitPyPI(token)
 	}
-	if name == "" {
+	if !ok || s.Name == "" {
 		return Spec{}, fmt.Errorf("cannot parse package token %q", token)
 	}
-	return Spec{Ecosystem: eco, Name: name, Version: version}, nil
+	s.Ecosystem = eco
+	return s, nil
 }
 
-// splitNpm parses "name@version" / "@scope/name@version" / "name". The version
-// delimiter is the last '@'; a leading '@' (scoped package) is not a delimiter.
-func splitNpm(token string) (name, version string) {
+// splitLastAt splits "name@ref" at the last '@'; a leading '@' (an npm scope)
+// is not a delimiter.
+func splitLastAt(token string) (name, version string) {
 	at := strings.LastIndex(token, "@")
 	if at <= 0 {
 		return token, ""
@@ -170,24 +181,89 @@ func splitNpm(token string) (name, version string) {
 	return token[:at], token[at+1:]
 }
 
-// splitPyPI parses a pip requirement / user-supplied pypi token:
-//   - "name==version"            -> concrete version
-//   - "name>=1" and other ranges -> bare name (caller resolves latest)
-//   - "name@version"             -> concrete version (the `check` CLI's friendly
-//     form); ignored when the part after '@' looks like a URL/VCS ref
-//     (contains '/' or ':'), e.g. pip's "pkg @ git+https://…".
-func splitPyPI(token string) (name, version string) {
-	if i := strings.IndexAny(token, "=<>~!"); i >= 0 {
-		name = token[:i]
-		if rest := token[i:]; strings.HasPrefix(rest, "==") {
-			version = rest[2:]
+// npmExact matches what npm-package-arg treats as one version (semver.valid
+// with loose parsing): an optional "v" or "=", then major.minor.patch.
+var npmExact = regexp.MustCompile(`^[=v]*\s*(\d+\.\d+\.\d+(?:-?[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)$`)
+
+// splitNpm parses an npm package spec the way npm-package-arg does. Only an
+// exact version is a pin: npm sends a range or a tag ("^4.17.0", "next",
+// "1.x") to the registry to pick a release, so taking it as a version would
+// check a release that does not exist. An alias ("x@npm:evil@1.0.0") installs
+// its target under another name, so the target is what gets checked. ok is
+// false for a spec that does not come from the registry at all (git, file,
+// workspace, a GitHub shorthand).
+func splitNpm(token string) (s Spec, ok bool) {
+	// The first '@' after a possible scope ends the name; the rest may itself
+	// contain '@' (an alias's own version).
+	name, spec := token, ""
+	if at := strings.Index(token, "@"); at == 0 {
+		if at = strings.Index(token[1:], "@"); at >= 0 {
+			name, spec = token[:at+1], token[at+2:]
 		}
-		return name, version
+	} else if at > 0 {
+		name, spec = token[:at], token[at+1:]
 	}
-	if at := strings.LastIndex(token, "@"); at > 0 {
-		if rest := token[at+1:]; rest != "" && !strings.ContainsAny(rest, "/:") {
-			return token[:at], rest
+	if rest, alias := strings.CutPrefix(spec, "npm:"); alias {
+		return splitNpm(rest)
+	}
+	spec = strings.TrimSpace(spec)
+	if strings.ContainsAny(spec, ":/") {
+		return Spec{}, false
+	}
+	s.Name = name
+	if m := npmExact.FindStringSubmatch(spec); m != nil {
+		s.Version = m[1]
+	} else if spec != "" && spec != "*" && spec != "latest" {
+		s.Constraint = spec
+	}
+	return s, true
+}
+
+// pypiName is the leading project name of a requirement (PEP 508).
+var pypiName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*`)
+
+// pypiExact is a plain release after poetry's / the check CLI's "name@".
+var pypiExact = regexp.MustCompile(`^v?[0-9][0-9A-Za-z.+!_-]*$`)
+
+// splitPyPI parses a PEP 508 requirement or a user-supplied pypi token. Extras
+// ("[security]") and environment markers ("; python_version>'3'") are not part
+// of the name. Only an exact single-release pin is a version: "==X" without a
+// wildcard, "===X", or "@X" with X a plain release (poetry's and the check
+// CLI's form). Anything else — a range, "==2.*", poetry's "@^7.0", "@latest" —
+// leaves it unpinned for the caller to resolve. ok is false for a direct
+// reference ("pkg @ https://…", "pkg@git+…"), which no registry serves.
+func splitPyPI(token string) (s Spec, ok bool) {
+	req, _, _ := strings.Cut(token, ";")
+	req = strings.TrimSpace(req)
+	s.Name = pypiName.FindString(req)
+	rest := strings.TrimSpace(req[len(s.Name):])
+	if strings.HasPrefix(rest, "[") {
+		if end := strings.IndexByte(rest, ']'); end >= 0 {
+			rest = strings.TrimSpace(rest[end+1:])
 		}
 	}
-	return token, ""
+	if v, at := strings.CutPrefix(rest, "@"); at {
+		v = strings.TrimSpace(v)
+		if strings.ContainsAny(v, ":/") {
+			return Spec{}, false
+		}
+		if pypiExact.MatchString(v) {
+			s.Version = v
+			return s, true
+		}
+		rest = v
+	}
+	rest = strings.TrimSuffix(strings.TrimPrefix(rest, "("), ")")
+	for _, clause := range strings.Split(rest, ",") {
+		clause = strings.TrimSpace(clause)
+		if v, ok := strings.CutPrefix(clause, "==="); ok {
+			s.Version = strings.TrimSpace(v)
+		} else if v, ok := strings.CutPrefix(clause, "=="); ok && !strings.Contains(v, "*") {
+			s.Version = strings.TrimSpace(v)
+		}
+		if s.Version != "" {
+			break
+		}
+	}
+	return s, true
 }

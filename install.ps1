@@ -26,6 +26,11 @@
 #   OSSPREY_SHIM_GIT=1                    Same as -Git.
 #   OSSPREY_OVERRIDE_PACKAGE_MANAGERS=1   Same as -OverridePackageManagers, and
 #                              the way to ask for shims through `irm ... | iex`.
+#   OSSPREY_SKIP_CHECKSUM=1               Install without verifying the sha256
+#                              (not recommended).
+#
+# Upgrading: shims already installed are re-pointed at the new binary, keeping
+# each one's mode; nothing else is shimmed.
 
 param([switch]$OverridePackageManagers, [switch]$Watchdog, [string]$MonitorId, [switch]$Git)
 
@@ -76,16 +81,23 @@ try {
     Log "downloading $Base/$Asset"
     Invoke-WebRequest -Uri "$Base/$Asset" -OutFile $exePath -UseBasicParsing
 
-    # --- verify sha256 if available ---
-    $sumPath = Join-Path $Tmp "$Asset.sha256"
-    $expected = $null
-    try {
-        Invoke-WebRequest -Uri "$Base/$Asset.sha256" -OutFile $sumPath -UseBasicParsing
+    # --- verify sha256 ---
+    # Fail closed: every release asset ships a .sha256 sidecar, so a binary we
+    # cannot verify is not installed. OSSPREY_SKIP_CHECKSUM=1 is the explicit,
+    # logged escape hatch.
+    if ($env:OSSPREY_SKIP_CHECKSUM) {
+        Log "OSSPREY_SKIP_CHECKSUM is set: NOT verifying the sha256 of $Asset"
+    } else {
+        $sumPath = Join-Path $Tmp "$Asset.sha256"
+        try {
+            Invoke-WebRequest -Uri "$Base/$Asset.sha256" -OutFile $sumPath -UseBasicParsing
+        } catch {
+            throw "could not download $Base/$Asset.sha256 to verify the binary (set OSSPREY_SKIP_CHECKSUM=1 to install unverified): $_"
+        }
         $expected = ((Get-Content $sumPath -Raw).Trim() -split '\s+')[0].ToLower()
-    } catch {
-        Log 'no sha256 file found, skipping verification'
-    }
-    if ($expected) {
+        if ($expected -notmatch '^[0-9a-f]{64}$') {
+            throw "malformed checksum file $Base/$Asset.sha256"
+        }
         Log 'verifying sha256'
         $actual = (Get-FileHash $exePath -Algorithm SHA256).Hash.ToLower()
         if ($expected -ne $actual) {
@@ -141,6 +153,25 @@ try {
         } catch {
             Log "shim install failed: $_"
             Log "ossprey itself is installed — run 'ossprey shim install' to retry"
+        }
+    } else {
+        # An upgrade re-points the shims already installed, so they call this
+        # binary and pick up the current shim script. Explicit --managers and
+        # --no-path keep it to exactly that: each shim keeps its own mode and
+        # nothing new is shimmed.
+        try {
+            $shimDir = & $dest shim dir
+            $shimmed = @(Get-ChildItem -Path $shimDir -Filter '*.cmd' -File -ErrorAction SilentlyContinue |
+                Where-Object { Select-String -Path $_.FullName -Pattern 'OSSPREY-SHIM-V1' -SimpleMatch -Quiet } |
+                ForEach-Object { $_.BaseName })
+            if ($shimmed.Count -gt 0) {
+                $list = $shimmed -join ','
+                Log "re-pointing existing shims ($list)"
+                & $dest shim install --no-path --managers $list | Out-Null
+                if ($LASTEXITCODE -ne 0) { throw "exit code $LASTEXITCODE" }
+            }
+        } catch {
+            Log "could not re-point the shims ($_) — run 'ossprey shim install' to retry"
         }
     }
 } finally {

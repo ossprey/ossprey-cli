@@ -2,7 +2,9 @@ package catalog
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -38,6 +40,49 @@ func (c *RequirementsCataloger) Catalog(ctx context.Context, resolver file.Resol
 		args := []string{"pip", "compile", "--universal", "--no-progress", absPath}
 		return runUV(ctx, c.uv, cache, dir, args, loc)
 	}
-	out, err := catalogByGlob(ctx, resolver, c.root, "**/requirements.txt", "requirements", parse)
+	out, err := catalogByGlob(ctx, resolver, c.root, requirementsGlob, "requirements", parse)
+	return out, nil, err
+}
+
+// requirementsGlob is syft's own requirements glob. Every cataloger that reads
+// requirements files uses it, so requirements-dev.txt is resolved, not just
+// read literally by syft.
+const requirementsGlob = "**/*requirements*.txt"
+
+// RequirementsTxtCataloger reports the requirements that pin no release
+// ("requests", "flask>2.0") as versionless direct deps, so they default to
+// latest like any other unpinned manifest entry. Syft drops the ones it cannot
+// guess a version for; a resolver's pinned version, where one ran, absorbs
+// these in mergeVersionless. Exact pins are left to syft and requirementPins.
+type RequirementsTxtCataloger struct {
+	root string
+}
+
+func NewRequirementsTxtCataloger(root string) *RequirementsTxtCataloger {
+	return &RequirementsTxtCataloger{root: root}
+}
+
+func (c *RequirementsTxtCataloger) Name() string { return "ossprey-requirementstxt-cataloger" }
+
+func (c *RequirementsTxtCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]pkg.Package, []artifact.Relationship, error) {
+	parse := func(absPath string, loc file.Location) ([]pkg.Package, error) {
+		data, err := os.ReadFile(absPath)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil, nil
+			}
+			return nil, err
+		}
+		var out []pkg.Package
+		for _, name := range unpinnedRequirements(data) {
+			out = append(out, pkg.Package{
+				Name:      normalizeName(name),
+				Type:      pkg.PythonPkg,
+				Locations: file.NewLocationSet(loc),
+			})
+		}
+		return out, nil
+	}
+	out, err := catalogByGlob(ctx, resolver, c.root, requirementsGlob, "requirements", parse)
 	return out, nil, err
 }

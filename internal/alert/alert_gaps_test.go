@@ -57,3 +57,26 @@ func TestMalwareOverflowAndOutcomes(t *testing.T) {
 		}
 	}
 }
+
+// An outcome too long for one headline row wraps inside the box instead of
+// panicking on a negative pad; an unbroken run is hard-split.
+func TestMalwareLongOutcomeWraps(t *testing.T) {
+	f := []Finding{{Name: "evil", Version: "1.0.0", Ecosystem: "npm"}}
+	for _, outcome := range []string{
+		"Installation blocked because this package was flagged by the Ossprey platform as malicious.",
+		strings.Repeat("x", 3*Width),
+	} {
+		out := ansi.Strip(Malware(f, outcome, ansi.TrueColor))
+		for _, l := range lines(out) {
+			if n := utf8.RuneCountInString(l); n != Width {
+				t.Errorf("line is %d runes, want %d: %q", n, Width, l)
+			}
+		}
+		if got := strings.Count(out, "x"); outcome[0] == 'x' && got != 3*Width {
+			t.Errorf("hard-split lost text: %d x's, want %d", got, 3*Width)
+		}
+	}
+	if out := Malware(f, "Installation blocked because this package was flagged.", ansi.None); !strings.Contains(out, "flagged.") {
+		t.Errorf("wrapped outcome lost its tail:\n%s", out)
+	}
+}

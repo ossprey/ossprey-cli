@@ -127,6 +127,8 @@ Windows resolves it under `%LOCALAPPDATA%`.
 
    **Fetch-and-execute** (`uvx`, `uv tool run`) is checked through its own path, never an install verb list: `Manager.toolRunAt` matches it and `parseToolRun` parses it, because only the first positional is a package and the rest is the program's own argv — `uvx cowsay moo` must check `cowsay`, not `moo` (a real package it could block on). `--from` names the package in the command's place, `--with` adds packages, `pkg@latest` is unpinned. A run with no registry package forwards unchecked rather than falling into the manifest-install scan. The flag asymmetry is two-sided here: an unlisted value flag makes its value read as the command, so the real package goes unchecked — which is why `toolRunValueFlags` is copied from `uv tool run --help` and `TestToolRunValueFlagsMatchUV` diffs it against the installed uv. `uvx` is a forwarder and a default shim of its own, since it is a separate binary.
 
+   **Only an exact pin is a version** (`check.ParseSpec`). Extras and markers are stripped (`evil[x]` checked as `evil`; it used to 404 and install unchecked). npm ranges and dist-tags travel in `Spec.Constraint`, and `registry.Resolve` picks what npm would: latest if it satisfies, else the highest match, else latest. `npmrange.go` ports node-semver; `TestNpmRangeMatchesNodeSemver` holds it to npm's copy. An npm alias (`x@npm:evil`) is checked as its target. npm's verb is looked up via `npmDeref`, a port of `cmd-list.js` including aliases, typos and abbreviations (`npm isntall x` used to go unchecked); `TestNpmCmdListMatchesNpm` diffs it against the installed npm. Named packages plus a requirements file (`pip install -r r.txt x`) are submitted with the project scan (`scanRequest.Specs`), never checked alone. uv's flag table is shared across subcommands, so a flag is listed only if it takes a value in every one; `TestUVInstallFlagTablesMatchUV` enforces that, and is why `-e/--editable` is absent.
+
    The npm side (`npx`, `npm exec`/`x`, `bunx`, `bun x`) uses the same `toolRunAt` plus a per-manager `Manager.parseRun` (`internal/forward/jsrun.go`). For npm a flag table was not good enough, because npm's parsing is not table-shaped: `npx-cli.js` rewrites argv (expanding shorthands, inserting `--` before what *it* thinks is the first positional, treating an unknown option as value-taking unless the next token starts with `-`) and then nopt re-parses the result with typed options, abbreviations (`--pack` is `--package`) and combined shorthands (`-gy`). `npx --no-update-notifier cowsay moo` is the case that bites: npx's rewrite reads `cowsay` as the option's value, nopt reads the option as a boolean, and npm runs cowsay — a one-stage reading checks `moo`. So `npxArgv` and `parseNpmArgv` are ports of the two stages, `npm_config.go` is npm's option table copied from `@npmcli/config` definitions, and two tests keep them honest against the installed npm: `TestNpmConfigTableMatchesNpm` diffs the table and `TestNpmParsersMatchNpm` runs the real `npx-cli.js`/`npm-cli.js` with only `lib/cli.js` swapped for a printer of npm's own nopt result. Note `-p` is `--package` to npx but `--parseable` to `npm exec`, and `npm exec` reads options after the command (`npm exec cowsay --package x` fetches `x`). bunx's parser really is simple (only `-p/--package` takes a value, unknown options and `--` are switches, `tsc`/`claude` are fetched as `typescript`/`@anthropic-ai/claude-code`), taken from bun's `bunx_command.rs`.
 
    **A bare command the project already has is not checked** (`installArgs.LocalCommand` + `projectHasBin`): npx and bunx run `node_modules/.bin/<cmd>` instead of fetching, so checking the registry package of that name checks something else and could block a run that installs nothing — `npx tsc` would check the unrelated `tsc` package. The lookup stops at the nearest directory with a `package.json` or `node_modules`, as npm's does; over-reaching would skip checks npm then fetches. A pinned version or `--package` is always checked. A tool run never takes the passive post-install path even when its manager has `Lockfile` (npm), since `npm exec` installs into npm's cache.
@@ -170,10 +172,11 @@ Two consequences worth keeping: the post-install catalogue falls back to a full 
 
 A shim is a generated `/bin/sh` script (`.cmd` on Windows) named after the manager, in `~/.ossprey/shims`, which shell profiles prepend to PATH inside a marked block. Four invariants hold it together:
 
-- **Recursion guard, twice.** The script strips its own directory from PATH before exec'ing, *and* `forward.Exec` resolves via `shim.LookPathReal`, which skips any PATH candidate containing `shim.Marker`. Either alone would do in the normal case; the pair covers symlinked/misspelled PATH entries.
+- **Recursion guard, twice.** The script strips its own directory from PATH before exec'ing, *and* `forward.Exec` resolves via `shim.LookPathReal`, which skips any PATH candidate containing `shim.Marker`. Either alone would do in the normal case; the pair covers symlinked/misspelled PATH entries. Except on the fail-open paths (bypass, missing binary), which exec the manager by name without `LookPathReal`: a `dir/` or symlinked PATH entry made the shim exec itself forever. Those paths also drop PATH entries whose `<entry>/<manager>` carries the marker, and `OSSPREY_SHIM_DEPTH` errors at 8 hand-offs rather than looping. The grep stays off the hot path.
 - **Fail open.** Missing ossprey binary or `OSSPREY_SHIM_BYPASS` set → exec the real manager with a warning. A scanner that can break `npm install` gets ripped out.
 - **The allowlist lives in `forward`, not the script.** Shims forward everything; `forward.Run`'s `installAt` decides what gets checked, so `npm run`/`poetry run` pass straight through. One allowlist, one language.
 - **Only our files.** `Uninstall` deletes only marker-carrying files; profile edits live between `# >>> ossprey shims >>>` markers.
+- **Installers fail closed on checksum** (`OSSPREY_SKIP_CHECKSUM=1` is the only way past it) and re-point existing shims on upgrade with `--no-path --managers <installed>`, so an upgrade never shims new managers or edits profiles.
 
 `shim` must stay a leaf package (`forward` imports it) — its only first-party dependency is `internal/monitor`, which is itself dependency-free. Do **not** reach for `internal/client` from here to validate a monitor id, which is what `internal/monitor` exists to avoid. `DefaultManagers()` and `forward.Managers()` are kept in agreement by an external test in `internal/shim/forward_agreement_test.go`.
 
@@ -246,6 +249,8 @@ directory `FileResolver` and runs them all unconditionally:
   - `PyProjectCataloger` — direct-deps fallback for `pyproject.toml` when no resolver is available.
   - `NpmResolveCataloger` — runs `npm install --package-lock-only` to resolve ranges when no lockfile is committed (npm analogue of uv).
   - `PackageJSONCataloger` — direct-deps fallback for `package.json`.
+  - `NpmLockCataloger` — reads `npm-shrinkwrap.json` (syft never globs it, yet `hasNpmLockfile` stands the npm resolve down for it) and the nested `dependencies` of v1 package-locks, which syft reads only at the top level.
+  - `RequirementsTxtCataloger` — versionless direct deps for requirements lines that pin no release (syft drops a bare `requests`). Exact pins are left to syft/`requirementPins`. Every requirements reader uses syft's own `**/*requirements*.txt` (`requirementsGlob`); a resolver globbing only `requirements.txt` left `requirements-dev.txt` direct-only.
 
 Custom catalogers shell out to a tool the caller resolved (`lookupUV`) or that
 they look up themselves (`npm`); a missing tool means the cataloger is not built,
@@ -298,7 +303,7 @@ cover.
 
 Output is deduped by `(type, name, version)`. `mergeVersionless` then collapses
 a package emitted both versionless (direct-deps fallback) and pinned (uv-resolved)
-into the pinned one. Vendored paths (`node_modules/`) are skipped (`isVendoredPath`).
+into the pinned one. Vendored paths (`node_modules/`) are skipped (`isVendoredPath`). Lockfile entries for the project's own code are dropped: yarn by resolution protocol (`workspace:`/`portal:`/`link:`/`file:`), npm when `resolved` is a scheme-less relative path (a workspace link). Otherwise the project's own name went to the API and was looked up on public npm.
 
 **Package sinks are excluded from the syft index itself** (`packageSinks`,
 `newDirectorySource`). Filtering `node_modules` packages after cataloguing was
@@ -468,6 +473,8 @@ same reason `PollBackoff` is: no test should sleep.
 used (`--api-key`/env, a stored login, or a monitor id — see
 `submit.NewClient`). The raw body is a JSON blob naming no fix, so printing it
 told a user with an expired key nothing about how to recover.
+
+`auth.Save` writes through a 0600 temp file and a rename: `os.WriteFile` applies its mode only on create, so an existing 0644 `credentials.json` stayed readable. `ossprey update` compares as semver, never as strings: plain `update`/`--check` only move forward; a downgrade needs `--version` or `--force`.
 
 ## Conventions worth knowing
 

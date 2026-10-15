@@ -381,9 +381,9 @@ func newCheckCmd() *cobra.Command {
 				// `check` resolves latest for unpinned packages, failing closed:
 				// if we can't pin a version we can't honestly check it.
 				if s.Version == "" {
-					v, err := registry.ResolveLatest(cmd.Context(), s.Ecosystem, s.Name)
+					v, err := registry.Resolve(cmd.Context(), s.Ecosystem, s.Name, s.Constraint)
 					if err != nil {
-						return fmt.Errorf("resolve latest version of %s: %w", s.Name, err)
+						return fmt.Errorf("resolve version of %s: %w", s.Name, err)
 					}
 					s.Version = v
 				}

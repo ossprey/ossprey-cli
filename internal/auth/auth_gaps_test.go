@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -251,5 +252,43 @@ func TestIdentity(t *testing.T) {
 		if got := (&Credentials{IDToken: tt.token}).Identity(); got != tt.want {
 			t.Errorf("%s: Identity() = %q, want %q", tt.name, got, tt.want)
 		}
+	}
+}
+
+// A credentials file left world-readable (an older build, a copied config,
+// a restrictive umask undone by hand) is tightened by the next save, and the
+// save leaves no temp file behind. A new config dir is owner-only.
+func TestSave_TightensAnExistingCredentialsFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits")
+	}
+	dir := filepath.Join(t.TempDir(), "cfg")
+	t.Setenv("OSSPREY_CONFIG_DIR", dir)
+	if err := Save(&Credentials{AccessToken: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	if info, _ := os.Stat(dir); info.Mode().Perm() != 0o700 {
+		t.Errorf("config dir mode = %o, want 700", info.Mode().Perm())
+	}
+	path, _ := Path()
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Save(&Credentials{AccessToken: "second"}); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("credentials mode = %o after re-save, want 600", perm)
+	}
+	if c, err := Load(); err != nil || c.AccessToken != "second" {
+		t.Fatalf("Load = %+v, %v", c, err)
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 1 {
+		t.Fatalf("config dir holds %d entries, want only credentials.json", len(entries))
 	}
 }

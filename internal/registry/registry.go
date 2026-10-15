@@ -73,6 +73,45 @@ func resolveNpm(ctx context.Context, name string) (string, error) {
 	return body.DistTags.Latest, nil
 }
 
+// Resolve returns the version a manager would install for name given what the
+// command asked for: constraint is an npm range or dist-tag ("^4.17.0",
+// "next"), or empty for the latest release. A constraint is honoured for npm
+// only; PyPI resolves to its latest release whatever was asked.
+//
+// A tag the registry does not have, or a range nothing satisfies, falls back to
+// the latest release: npm would fail that install anyway, and checking a real
+// release beats skipping the check.
+func Resolve(ctx context.Context, ecosystem, name, constraint string) (string, error) {
+	if constraint == "" || ecosystem != "npm" {
+		return ResolveLatest(ctx, ecosystem, name)
+	}
+	var body struct {
+		DistTags map[string]string          `json:"dist-tags"`
+		Versions map[string]json.RawMessage `json:"versions"`
+	}
+	// The abbreviated packument npm itself installs from: versions and tags
+	// without every release's README.
+	endpoint := npmBaseURL + url.PathEscape(name)
+	if err := getJSONAs(ctx, endpoint, "application/vnd.npm.install-v1+json", &body); err != nil {
+		return "", err
+	}
+	latest := body.DistTags["latest"]
+	versions := make([]string, 0, len(body.Versions))
+	for v := range body.Versions {
+		versions = append(versions, v)
+	}
+	if v, ok := pickNpmVersion(constraint, latest, versions); ok {
+		return v, nil
+	}
+	if v := body.DistTags[constraint]; v != "" {
+		return v, nil
+	}
+	if latest == "" {
+		return "", fmt.Errorf("npm registry returned no latest version for %q", name)
+	}
+	return latest, nil
+}
+
 // resolvePyPI reads info.version from the PyPI JSON API.
 func resolvePyPI(ctx context.Context, name string) (string, error) {
 	endpoint := pypiBaseURL + url.PathEscape(name) + "/json"
@@ -120,11 +159,15 @@ func resolveCargo(ctx context.Context, name string) (string, error) {
 }
 
 func getJSON(ctx context.Context, endpoint string, out any) error {
+	return getJSONAs(ctx, endpoint, "application/json", out)
+}
+
+func getJSONAs(ctx context.Context, endpoint, accept string, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept", accept)
 	req.Header.Set("User-Agent", userAgent)
 	resp, err := DefaultHTTP.Do(req)
 	if err != nil {

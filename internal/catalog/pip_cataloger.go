@@ -75,7 +75,7 @@ func (c *PipCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]p
 	reqParse := func(absPath string, loc file.Location) ([]pkg.Package, error) {
 		return runPipResolve(ctx, python, cache, filepath.Dir(absPath), []string{"-r", absPath}, loc)
 	}
-	reqs, err := catalogByGlob(ctx, resolver, c.root, "**/requirements.txt", "pip", reqParse)
+	reqs, err := catalogByGlob(ctx, resolver, c.root, requirementsGlob, "pip", reqParse)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -373,7 +373,7 @@ func warnNoPythonResolver(reason string) {
 // hasPythonManifest reports whether the tree declares Python dependencies
 // anywhere outside a vendored directory.
 func hasPythonManifest(resolver file.Resolver) bool {
-	for _, glob := range []string{"**/requirements.txt", "**/pyproject.toml", "**/setup.py"} {
+	for _, glob := range []string{requirementsGlob, "**/pyproject.toml", "**/setup.py"} {
 		locs, err := resolver.FilesByGlob(glob)
 		if err != nil {
 			continue

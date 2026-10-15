@@ -164,3 +164,77 @@ func TestRun_SubmitErrorIsReturned(t *testing.T) {
 		}
 	}
 }
+
+// Only a token that pins exactly one release carries a Version. Everything
+// else used to reach the API as a bogus name or version — "evil[x]" 404s and is
+// skipped, "lodash@^4.17.0" names no release, "lodash@npm:evil" checks lodash —
+// so the package actually installed went unchecked.
+func TestParseSpec_OnlyAnExactPinIsAVersion(t *testing.T) {
+	tests := []struct {
+		eco, token, name, version, constraint string
+	}{
+		// PyPI: extras, markers, operators, wildcards, poetry's "@".
+		{"pypi", "evil[x]", "evil", "", ""},
+		{"pypi", "evil[x,y]==1.0", "evil", "1.0", ""},
+		{"pypi", "evil [x] == 1.0", "evil", "1.0", ""},
+		{"pypi", `pkg; python_version>"3"`, "pkg", "", ""},
+		{"pypi", `pkg==1.2 ; python_version>"3"`, "pkg", "1.2", ""},
+		{"pypi", "pkg===1.0", "pkg", "1.0", ""},
+		{"pypi", "pkg==2.*", "pkg", "", ""},
+		{"pypi", "pkg>=1,==1.4", "pkg", "1.4", ""},
+		{"pypi", "pkg>=1,<2", "pkg", "", ""},
+		{"pypi", "requests@", "requests", "", ""},
+		{"pypi", "pkg@^7.0", "pkg", "", ""},
+		{"pypi", "pkg@latest", "pkg", "", ""},
+		{"pypi", "pkg@~=7.0", "pkg", "", ""},
+		{"pypi", "pkg@==7.0", "pkg", "7.0", ""},
+		{"pypi", "pkg@7.0.1", "pkg", "7.0.1", ""},
+		{"pypi", "pkg==1.0.0-beta.1", "pkg", "1.0.0-beta.1", ""},
+		// npm: only an exact semver pins; a range or tag is resolved.
+		{"npm", "lodash@4.17.21", "lodash", "4.17.21", ""},
+		{"npm", "lodash@v4.17.21", "lodash", "4.17.21", ""},
+		{"npm", "lodash@=4.17.21", "lodash", "4.17.21", ""},
+		{"npm", "lodash@^4.17.0", "lodash", "", "^4.17.0"},
+		{"npm", "lodash@~1", "lodash", "", "~1"},
+		{"npm", "lodash@1.x", "lodash", "", "1.x"},
+		{"npm", "lodash@>=1 <2", "lodash", "", ">=1 <2"},
+		{"npm", "lodash@next", "lodash", "", "next"},
+		{"npm", "lodash@latest", "lodash", "", ""},
+		{"npm", "lodash@", "lodash", "", ""},
+		{"npm", "lodash@1.2.3.4", "lodash", "", "1.2.3.4"},
+		{"npm", "lodash@npm:evil", "evil", "", ""},
+		{"npm", "lodash@npm:evil@1.0.0", "evil", "1.0.0", ""},
+		{"npm", "lodash@npm:@evil/pkg@^2", "@evil/pkg", "", "^2"},
+		{"npm", "@scope/pkg@npm:evil@1.0.0", "evil", "1.0.0", ""},
+		{"npm", "@scope/pkg@next", "@scope/pkg", "", "next"},
+	}
+	for _, tt := range tests {
+		s, err := ParseSpec(tt.eco, tt.token)
+		if err != nil {
+			t.Errorf("ParseSpec(%q, %q): %v", tt.eco, tt.token, err)
+			continue
+		}
+		if s.Name != tt.name || s.Version != tt.version || s.Constraint != tt.constraint {
+			t.Errorf("ParseSpec(%q, %q) = name %q version %q constraint %q, want %q %q %q",
+				tt.eco, tt.token, s.Name, s.Version, s.Constraint, tt.name, tt.version, tt.constraint)
+		}
+	}
+}
+
+// A spec no registry serves is not a package to check: the forwarder files it
+// with the other non-registry targets instead of looking up a bogus name.
+func TestParseSpec_NonRegistrySpecsAreErrors(t *testing.T) {
+	for _, tc := range []struct{ eco, token string }{
+		{"pypi", "pkg @ https://example.com/pkg.whl"},
+		{"pypi", "pkg@file:///tmp/pkg"},
+		{"npm", "pkg@github:user/repo"},
+		{"npm", "pkg@user/repo"},
+		{"npm", "pkg@file:../pkg"},
+		{"npm", "pkg@workspace:*"},
+		{"npm", "pkg@git+ssh://git@github.com/u/r.git"},
+	} {
+		if s, err := ParseSpec(tc.eco, tc.token); err == nil {
+			t.Errorf("ParseSpec(%q, %q) = %+v, want an error", tc.eco, tc.token, s)
+		}
+	}
+}

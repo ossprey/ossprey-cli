@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"reflect"
@@ -823,5 +824,82 @@ func TestRun_MixedLocalAndRegistryTargetsChecksOnlyTheRegistryOnes(t *testing.T)
 	}
 	if !ex.called || !reflect.DeepEqual(ex.args, args) {
 		t.Errorf("exec args = %v, want %v unchanged", ex.args, args)
+	}
+}
+
+// helpFlags reads a command's --help into the options that take a value and
+// those that do not. Both clap (uv) and optparse (pip) print a value as
+// "<NAME>" after the option.
+func helpFlags(t *testing.T, bin string, args ...string) (value, boolean map[string]bool) {
+	t.Helper()
+	out, err := exec.Command(bin, append(args, "--help")...).Output()
+	if err != nil {
+		t.Skipf("%s %v --help: %v", bin, args, err)
+	}
+	value, boolean = map[string]bool{}, map[string]bool{}
+	re := regexp.MustCompile(`(?m)^\s+(?:(-[a-zA-Z]), )?(--[a-z][a-z0-9-]*)(\.\.\.)?( <|  |$)`)
+	for _, m := range re.FindAllStringSubmatch(string(out), -1) {
+		into := boolean
+		if m[4] == " <" {
+			into = value
+		}
+		for _, f := range m[1:3] {
+			if f != "" {
+				into[f] = true
+			}
+		}
+	}
+	return value, boolean
+}
+
+// uv's install commands share one table, so a flag belongs in it only when it
+// takes a value in every command that has it: `-e/--editable` takes a path in
+// `uv pip install` but is a switch in `uv add` and `uv tool install`, where
+// listing it swallowed the package after it. And every flag that takes a value
+// everywhere must be listed, or its value is read as a package — or, for the
+// requirements and package flags, the file or package goes unchecked.
+func TestUVInstallFlagTablesMatchUV(t *testing.T) {
+	if _, err := exec.LookPath("uv"); err != nil {
+		t.Skip("uv not installed")
+	}
+	valueIn, boolIn := map[string]bool{}, map[string]bool{}
+	for _, sub := range [][]string{{"add"}, {"sync"}, {"lock"}, {"pip", "install"}, {"pip", "sync"}, {"tool", "install"}} {
+		v, b := helpFlags(t, "uv", sub...)
+		maps.Copy(valueIn, v)
+		maps.Copy(boolIn, b)
+	}
+	listed := func(f string) bool {
+		return valueFlags["uv"][f] || requirementFileFlags["uv"][f] ||
+			packageValueFlags["uv"][f] || sourceFlags["uv"][f]
+	}
+	for _, table := range []map[string]bool{valueFlags["uv"], requirementFileFlags["uv"], packageValueFlags["uv"], sourceFlags["uv"]} {
+		for f := range table {
+			if boolIn[f] {
+				t.Errorf("%s is a switch in some uv install command but is listed as taking a value", f)
+			}
+		}
+	}
+	for f := range valueIn {
+		if !boolIn[f] && !listed(f) {
+			t.Errorf("uv %s takes a value but is in no flag table", f)
+		}
+	}
+}
+
+// pip's install options, held to the installed pip the same way.
+func TestPipInstallFlagTablesMatchPip(t *testing.T) {
+	if _, err := exec.LookPath("pip"); err != nil {
+		t.Skip("pip not installed")
+	}
+	value, boolean := helpFlags(t, "pip", "install")
+	for f := range valueFlags["pip"] {
+		if boolean[f] {
+			t.Errorf("pip %s is a switch but is listed as taking a value", f)
+		}
+	}
+	for f := range value {
+		if !valueFlags["pip"][f] && !requirementFileFlags["pip"][f] {
+			t.Errorf("pip %s takes a value but is in no flag table", f)
+		}
 	}
 }

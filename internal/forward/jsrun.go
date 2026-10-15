@@ -54,10 +54,11 @@ type npmArgv struct {
 	Positionals []string
 }
 
-// npmExecAt matches `npm exec` and `npm x`. It starts the run at 0, not after
-// the verb, because npm reads options on either side of it.
+// npmExecAt matches `npm exec` under any name npm takes for it (`x`, `exe`).
+// It starts the run at 0, not after the verb, because npm reads options on
+// either side of it.
 func npmExecAt(args []string) (int, bool) {
-	if _, ok := verbAt("npm", "exec", "x")(args); ok {
+	if idx := verbIndex("npm", args); idx >= 0 && npmDeref(args[idx]) == "exec" {
 		return 0, true
 	}
 	return 0, false

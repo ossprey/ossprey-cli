@@ -381,7 +381,7 @@ func TestMalformedMonitorHeaderReadsAsBlocking(t *testing.T) {
 	}
 }
 
-// A flagless re-install -- what install.sh runs on every upgrade -- must not
+// A re-install naming no mode -- what install.sh runs on every upgrade -- must not
 // take one shim's passive mode and apply it to the rest. Doing so turned the
 // malware gate off for managers the user had deliberately left blocking.
 func TestReinstallInheritsEachManagersOwnMode(t *testing.T) {

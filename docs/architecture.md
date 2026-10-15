@@ -56,9 +56,12 @@ flowchart TD
     L -- "no" --> W{"passive mode?"}
 
     W -- "no: gating" --> X{"packages named?"}
-    X -- "yes" --> Y["check those packages"]
+    X -- "yes" --> R{"a requirements<br/>file too?"}
+    R -- "no" --> Y["check those packages"]
+    R -- "yes: pip install -r f pkg" --> RZ["scan the project manifest<br/>plus the named packages"]
     X -- "no: bare install" --> Z["scan the project manifest"]
     Y --> AA{"malware?"}
+    RZ --> AA
     Z --> AA
     AA -- "yes" --> AB["block: exit 1,<br/>manager never runs"]
     AA -- "no" --> U

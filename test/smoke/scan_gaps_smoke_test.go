@@ -48,15 +48,32 @@ func TestScanLockfilesWithoutFixtures(t *testing.T) {
 	cases := []struct {
 		name, file, body string
 		want             []string
+		absent           []string // name prefixes that must not appear
 	}{
 		{"uv.lock", "uv.lock", "version = 1\nrequires-python = \">=3.12\"\n\n[[package]]\nname = \"requests\"\nversion = \"2.31.0\"\nsource = { registry = \"https://pypi.org/simple\" }\n",
-			[]string{"requests@2.31.0"}},
+			[]string{"requests@2.31.0"}, nil},
 		{"pdm.lock", "pdm.lock", "[metadata]\ngroups = [\"default\"]\nlock_version = \"4.4\"\ncontent_hash = \"sha256:x\"\n\n[[package]]\nname = \"requests\"\nversion = \"2.31.0\"\nrequires_python = \">=3.7\"\nsummary = \"x\"\nfiles = []\n",
-			[]string{"requests@2.31.0"}},
+			[]string{"requests@2.31.0"}, nil},
 		{"package-lock v1", "package-lock.json", `{"name":"app","version":"1.0.0","lockfileVersion":1,"requires":true,"dependencies":{"left-pad":{"version":"1.3.0","resolved":"https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"}}}`,
-			[]string{"left-pad@1.3.0"}},
+			[]string{"left-pad@1.3.0"}, nil},
 		{"pnpm-lock v9", "pnpm-lock.yaml", "lockfileVersion: '9.0'\n\nimporters:\n\n  .:\n    dependencies:\n      left-pad:\n        specifier: 1.3.0\n        version: 1.3.0\n\npackages:\n\n  left-pad@1.3.0:\n    resolution: {integrity: sha512-x}\n\nsnapshots:\n\n  left-pad@1.3.0: {}\n",
-			[]string{"left-pad@1.3.0"}},
+			[]string{"left-pad@1.3.0"}, nil},
+		// v1 nests what npm could not hoist; syft reads only the top level.
+		{"package-lock v1 nested", "package-lock.json", v1NestedLock,
+			[]string{"is-number@7.0.0", "is-odd@3.0.1", "is-number@6.0.0"}, nil},
+		// The npm resolve stands down for a shrinkwrap, so it must be read.
+		{"npm-shrinkwrap", "npm-shrinkwrap.json", v1NestedLock,
+			[]string{"is-number@7.0.0", "is-odd@3.0.1", "is-number@6.0.0"}, nil},
+		// A workspace link is local code, never a versionless registry lookup.
+		{"package-lock workspace link", "package-lock.json", `{"name":"app","version":"1.0.0","lockfileVersion":3,"packages":{"":{"name":"app","version":"1.0.0"},
+"node_modules/my-internal-lib":{"resolved":"packages/my-internal-lib","link":true},"packages/my-internal-lib":{"name":"my-internal-lib","version":"1.0.0"},
+"node_modules/left-pad":{"version":"1.3.0","resolved":"https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"}}}`,
+			[]string{"left-pad@1.3.0"}, []string{"my-internal-lib@", "packages/my-internal-lib@"}},
+		// The berry root project is a lock entry of its own.
+		{"yarn berry workspace root", "yarn.lock", "__metadata:\n  version: 6\n  cacheKey: 8\n\n" +
+			"\"left-pad@npm:1.3.0\":\n  version: 1.3.0\n  resolution: \"left-pad@npm:1.3.0\"\n  languageName: node\n  linkType: hard\n\n" +
+			"\"app@workspace:.\":\n  version: 0.0.0-use.local\n  resolution: \"app@workspace:.\"\n  languageName: unknown\n  linkType: soft\n",
+			[]string{"left-pad@1.3.0"}, []string{"app@"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -75,7 +92,33 @@ func TestScanLockfilesWithoutFixtures(t *testing.T) {
 					t.Errorf("missing %s in %v", w, got)
 				}
 			}
+			for id := range got {
+				for _, a := range tc.absent {
+					if strings.HasPrefix(id, a) {
+						t.Errorf("unpublished %s emitted as a component", id)
+					}
+				}
+			}
 		})
+	}
+}
+
+const v1NestedLock = `{"name":"app","version":"1.0.0","lockfileVersion":1,"requires":true,"dependencies":{
+"is-number":{"version":"7.0.0","resolved":"https://registry.npmjs.org/is-number/-/is-number-7.0.0.tgz"},
+"is-odd":{"version":"3.0.1","resolved":"https://registry.npmjs.org/is-odd/-/is-odd-3.0.1.tgz","requires":{"is-number":"^6.0.0"},
+"dependencies":{"is-number":{"version":"6.0.0","resolved":"https://registry.npmjs.org/is-number/-/is-number-6.0.0.tgz"}}}}}`
+
+// The yarn berry fixture's own root project must not leak out of its lock.
+func TestScanYarnBerryFixtureOmitsTheProject(t *testing.T) {
+	sbomFile := filepath.Join(t.TempDir(), "sbom.json")
+	res := runScanEnv(t, nil, filepath.Join(fixturesDir(t), "yarn_berry_simple_math"), "--dry-run-safe", "--no-version-lookup", "-o", sbomFile)
+	if res.exitCode != 0 {
+		t.Fatalf("exit %d\nstderr: %s", res.exitCode, res.stderr)
+	}
+	for id := range componentIDs(t, sbomFile) {
+		if strings.HasPrefix(id, "yarn-berry-simple-math@") {
+			t.Errorf("root project %s emitted as a component", id)
+		}
 	}
 }
 

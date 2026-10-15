@@ -125,6 +125,21 @@ func Notice(ctx context.Context, opts NoticeOptions) error {
 	return cacheErr
 }
 
+// compareVersions orders current against target as semver: -1, 0 or 1. When
+// either does not parse (a dev build, an odd tag) it falls back to string
+// equality and reports -1 for a mismatch, so `ossprey update` stays usable.
+func compareVersions(current, target string) int {
+	c, cerr := parseVersion(current)
+	t, terr := parseVersion(target)
+	if cerr != nil || terr != nil {
+		if current == target {
+			return 0
+		}
+		return -1
+	}
+	return c.Compare(t)
+}
+
 func parseVersion(v string) (*goversion.Version, error) {
 	return goversion.NewSemver(strings.TrimPrefix(strings.TrimSpace(v), "v"))
 }
@@ -191,9 +206,18 @@ func Run(ctx context.Context, opts Options) error {
 
 	target := strings.TrimPrefix(tag, "v")
 	current := strings.TrimPrefix(opts.Current, "v")
-	if !opts.Force && target == current {
-		fmt.Fprintf(out, "ossprey %s is already the latest version\n", current)
-		return nil
+	if !opts.Force {
+		switch compareVersions(current, target) {
+		case 0:
+			fmt.Fprintf(out, "ossprey %s is already the latest version\n", current)
+			return nil
+		case 1:
+			// Only an explicit --version may downgrade; "latest" never does.
+			if opts.Target == "" {
+				fmt.Fprintf(out, "ossprey %s is newer than the latest release (%s); nothing to do\n", current, target)
+				return nil
+			}
+		}
 	}
 	if opts.CheckOnly {
 		fmt.Fprintf(out, "update available: %s -> %s (run `ossprey update` to install)\n", current, target)

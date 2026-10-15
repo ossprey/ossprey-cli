@@ -27,9 +27,9 @@ func TestParseSpec(t *testing.T) {
 		{name: "pypi bare", ecosystem: "pypi", token: "requests", wantEco: "pypi", wantName: "requests", wantVersion: ""},
 		{name: "pypi range strips version", ecosystem: "pypi", token: "requests>=2.0", wantEco: "pypi", wantName: "requests", wantVersion: ""},
 		{name: "pypi @ friendly form", ecosystem: "pypi", token: "requests@2.31.0", wantEco: "pypi", wantName: "requests", wantVersion: "2.31.0"},
-		{name: "pypi @ url is not a version", ecosystem: "pypi", token: "mypkg@git+https://x/y", wantEco: "pypi", wantName: "mypkg@git+https://x/y", wantVersion: ""},
+		{name: "pypi @ url is not a registry package", ecosystem: "pypi", token: "mypkg@git+https://x/y", wantErr: true},
 		{name: "pypi alias pip", ecosystem: "pip", token: "flask==3.0", wantEco: "pypi", wantName: "flask", wantVersion: "3.0"},
-		{name: "npm alias yarn", ecosystem: "yarn", token: "react@18", wantEco: "npm", wantName: "react", wantVersion: "18"},
+		{name: "npm alias yarn", ecosystem: "yarn", token: "react@18.2.0", wantEco: "npm", wantName: "react", wantVersion: "18.2.0"},
 		{name: "bad ecosystem", ecosystem: "cargo", token: "serde", wantErr: true},
 	}
 

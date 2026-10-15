@@ -193,12 +193,18 @@ func TestWindowsScriptContent(t *testing.T) {
 		":: " + modePrefix + "monitor " + testMonitorID + "\n",
 		// Trailing backslash dropped so the ";"-anchored strip matches.
 		`call set "PATH=%%PATH:C:\Users\dev\AppData\Local\ossprey\shims;=%%"`,
+		// ...and the trailing-backslash spelling of the same entry.
+		`call set "PATH=%%PATH:C:\Users\dev\AppData\Local\ossprey\shims\;=%%"`,
+		// Re-entry guard: counted on the bypass path, checked on entry.
+		`set /a "ossprey_depth=` + depthEnv + `+0"`,
+		"if %ossprey_depth% GEQ " + maxDepth + " (",
+		":ossprey_bypass\nset /a \"" + depthEnv + "=ossprey_depth+1\" >nul\n",
 		"if defined " + BypassEnv + " goto ossprey_bypass\n",
 		`if not exist "` + bin + `" (`,
 		`set "` + passiveEnv + `=1"` + "\n",
 		`set "` + monitorEnv + `=` + testMonitorID + `"` + "\n",
 		`"` + bin + `" npm %*` + "\n",
-		":ossprey_bypass\ncall npm %*\nexit /b %ERRORLEVEL%\n",
+		"call npm %*\nexit /b %ERRORLEVEL%\n",
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf(".cmd shim is missing %q:\n%s", want, script)

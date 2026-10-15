@@ -31,10 +31,10 @@ check and no API call.
 
 | Manager | Checked subcommands |
 | ------- | ------------------- |
-| `npm` | `install`, `i`, `add`, `ci`, `update`, `up`, `exec`, `x` |
+| `npm` | `install`, `ci`, `update`, `install-test`, `install-ci-test` and `exec`, under every name npm accepts for them: aliases (`i`, `add`, `clean-install`, `upgrade`, `it`, `cit`, `x`, …), its built-in typo aliases (`isntall`, `udpate`, …) and unambiguous abbreviations (`insta`, `upd`) |
 | `npx` | every invocation (`npx` is `npm exec`) |
-| `pnpm` | `install`, `i`, `add`, `update`, `up` |
-| `yarn` | `add`, `install`, `upgrade`, `up` |
+| `pnpm` | `install`, `i`, `add`, `update`, `up`, `upgrade`, `install-test`, `it` |
+| `yarn` | `add`, `install`, `upgrade`, `up`, bare `yarn` (an install), `global add`, `global upgrade`, and any of these after `workspace <name>` |
 | `bun` | `install`, `i`, `ci`, `add`, `a`, `update`, `up`, `x` |
 | `bunx` | every invocation (`bunx` is `bun x`) |
 | `pip`, `pip3` | `install` |
@@ -105,13 +105,31 @@ from the lockfile.
   foo==1 bar`): every package named on the command line is checked. Multiple
   packages, flags, flag-values, local paths, archives and VCS/URL targets are
   all handled — only the real registry packages are checked, the rest are noted
-  and forwarded. `uv tool install` counts its `--with` packages as named too,
-  and with `--from 'ruff==0.6.0' ruff` checks the `--from` package rather than
-  the bare name. Transitive dependencies are **not** resolved here; run `ossprey
-  scan` after install for full-tree coverage.
+  and forwarded. `uv tool install` counts its `--with`/`-w` and
+  `--with-executables-from` packages as named too (comma-separated lists
+  included), and with `--from 'ruff==0.6.0' ruff` checks the `--from` package
+  rather than the bare name. Transitive dependencies are **not** resolved here;
+  run `ossprey scan` after install for full-tree coverage.
+
+  A named package is checked at the release the manager would install. Only an
+  exact pin is taken as the version: `foo@1.2.3` for npm, `foo==1.2` or
+  `foo===1.2` for PyPI (also poetry's `foo@1.2`). Anything else is resolved from
+  the registry: an npm range (`foo@^4.17.0`, `~1`, `1.x`, `>=1 <2`) to the
+  release npm would pick (`latest` if it satisfies the range, otherwise the
+  highest match), an npm dist-tag (`foo@next`) to that tag, and a PyPI range,
+  wildcard (`==2.*`) or poetry constraint (`foo@^7.0`) to the latest release.
+  An npm range nothing satisfies, or a tag the registry does not have, falls
+  back to `latest`. PyPI extras and markers (`foo[socks]; python_version>"3"`)
+  are not part of the name, and an npm alias (`foo@npm:bar@1.0.0`) is checked
+  as `bar`, the package actually installed.
+- **Named packages plus a requirements file** (`pip install -r
+  requirements.txt flask`, `uv pip install -r requirements.txt flask`): both
+  are installed, so both are checked in one submission — the current directory
+  is scanned as for a manifest install and the named packages are added to it.
 - **Manifest install** (bare `ossprey npm install`, `npm ci`, `yarn install`,
-  `bun install`, `poetry install`, `poetry sync`, `uv sync`, `uv pip sync requirements.txt`, or
-  `pip install -r requirements.txt`): no
+  bare `yarn`, `bun install`, `poetry install`, `poetry sync`, `uv sync`,
+  `uv pip sync requirements.txt`, or `pip install -r requirements.txt` /
+  `uv pip install --requirements requirements.txt`): no
   packages are named, so the manager installs from the project's
   manifest/lockfile. The forwarder scans the current directory and checks every
   declared dependency before forwarding — it does **not** fall through

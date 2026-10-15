@@ -254,3 +254,42 @@ func TestLatestTagParsesTheRedirect(t *testing.T) {
 		}
 	}
 }
+
+// A build newer than the latest release (a release candidate, a fresh tag the
+// redirect has not caught up with) is never "updated" backwards, by --check or
+// by a plain update. Only --force or an explicit --version may downgrade.
+func TestRunNeverDowngradesToLatest(t *testing.T) {
+	for _, current := range []string{"1.1.0", "v1.10.0"} {
+		srv, downloads := newReleaseServer(t, "v1.0.0", []byte("old release"), true)
+		for _, check := range []bool{true, false} {
+			exe := fakeExe(t)
+			var out bytes.Buffer
+			err := Run(context.Background(), Options{Current: current, CheckOnly: check, BaseURL: srv.URL, ExePath: exe, Out: &out})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(out.String(), "update available") || downloads.Load() != 0 {
+				t.Fatalf("current %s check=%v: out=%q downloads=%d", current, check, out.String(), downloads.Load())
+			}
+			if got, _ := os.ReadFile(exe); string(got) != "old binary" {
+				t.Fatalf("current %s: binary replaced: %q", current, got)
+			}
+		}
+	}
+
+	srv, downloads := newReleaseServer(t, "v1.0.0", []byte("old release"), true)
+	if err := Run(context.Background(), Options{Current: "1.1.0", Force: true, BaseURL: srv.URL, ExePath: fakeExe(t)}); err != nil || downloads.Load() != 1 {
+		t.Fatalf("--force: err=%v downloads=%d; want the downgrade installed", err, downloads.Load())
+	}
+}
+
+// Comparison is numeric, and a dev build (no comparable version) can still
+// update rather than being stuck.
+func TestRunComparesAsSemver(t *testing.T) {
+	for _, current := range []string{"1.9.0", "dev", "1.10.0-rc.1"} {
+		srv, downloads := newReleaseServer(t, "v1.10.0", []byte("new"), true)
+		if err := Run(context.Background(), Options{Current: current, BaseURL: srv.URL, ExePath: fakeExe(t)}); err != nil || downloads.Load() != 1 {
+			t.Errorf("current %s: err=%v downloads=%d; want an update", current, err, downloads.Load())
+		}
+	}
+}

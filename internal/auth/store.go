@@ -112,7 +112,22 @@ func Save(c *Credentials) error {
 	if err != nil {
 		return fmt.Errorf("encode credentials: %w", err)
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	// os.WriteFile applies its mode only on create, so an existing 0644 file
+	// would keep leaking tokens. Write a fresh 0600 temp file (CreateTemp's
+	// mode) beside it and rename over, which also never leaves a torn file.
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".credentials-*.json")
+	if err != nil {
+		return fmt.Errorf("write credentials: %w", err)
+	}
+	defer os.Remove(tmp.Name()) // no-op after a successful rename
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("write credentials: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("write credentials: %w", err)
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
 		return fmt.Errorf("write credentials: %w", err)
 	}
 	return nil
