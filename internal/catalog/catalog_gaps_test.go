@@ -360,12 +360,12 @@ func TestDirectorySourceSkipsPackageSinksUnderSymlinkedRoot(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlinks need privileges on Windows")
 	}
-	real := t.TempDir()
+	realDir := t.TempDir()
 	for _, rel := range []string{"package.json", "node_modules/left-pad/package.json", ".venv/lib/x/package.json"} {
-		sinkFixture(t, real, rel, `{"name":"x","version":"1.0.0"}`)
+		sinkFixture(t, realDir, rel, `{"name":"x","version":"1.0.0"}`)
 	}
 	link := filepath.Join(t.TempDir(), "link")
-	if err := os.Symlink(real, link); err != nil {
+	if err := os.Symlink(realDir, link); err != nil {
 		t.Skipf("symlink: %v", err)
 	}
 

@@ -411,6 +411,9 @@ func TestGitOutputUsesTheRealGitWithBypass(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Fatal(err)
 	}
+	if p, err := shim.LookPathReal("git"); err == nil {
+		t.Fatalf("LookPathReal returned the shim %q", p)
+	}
 	if got := gitOutput(".", "x"); got != "" {
 		t.Fatalf("gitOutput ran the shim: %q", got)
 	}

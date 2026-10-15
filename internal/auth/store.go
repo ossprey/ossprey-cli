@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
@@ -111,6 +112,14 @@ func Save(c *Credentials) error {
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode credentials: %w", err)
+	}
+	// Windows has no mode bits to tighten; a renamed temp file would inherit
+	// the directory's ACL and drop a private one on the existing file.
+	if runtime.GOOS == "windows" {
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			return fmt.Errorf("write credentials: %w", err)
+		}
+		return nil
 	}
 	// os.WriteFile applies its mode only on create, so an existing 0644 file
 	// would keep leaking tokens. Write a fresh 0600 temp file (CreateTemp's

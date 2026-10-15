@@ -1118,12 +1118,13 @@ var toolRunValueFlags = flagSet("--from", "-w", "--with", "--with-editable",
 
 // splitRequirements splits uv's comma-separated requirement list (`--with
 // a,b>=1,<2`) the way uv does: a comma starts a new requirement unless what
-// follows it continues a version specifier.
+// follows it continues a version specifier. A PEP 440 clause always opens with
+// an operator, so a leading digit is a new name (`3to2`), not a continuation.
 func splitRequirements(value string) []string {
 	var out []string
 	for _, part := range strings.Split(value, ",") {
 		trimmed := strings.TrimSpace(part)
-		if len(out) > 0 && (trimmed == "" || strings.ContainsAny(trimmed[:1], "<>=!~0123456789")) {
+		if len(out) > 0 && (trimmed == "" || strings.ContainsAny(trimmed[:1], "<>=!~")) {
 			out[len(out)-1] += "," + part
 			continue
 		}

@@ -75,11 +75,14 @@ func TestAccessToken_RefreshUsesTheStoredTenant(t *testing.T) {
 	if _, err := AccessToken(context.Background(), hc); err != nil {
 		t.Fatalf("AccessToken: %v", err)
 	}
-	if host != "auth.stored.test" {
-		t.Errorf("refresh host: got %q, want the stored domain", host)
+	mu.Lock()
+	gotHost, gotCID := host, clientID
+	mu.Unlock()
+	if gotHost != "auth.stored.test" {
+		t.Errorf("refresh host: got %q, want the stored domain", gotHost)
 	}
-	if clientID != "stored-cid" {
-		t.Errorf("refresh client_id: got %q, want stored-cid", clientID)
+	if gotCID != "stored-cid" {
+		t.Errorf("refresh client_id: got %q, want stored-cid", gotCID)
 	}
 }
 

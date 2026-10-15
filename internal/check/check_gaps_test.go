@@ -232,9 +232,18 @@ func TestParseSpec_NonRegistrySpecsAreErrors(t *testing.T) {
 		{"npm", "pkg@file:../pkg"},
 		{"npm", "pkg@workspace:*"},
 		{"npm", "pkg@git+ssh://git@github.com/u/r.git"},
+		{"npm", "user/repo"},
+		{"npm", "user/repo#v1.0.0"},
 	} {
 		if s, err := ParseSpec(tc.eco, tc.token); err == nil {
 			t.Errorf("ParseSpec(%q, %q) = %+v, want an error", tc.eco, tc.token, s)
 		}
+	}
+}
+
+func TestParseSpec_ScopedNameIsNotAGitHubShorthand(t *testing.T) {
+	s, err := ParseSpec("npm", "@scope/pkg@1.2.3")
+	if err != nil || s.Name != "@scope/pkg" || s.Version != "1.2.3" {
+		t.Fatalf("ParseSpec = %+v, %v", s, err)
 	}
 }

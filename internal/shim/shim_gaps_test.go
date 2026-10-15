@@ -1,6 +1,7 @@
 package shim
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -174,8 +175,8 @@ func TestShimBypassKeepsTheManagersExitCode(t *testing.T) {
 	cmd := exec.Command(filepath.Join(shimDir, "npm"), "install")
 	cmd.Env = []string{"PATH=" + shimDir + ":" + realDir, BypassEnv + "=1"}
 	err := cmd.Run()
-	ee, ok := err.(*exec.ExitError)
-	if !ok || ee.ExitCode() != 7 {
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) || ee.ExitCode() != 7 {
 		t.Fatalf("exit = %v, want the real npm's 7", err)
 	}
 }

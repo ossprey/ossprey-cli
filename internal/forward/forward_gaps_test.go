@@ -462,9 +462,9 @@ func TestRun_UnpinnedResolvedToLatestCanBlock(t *testing.T) {
 func TestRun_PartialRegistryOutageStillChecksTheRest(t *testing.T) {
 	ex := &stubExec{}
 	var got []check.Spec
-	swap(t, ex.fn, func(_ context.Context, o check.Options) (*ossbom.SBOM, error) {
+	swap(t, ex.fn, func(ctx context.Context, o check.Options) (*ossbom.SBOM, error) {
 		got = o.Specs
-		return malwareSBOM(context.Background(), o)
+		return malwareSBOM(ctx, o)
 	})
 	err := Run(context.Background(), Options{
 		Bin:  "npm",
@@ -617,9 +617,9 @@ func TestRun_PassiveRoutingPerManager(t *testing.T) {
 			swapLocalBin(t, false)
 			ex := &stubExec{}
 			var got check.Options
-			swap(t, ex.fn, func(_ context.Context, o check.Options) (*ossbom.SBOM, error) {
+			swap(t, ex.fn, func(ctx context.Context, o check.Options) (*ossbom.SBOM, error) {
 				got = o
-				return cleanSBOM(context.Background(), o)
+				return cleanSBOM(ctx, o)
 			})
 			var scan *scanRequest
 			swapScan(t, func(_ context.Context, req scanRequest) (*ossbom.SBOM, error) {
@@ -654,9 +654,9 @@ func TestRun_PassiveMonitorIDReachesTheSubmission(t *testing.T) {
 
 	var chk check.Options
 	swap(t, func(context.Context, string, []string) error { return nil },
-		func(_ context.Context, o check.Options) (*ossbom.SBOM, error) {
+		func(ctx context.Context, o check.Options) (*ossbom.SBOM, error) {
 			chk = o
-			return cleanSBOM(context.Background(), o)
+			return cleanSBOM(ctx, o)
 		})
 	if err := Run(context.Background(), Options{Bin: "pip", Args: []string{"install", "flask==3.0.0"},
 		Passive: true, MonitorID: id}); err != nil {
@@ -666,11 +666,11 @@ func TestRun_PassiveMonitorIDReachesTheSubmission(t *testing.T) {
 		t.Errorf("named submission: MonitorID=%q SubmitOnly=%v", chk.MonitorID, chk.SubmitOnly)
 	}
 
-	for _, args := range [][]string{{"install"}, {"install", "-r", "req.txt"}} {
-		bin := "npm"
-		if args[len(args)-1] == "req.txt" {
-			bin = "pip"
-		}
+	for _, tc := range []struct {
+		bin  string
+		args []string
+	}{{"npm", []string{"install"}}, {"pip", []string{"install", "-r", "req.txt"}}} {
+		bin, args := tc.bin, tc.args
 		var req scanRequest
 		swapScan(t, func(_ context.Context, r scanRequest) (*ossbom.SBOM, error) {
 			req = r
@@ -809,11 +809,11 @@ func TestRun_WarningsDrainBeforeEveryExec(t *testing.T) {
 func TestRun_MixedLocalAndRegistryTargetsChecksOnlyTheRegistryOnes(t *testing.T) {
 	ex := &stubExec{}
 	var got []string
-	swap(t, ex.fn, func(_ context.Context, o check.Options) (*ossbom.SBOM, error) {
+	swap(t, ex.fn, func(ctx context.Context, o check.Options) (*ossbom.SBOM, error) {
 		for _, s := range o.Specs {
 			got = append(got, s.Name)
 		}
-		return cleanSBOM(context.Background(), o)
+		return cleanSBOM(ctx, o)
 	})
 	args := []string{"add", "git+https://github.com/x/y.git", "../lib", "lodash@4.17.21", "https://e.com/a.tgz"}
 	if err := Run(context.Background(), Options{Bin: "yarn", Args: args}); err != nil {
@@ -901,5 +901,14 @@ func TestPipInstallFlagTablesMatchPip(t *testing.T) {
 		if !valueFlags["pip"][f] && !requirementFileFlags["pip"][f] {
 			t.Errorf("pip %s takes a value but is in no flag table", f)
 		}
+	}
+}
+
+// A clause after a comma opens with an operator; a digit starts a new name.
+func TestSplitRequirementsDigitStartsANewName(t *testing.T) {
+	got := splitRequirements("ok,3to2,b>=1,<2")
+	want := []string{"ok", "3to2", "b>=1,<2"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("splitRequirements = %q, want %q", got, want)
 	}
 }

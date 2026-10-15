@@ -210,6 +210,10 @@ func splitNpm(token string) (s Spec, ok bool) {
 	if strings.ContainsAny(spec, ":/") {
 		return Spec{}, false
 	}
+	// An unscoped name never contains '/': "user/repo" is a GitHub shorthand.
+	if !strings.HasPrefix(name, "@") && strings.Contains(name, "/") {
+		return Spec{}, false
+	}
 	s.Name = name
 	if m := npmExact.FindStringSubmatch(spec); m != nil {
 		s.Version = m[1]
