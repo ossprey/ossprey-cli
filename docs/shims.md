@@ -92,7 +92,9 @@ missing from PATH. Cover those by setting PATH where they start:
   hook to `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR`) that puts the shim
   directory first on PATH for every command Claude Code runs. It applies from
   the next session, is re-pointed by a later `shim install`, and is removed by
-  `shim uninstall`. Not yet available on Windows.
+  `shim uninstall`. `--no-path` leaves an existing hook alone unless you also
+  pass `--agent`. Not needed on Windows, where the user PATH already reaches
+  agents.
 - **CI and containers:** `--no-path`, then set PATH in the job or image (below).
 
 In a container image, skip the profile edit and set PATH directly:

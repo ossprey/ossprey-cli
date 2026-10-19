@@ -88,6 +88,8 @@ type Result struct {
 	Agents   []string
 	OnPath   bool
 	PathHint string
+	// Warnings are things that did not happen but must not fail the command.
+	Warnings []string
 }
 
 // resolveMode keeps an installed passive mode across a re-run that names none.
@@ -151,7 +153,14 @@ func Plan(o Options) (*Result, error) {
 	if err != nil {
 		return res, nil
 	}
+	if len(o.Agents) > 0 && runtime.GOOS == "windows" {
+		res.Warnings = append(res.Warnings, agentsUnsupported)
+	}
 	for _, path := range agentSettings(o, home) {
+		if _, err := claudeHookCommands(path); err != nil {
+			res.Warnings = append(res.Warnings, "Claude Code hook not updated: "+err.Error())
+			continue
+		}
 		if !hasClaudeHookFor(path, dir) {
 			res.Agents = append(res.Agents, path)
 		}
@@ -228,9 +237,12 @@ func Install(o Options) (*Result, error) {
 	if home, err := homeDir(o); err == nil {
 		for _, path := range agentSettings(o, home) {
 			wrote, err := WriteClaudeHook(path, res.Dir)
-			// Re-pointing an existing hook is best effort: a settings file the
-			// user has since broken must not fail a routine upgrade.
-			if err != nil && slices.Contains(o.Agents, AgentClaude) {
+			if err != nil {
+				// Re-pointing an existing hook is best effort: a settings file
+				// the user has since broken must not fail a routine upgrade.
+				if !slices.Contains(o.Agents, AgentClaude) {
+					continue
+				}
 				return nil, err
 			}
 			if wrote {
@@ -240,17 +252,6 @@ func Install(o Options) (*Result, error) {
 	}
 	res.OnPath = onPath(res.Dir)
 	return res, nil
-}
-
-// agentSettings returns the agent settings files to write: those asked for, plus
-// one already carrying our hook, so a flagless re-run re-points it rather than
-// leaving it naming a shim directory that may have moved.
-func agentSettings(o Options, home string) []string {
-	path := ClaudeSettingsPath(home)
-	if slices.Contains(o.Agents, AgentClaude) || HasClaudeHook(path) {
-		return []string{path}
-	}
-	return nil
 }
 
 func Uninstall(o Options) (*Result, error) {
@@ -301,19 +302,24 @@ func Uninstall(o Options) (*Result, error) {
 			return nil, err
 		}
 		res.Profiles = profiles
-		if home, err := homeDir(o); err == nil {
-			path := ClaudeSettingsPath(home)
-			removed, err := RemoveClaudeHook(path)
-			if err != nil {
-				return nil, err
-			}
-			if removed {
-				res.Profiles = append(res.Profiles, path)
-			}
-		}
 		if runtime.GOOS == "windows" {
 			if changed, err := windowsRemoveUserPath(dir); err == nil && changed {
 				res.Profiles = append(res.Profiles, "Windows user PATH")
+			}
+		}
+	}
+	// The Claude hook goes with a full uninstall, and also under --no-path when
+	// it points at the directory just emptied, which would leave it dangling.
+	if home, err := homeDir(o); err == nil && len(only) == 0 {
+		path := ClaudeSettingsPath(home)
+		abs, _ := filepath.Abs(dir)
+		if !o.SkipProfiles || hasClaudeHookFor(path, abs) {
+			removed, err := RemoveClaudeHook(path)
+			switch {
+			case err != nil:
+				res.Warnings = append(res.Warnings, "Claude Code hook not removed: "+err.Error())
+			case removed:
+				res.Profiles = append(res.Profiles, path)
 			}
 		}
 	}

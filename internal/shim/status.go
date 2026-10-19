@@ -95,7 +95,7 @@ func Load(o Options) (*Status, error) {
 	for _, p := range Profiles(home) {
 		st.Profiles = append(st.Profiles, ProfileStatus{Path: p.Path, Managed: HasBlock(p.Path)})
 	}
-	if path := ClaudeSettingsPath(home); HasClaudeHook(path) {
+	if path := ClaudeSettingsPath(home); hasClaudeHookFor(path, dir) {
 		st.ClaudeHook = path
 	}
 	return st, nil

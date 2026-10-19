@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"runtime"
 	"strings"
 
@@ -171,6 +172,7 @@ func newShimUninstallCmd() *cobra.Command {
 			for _, p := range res.Profiles {
 				fmt.Println("Cleaned PATH entry from " + p)
 			}
+			printWarnings(res.Warnings)
 			if len(res.Profiles) > 0 || res.OnPath {
 				fmt.Println("\nOpen a new terminal for the change to take effect.")
 			}
@@ -243,6 +245,7 @@ func previewInstall(opts shim.Options) error {
 	for _, p := range res.Agents {
 		fmt.Println("Would add the agent PATH hook to " + p)
 	}
+	printWarnings(res.Warnings)
 	return nil
 }
 
@@ -291,6 +294,7 @@ func printInstallResult(res *shim.Result, noPath bool) {
 		fmt.Println("It applies from the next Claude Code session.")
 	}
 
+	printWarnings(res.Warnings)
 	fmt.Printf("\nBypass a single command with %s=1, or undo with `ossprey shim uninstall`.\n", shim.BypassEnv)
 }
 
@@ -336,7 +340,7 @@ func printStatus(st *shim.Status) {
 		fmt.Printf("  export PATH=\"%s:$PATH\"\n", st.Dir)
 		fmt.Println("Shell profiles only reach login and interactive shells, so `bash -c`,")
 		fmt.Println("scripts and coding agents inherit PATH from whatever started them.")
-		if st.ClaudeHook == "" {
+		if st.ClaudeHook == "" && runtime.GOOS != "windows" {
 			fmt.Println("For Claude Code: ossprey shim install --agent claude")
 		}
 	}
@@ -358,6 +362,12 @@ func printStatus(st *shim.Status) {
 	}
 	if runtime.GOOS != "windows" && len(managed) == 0 && st.Installed() {
 		fmt.Println("\nNo shell profile carries the PATH entry (installed with --no-path?).")
+	}
+}
+
+func printWarnings(ws []string) {
+	for _, w := range ws {
+		fmt.Fprintln(os.Stderr, "warning: "+w)
 	}
 }
 

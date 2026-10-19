@@ -1,7 +1,6 @@
 package shim
 
 import (
-	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,53 +9,72 @@ import (
 	"testing"
 )
 
-// claudeHookCommands returns the SessionStart commands in a settings file.
-func claudeHookCommands(t *testing.T, path string) []string {
+// allHookCommands returns every SessionStart command in a settings file.
+func allHookCommands(t *testing.T, path string) []string {
 	t.Helper()
-	settings, err := parseSettings([]byte(read(t, path)))
+	s, err := parseSettings([]byte(read(t, path)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var out []string
-	for _, g := range sessionStartGroups(settings) {
-		for _, h := range hookList(g) {
-			cmd, _ := h["command"].(string)
-			out = append(out, cmd)
-		}
-	}
-	return out
+	return s.hookCommands()
 }
 
-func TestClaudeHookPutsShimsFirstOnPathForLaterCommands(t *testing.T) {
-	requirePOSIX(t)
+// runClaudeHook runs our hook the way Claude Code would, n times (startup,
+// then resume or compact), and returns PATH as a later Bash command sees it.
+func runClaudeHook(t *testing.T, dir, startPath string, n int) (path, envFile string) {
+	t.Helper()
 	root := t.TempDir()
-	dir := filepath.Join(root, "it's shims")
 	settings := filepath.Join(root, "settings.json")
 	if _, err := WriteClaudeHook(settings, dir); err != nil {
 		t.Fatal(err)
 	}
-	cmds := claudeHookCommands(t, settings)
+	cmds := allHookCommands(t, settings)
 	if len(cmds) != 1 {
 		t.Fatalf("hook commands = %v, want one", cmds)
 	}
-
-	envFile := filepath.Join(root, "claude-env")
-	hook := exec.Command("sh", "-c", cmds[0])
-	hook.Env = append(os.Environ(), "CLAUDE_ENV_FILE="+envFile)
-	if out, err := hook.CombinedOutput(); err != nil {
-		t.Fatalf("hook failed: %v\n%s", err, out)
+	envFile = filepath.Join(root, "claude-env")
+	for range n {
+		hook := exec.Command("sh", "-c", cmds[0])
+		hook.Env = append(os.Environ(), "CLAUDE_ENV_FILE="+envFile)
+		if out, err := hook.CombinedOutput(); err != nil {
+			t.Fatalf("hook failed: %v\n%s", err, out)
+		}
 	}
-
-	// Claude Code runs the env file before every Bash command; running it twice
-	// in one shell must not stack a second entry.
-	bash := exec.Command("sh", "-c", `. "$1"; . "$1"; printf '%s' "$PATH"`, "sh", envFile)
-	bash.Env = append(os.Environ(), "PATH=/usr/bin:/bin")
-	out, err := bash.Output()
+	// Claude Code runs the env file before every Bash command.
+	cmd := exec.Command("sh", "-c", `. "$1"; . "$1"; printf '%s' "$PATH"`, "sh", envFile)
+	cmd.Env = append(os.Environ(), "PATH="+startPath)
+	out, err := cmd.Output()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := string(out), dir+":/usr/bin:/bin"; got != want {
+	return string(out), envFile
+}
+
+func TestClaudeHookPutsShimsFirstOnPathForLaterCommands(t *testing.T) {
+	requirePOSIX(t)
+	dir := filepath.Join(t.TempDir(), "it's shims")
+	got, _ := runClaudeHook(t, dir, "/usr/bin:/bin", 1)
+	if want := dir + ":/usr/bin:/bin"; got != want {
 		t.Fatalf("PATH = %q, want %q", got, want)
+	}
+}
+
+func TestClaudeHookMovesShimsAheadOfAnInheritedNpm(t *testing.T) {
+	requirePOSIX(t)
+	// A terminal whose .bashrc adds the shims and then nvm's bin hands Claude
+	// Code a PATH with npm ahead of the shim.
+	dir := filepath.Join(t.TempDir(), "shims")
+	got, _ := runClaudeHook(t, dir, "/nvm/bin:"+dir+":/usr/bin", 1)
+	if want := dir + ":/nvm/bin:/usr/bin"; got != want {
+		t.Fatalf("PATH = %q, want %q", got, want)
+	}
+}
+
+func TestClaudeHookWritesItsLineOnceAcrossResumes(t *testing.T) {
+	requirePOSIX(t)
+	_, envFile := runClaudeHook(t, "/s", "/usr/bin", 3)
+	if n := strings.Count(read(t, envFile), agentHookMarker); n != 1 {
+		t.Fatalf("env file has %d copies of the PATH line, want 1:\n%s", n, read(t, envFile))
 	}
 }
 
@@ -69,15 +87,40 @@ func TestClaudeHookDoesNothingOutsideASession(t *testing.T) {
 	}
 }
 
-func TestWriteClaudeHookKeepsTheUsersSettings(t *testing.T) {
+func TestClaudeHookRoundTripLeavesTheUsersFileAsItWas(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
+	// Unsorted keys, a number float64 would round, and a hook group whose
+	// keys are out of alphabetical order: all must survive install+uninstall.
 	user := `{
   "model": "opus",
+  "cleanupPeriodDays": 12345678901234567890,
   "hooks": {
-    "SessionStart": [{"matcher": "startup", "hooks": [{"type": "command", "command": "echo mine"}]}],
-    "Stop": [{"hooks": [{"type": "command", "command": "echo stop"}]}]
-  }
-}`
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo stop"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo mine",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  },
+  "env": {}
+}
+`
 	if err := os.WriteFile(path, []byte(user), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -92,9 +135,12 @@ func TestWriteClaudeHookKeepsTheUsersSettings(t *testing.T) {
 	if _, err := WriteClaudeHook(path, "/b"); err != nil {
 		t.Fatal(err)
 	}
-	cmds := claudeHookCommands(t, path)
-	if len(cmds) != 2 || cmds[0] != "echo mine" || !strings.Contains(cmds[1], "'/b'") {
+	cmds := allHookCommands(t, path)
+	if len(cmds) != 2 || cmds[0] != "echo mine" || !hasClaudeHookFor(path, "/b") {
 		t.Fatalf("SessionStart commands = %q, want the user's hook then ours for /b", cmds)
+	}
+	if strings.Contains(read(t, path), "\\u003e") {
+		t.Fatalf("the hook's >> was HTML-escaped:\n%s", read(t, path))
 	}
 	if fi, _ := os.Stat(path); runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
 		t.Fatalf("mode = %v, want the user's 0600 kept", fi.Mode().Perm())
@@ -103,16 +149,31 @@ func TestWriteClaudeHookKeepsTheUsersSettings(t *testing.T) {
 	if removed, err := RemoveClaudeHook(path); err != nil || !removed {
 		t.Fatalf("remove = %v, %v", removed, err)
 	}
-	var got map[string]any
-	if err := json.Unmarshal([]byte(read(t, path)), &got); err != nil {
+	if got := read(t, path); got != user {
+		t.Fatalf("after uninstall:\n%s\nwant the original file:\n%s", got, user)
+	}
+}
+
+func TestWriteClaudeHookFollowsASymlinkedSettingsFile(t *testing.T) {
+	requirePOSIX(t)
+	root := t.TempDir()
+	target := filepath.Join(root, "dotfiles", "settings.json")
+	mkdirs(t, filepath.Dir(target), filepath.Join(root, ".claude"))
+	if err := os.WriteFile(target, []byte("{}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	var want map[string]any
-	_ = json.Unmarshal([]byte(user), &want)
-	gotJSON, _ := json.Marshal(got)
-	wantJSON, _ := json.Marshal(want)
-	if string(gotJSON) != string(wantJSON) {
-		t.Fatalf("after uninstall:\n%s\nwant the original settings:\n%s", gotJSON, wantJSON)
+	link := filepath.Join(root, ".claude", "settings.json")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := WriteClaudeHook(link, "/a"); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("the settings symlink was replaced by a file")
+	}
+	if !hasClaudeHookFor(target, "/a") {
+		t.Fatal("hook not written to the symlink's target")
 	}
 }
 
@@ -130,11 +191,26 @@ func TestWriteClaudeHookRefusesInvalidJSON(t *testing.T) {
 	}
 }
 
-func TestInstallAgentHookIsRepointedAndUninstalled(t *testing.T) {
+func TestMarkerOutsideAHookIsNotOurHook(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := os.WriteFile(path, []byte(`{"note": "`+agentHookMarker+`"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if HasClaudeHook(path) {
+		t.Fatal("a marker in an unrelated value read as an installed hook")
+	}
+}
+
+func agentSandbox(t *testing.T) (sandbox, string) {
+	t.Helper()
 	requirePOSIX(t)
 	s := newSandbox(t)
 	t.Setenv(claudeConfigDirEnv, "")
-	settings := filepath.Join(s.home, ".claude", "settings.json")
+	return s, filepath.Join(s.home, ".claude", "settings.json")
+}
+
+func TestInstallAgentHookIsRepointedAndUninstalled(t *testing.T) {
+	s, settings := agentSandbox(t)
 
 	o := s.opts()
 	o.Agents = []string{AgentClaude}
@@ -154,7 +230,7 @@ func TestInstallAgentHookIsRepointedAndUninstalled(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !hasClaudeHookFor(settings, moved.Dir) {
-		t.Fatalf("hook not re-pointed at %s: %v", moved.Dir, claudeHookCommands(t, settings))
+		t.Fatalf("hook not re-pointed at %s: %v", moved.Dir, allHookCommands(t, settings))
 	}
 
 	res, err = Uninstall(moved)
@@ -166,18 +242,85 @@ func TestInstallAgentHookIsRepointedAndUninstalled(t *testing.T) {
 	}
 }
 
-func TestFlaglessReinstallSurvivesBrokenAgentSettings(t *testing.T) {
-	requirePOSIX(t)
-	s := newSandbox(t)
-	t.Setenv(claudeConfigDirEnv, "")
-	settings := filepath.Join(s.home, ".claude", "settings.json")
+func TestNoPathInstallLeavesAnExistingHookAlone(t *testing.T) {
+	s, settings := agentSandbox(t)
+	o := s.opts()
+	o.Agents = []string{AgentClaude}
+	if _, err := Install(o); err != nil {
+		t.Fatal(err)
+	}
+
+	// A throwaway install, as in a test or image build, must not move the
+	// user's hook to a directory that is about to be deleted.
+	tmp := s.opts()
+	tmp.Dir = filepath.Join(s.root, "throwaway")
+	tmp.SkipProfiles = true
+	plan, err := Plan(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Agents) != 0 {
+		t.Fatalf("--no-path dry run would touch %v", plan.Agents)
+	}
+	if _, err := Install(tmp); err != nil {
+		t.Fatal(err)
+	}
+	if !hasClaudeHookFor(settings, s.shimDir) {
+		t.Fatalf("--no-path install moved the hook: %v", allHookCommands(t, settings))
+	}
+}
+
+func TestNoPathUninstallRemovesOnlyAHookForItsDirectory(t *testing.T) {
+	s, settings := agentSandbox(t)
+	o := s.opts()
+	o.Agents = []string{AgentClaude}
+	o.SkipProfiles = true
+	if _, err := Install(o); err != nil {
+		t.Fatal(err)
+	}
+
+	other := s.opts()
+	other.Dir = filepath.Join(s.root, "other")
+	other.SkipProfiles = true
+	if _, err := Uninstall(other); err != nil {
+		t.Fatal(err)
+	}
+	if !hasClaudeHookFor(settings, s.shimDir) {
+		t.Fatal("uninstalling another directory removed the hook")
+	}
+
+	if _, err := Uninstall(o); err != nil {
+		t.Fatal(err)
+	}
+	if HasClaudeHook(settings) {
+		t.Fatal("--no-path uninstall left a hook pointing at the removed shims")
+	}
+}
+
+func TestBrokenAgentSettingsWarnButNeverFail(t *testing.T) {
+	s, settings := agentSandbox(t)
 	mkdirs(t, filepath.Dir(settings))
-	broken := `{"note": "` + agentHookMarker + `",`
+	broken := `{"hooks": "` + agentHookMarker + `",`
 	if err := os.WriteFile(settings, []byte(broken), 0o644); err != nil {
 		t.Fatal(err)
 	}
+
+	plan, err := Plan(s.opts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Agents) != 0 || len(plan.Warnings) == 0 {
+		t.Fatalf("dry run: agents %v, warnings %v; want a warning and no write", plan.Agents, plan.Warnings)
+	}
 	if _, err := Install(s.opts()); err != nil {
 		t.Fatalf("upgrade failed over a broken agent settings file: %v", err)
+	}
+	res, err := Uninstall(s.opts())
+	if err != nil {
+		t.Fatalf("uninstall failed over a broken agent settings file: %v", err)
+	}
+	if len(res.Done) == 0 || len(res.Warnings) == 0 {
+		t.Fatalf("uninstall removed %v with warnings %v; want shims removed and a warning", names(res.Done), res.Warnings)
 	}
 	if read(t, settings) != broken {
 		t.Fatal("rewrote a settings file it could not parse")
