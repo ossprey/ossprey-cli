@@ -51,7 +51,7 @@ func Malware(findings []Finding, outcome string, p ansi.Profile) string {
 	var b strings.Builder
 	edge := func(s string) { b.WriteString(p.Red(s) + "\n") }
 	row := func(plain, styled string) {
-		pad := strings.Repeat(" ", inner-utf8.RuneCountInString(plain))
+		pad := strings.Repeat(" ", max(0, inner-utf8.RuneCountInString(plain)))
 		b.WriteString(p.Red("│") + styled + pad + p.Red("│") + "\n")
 	}
 	blank := func() { row("", "") }
@@ -64,7 +64,9 @@ func Malware(findings []Finding, outcome string, p ansi.Profile) string {
 		row(indent+l, indent+p.RGB(c[0], c[1], c[2], l))
 	}
 	blank()
-	styledText(headline(len(findings), outcome), p.Bold)
+	for _, l := range wrap(headline(len(findings), outcome), inner-len(indent)) {
+		styledText(l, p.Bold)
+	}
 	blank()
 	styledText(pad("PACKAGE", nameCol)+" "+pad("VERSION", versionCol)+" ECOSYSTEM", p.Dim)
 	styledText(strings.Repeat("─", inner-len(indent)-3), p.Dim)
@@ -98,4 +100,35 @@ func pad(s string, width int) string {
 		return s + strings.Repeat(" ", width-n)
 	}
 	return s
+}
+
+// wrap breaks s into lines of at most width runes at spaces, hard-breaking a
+// word longer than a line, so a long outcome stays inside the box.
+func wrap(s string, width int) []string {
+	var lines []string
+	line := ""
+	for _, w := range strings.Fields(s) {
+		for utf8.RuneCountInString(w) > width {
+			if line != "" {
+				lines = append(lines, line)
+				line = ""
+			}
+			r := []rune(w)
+			lines = append(lines, string(r[:width]))
+			w = string(r[width:])
+		}
+		switch {
+		case line == "":
+			line = w
+		case utf8.RuneCountInString(line)+1+utf8.RuneCountInString(w) <= width:
+			line += " " + w
+		default:
+			lines = append(lines, line)
+			line = w
+		}
+	}
+	if line != "" || len(lines) == 0 {
+		lines = append(lines, line)
+	}
+	return lines
 }

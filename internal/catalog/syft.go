@@ -2,9 +2,12 @@ package catalog
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/anchore/syft/syft/pkg"
@@ -166,6 +169,8 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 		python.NewPackageCataloger(pyCfg),
 		javascript.NewPackageCataloger(),
 		javascript.NewLockCataloger(jsCfg),
+		// Custom: npm-shrinkwrap.json and v1 nested deps, which syft skips.
+		NewNpmLockCataloger(absRoot),
 		// Cargo.lock only: syft v1.44.0 ships no Cargo.toml parser, so a crate
 		// that gitignores its lockfile still catalogues to nothing.
 		rust.NewCargoLockCataloger(),
@@ -195,6 +200,8 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 	}
 	// Custom: direct-deps fallback for pyproject.toml when uv is missing.
 	catalogers = append(catalogers, NewPyProjectCataloger(absRoot))
+	// Custom: the same for requirements lines syft cannot version ("requests").
+	catalogers = append(catalogers, NewRequirementsTxtCataloger(absRoot))
 	if !opts.NoExec {
 		catalogers = append(catalogers,
 			// Custom: resolve npm ranges to concrete versions via `npm install
@@ -223,6 +230,7 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 		// `flask>2.0` in requirements.txt emptied the SBOM of every Python
 		// package, silently scanning nothing.
 		pkgs, _, err := c.Catalog(ctx, resolver)
+		err = dropCoveredRequirementErrors(err)
 		if err != nil && ctx.Err() == nil {
 			warn.Add(ctx, parseEntry(c.Name(), err))
 		}
@@ -423,7 +431,13 @@ func registryOf(p pkg.Package) string {
 // same (type, name) exists, folding their Source/Locations into the siblings so
 // no attribution is lost. Entries with no versioned sibling are kept as-is.
 func mergeVersionless(pkgs []Package) []Package {
-	gkey := func(p Package) string { return p.Type + "@" + normalizeName(p.Name) }
+	gkey := func(p Package) string {
+		if p.Type == "pypi" {
+			// PEP 503: "typing_extensions" as written is uv's "typing-extensions".
+			return p.Type + "@" + canonicalPackageName(p.Name)
+		}
+		return p.Type + "@" + normalizeName(p.Name)
+	}
 
 	hasVersioned := map[string]bool{}
 	for _, p := range pkgs {
@@ -490,9 +504,11 @@ func isOspreyCataloger(name string) bool {
 	case "ossprey-uv-cataloger",
 		"ossprey-setuppy-cataloger",
 		"ossprey-requirements-cataloger",
+		"ossprey-requirementstxt-cataloger",
 		"ossprey-pip-cataloger",
 		"ossprey-pyproject-cataloger",
 		"ossprey-npm-cataloger",
+		"ossprey-npm-lock-cataloger",
 		"ossprey-packagejson-cataloger",
 		"ossprey-cargotoml-cataloger":
 		return true
@@ -539,8 +555,8 @@ func isWorkspaceCargoEntry(p pkg.Package) bool {
 	return strings.TrimSpace(m.Source) == ""
 }
 
-// isUnpublishedNpmLockEntry reports whether p is a package-lock.json entry
-// that is not fetchable from the npm registry — the root project itself, or a
+// isUnpublishedNpmLockEntry reports whether p is a package-lock.json (or
+// yarn.lock, see isLocalYarnResolved) entry that is not fetchable from the npm registry — the root project itself, or a
 // file:/link:/workspace: dependency — so emitting it would only yield spurious
 // NOT_FOUND findings (e.g. the root project app@1.0.0 leaking out of syft's
 // lock cataloger).
@@ -554,6 +570,9 @@ func isWorkspaceCargoEntry(p pkg.Package) bool {
 // empty-resolved entries the lockfile itself is consulted, where the
 // packages-map key distinguishes registry deps from root/local entries.
 func isUnpublishedNpmLockEntry(p pkg.Package, locks *npmLockClassifier) bool {
+	if y, ok := p.Metadata.(pkg.YarnLockEntry); ok {
+		return isLocalYarnResolved(y.Resolved)
+	}
 	m, ok := p.Metadata.(pkg.NpmPackageLockEntry)
 	if !ok {
 		return false
@@ -562,6 +581,62 @@ func isUnpublishedNpmLockEntry(p pkg.Package, locks *npmLockClassifier) bool {
 		return isLocalNpmResolved(resolved)
 	}
 	return !locks.isRegistryDep(p)
+}
+
+// isLocalYarnResolved reports whether a yarn.lock entry names local code: a
+// berry resolution ("app@workspace:.", "lib@portal:../lib", "x@link:./x",
+// "y@file:./y.tgz::locator=...") — the root project leaked out as
+// app@0.0.0-use.local — or a classic file:/link: "resolved". An empty value
+// is kept, as for package-lock.json: absence proves nothing about the source.
+func isLocalYarnResolved(resolved string) bool {
+	resolved = strings.TrimSpace(resolved)
+	if isLocalNpmResolved(resolved) {
+		return true
+	}
+	// Berry: "<name>@<protocol>:<ref>"; a scoped name starts with its own "@".
+	at := strings.Index(resolved[min(1, len(resolved)):], "@")
+	if at < 0 {
+		return false
+	}
+	protocol, _, ok := strings.Cut(resolved[at+2:], ":")
+	if !ok {
+		return false
+	}
+	switch protocol {
+	case "workspace", "portal", "link", "file":
+		return true
+	}
+	return false
+}
+
+// unversionedRequirementErr is syft's complaint about a requirements line it
+// could not guess a version for.
+var unversionedRequirementErr = regexp.MustCompile(`unable to determine package version in requirements\.txt line: ("(?:[^"\\]|\\.)*")$`)
+
+// dropCoveredRequirementErrors removes syft's parse errors for requirements
+// lines RequirementsTxtCataloger reports versionless, so a scan does not say
+// it could not parse a dependency it then lists. Anything unmatched stays.
+func dropCoveredRequirementErrors(err error) error {
+	if err == nil {
+		return nil
+	}
+	leaves := []error{err}
+	if j, ok := err.(interface{ Unwrap() []error }); ok {
+		leaves = j.Unwrap()
+	}
+	var keep []error
+	for _, e := range leaves {
+		if m := unversionedRequirementErr.FindStringSubmatch(e.Error()); m != nil {
+			if line, uerr := strconv.Unquote(m[1]); uerr == nil && len(unpinnedRequirements([]byte(line))) == 1 {
+				continue
+			}
+		}
+		keep = append(keep, e)
+	}
+	if len(keep) == len(leaves) {
+		return err
+	}
+	return errors.Join(keep...)
 }
 
 func locations(p pkg.Package) []string {

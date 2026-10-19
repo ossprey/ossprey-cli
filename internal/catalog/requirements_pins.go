@@ -121,6 +121,18 @@ var pinnedRequirement = regexp.MustCompile(`^([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[^
 // because environment markers let one name be pinned several times.
 func pinnedRequirements(data []byte) map[string][]string {
 	pins := map[string][]string{}
+	for _, line := range requirementLines(data) {
+		if name, version, ok := parsePinnedRequirement(line); ok {
+			pins[name] = append(pins[name], version)
+		}
+	}
+	return pins
+}
+
+// requirementLines splits a requirements file into logical lines: comments
+// stripped and backslash continuations joined.
+func requirementLines(data []byte) []string {
+	var lines []string
 	sc := bufio.NewScanner(bytes.NewReader(data))
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	var continued string
@@ -132,11 +144,9 @@ func pinnedRequirements(data []byte) map[string][]string {
 			continue
 		}
 		line, continued = continued+line, ""
-		if name, version, ok := parsePinnedRequirement(line); ok {
-			pins[name] = append(pins[name], version)
-		}
+		lines = append(lines, line)
 	}
-	return pins
+	return lines
 }
 
 // parsePinnedRequirement extracts the canonical name and version from one
@@ -144,11 +154,28 @@ func pinnedRequirements(data []byte) map[string][]string {
 // release at all. Comments, environment markers and pip options are stripped
 // first; option lines, editables and URL requirements pin nothing.
 func parsePinnedRequirement(line string) (name, version string, ok bool) {
+	fields, ok := requirementFields(line)
+	if !ok {
+		return "", "", false
+	}
+	// A PEP 440 name, extras list and version all forbid whitespace, so joining
+	// the fields normalises "pkg [extra] == 1.0" without altering any of them.
+	m := pinnedRequirement.FindStringSubmatch(strings.Join(fields, ""))
+	if m == nil {
+		return "", "", false
+	}
+	return canonicalPackageName(m[1]), m[2], true
+}
+
+// requirementFields reduces one logical requirements line to the fields of its
+// bare requirement, without markers or pip options; false for blank, option,
+// include and editable lines.
+func requirementFields(line string) ([]string, bool) {
 	spec := strings.TrimSpace(line)
 	// Blank, or a pip option / "-r" include / "-e" editable rather than a
 	// requirement.
 	if spec == "" || strings.HasPrefix(spec, "-") {
-		return "", "", false
+		return nil, false
 	}
 	if i := strings.IndexByte(spec, ';'); i >= 0 {
 		spec = spec[:i] // PEP 508 environment marker
@@ -161,13 +188,32 @@ func parsePinnedRequirement(line string) (name, version string, ok bool) {
 			break
 		}
 	}
-	// A PEP 440 name, extras list and version all forbid whitespace, so joining
-	// the fields normalises "pkg [extra] == 1.0" without altering any of them.
-	m := pinnedRequirement.FindStringSubmatch(strings.Join(fields, ""))
-	if m == nil {
-		return "", "", false
+	return fields, true
+}
+
+// unpinnedRequirement matches a requirement naming no single release: a bare
+// name or one constrained only by ranges ("flask>2.0", "click~=8.1, !=8.1.3").
+// An exact pin ("==", "===") never matches, nor does a URL, a local path or
+// free text ("not a requirement" is not the name "notarequirement").
+var unpinnedRequirement = regexp.MustCompile(`^([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)\s*(?:\[[^\]]*\])?\s*` +
+	`(?:\(?\s*` + rangeClause + `(?:\s*,\s*` + rangeClause + `)*\s*\)?)?$`)
+
+const rangeClause = `(?:~=|!=|<=|>=|<|>)\s*[A-Za-z0-9.*+!_-]+`
+
+// unpinnedRequirements returns the names of the requirements in one file that
+// pin no release, which syft drops when it cannot guess a version.
+func unpinnedRequirements(data []byte) []string {
+	var names []string
+	for _, line := range requirementLines(data) {
+		fields, ok := requirementFields(line)
+		if !ok {
+			continue
+		}
+		if m := unpinnedRequirement.FindStringSubmatch(strings.Join(fields, " ")); m != nil {
+			names = append(names, m[1])
+		}
 	}
-	return canonicalPackageName(m[1]), m[2], true
+	return names
 }
 
 // stripRequirementComment removes a trailing "#" comment. pip only treats "#"

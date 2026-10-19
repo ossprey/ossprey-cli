@@ -15,8 +15,10 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/ossprey/ossprey-cli/internal/alert"
@@ -160,6 +162,12 @@ func writesLocalLockfile(m *Manager, args []string) bool {
 			return false
 		}
 	}
+	// `yarn global add` installs into yarn's global directory.
+	if m.Bin == "yarn" {
+		if i := verbIndex("yarn", args); i >= 0 && args[i] == "global" {
+			return false
+		}
+	}
 	blocking := noLocalLockfileFlags[m.Bin]
 	for i := 0; i < len(args); i++ {
 		flag, value, hasInline := splitFlagValue(args[i])
@@ -200,7 +208,7 @@ func isDirFlag(flag string) bool {
 // `yarn install`, `poetry install`, `poetry sync`, `uv sync`); the latter trigger a project
 // manifest scan instead of falling through unchecked (OSS-1284).
 var managers = map[string]*Manager{
-	"npm": {Bin: "npm", Ecosystem: "npm", Lockfile: true, installAt: verbAt("npm", "install", "i", "add", "ci", "update", "up"),
+	"npm": {Bin: "npm", Ecosystem: "npm", Lockfile: true, installAt: npmInstallAt,
 		toolRunAt: npmExecAt, parseRun: npmExecRun},
 	// npx is `npm exec` under its own name: every invocation fetches and runs.
 	"npx": {Bin: "npx", Ecosystem: "npm", installAt: noInstall,
@@ -212,8 +220,9 @@ var managers = map[string]*Manager{
 		toolRunAt: verbAt("bun", "x"), parseRun: bunxRun},
 	"bunx": {Bin: "bunx", Ecosystem: "npm", installAt: noInstall,
 		toolRunAt: func([]string) (int, bool) { return 0, true }, parseRun: bunxRun},
-	"pnpm":   {Bin: "pnpm", Ecosystem: "npm", Lockfile: true, installAt: verbAt("pnpm", "install", "i", "add", "update", "up")},
-	"yarn":   {Bin: "yarn", Ecosystem: "npm", Lockfile: true, installAt: verbAt("yarn", "add", "install", "upgrade", "up")},
+	"pnpm": {Bin: "pnpm", Ecosystem: "npm", Lockfile: true, installAt: verbAt("pnpm", "install", "i", "add", "update", "up",
+		"upgrade", "install-test", "it")},
+	"yarn":   {Bin: "yarn", Ecosystem: "npm", Lockfile: true, installAt: yarnInstallAt},
 	"pip":    {Bin: "pip", Ecosystem: "pypi", installAt: verbAt("pip", "install")},
 	"pip3":   {Bin: "pip3", Ecosystem: "pypi", installAt: verbAt("pip3", "install")},
 	"poetry": {Bin: "poetry", Ecosystem: "pypi", Lockfile: true, installAt: verbAt("poetry", "add", "install", "sync", "update", "lock")},
@@ -291,6 +300,42 @@ func verbIndex(bin string, args []string) int {
 	return -1
 }
 
+// yarnInstallAt matches yarn's installs: `yarn add/install/upgrade`, bare
+// `yarn` (which is `yarn install`), `yarn global add/upgrade`, and any of
+// those run in a workspace (`yarn workspace web add x`).
+func yarnInstallAt(args []string) (int, bool) {
+	idx := verbIndex("yarn", args)
+	if idx < 0 {
+		// No command, only options: an install of the manifest, unless all it
+		// asks for is help or the version.
+		for _, a := range args {
+			switch a {
+			case "-v", "--version", "-h", "--help", "--":
+				return 0, false
+			}
+		}
+		return len(args), true
+	}
+	rest := args[idx:]
+	switch {
+	case slices.Contains([]string{"add", "install", "upgrade", "up"}, rest[0]):
+		return idx + 1, true
+	case rest[0] == "global" && len(rest) > 1 && (rest[1] == "add" || rest[1] == "upgrade"):
+		return idx + 2, true
+	case rest[0] == "workspace" && len(rest) > 2:
+		// `yarn workspace <name> <command...>` runs that command in the
+		// workspace. Bare `yarn workspace web` names no command.
+		sub := rest[2:]
+		if verbIndex("yarn", sub) < 0 {
+			return 0, false
+		}
+		if start, ok := yarnInstallAt(sub); ok {
+			return idx + 2 + start, true
+		}
+	}
+	return 0, false
+}
+
 // uvInstallAt matches `uv add ...`, `uv sync`, `uv lock`, `uv pip install
 // ...`, `uv pip sync ...` and `uv tool install ...`, with uv's global flags
 // allowed before the verb.
@@ -352,10 +397,11 @@ var globalValueFlags = map[string]map[string]bool{
 	// bun has no entry: it finds its command by skipping options without
 	// reading values, so in `bun --cwd web add x` the command is "web".
 	"pip": flagSet("--log", "--proxy", "--timeout", "--retries", "--cache-dir",
-		"--python", "-i", "--index-url"),
+		"--python", "-i", "--index-url", "--keyring-provider", "--exists-action",
+		"--trusted-host", "--cert", "--client-cert", "--use-feature", "--use-deprecated"),
 	"poetry": flagSet("-C", "--directory", "--project", "-P"),
 	"uv": flagSet("--directory", "--project", "--cache-dir", "--python", "-p",
-		"--config-file", "--color"),
+		"--config-file", "--color", "--allow-insecure-host"),
 }
 
 // Options configures a forwarder Run.
@@ -364,10 +410,14 @@ type Options struct {
 	Args   []string
 	APIURL string
 	APIKey string
-	// ResolveLatest fills a concrete version for unpinned packages. Defaults to
-	// registry.ResolveLatest; overridable in tests.
+	// ResolveLatest fills a concrete version for unpinned packages, ignoring any
+	// range or tag; overridable in tests. Resolve, when set, is used instead.
 	ResolveLatest func(ctx context.Context, ecosystem, name string) (string, error)
-	SkipCI        bool
+	// Resolve fills a concrete version for an unpinned package from the range
+	// or dist-tag it was named with (check.Spec.Constraint). Defaults to
+	// registry.Resolve.
+	Resolve func(ctx context.Context, ecosystem, name, constraint string) (string, error)
+	SkipCI  bool
 	// Passive submits the scan and forwards the install without waiting for a
 	// verdict. This is what the watchdog and monitor shims run in.
 	Passive bool
@@ -419,9 +469,14 @@ func Run(ctx context.Context, opts Options) error {
 		return reportAndForward(ctx, m, opts, sbom)
 	}
 
-	resolve := opts.ResolveLatest
+	resolve := opts.Resolve
 	if resolve == nil {
-		resolve = registry.ResolveLatest
+		resolve = registry.Resolve
+		if latest := opts.ResolveLatest; latest != nil {
+			resolve = func(ctx context.Context, eco, name, _ string) (string, error) {
+				return latest(ctx, eco, name)
+			}
+		}
 	}
 
 	start, isInstall := m.installAt(opts.Args)
@@ -476,8 +531,9 @@ func Run(ctx context.Context, opts Options) error {
 	if kept := dropTrusted(ctx, opts.Trust, parsed.Specs); len(kept) < len(parsed.Specs) {
 		parsed.Specs = kept
 		// Every named package was trusted. Without this the empty spec list
-		// would read as a bare install and scan the whole project instead.
-		if len(kept) == 0 {
+		// would read as a bare install and scan the whole project instead —
+		// which is still right when a requirements file is installed too.
+		if len(kept) == 0 && len(parsed.ReqFiles) == 0 {
 			// What was trusted first, then what that means for the install.
 			flushWarnings(ctx)
 			note("ossprey: every package named is from a trusted source; forwarding `%s %s` unchecked\n",
@@ -496,6 +552,37 @@ func Run(ctx context.Context, opts Options) error {
 	}
 
 	switch {
+	case len(parsed.Specs) > 0 && len(parsed.ReqFiles) > 0:
+		// Packages named *and* a requirements file (`pip install -r req.txt
+		// flask`, `uvx --with-requirements r.txt ruff`): both are installed, so
+		// both are checked, in one submission — the files named, plus the
+		// packages. Checking only the names left everything in the file
+		// unchecked.
+		req := scanRequest{
+			APIURL: opts.APIURL, APIKey: opts.APIKey, MonitorID: opts.MonitorID,
+			Trust: opts.Trust,
+		}
+		if opts.Passive {
+			req.SubmitOnly = true
+			return passiveAlongside(ctx, m, opts, len(parsed.Specs), func(ctx context.Context) (*ossbom.SBOM, error) {
+				dir, cleanup := reqFilesDir(parsed.ReqFiles)
+				defer cleanup()
+				req.Dir = dir
+				req.Specs = resolveSpecs(ctx, resolve, parsed.Specs)
+				return scanProjectFn(ctx, req)
+			})
+		}
+		note("ossprey: scanning %s and %s before `%s %s`\n", strings.Join(parsed.ReqFiles, ", "),
+			countPackages(len(parsed.Specs)), m.Bin, strings.Join(opts.Args, " "))
+		stop := progress.Start(progressTo(), "ossprey: scan in progress")
+		dir, cleanup := reqFilesDir(parsed.ReqFiles)
+		defer cleanup()
+		req.Dir = dir
+		req.Specs = resolveSpecs(ctx, resolve, parsed.Specs)
+		sbom, err := scanProjectFn(ctx, req)
+		stop()
+		return finish(sbom, err)
+
 	case len(parsed.Specs) > 0:
 		// Explicit packages named — check exactly those.
 		if other := slices.Concat(parsed.NonPackages, parsed.ReqFiles); len(other) > 0 {
@@ -550,8 +637,10 @@ func Run(ctx context.Context, opts Options) error {
 			note("ossprey: no packages named; scanning project manifest alongside `%s %s`\n",
 				m.Bin, strings.Join(opts.Args, " "))
 			return passiveAlongside(ctx, m, opts, 0, func(ctx context.Context) (*ossbom.SBOM, error) {
+				dir, cleanup := reqFilesDir(parsed.ReqFiles)
+				defer cleanup()
 				return scanProjectFn(ctx, scanRequest{
-					Dir: ".", APIURL: opts.APIURL, APIKey: opts.APIKey,
+					Dir: dir, APIURL: opts.APIURL, APIKey: opts.APIKey,
 					MonitorID: opts.MonitorID, SubmitOnly: true, Trust: opts.Trust,
 				})
 			})
@@ -561,8 +650,10 @@ func Run(ctx context.Context, opts Options) error {
 		// Cataloguing a whole project can take longer than the API scan itself
 		// (npm range resolution, uv), so the indicator wraps both.
 		stop := progress.Start(progressTo(), "ossprey: scan in progress")
+		dir, cleanup := reqFilesDir(parsed.ReqFiles)
+		defer cleanup()
 		sbom, err := scanProjectFn(ctx, scanRequest{
-			Dir: ".", APIURL: opts.APIURL, APIKey: opts.APIKey, MonitorID: opts.MonitorID,
+			Dir: dir, APIURL: opts.APIURL, APIKey: opts.APIKey, MonitorID: opts.MonitorID,
 			Trust: opts.Trust,
 		})
 		stop()
@@ -599,11 +690,11 @@ func dropTrusted(ctx context.Context, policy trust.Policy, specs []check.Spec) [
 
 // resolveSpecs fills concrete versions for unpinned specs. Fail open: a registry
 // outage must not block the developer — warn and drop that one from the check.
-func resolveSpecs(ctx context.Context, resolve func(context.Context, string, string) (string, error), specs []check.Spec) []check.Spec {
+func resolveSpecs(ctx context.Context, resolve func(context.Context, string, string, string) (string, error), specs []check.Spec) []check.Spec {
 	resolved := make([]check.Spec, 0, len(specs))
 	for _, s := range specs {
 		if s.Version == "" {
-			v, err := resolve(ctx, s.Ecosystem, s.Name)
+			v, err := resolve(ctx, s.Ecosystem, s.Name, s.Constraint)
 			if err != nil {
 				// Different consequence from the scan path, so a different
 				// class: here the package is not checked at all, which is
@@ -612,7 +703,7 @@ func resolveSpecs(ctx context.Context, resolve func(context.Context, string, str
 					"skipping its check"))
 				continue
 			}
-			s.Version = v
+			s.Version, s.Constraint = v, ""
 		}
 		resolved = append(resolved, s)
 	}
@@ -690,6 +781,92 @@ func manifestInstall(p installArgs) bool {
 // dir forwards.
 
 // scanRequest describes one project scan-and-submit.
+// reqFilesDir is where a requirements-file install is scanned from: a fresh
+// dir holding each file it names as requirements.txt, nested -r includes
+// inlined. Scanning "." instead missed a file the catalogue's glob does not
+// match (requirements/prod.txt, deps.txt, ../shared/reqs.txt) and checked
+// unrelated manifests beside it. With no files named, or none readable (pip
+// then fails on its own), it is the project dir.
+func reqFilesDir(files []string) (string, func()) {
+	noop := func() {}
+	if len(files) == 0 {
+		return ".", noop
+	}
+	dir, err := os.MkdirTemp("", "ossprey-reqs-")
+	if err != nil {
+		return ".", noop
+	}
+	cleanup := func() { os.RemoveAll(dir) }
+	wrote := 0
+	for i, f := range files {
+		data, err := flattenRequirements(f, map[string]bool{})
+		if err != nil {
+			continue
+		}
+		sub := filepath.Join(dir, strconv.Itoa(i))
+		if os.MkdirAll(sub, 0o700) != nil || os.WriteFile(filepath.Join(sub, "requirements.txt"), data, 0o600) != nil {
+			continue
+		}
+		wrote++
+	}
+	if wrote == 0 {
+		cleanup()
+		return ".", noop
+	}
+	return dir, cleanup
+}
+
+// flattenRequirements reads a requirements file with its -r includes inlined
+// (relative to the including file, as pip resolves them). Constraint files are
+// dropped: they install nothing, and a relative path would not resolve from
+// the copy.
+func flattenRequirements(path string, seen map[string]bool) ([]byte, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	if seen[abs] {
+		return nil, nil
+	}
+	seen[abs] = true
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var out []byte
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+		if inc, ok := requirementInclude(trimmed, "-r", "--requirement"); ok {
+			if !filepath.IsAbs(inc) {
+				inc = filepath.Join(filepath.Dir(path), inc)
+			}
+			nested, err := flattenRequirements(inc, seen)
+			if err == nil {
+				out = append(out, nested...)
+			}
+			continue
+		}
+		if _, ok := requirementInclude(trimmed, "-c", "--constraint"); ok {
+			continue
+		}
+		out = append(out, line...)
+		out = append(out, '\n')
+	}
+	return out, nil
+}
+
+// requirementInclude reads "-r f", "-rf", "--requirement f" or "--requirement=f".
+func requirementInclude(line, short, long string) (string, bool) {
+	for _, p := range []string{long + "=", long + " ", long + "\t", short} {
+		if v, ok := strings.CutPrefix(line, p); ok {
+			if v = strings.TrimSpace(v); v != "" {
+				return v, true
+			}
+		}
+	}
+	return "", false
+}
+
 type scanRequest struct {
 	Dir       string
 	APIURL    string
@@ -705,6 +882,9 @@ type scanRequest struct {
 	Installed bool
 	// Trust is passed to the scan; trusted packages are not sent.
 	Trust trust.Policy
+	// Specs are packages named on the command line beside a requirements
+	// file. They are submitted with the scan, so one verdict covers both.
+	Specs []check.Spec
 }
 
 func scanProject(ctx context.Context, req scanRequest) (*ossbom.SBOM, error) {
@@ -720,6 +900,10 @@ func scanProject(ctx context.Context, req scanRequest) (*ossbom.SBOM, error) {
 		if sbom, err = scan.Run(ctx, scan.Options{Path: req.Dir, Trust: req.Trust}); err != nil {
 			return nil, err
 		}
+	}
+	for _, s := range req.Specs {
+		sbom.AddComponent(ossbom.Component{Name: s.Name, Version: s.Version, Type: s.Ecosystem,
+			Source: []string{"check"}})
 	}
 	if len(sbom.Components) == 0 {
 		return sbom, nil // nothing declared to check
@@ -911,12 +1095,14 @@ func parseInstallArgs(m *Manager, args []string, positionalReqFiles bool) instal
 					i++
 				}
 			case pkgFlags[flag]:
-				// The value is another package being installed: check it too.
-				if hasInline {
-					classify(inlineVal)
-				} else if i+1 < len(args) {
-					classify(args[i+1])
+				// The value is more packages being installed: check them too.
+				value := inlineVal
+				if !hasInline && i+1 < len(args) {
+					value = args[i+1]
 					i++
+				}
+				for _, p := range splitRequirements(value) {
+					classify(p)
 				}
 			case valFlags[flag] && !hasInline && i+1 < len(args):
 				i++ // consume the flag's value so it isn't read as a package
@@ -997,7 +1183,9 @@ func parseToolRun(m *Manager, args []string) installArgs {
 				sourceNamed = true
 				addPkg(value)
 			case "-w", "--with":
-				addPkg(value)
+				for _, p := range splitRequirements(value) {
+					addPkg(p)
+				}
 			case "--with-requirements":
 				out.ReqFiles = append(out.ReqFiles, value)
 			}
@@ -1026,6 +1214,43 @@ var toolRunValueFlags = flagSet("--from", "-w", "--with", "--with-editable",
 	"--config-settings-package", "--no-build-isolation-package", "--no-build-package",
 	"--no-binary-package", "--cache-dir", "--refresh-package", "-p", "--python",
 	"--color", "--allow-insecure-host", "--directory", "--project", "--config-file")
+
+// splitRequirements splits uv's comma-separated requirement list (`--with
+// a,b>=1,<2`) the way uv does: a comma starts a new requirement unless what
+// follows it continues a version specifier. A PEP 440 clause always opens with
+// an operator, so a leading digit is a new name (`3to2`), not a continuation.
+func splitRequirements(value string) []string {
+	// Commas inside extras ("black[d,jupyter]") belong to that requirement,
+	// as in uv's CommaSeparatedRequirements.
+	var parts []string
+	depth, start := 0, 0
+	for i, r := range value {
+		switch r {
+		case '[':
+			depth++
+		case ']':
+			if depth > 0 {
+				depth--
+			}
+		case ',':
+			if depth == 0 {
+				parts = append(parts, value[start:i])
+				start = i + 1
+			}
+		}
+	}
+	parts = append(parts, value[start:])
+	var out []string
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if len(out) > 0 && (trimmed == "" || strings.ContainsAny(trimmed[:1], "<>=!~")) {
+			out[len(out)-1] += "," + part
+			continue
+		}
+		out = append(out, trimmed)
+	}
+	return out
+}
 
 // splitFlagValue splits "--flag=value" into ("--flag", "value", true). A flag
 // with no inline value returns (flag, "", false).
@@ -1093,7 +1318,8 @@ func flagSet(flags ...string) map[string]bool {
 // pnpm inheriting npm's list is what hid `pnpm add -w <pkg>` (OSS-1577).
 var valueFlags = map[string]map[string]bool{
 	"npm": flagSet("--registry", "--prefix", "-C", "--cache", "--userconfig",
-		"--globalconfig", "--tag", "--otp", "-w", "--workspace", "--omit", "--include"),
+		"--globalconfig", "--tag", "--otp", "-w", "--workspace", "--omit", "--include",
+		"--before", "--install-strategy"),
 	// pnpm's own, deliberately not npm's: -w is --workspace-root here and takes
 	// no value, and --filter is accepted after the verb as well as before it.
 	"pnpm": flagSet("--filter", "-F", "--filter-prod", "--dir", "-C", "--registry",
@@ -1111,30 +1337,49 @@ var valueFlags = map[string]map[string]bool{
 		"--extra-index-url", "-f", "--find-links", "-c", "--constraint", "--prefix",
 		"--root", "--src", "--python", "--cache-dir", "--log", "--no-binary",
 		"--only-binary", "--platform", "--python-version", "--implementation",
-		"--abi", "--progress-bar", "--report"),
+		"--abi", "--progress-bar", "--report", "--upgrade-strategy", "-C", "--config-settings",
+		"--global-option", "--root-user-action", "--keyring-provider", "--proxy", "--retries",
+		"--timeout", "--exists-action", "--trusted-host", "--cert", "--client-cert",
+		"--use-feature", "--use-deprecated",
+		// pip 25+/26.
+		"--group", "--requirements-from-script", "--build-constraint", "--refresh-package",
+		"--all-releases", "--only-final", "--resume-retries", "--uploaded-prior-to"),
 	// --with/--without/--only/-E are install/sync's group and extras selectors:
 	// unlisted, `poetry sync --with dev` reads "dev" as a named package and
 	// checks it instead of scanning the project.
+	// `--optional` is absent: it takes a value in poetry 2 but is a switch in
+	// poetry 1, where listing it would swallow the package after it.
 	"poetry": flagSet("--source", "-G", "--group", "--python", "-P", "--project", "-C",
-		"--with", "--without", "--only", "-E", "--extras"),
+		"--with", "--without", "--only", "-E", "--extras", "--platform", "--markers"),
 	// uv covers both `uv add` (uv-native flags) and `uv pip install` (pip-style flags).
 	// `uv sync`/`uv lock` take no packages at all, so an unlisted value there
 	// (`uv sync --package api`) turns a project scan into a check of one wrong
 	// name; the workspace and group selectors below are listed for that reason.
+	// TestUVInstallFlagTablesMatchUV holds it to `uv <command> --help`. `-e` /
+	// `--editable` are absent: a path in `uv pip install`, but a switch in `uv
+	// add` and `uv tool install`, where listing them swallowed the package.
 	"uv": flagSet("-i", "--index-url", "--extra-index-url", "--index", "--default-index",
 		"-f", "--find-links", "--cache-dir", "-p", "--python", "--project", "-c",
-		"--constraint", "-o", "--override", "--group", "--index-strategy",
-		"-t", "--target", "--prefix", "-e", "--editable", "--optional", "--extra",
+		"--constraint", "--constraints", "-o", "--override", "--overrides", "--group",
+		"--index-strategy", "-t", "--target", "--prefix", "--optional", "--extra",
 		"--package", "--no-group", "--only-group", "--tag", "--branch", "--rev",
 		"-m", "--marker", "-P", "--upgrade-package", "--reinstall-package",
-		"--no-install-package", "--prerelease", "--resolution", "--with-editable"),
+		"--no-install-package", "--prerelease", "--resolution", "--with-editable",
+		"-b", "--build-constraint", "--build-constraints", "--exclude", "--excludes",
+		"--bounds", "--script", "--no-extra", "--output-format", "--no-editable-package",
+		"--only-binary", "--python-version", "--python-platform", "--torch-backend",
+		"--keyring-provider", "--upgrade-group", "--fork-strategy", "--exclude-newer",
+		"--exclude-newer-package", "--no-sources-package", "--link-mode", "-C",
+		"--config-setting", "--config-settings-package", "--no-build-isolation-package",
+		"--no-build-package", "--no-binary-package", "--refresh-package", "--color",
+		"--allow-insecure-host", "--directory", "--config-file"),
 }
 
 // packageValueFlags name the flags whose value is itself a package being
 // installed, so it is checked like a positional one: `uv tool install ruff
 // --with ruff-lsp` installs both.
 var packageValueFlags = map[string]map[string]bool{
-	"uv": flagSet("--with"),
+	"uv": flagSet("-w", "--with", "--with-executables-from"),
 }
 
 // sourceFlags name the flags whose value is the package actually installed,
@@ -1159,7 +1404,7 @@ func init() {
 // scan` for full coverage), so the value is reported as skipped to warn the user.
 var requirementFileFlags = map[string]map[string]bool{
 	"pip": flagSet("-r", "--requirement"),
-	"uv":  flagSet("-r", "--requirement", "--with-requirements"),
+	"uv":  flagSet("-r", "--requirement", "--requirements", "--with-requirements"),
 }
 
 // Exec runs the real package manager, inheriting stdio. The child's exit code

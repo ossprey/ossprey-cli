@@ -243,7 +243,10 @@ func stagedManifestPaths(ctx context.Context, repoDir string, hasHead bool) ([]s
 	if hasHead {
 		raw, err = gitOutput(ctx, repoDir, "diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z")
 	} else {
-		raw, err = gitOutput(ctx, repoDir, "ls-files", "--cached", "-z")
+		// Unlike diff, ls-files lists only cwd's subtree, cwd-relative; ":/"
+		// and --full-name make it the whole index, root-relative, as the
+		// ":<path>" reads below expect when repoDir is a subdirectory.
+		raw, err = gitOutput(ctx, repoDir, "ls-files", "--cached", "-z", "--full-name", "--", ":/")
 	}
 	if err != nil {
 		return nil, fmt.Errorf("precommit: list staged files: %w", err)

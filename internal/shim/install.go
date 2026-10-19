@@ -93,7 +93,8 @@ type Result struct {
 // resolveMode keeps an installed passive mode across a re-run that names none.
 //
 // `shim install` is documented as safe to re-run, and is how you re-point shims
-// after moving the binary -- install.sh calls it on every upgrade. Taking the
+// after moving the binary -- install.sh/install.ps1 re-run it on every upgrade
+// (as `--no-path --managers <the installed shims>`, naming no mode). Taking the
 // mode from the flags alone would mean a routine upgrade silently rewrote a
 // fleet's monitor shims into blocking ones, and the next `npm install` that hit
 // a flagged transitive dependency would start failing builds everywhere. So an
@@ -380,6 +381,12 @@ func resolve(o Options) (dir, bin string, err error) {
 	}
 	if bin, err = filepath.Abs(bin); err != nil {
 		return "", "", fmt.Errorf("resolve ossprey binary path: %w", err)
+	}
+	// Both paths are written into the shim, and the binary into its
+	// `ossprey-bin:` header line: a line break would end that line early (and
+	// split a .cmd shim's commands), so it is refused rather than escaped.
+	if strings.ContainsAny(dir+bin, "\r\n") {
+		return "", "", fmt.Errorf("the shim directory and ossprey binary paths must not contain a line break: %q, %q", dir, bin)
 	}
 	if filepath.Dir(bin) == dir {
 		return "", "", fmt.Errorf("the ossprey binary is inside the shim directory (%s); shims must call an ossprey outside it", dir)

@@ -358,26 +358,36 @@ func TestRunSHA256Mismatch(t *testing.T) {
 	}
 }
 
-func TestRunMissingSidecarStillInstalls(t *testing.T) {
+func TestRunMissingSidecarFailsClosed(t *testing.T) {
+	newBin := []byte("unverified but present")
+	srv, _ := newReleaseServer(t, "v1.2.3", newBin, false)
+	exe := fakeExe(t)
+	before, _ := os.ReadFile(exe)
+
+	err := Run(context.Background(), Options{Current: "1.0.0", BaseURL: srv.URL, ExePath: exe, Out: &bytes.Buffer{}})
+	if err == nil || !strings.Contains(err.Error(), "no sha256 file") {
+		t.Fatalf("want a refusal, got %v", err)
+	}
+	if got, _ := os.ReadFile(exe); !bytes.Equal(got, before) {
+		t.Errorf("binary replaced without verification: %q", got)
+	}
+}
+
+func TestRunMissingSidecarSkipChecksumOptOut(t *testing.T) {
+	t.Setenv("OSSPREY_SKIP_CHECKSUM", "1")
 	newBin := []byte("unverified but present")
 	srv, _ := newReleaseServer(t, "v1.2.3", newBin, false)
 	exe := fakeExe(t)
 
 	var out bytes.Buffer
-	err := Run(context.Background(), Options{
-		Current: "1.0.0",
-		BaseURL: srv.URL,
-		ExePath: exe,
-		Out:     &out,
-	})
-	if err != nil {
+	if err := Run(context.Background(), Options{Current: "1.0.0", BaseURL: srv.URL, ExePath: exe, Out: &out}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	if got, _ := os.ReadFile(exe); !bytes.Equal(got, newBin) {
 		t.Errorf("binary not replaced: %q", got)
 	}
-	if !strings.Contains(out.String(), "skipping verification") {
-		t.Errorf("missing skip-verification notice: %q", out.String())
+	if !strings.Contains(out.String(), "NOT verifying") {
+		t.Errorf("missing opt-out notice: %q", out.String())
 	}
 }
 
