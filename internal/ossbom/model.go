@@ -22,6 +22,12 @@ type Environment struct {
 	ProductEnv  string `json:"product_env,omitempty"`
 	Project     string `json:"project,omitempty"`
 	Path        string `json:"path,omitempty"`
+	// Person names who ran the command; see internal/identity.
+	Person string `json:"person,omitempty"`
+	// Agent is the coding agent the command ran under, e.g. "claude-code".
+	Agent string `json:"agent,omitempty"`
+	// AgentSession is that agent's session id, when the agent exports one.
+	AgentSession string `json:"agent_session,omitempty"`
 }
 
 type Component struct {

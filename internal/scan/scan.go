@@ -15,6 +15,7 @@ import (
 	"github.com/ossprey/ossprey-cli/internal/apitext"
 	"github.com/ossprey/ossprey-cli/internal/catalog"
 	"github.com/ossprey/ossprey-cli/internal/env"
+	"github.com/ossprey/ossprey-cli/internal/identity"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
 	"github.com/ossprey/ossprey-cli/internal/severity"
 	"github.com/ossprey/ossprey-cli/internal/trust"
@@ -78,6 +79,7 @@ func Run(ctx context.Context, opts Options) (*ossbom.SBOM, error) {
 
 	scanEnv := ossbom.Environment{Path: abs, MachineName: host}
 	env.Overlay(&scanEnv)
+	identity.Stamp(&scanEnv)
 	// Fallback only: an ADO agent checks out into ".../1/s", so CI names it instead.
 	if scanEnv.Project == "" {
 		scanEnv.Project = filepath.Base(abs)
