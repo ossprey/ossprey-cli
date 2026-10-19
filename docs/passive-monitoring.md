@@ -87,6 +87,18 @@ curl -fsSL https://github.com/ossprey/ossprey-cli/releases/latest/download/insta
 `ossprey shim status` says which mode each shim is in, so you can tell a
 blocking install from a passive one at a glance.
 
+## Who ran it, and in which agent session
+
+Every submission names the person and, under a coding agent, its session, so the dashboard can group what was installed by person and then by session:
+
+| `env` field | Value |
+|---|---|
+| `person` | `<os user>@<machine name>` |
+| `agent` | `claude-code` when Claude Code ran the command (`CLAUDECODE` or `CLAUDE_CODE_CHILD_SESSION` is `1`) |
+| `agent_session` | `CLAUDE_CODE_SESSION_ID`, else `CLAUDE_CODE_REMOTE_SESSION_ID` |
+
+Only Claude Code cloud sessions export a session id. A local Claude Code exports none, so its installs are grouped by machine instead. Installs from a plain terminal or CI carry no `agent`.
+
 ## What passive mode costs you
 
 - **Nothing is blocked.** A passive shim reports malware to the dashboard; it
