@@ -253,6 +253,8 @@ func printInstallResult(res *shim.Result, noPath bool) {
 	if len(res.Done) == 0 {
 		fmt.Printf("No package managers to shim. Supported: %s\n", strings.Join(shim.DefaultManagers(), ", "))
 		fmt.Println("Install one, or re-run with --all to shim them ahead of time.")
+		printAgentHooks(res.Agents)
+		printWarnings(res.Warnings)
 		return
 	}
 
@@ -289,11 +291,7 @@ func printInstallResult(res *shim.Result, noPath bool) {
 		fmt.Println("Open a new terminal (or `hash -r`) to pick it up, then run `ossprey shim status`.")
 	}
 
-	for _, p := range res.Agents {
-		fmt.Println("\nAdded a SessionStart hook putting the shims on PATH for Claude Code in " + p)
-		fmt.Println("It applies from the next Claude Code session.")
-	}
-
+	printAgentHooks(res.Agents)
 	printWarnings(res.Warnings)
 	fmt.Printf("\nBypass a single command with %s=1, or undo with `ossprey shim uninstall`.\n", shim.BypassEnv)
 }
@@ -362,6 +360,13 @@ func printStatus(st *shim.Status) {
 	}
 	if runtime.GOOS != "windows" && len(managed) == 0 && st.Installed() {
 		fmt.Println("\nNo shell profile carries the PATH entry (installed with --no-path?).")
+	}
+}
+
+func printAgentHooks(paths []string) {
+	for _, p := range paths {
+		fmt.Println("\nAdded a SessionStart hook putting the shims on PATH for Claude Code's Bash commands in " + p)
+		fmt.Println("It applies from the next Claude Code session.")
 	}
 }
 

@@ -116,6 +116,22 @@ func TestProfilesIncludeZshenvWhenZshIsInstalled(t *testing.T) {
 	}
 }
 
+func TestProfilesIncludeAnExistingBashLogin(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("PATH", home)
+	login := filepath.Join(home, ".bash_login")
+	if err := os.WriteFile(login, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var paths []string
+	for _, p := range Profiles(home) {
+		paths = append(paths, p.Path)
+	}
+	if !contains(paths, login) {
+		t.Fatalf("Profiles = %v, want ~/.bash_login, which hides ~/.profile from a login bash", paths)
+	}
+}
+
 func TestFishQuote(t *testing.T) {
 	if got := fishQuote(`/a'b\c`); got != `'/a\'b\\c'` {
 		t.Fatalf("fishQuote = %s", got)

@@ -40,7 +40,7 @@ speaks up for a block (the full malware report) or a platform error; set
 | `ossprey shim dir` | Print the shim directory (for `ENV PATH=…` in a Dockerfile) |
 | `ossprey shim install --watchdog` | Passive: submit scans with this machine's login, never block an install |
 | `ossprey shim install --monitor <id>` | Passive: submit through a monitor's id, with no credential on the machine |
-| `ossprey shim install --agent claude` | Also put the shims on PATH for the commands Claude Code runs |
+| `ossprey shim install --agent claude` | Also put the shims on PATH for Claude Code's Bash commands |
 
 Useful flags: `--git` to also shim git (opt-in, see [git.md](git.md)),
 `--managers npm,pip` to shim a subset, `--all` to shim managers
@@ -69,8 +69,9 @@ yourself, `--dir` / `$OSSPREY_SHIM_DIR` to relocate them.
 
 Which profiles get the PATH entry: `~/.profile` always; `~/.bashrc`,
 `~/.zshrc`, `~/.zshenv` and `~/.config/fish/config.fish` if the file exists or
-that shell is installed; `~/.bash_profile` and `~/.zprofile` only if they
-already exist. On Windows the shims are `.cmd` files and the directory is
+that shell is installed; `~/.bash_profile`, `~/.bash_login` and `~/.zprofile` only if
+they already exist (bash reads only the first of `~/.bash_profile`,
+`~/.bash_login` and `~/.profile`). On Windows the shims are `.cmd` files and the directory is
 prepended to your user PATH.
 
 **Which shells see the shims**
@@ -90,7 +91,7 @@ missing from PATH. Cover those by setting PATH where they start:
 
 - **Claude Code:** `ossprey shim install --agent claude` adds a SessionStart
   hook to `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR`) that puts the shim
-  directory first on PATH for every command Claude Code runs. It applies from
+  directory first on PATH for every Bash command Claude Code runs. It applies from
   the next session, is re-pointed by a later `shim install`, and is removed by
   `shim uninstall`. `--no-path` leaves an existing hook alone unless you also
   pass `--agent`. Not needed on Windows, where the user PATH already reaches
