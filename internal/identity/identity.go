@@ -63,25 +63,42 @@ type Session struct {
 	ID string
 }
 
-// sessionIDVars are read in order. Claude Code exports a session id only in
-// cloud sessions; a local CLI exports none.
-var sessionIDVars = []string{"CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_REMOTE_SESSION_ID"}
+// SessionLookup reports the session of one agent harness, and whether the
+// command ran under it.
+type SessionLookup func(getenv func(string) string) (Session, bool)
 
-// DetectSession reads the agent session from the environment.
-func DetectSession(getenv func(string) string) Session {
+// SessionLookups are tried in order; the first match wins. Register another
+// harness here.
+var SessionLookups = []SessionLookup{claudeCodeSession}
+
+// claudeSessionIDVars are read in order. Claude Code exports a session id only
+// in cloud sessions; a local CLI exports none.
+var claudeSessionIDVars = []string{"CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_REMOTE_SESSION_ID"}
+
+func claudeCodeSession(getenv func(string) string) (Session, bool) {
 	// CLAUDECODE is set in every subprocess Claude Code spawns, CHILD_SESSION
 	// by newer versions only; either marks a command it ran.
 	if getenv("CLAUDECODE") != "1" && getenv("CLAUDE_CODE_CHILD_SESSION") != "1" {
-		return Session{}
+		return Session{}, false
 	}
 	s := Session{Agent: AgentClaudeCode}
-	for _, k := range sessionIDVars {
+	for _, k := range claudeSessionIDVars {
 		if v := strings.TrimSpace(getenv(k)); v != "" {
 			s.ID = v
 			break
 		}
 	}
-	return s
+	return s, true
+}
+
+// DetectSession reads the agent session from the environment.
+func DetectSession(getenv func(string) string) Session {
+	for _, lookup := range SessionLookups {
+		if s, ok := lookup(getenv); ok {
+			return s
+		}
+	}
+	return Session{}
 }
 
 // Default resolves people for Stamp.

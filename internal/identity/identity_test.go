@@ -71,3 +71,21 @@ func TestStampUsesTheResolverAndKeepsAGivenPerson(t *testing.T) {
 		t.Errorf("Stamp replaced a given person: %q", given.Person)
 	}
 }
+
+func TestDetectSessionTriesLookupsInOrder(t *testing.T) {
+	prev := SessionLookups
+	t.Cleanup(func() { SessionLookups = prev })
+	other := func(getenv func(string) string) (Session, bool) {
+		return Session{Agent: "other", ID: getenv("OTHER_ID")}, getenv("OTHER_ID") != ""
+	}
+	SessionLookups = []SessionLookup{other, claudeCodeSession}
+
+	got := DetectSession(envOf(map[string]string{"OTHER_ID": "o1", "CLAUDECODE": "1"}))
+	if got != (Session{"other", "o1"}) {
+		t.Errorf("DetectSession = %+v, want the first matching lookup", got)
+	}
+	got = DetectSession(envOf(map[string]string{"CLAUDECODE": "1"}))
+	if got != (Session{Agent: AgentClaudeCode}) {
+		t.Errorf("DetectSession = %+v, want the next lookup to match", got)
+	}
+}
