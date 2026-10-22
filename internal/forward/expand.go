@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/ossprey/ossprey-cli/internal/catalog"
@@ -256,13 +257,15 @@ func without(set, drop map[string]bool) map[string]bool {
 }
 
 // uvGlobalArgs are the tokens before a uv command's verb, where its global
-// options sit; uvx and pip have no such part.
+// options sit; uvx and pip have no such part. A copy, never a prefix slice
+// of args: a caller appends to it, and an append into args's own backing
+// array would overwrite the verb and arguments the real uv is about to get.
 func uvGlobalArgs(m *Manager, args []string) []string {
 	if m.Bin != "uv" {
 		return nil
 	}
 	if idx := verbIndex("uv", args); idx > 0 {
-		return args[:idx]
+		return slices.Clone(args[:idx])
 	}
 	return nil
 }
@@ -509,32 +512,11 @@ func npmConfigDir(m *Manager, args []string) string {
 	if m.Bin != "npm" {
 		return npmLocalPrefix()
 	}
-	valFlags := union(globalValueFlags[m.Bin], valueFlags[m.Bin])
-	global, prefix := false, ""
-	for i := 0; i < len(args); i++ {
-		flag, value, hasInline := splitFlagValue(args[i])
-		if !hasInline && valFlags[flag] && i+1 < len(args) {
-			value = args[i+1]
-			i++
-		}
-		switch flag {
-		case "-g", "--global":
-			global = true
-		case "--location":
-			// Not in npm's value table (its value is one of three words), so
-			// read it here: `--location global` as well as `--location=global`.
-			if !hasInline && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
-				value = args[i+1]
-				i++
-			}
-			if value == "global" {
-				global = true
-			}
-		case "--prefix", "-C":
-			prefix = value
-		}
-	}
-	return npmConfigDirFor(global, prefix)
+	// npm's own parse decides the mode, with its last-wins and negation
+	// rules: `--global --no-global` and `--global=false` are local installs,
+	// and -C is --prefix.
+	a := parseNpmArgv(args)
+	return npmConfigDirFor(a.global(), a.prefix())
 }
 
 // npmConfigDirFor is npmConfigDir once global mode and the --prefix are

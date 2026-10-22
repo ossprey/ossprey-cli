@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -754,6 +755,11 @@ func TestNpmConfigDir(t *testing.T) {
 		{"--location=project", sub, npm, []string{"install", "--location=project", "x"}, proj},
 		{"--prefix", sub, npm, []string{"--prefix", "..", "install", "x"}, proj},
 		{"-C after the verb", bare, npm, []string{"install", "-C", "../proj", "x"}, proj},
+		// npm's last-wins and negation rules: these are local installs.
+		{"--global=false", sub, npm, []string{"install", "--global=false", "x"}, proj},
+		{"--global then --no-global", sub, npm, []string{"install", "--global", "--no-global", "x"}, proj},
+		{"--location overridden", sub, npm, []string{"install", "--location=global", "--location=project", "x"}, proj},
+		{"--no-global then -g", sub, npm, []string{"install", "--no-global", "-g", "x"}, ""},
 		{"pnpm reads the project's", sub, pnpm, []string{"add", "x"}, proj},
 	}
 	for _, tt := range tests {
@@ -844,6 +850,10 @@ func TestExpandInstall_UVGlobalOptionsAndInterpreterPaths(t *testing.T) {
 			".", []string{"--project", absPath("p")}, false},
 		{"named install --project after the verb", uv, []string{"pip", "install", "--project", "p", "ruff"},
 			".", []string{"--project", absPath("p")}, false},
+		// The global part is gathered without touching args: an append into
+		// its backing array would overwrite the verb the real uv is given.
+		{"global part leaves args intact", uv, []string{"--no-config", "tool", "run", "--with", "httpx", "--with", "rich", "ruff"},
+			"", []string{"--no-config"}, false},
 	}
 	for _, tt := range tests {
 		gotDir, gotUV, uvOnly = nil, nil, false
@@ -860,8 +870,12 @@ func TestExpandInstall_UVGlobalOptionsAndInterpreterPaths(t *testing.T) {
 			start, _ = tt.m.installAt(tt.args)
 			parsed = ParseSpecs(tt.m, tt.args[start:])
 		}
+		before := slices.Clone(tt.args)
 		if _, err := expandInstall(context.Background(), tt.m, tt.args, start, parsed); err != nil {
 			t.Fatalf("%s: %v", tt.name, err)
+		}
+		if !reflect.DeepEqual(tt.args, before) {
+			t.Errorf("%s: args changed to %v", tt.name, tt.args)
 		}
 		if gotDir == nil || gotDir[0] != tt.wantDir {
 			t.Errorf("%s: dir = %v, want %q", tt.name, gotDir, tt.wantDir)
