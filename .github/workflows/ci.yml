@@ -66,6 +66,14 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # The forwarder's npm tables are held to the installed npm, so every
+      # runner gets the same one rather than whatever its image ships.
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4
+        with:
+          node-version: '24'
+      - name: Pin npm
+        run: npm install -g npm@11.19.1
+
       - name: go test
         run: go test ./...
 
@@ -99,10 +107,10 @@ jobs:
 
       - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4
         with:
-          node-version: '22'
+          node-version: '24'
 
-      - name: Install pnpm
-        run: npm install -g pnpm@latest
+      - name: Pin npm and install pnpm
+        run: npm install -g npm@11.19.1 pnpm@latest
 
       - name: pnpm version
         run: pnpm --version
