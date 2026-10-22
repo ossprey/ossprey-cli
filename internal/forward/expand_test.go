@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -356,6 +357,18 @@ func TestExpandInstall_ToolRunHasNoProjectContext(t *testing.T) {
 	if !reflect.DeepEqual(gotSpecs, []string{"cowsay"}) {
 		t.Errorf("specs = %v", gotSpecs)
 	}
+
+	// A --userconfig npm reads is made absolute for the dry run, which runs
+	// in another directory.
+	args = []string{"--userconfig", "./x.npmrc", "cowsay"}
+	parsed = npx.parseRun(args)
+	parsed.ToolRun = true
+	if _, err := expandInstall(context.Background(), npx, args, 0, parsed); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"--userconfig", filepath.Join(dir, "x.npmrc")}; !reflect.DeepEqual(gotFlags, want) {
+		t.Errorf("flags = %v, want %v", gotFlags, want)
+	}
 }
 
 // For uvx, only the flags before the command reach the resolver: an index
@@ -389,13 +402,17 @@ func TestExpandInstall_ToolRunReadsOnlyLeadingFlags(t *testing.T) {
 		t.Errorf("pip flags = %v, want %v", gotPip, want)
 	}
 
-	args = []string{"--index", "https://i.example", "ruff"}
+	// uv's --index has no pip equivalent (first index wins vs best version
+	// across indexes), so the fallback is given no index rather than a
+	// different selection rule; --default-index replaces the default, which
+	// pip's --index-url does too.
+	args = []string{"--index", "https://i.example", "--default-index", "https://d.example", "ruff"}
 	parsed = parseToolRun(m, args)
 	parsed.ToolRun = true
 	if _, err := expandInstall(context.Background(), m, args, 0, parsed); err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"--extra-index-url", "https://i.example"}; !reflect.DeepEqual(gotPip, want) {
+	if want := []string{"--index-url", "https://d.example"}; !reflect.DeepEqual(gotPip, want) {
 		t.Errorf("pip flags = %v, want %v", gotPip, want)
 	}
 }
@@ -472,9 +489,12 @@ func TestResolverFlags(t *testing.T) {
 		{"uv to uv keeps its own",
 			uvResolveFlags(uv, []string{"--index", "https://i.example", "--prerelease=allow", "--dev", "httpx"}),
 			[]string{"--index", "https://i.example", "--prerelease=allow"}},
-		{"uv to pip renames the index flags",
+		{"uv to pip renames the default index and drops --index",
 			pipResolveFlags(uv, []string{"--index", "https://i.example", "--default-index=https://d.example", "--resolution", "lowest", "httpx"}),
-			[]string{"--extra-index-url", "https://i.example", "--index-url=https://d.example"}},
+			[]string{"--index-url=https://d.example"}},
+		{"npm makes --userconfig absolute",
+			npmResolveFlags(npm, []string{"--userconfig", "u.npmrc", "--userconfig=./v.npmrc", "express"}),
+			[]string{"--userconfig", absPath("u.npmrc"), "--userconfig=" + absPath("v.npmrc")}},
 	}
 	for _, tt := range tests {
 		if !reflect.DeepEqual(tt.got, tt.want) {

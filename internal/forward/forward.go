@@ -1092,6 +1092,8 @@ type installArgs struct {
 	// (`npx --registry …`), taken from npm's own parse of the argv so the
 	// program's arguments can never supply it.
 	Registry string
+	// Userconfig is the --userconfig npm reads, from the same parse.
+	Userconfig string
 }
 
 // ParseSpecs classifies install arguments. A real-world multi-package install

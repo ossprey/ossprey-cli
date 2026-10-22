@@ -57,6 +57,10 @@ type npmArgv struct {
 	// (the last wins, as in nopt). It is read by npm, not by the program run,
 	// so the resolver must use it too.
 	Registry string
+	// Userconfig is the --userconfig path, cleaned but still relative to the
+	// directory the command ran in, as nopt's path type resolves it; a
+	// resolver running elsewhere must make it absolute first.
+	Userconfig string
 }
 
 // npmExecAt matches `npm exec` under any name npm takes for it (`x`, `exe`).
@@ -86,7 +90,7 @@ func npxRun(args []string) installArgs {
 }
 
 func (a npmArgv) target() installArgs {
-	out := installArgs{Registry: a.Registry}
+	out := installArgs{Registry: a.Registry, Userconfig: a.Userconfig}
 	if len(a.Packages) > 0 {
 		for _, p := range a.Packages {
 			out.addTarget("npm", strings.TrimSuffix(p, "@latest"))
@@ -254,6 +258,8 @@ func parseNpmArgv(in []string) npmArgv {
 				out.Call = true
 			case "registry":
 				out.Registry = la // the last wins, and is the one validated below
+			case "userconfig":
+				out.Userconfig = filepath.Clean(la)
 			}
 			i++
 			continue

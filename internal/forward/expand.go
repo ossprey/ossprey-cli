@@ -190,7 +190,10 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 		if parsed.ToolRun {
 			var flags []string
 			if parsed.Registry != "" {
-				flags = []string{"--registry", parsed.Registry}
+				flags = append(flags, "--registry", parsed.Registry)
+			}
+			if parsed.Userconfig != "" {
+				flags = append(flags, "--userconfig", absPath(parsed.Userconfig))
 			}
 			return resolveNpmFn(ctx, "", tokens, flags)
 		}
@@ -217,11 +220,12 @@ func toolRunLeadingFlags(rest []string) []string {
 
 // toolRunPipFlags are the same leading flags as pip's resolver reads them,
 // for a host with no working uv: the index a uvx run names must reach the
-// fallback too, or it would resolve against a different one.
+// fallback too, or it would resolve against a different one. --index is left
+// out for the reason pipResolveFlags gives.
 func toolRunPipFlags(rest []string) []string {
 	return pickFlags(toolRunLead(rest), toolRunValueFlags,
-		union(pythonCommonFlags, flagSet("--index", "--default-index")),
-		map[string]string{"--index": "--extra-index-url", "--default-index": "--index-url"})
+		union(pythonCommonFlags, flagSet("--default-index")),
+		map[string]string{"--default-index": "--index-url"})
 }
 
 // toolRunLead is the part of a tool run's arguments before the command: the
@@ -307,13 +311,34 @@ func npmProjectDir(m *Manager, args []string) string {
 // npmResolveFlags are passed from an npm install to the resolving npm. pnpm
 // and yarn spell theirs differently, so nothing of theirs is passed.
 var npmPassFlags = flagSet("--legacy-peer-deps", "--strict-peer-deps", "--no-optional",
-	"--omit", "--include", "--registry", "--before", "--tag")
+	"--omit", "--include", "--registry", "--before", "--tag", "--userconfig")
 
 func npmResolveFlags(m *Manager, rest []string) []string {
 	if m.Bin != "npm" {
 		return nil
 	}
-	return pickFlags(rest, valueFlags[m.Bin], npmPassFlags, nil)
+	return absUserconfig(pickFlags(rest, valueFlags[m.Bin], npmPassFlags, nil))
+}
+
+// absUserconfig makes a --userconfig path absolute: npm resolves it against
+// the directory the command ran in, and the dry run runs in another.
+func absUserconfig(flags []string) []string {
+	for i, f := range flags {
+		switch {
+		case f == "--userconfig" && i+1 < len(flags):
+			flags[i+1] = absPath(flags[i+1])
+		case strings.HasPrefix(f, "--userconfig="):
+			flags[i] = "--userconfig=" + absPath(strings.TrimPrefix(f, "--userconfig="))
+		}
+	}
+	return flags
+}
+
+func absPath(p string) string {
+	if abs, err := filepath.Abs(p); err == nil {
+		return abs
+	}
+	return p
 }
 
 // Flags the pip and uv resolvers read the same way.
@@ -342,15 +367,20 @@ func uvResolveFlags(m *Manager, rest []string) []string {
 	return nil
 }
 
-// pipResolveFlags are passed to `pip install --dry-run`. uv's --index and
-// --default-index are pip's --extra-index-url and --index-url.
+// pipResolveFlags are passed to `pip install --dry-run`. uv's --default-index
+// is pip's --index-url. uv's --index is deliberately not mapped: uv takes a
+// package from the first index that has it, pip the best version across
+// every index, so pip with an --extra-index-url can pick a release uv would
+// not. Left out, a private-index package fails the fallback and the names
+// are checked with the warning, rather than a different release checked as
+// if it were the one installed.
 func pipResolveFlags(m *Manager, rest []string) []string {
 	switch m.Bin {
 	case "pip", "pip3":
 		return pickFlags(rest, valueFlags[m.Bin], union(pythonCommonFlags, pipOnlyFlags), nil)
 	case "uv":
-		return pickFlags(rest, valueFlags[m.Bin], union(pythonCommonFlags, flagSet("--index", "--default-index")),
-			map[string]string{"--index": "--extra-index-url", "--default-index": "--index-url"})
+		return pickFlags(rest, valueFlags[m.Bin], union(pythonCommonFlags, flagSet("--default-index")),
+			map[string]string{"--default-index": "--index-url"})
 	}
 	return nil
 }

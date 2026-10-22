@@ -411,6 +411,9 @@ Module._load = function (request, parent, isMain) {
       packages: pkg.map(String),
       call: conf.call !== undefined,
       registry: conf.registry === undefined ? '' : String(conf.registry),
+      // nopt's path type resolves against the cwd; relative to it again so
+      // the port, which keeps the path as given, compares equal.
+      userconfig: conf.userconfig === undefined ? '' : require('path').relative(process.cwd(), String(conf.userconfig)),
     }))
   }
 }
@@ -438,11 +441,13 @@ func TestNpmParsersMatchNpm(t *testing.T) {
 			Packages    []string
 			Call        bool
 			Registry    string
+			Userconfig  string
 		}
 		if err := json.Unmarshal(out, &got); err != nil {
 			t.Fatalf("%s %q: %v (%s)", cli, args, err, out)
 		}
-		return npmArgv{Packages: got.Packages, Call: got.Call, Positionals: got.Positionals, Registry: got.Registry}
+		return npmArgv{Packages: got.Packages, Call: got.Call, Positionals: got.Positionals,
+			Registry: got.Registry, Userconfig: filepath.ToSlash(got.Userconfig)}
 	}
 	norm := func(a npmArgv) npmArgv {
 		if len(a.Packages) == 0 {
@@ -451,6 +456,7 @@ func TestNpmParsersMatchNpm(t *testing.T) {
 		if len(a.Positionals) == 0 {
 			a.Positionals = nil
 		}
+		a.Userconfig = filepath.ToSlash(a.Userconfig)
 		return a
 	}
 
@@ -473,6 +479,7 @@ func TestNpmParsersMatchNpm(t *testing.T) {
 		{"--registry", "nope", "cowsay"}, {"--registry", "https://a.example", "--registry", "nope", "cowsay"},
 		{"--registry", "https://a.example", "--registry", "https://b.example/", "cowsay"},
 		{"cowsay", "--registry", "https://after.example"},
+		{"--userconfig=./y.npmrc", "cowsay"}, {"--userconfig", "sub/../z.npmrc", "cowsay", "moo"},
 		{"--unknown=1", "cowsay"}, {"-d", "cowsay"}, {"--yes=true", "cowsay"}, {"--version"}, {},
 	}
 	for _, args := range npx {
