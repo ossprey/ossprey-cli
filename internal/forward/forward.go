@@ -1104,6 +1104,11 @@ type installArgs struct {
 	// NpmOmits are the dependency kinds npm's effective omit policy leaves
 	// out of the install (npmArgv.omits).
 	NpmOmits map[string]bool
+	// NpmCache is the --cache npm was given, if any, and NpxPackages the
+	// specs a tool run installs into the npx cache, as typed: together they
+	// locate the tree an earlier run of the same packages left there.
+	NpmCache    string
+	NpxPackages []string
 }
 
 // ParseSpecs classifies install arguments. A real-world multi-package install

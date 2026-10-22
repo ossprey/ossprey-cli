@@ -420,9 +420,9 @@ Module._load = function (request, parent, isMain) {
       // a Date (before) as the word, a path (prefix) relative to the cwd,
       // everything else as its string.
       config: Object.fromEntries(['legacy-peer-deps', 'strict-peer-deps', 'optional', 'omit', 'include',
-        'before', 'tag', 'globalconfig', 'global', 'prefix', 'location'].filter(k => conf[k] !== undefined).map(k =>
+        'before', 'tag', 'globalconfig', 'global', 'prefix', 'location', 'cache'].filter(k => conf[k] !== undefined).map(k =>
           [k, [].concat(conf[k]).map(v => v instanceof Date ? 'date'
-            : k === 'prefix' || k === 'globalconfig' ? require('path').relative(process.cwd(), String(v)) : String(v))])),
+            : k === 'prefix' || k === 'globalconfig' || k === 'cache' ? require('path').relative(process.cwd(), String(v)) : String(v))])),
     }))
   }
 }
@@ -437,10 +437,11 @@ func TestNpmParsersMatchNpm(t *testing.T) {
 	if err := os.WriteFile(preload, []byte(oraclePreload), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	oracleDir := t.TempDir()
 	oracle := func(cli string, args []string) npmArgv {
 		t.Helper()
 		cmd := exec.Command(node, append([]string{"-r", preload, filepath.Join(root, "bin", cli)}, args...)...)
-		cmd.Dir = t.TempDir()
+		cmd.Dir = oracleDir
 		out, err := cmd.Output()
 		if err != nil {
 			t.Fatalf("%s %q: %v", cli, args, err)
@@ -466,7 +467,17 @@ func TestNpmParsersMatchNpm(t *testing.T) {
 		if len(a.Positionals) == 0 {
 			a.Positionals = nil
 		}
-		a.Userconfig = filepath.ToSlash(a.Userconfig)
+		// A home path is absolute on both sides after nopt's expansion; the
+		// oracle reports it relative to its cwd, so the port's is too.
+		rel := func(v string) string {
+			if filepath.IsAbs(v) {
+				if r, err := filepath.Rel(oracleDir, v); err == nil {
+					v = r
+				}
+			}
+			return filepath.ToSlash(v)
+		}
+		a.Userconfig = rel(a.Userconfig)
 		if len(a.Config) == 0 {
 			a.Config = nil
 		}
@@ -480,8 +491,8 @@ func TestNpmParsersMatchNpm(t *testing.T) {
 				switch k {
 				case "before":
 					v = "date"
-				case "prefix", "globalconfig":
-					v = filepath.ToSlash(filepath.Clean(v))
+				case "prefix", "globalconfig", "cache":
+					v = rel(filepath.Clean(v))
 				}
 				out = append(out, v)
 			}
@@ -527,6 +538,9 @@ func TestNpmParsersMatchNpm(t *testing.T) {
 		{"--optional=false", "cowsay"}, {"--no-optional=false", "cowsay"}, {"--no-global=false", "cowsay"},
 		{"--tag", "next", "--tag=latest", "cowsay"},
 		{"--globalconfig", "./corp.npmrc", "cowsay"}, {"--globalconfig=sub/../g.npmrc", "cowsay", "moo"},
+		// nopt expands a leading ~/ in a path-typed option.
+		{"--userconfig", "~/u.npmrc", "cowsay"}, {"--globalconfig=~/g.npmrc", "cowsay"}, {"--prefix", "~/p", "cowsay"},
+		{"--cache", "~/c", "cowsay"}, {"--cache=./c", "cowsay", "moo"},
 	}
 	for _, args := range npx {
 		want, got := norm(oracle("npx-cli.js", args)), norm(parseNpmArgv(npxArgv(args)))

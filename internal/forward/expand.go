@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 
@@ -24,6 +25,7 @@ var (
 	resolvePythonFn     = catalog.ResolvePythonInstall
 	resolveWithUVFn     = catalog.ResolvePythonInstallWithUV
 	npmConfigIncludesFn = catalog.NpmConfigIncludes
+	npxCachedFn         = catalog.NpxCachedTree
 )
 
 // A named install used to check exactly the packages typed. `npm install
@@ -204,6 +206,11 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 			if err != nil {
 				return tree, err
 			}
+			if m.Bin == "npm" {
+				// npm may reuse what an earlier run left in its npx cache,
+				// dependencies and all, rather than what resolves today.
+				tree = withNpxCached(tree, parsed)
+			}
 			omits := npmEffectiveOmits(ctx, parsed.NpmOmits, slices.Concat(flags, npmLocationFlags(parsed.NpmGlobal, parsed.NpmPrefix)))
 			return npmOmit(tree, omits), nil
 		}
@@ -299,6 +306,55 @@ func pythonValueFlags(m *Manager) map[string]bool {
 		return union(valueFlags["uv"], toolRunValueFlags)
 	}
 	return valueFlags[m.Bin]
+}
+
+// withNpxCached adds to a fresh resolution of a tool run whatever an earlier
+// run of the same packages left in npm's npx cache: npm reuses that
+// installation when the package it holds still satisfies the request, with
+// the dependencies resolved back then, so the run may execute either tree.
+// The cache is npm's --cache, else npm_config_cache, else npm's default
+// (~/.npm, %LocalAppData%\npm-cache). An unreadable cache adds nothing.
+func withNpxCached(tree []catalog.Resolved, parsed installArgs) []catalog.Resolved {
+	cached, err := npxCachedFn(npmCacheDir(parsed.NpmCache), parsed.NpxPackages)
+	if err != nil || len(cached) == 0 {
+		return tree
+	}
+	seen := map[string]bool{}
+	for _, r := range tree {
+		seen[r.Name+"@"+r.Version] = true
+	}
+	for _, r := range cached {
+		if !seen[r.Name+"@"+r.Version] {
+			tree = append(tree, r)
+		}
+	}
+	return tree
+}
+
+// npmCacheDir is where npm keeps its cache for this run: --cache as parsed,
+// npm_config_cache, or npm's platform default.
+func npmCacheDir(flag string) string {
+	if flag != "" {
+		return absPath(flag)
+	}
+	for _, name := range []string{"npm_config_cache", "NPM_CONFIG_CACHE"} {
+		if v := os.Getenv(name); v != "" {
+			return absPath(expandHome(v))
+		}
+	}
+	if runtime.GOOS == "windows" {
+		if v := os.Getenv("LOCALAPPDATA"); v != "" {
+			return filepath.Join(v, "npm-cache")
+		}
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	if runtime.GOOS == "windows" {
+		return filepath.Join(home, "npm-cache")
+	}
+	return filepath.Join(home, ".npm")
 }
 
 // npmLocationFlags are the flags that make `npm config get` read the same
@@ -551,10 +607,25 @@ func npmResolveFlags(m *Manager, rest []string) []string {
 }
 
 // absUserconfig makes npm's --userconfig and --globalconfig paths absolute:
-// npm resolves them against the directory the command ran in, and the dry
-// run runs in another.
+// npm resolves them against the directory the command ran in, a leading
+// `~/` against the home directory as nopt does, and the dry run runs in
+// another.
 func absUserconfig(flags []string) []string {
-	return absFlagValues(flags, flagSet("--userconfig", "--globalconfig"), ".")
+	paths := flagSet("--userconfig", "--globalconfig")
+	for i := 0; i < len(flags); i++ {
+		flag, inline, hasInline := splitFlagValue(flags[i])
+		if !paths[flag] {
+			continue
+		}
+		switch {
+		case hasInline:
+			flags[i] = flag + "=" + expandHome(inline)
+		case i+1 < len(flags):
+			flags[i+1] = expandHome(flags[i+1])
+			i++
+		}
+	}
+	return absFlagValues(flags, paths, ".")
 }
 
 // absFlagValues makes the values of the flags in paths absolute, in both

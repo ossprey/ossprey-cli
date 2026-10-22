@@ -128,6 +128,9 @@ func runNpmResolve(ctx context.Context, npm, cache, packageJSON string, loc file
 
 type npmLockfile struct {
 	Packages map[string]struct {
+		// Name is set for an alias (`renamed@npm:left-pad`): the real
+		// package, where the key names the directory it is installed as.
+		Name     string `json:"name"`
 		Version  string `json:"version"`
 		Resolved string `json:"resolved"`
 		// npm's dependency kinds: recorded in the lock whatever the omit
@@ -156,7 +159,10 @@ func parseNpmLock(data []byte, loc file.Location) ([]pkg.Package, error) {
 		if key == "" || entry.Version == "" || entry.Resolved == "" {
 			continue // root project / local (file:,link:) dep — not on the registry
 		}
-		name := npmNameFromLockKey(key)
+		name := entry.Name // an alias names the real package here
+		if name == "" {
+			name = npmNameFromLockKey(key)
+		}
 		if name == "" {
 			continue
 		}

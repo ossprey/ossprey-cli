@@ -73,7 +73,29 @@ type npmArgv struct {
 // dist-tag, and the global/prefix/location trio that decides which .npmrc
 // npm reads.
 var npmRunConfig = flagSet("legacy-peer-deps", "strict-peer-deps", "optional", "omit", "include",
-	"before", "tag", "globalconfig", "global", "prefix", "location")
+	"before", "tag", "globalconfig", "global", "prefix", "location", "cache")
+
+// npmPathConfig are the npmRunConfig keys nopt types as paths: a leading
+// `~/` is the home directory (nopt's validatePath), and the rest is read
+// relative to the command's directory.
+var npmPathConfig = flagSet("globalconfig", "prefix", "cache")
+
+// expandHome is nopt's home expansion for a path-typed option: `~/x` is
+// `<home>/x` (`~\x` as well on Windows); anything else is left as given.
+func expandHome(v string) string {
+	rest, ok := strings.CutPrefix(v, "~/")
+	if !ok && runtime.GOOS == "windows" {
+		rest, ok = strings.CutPrefix(v, `~\`)
+	}
+	if !ok {
+		return v
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return v
+	}
+	return filepath.Join(home, rest)
+}
 
 // npmConfigKeys are npmRunConfig's keys in a fixed order, for output.
 var npmConfigKeys = []string{"before", "globalconfig", "include", "legacy-peer-deps", "omit", "optional", "strict-peer-deps", "tag"}
@@ -81,6 +103,9 @@ var npmConfigKeys = []string{"before", "globalconfig", "include", "legacy-peer-d
 func (a *npmArgv) record(key, value string) {
 	if !npmRunConfig[key] {
 		return
+	}
+	if npmPathConfig[key] {
+		value = filepath.Clean(expandHome(value))
 	}
 	if a.Config == nil {
 		a.Config = map[string][]string{}
@@ -105,10 +130,24 @@ func (a npmArgv) global() bool {
 // prefix is the --prefix npm was given, cleaned and still relative to the
 // command's directory, or "".
 func (a npmArgv) prefix() string {
-	if p := a.last("prefix"); p != "" {
-		return filepath.Clean(p)
+	return a.last("prefix")
+}
+
+// cache is the --cache npm was given, or "".
+func (a npmArgv) cache() string {
+	return a.last("cache")
+}
+
+// npxPackages are the specs libnpmexec installs for the run, as typed: the
+// --package values, else the command itself. They key the npx cache.
+func (a npmArgv) npxPackages() []string {
+	if len(a.Packages) > 0 {
+		return slices.Clone(a.Packages)
 	}
-	return ""
+	if a.Call || len(a.Positionals) == 0 {
+		return nil
+	}
+	return []string{a.Positionals[0]}
 }
 
 // omits is npm's effective omit policy from the recorded options: the kinds
@@ -150,7 +189,7 @@ func (a npmArgv) resolveFlags() []string {
 				out = append(out, "--"+key)
 			case npmConfig[key].isBool() && v == "false":
 				out = append(out, "--no-"+key)
-			case key == "globalconfig":
+			case key == "globalconfig", key == "cache":
 				// A path, resolved against the command's directory as nopt
 				// does; the dry run runs in another.
 				out = append(out, "--"+key+"="+absPath(v))
@@ -190,7 +229,8 @@ func npxRun(args []string) installArgs {
 
 func (a npmArgv) target() installArgs {
 	out := installArgs{Registry: a.Registry, Userconfig: a.Userconfig,
-		NpmFlags: a.resolveFlags(), NpmGlobal: a.global(), NpmPrefix: a.prefix(), NpmOmits: a.omits()}
+		NpmFlags: a.resolveFlags(), NpmGlobal: a.global(), NpmPrefix: a.prefix(), NpmOmits: a.omits(),
+		NpmCache: a.cache(), NpxPackages: a.npxPackages()}
 	if len(a.Packages) > 0 {
 		for _, p := range a.Packages {
 			out.addTarget("npm", p)
@@ -374,7 +414,7 @@ func parseNpmArgv(in []string) npmArgv {
 			case "registry":
 				out.Registry = la // the last wins, and is the one validated below
 			case "userconfig":
-				out.Userconfig = filepath.Clean(la)
+				out.Userconfig = filepath.Clean(expandHome(la))
 			default:
 				out.record(key, la)
 			}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -258,6 +259,7 @@ func TestParseNpmLockCarriesDependencyKinds(t *testing.T) {
 		"node_modules/devonly": {"version":"3.0.0","resolved":"https://registry.npmjs.org/devonly/-/devonly-3.0.0.tgz","dev":true},
 		"node_modules/both": {"version":"4.0.0","resolved":"https://registry.npmjs.org/both/-/both-4.0.0.tgz","devOptional":true},
 		"node_modules/peer": {"version":"6.0.0","resolved":"https://registry.npmjs.org/peer/-/peer-6.0.0.tgz","peer":true},
+		"node_modules/renamed": {"name":"left-pad","version":"1.3.0","resolved":"https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"},
 		"node_modules/twice": {"version":"5.0.0","resolved":"https://registry.npmjs.org/twice/-/twice-5.0.0.tgz","optional":true},
 		"node_modules/a/node_modules/twice": {"version":"5.0.0","resolved":"https://registry.npmjs.org/twice/-/twice-5.0.0.tgz"},
 		"node_modules/b/node_modules/twice": {"version":"5.0.0","resolved":"https://registry.npmjs.org/twice/-/twice-5.0.0.tgz","optional":true}}}`)
@@ -265,6 +267,8 @@ func TestParseNpmLockCarriesDependencyKinds(t *testing.T) {
 	want := map[string]kinds{
 		"needed": {}, "extra": {Optional: true}, "devonly": {Dev: true}, "both": {DevOptional: true}, "twice": {},
 		"peer": {Peer: true},
+		// An alias is the real package, named by the entry, not its directory.
+		"left-pad": {},
 	}
 	// Map iteration order varies per run; the merge must not depend on it.
 	for range 20 {
@@ -306,5 +310,86 @@ func TestNpmConfigIncludes(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Errorf("global mode read the project's includes: %v", got)
+	}
+}
+
+// The npx cache key is libnpmexec's: known answers computed with node's
+// crypto over the same sorted, newline-joined specs.
+func TestNpxCacheKey(t *testing.T) {
+	for _, tt := range []struct {
+		packages []string
+		want     string
+	}{
+		{[]string{"cowsay@1.6.0"}, "e3e1d528ee105f80"},
+		{[]string{"b@1", "a@2"}, "e26dd66f86ee88a6"},
+		{[]string{"cowsay"}, "8f497369b2d6166e"},
+	} {
+		if got := NpxCacheKey(tt.packages); got != tt.want {
+			t.Errorf("NpxCacheKey(%v) = %s, want %s", tt.packages, got, tt.want)
+		}
+	}
+}
+
+// What an earlier npx run left in the cache is read back as a tree, aliases
+// by their real name; no cache, no tree.
+func TestNpxCachedTree(t *testing.T) {
+	cache := t.TempDir()
+	if got, err := NpxCachedTree(cache, []string{"cowsay@1.6.0"}); err != nil || got != nil {
+		t.Fatalf("empty cache: %v, %v", got, err)
+	}
+	dir := filepath.Join(cache, "_npx", NpxCacheKey([]string{"cowsay@1.6.0"}))
+	os.MkdirAll(dir, 0o755)
+	os.WriteFile(filepath.Join(dir, "package-lock.json"), []byte(`{"lockfileVersion":3,"packages":{
+		"": {"name":"x"},
+		"node_modules/cowsay": {"version":"1.6.0","resolved":"https://registry.npmjs.org/cowsay/-/cowsay-1.6.0.tgz"},
+		"node_modules/old": {"name":"get-stdin","version":"8.0.0","resolved":"https://registry.npmjs.org/get-stdin/-/get-stdin-8.0.0.tgz"}}}`), 0o644)
+	got, err := NpxCachedTree(cache, []string{"cowsay@1.6.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]string{}
+	for _, r := range got {
+		names[r.Name] = r.Version
+	}
+	if !reflect.DeepEqual(names, map[string]string{"cowsay": "1.6.0", "get-stdin": "8.0.0"}) {
+		t.Errorf("cached tree = %v", names)
+	}
+	if got, _ := NpxCachedTree(cache, []string{"cowsay@1.5.0"}); got != nil {
+		t.Errorf("another request found the tree: %v", got)
+	}
+}
+
+// Against a real npm: the tree a real `npx` run leaves is found under the
+// key this package computes.
+func TestNpxCachedTreeMatchesARealRun(t *testing.T) {
+	if testing.Short() {
+		t.Skip("network")
+	}
+	npm, err := lookTool("npm")
+	if err != nil {
+		t.Skip("no npm")
+	}
+	cache := t.TempDir()
+	npx := filepath.Join(filepath.Dir(npm), "npx")
+	if _, err := os.Stat(npx); err != nil {
+		t.Skip("no npx beside npm")
+	}
+	cmd := exec.Command(npx, "--yes", "--cache", cache, "cowsay@1.6.0", "hi")
+	cmd.Env = toolEnv()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Skipf("npx: %v: %s", err, out)
+	}
+	got, err := NpxCachedTree(cache, []string{"cowsay@1.6.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, r := range got {
+		if r.Name == "cowsay" && r.Version == "1.6.0" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the real run's cache was not found: %v", got)
 	}
 }

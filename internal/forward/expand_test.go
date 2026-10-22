@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -313,12 +314,18 @@ func TestExpandInstall_ToolRunHasNoProjectContext(t *testing.T) {
 
 	var gotDir, gotConfig string
 	var gotSpecs, gotFlags []string
-	old := resolveNpmFn
+	old, oldCached := resolveNpmFn, npxCachedFn
 	resolveNpmFn = func(_ context.Context, projectDir, configDir string, specs, flags []string) ([]catalog.Resolved, error) {
 		gotDir, gotConfig, gotSpecs, gotFlags = projectDir, configDir, specs, flags
 		return nil, nil
 	}
-	t.Cleanup(func() { resolveNpmFn = old })
+	var cacheDir string
+	var cachePackages []string
+	npxCachedFn = func(dir string, packages []string) ([]catalog.Resolved, error) {
+		cacheDir, cachePackages = dir, packages
+		return nil, nil
+	}
+	t.Cleanup(func() { resolveNpmFn, npxCachedFn = old, oldCached })
 
 	m, _ := Lookup("npm")
 	args := []string{"exec", "cowsay@1.6.0", "--", "--legacy-peer-deps", "--registry", "https://evil.example", "moo"}
@@ -376,6 +383,43 @@ func TestExpandInstall_ToolRunHasNoProjectContext(t *testing.T) {
 		if !reflect.DeepEqual(gotFlags, tt.wantFlags) {
 			t.Errorf("%v: flags = %v, want %v", tt.args, gotFlags, tt.wantFlags)
 		}
+	}
+
+	// The npx cache is looked up under the packages as typed (the --package
+	// values, else the command) in npm's cache: --cache, with nopt's home
+	// expansion, else the default.
+	home, _ := os.UserHomeDir()
+	for _, tt := range []struct {
+		args         []string
+		wantCache    string
+		wantPackages []string
+	}{
+		{[]string{"exec", "cowsay@1.6.0", "--", "moo"}, filepath.Join(home, ".npm"), []string{"cowsay@1.6.0"}},
+		{[]string{"exec", "--cache", "~/c", "--package=cowsay@1.6.0", "--package", "left-pad", "--", "cowsay"}, filepath.Join(home, "c"), []string{"cowsay@1.6.0", "left-pad"}},
+	} {
+		cacheDir, cachePackages = "", nil
+		parsed := m.parseRun(tt.args)
+		parsed.ToolRun = true
+		if _, err := expandInstall(context.Background(), m, tt.args, 0, parsed); err != nil {
+			t.Fatal(err)
+		}
+		if runtime.GOOS != "windows" && cacheDir != tt.wantCache {
+			t.Errorf("%v: npx cache looked up in %q, want %q", tt.args, cacheDir, tt.wantCache)
+		}
+		if !reflect.DeepEqual(cachePackages, tt.wantPackages) {
+			t.Errorf("%v: npx cache keyed by %v, want %v", tt.args, cachePackages, tt.wantPackages)
+		}
+	}
+
+	// A home path in an npm option is nopt's: `~/x` is the home directory.
+	args = []string{"exec", "--userconfig=~/u.npmrc", "--globalconfig", "~/g.npmrc", "cowsay@1.6.0"}
+	parsed = m.parseRun(args)
+	parsed.ToolRun = true
+	if _, err := expandInstall(context.Background(), m, args, 0, parsed); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"--globalconfig=" + filepath.Join(home, "g.npmrc"), "--userconfig", filepath.Join(home, "u.npmrc")}; !reflect.DeepEqual(gotFlags, want) {
+		t.Errorf("home paths: flags = %v, want %v", gotFlags, want)
 	}
 
 	// An explicit tag on the spec is what npm fetches, whatever --tag says,
@@ -946,7 +990,8 @@ func TestSplitAttachedShorts(t *testing.T) {
 // not block such a run on a package it never installs. --include=optional
 // restores it.
 func TestExpandInstall_NpmOmitOptional(t *testing.T) {
-	old, oldInc := resolveNpmFn, npmConfigIncludesFn
+	old, oldInc, oldCached := resolveNpmFn, npmConfigIncludesFn, npxCachedFn
+	npxCachedFn = func(string, []string) ([]catalog.Resolved, error) { return nil, nil }
 	resolveNpmFn = func(context.Context, string, string, []string, []string) ([]catalog.Resolved, error) {
 		return []catalog.Resolved{{Name: "needed", Version: "1.0.0"}, {Name: "extra", Version: "2.0.0", Optional: true},
 			{Name: "devonly", Version: "3.0.0", Dev: true}, {Name: "both", Version: "4.0.0", DevOptional: true},
@@ -963,7 +1008,7 @@ func TestExpandInstall_NpmOmitOptional(t *testing.T) {
 		askedFlags = flags
 		return configured, configErr
 	}
-	t.Cleanup(func() { resolveNpmFn, npmConfigIncludesFn = old, oldInc })
+	t.Cleanup(func() { resolveNpmFn, npmConfigIncludesFn, npxCachedFn = old, oldInc, oldCached })
 	m, _ := Lookup("npm")
 
 	names := func(tree []catalog.Resolved) []string {
@@ -1066,5 +1111,41 @@ func TestExpandInstall_NpmOmitOptional(t *testing.T) {
 	run([]string{"--prefix", "../o", "install", "--omit=optional", "cowsay"}, false)
 	if !slices.Contains(askedFlags, absPath("../o")) {
 		t.Errorf("--prefix install asked with flags %v, want the prefix", askedFlags)
+	}
+}
+
+// npm reuses what an earlier run of the same packages left in its npx cache,
+// with the dependencies resolved back then: the check covers that tree as
+// well as today's resolution, deduplicated.
+func TestExpandInstall_ToolRunCoversTheNpxCache(t *testing.T) {
+	old, oldCached := resolveNpmFn, npxCachedFn
+	resolveNpmFn = func(context.Context, string, string, []string, []string) ([]catalog.Resolved, error) {
+		return []catalog.Resolved{{Name: "cowsay", Version: "1.6.0"}, {Name: "get-stdin", Version: "8.0.0"}}, nil
+	}
+	npxCachedFn = func(string, []string) ([]catalog.Resolved, error) {
+		return []catalog.Resolved{{Name: "cowsay", Version: "1.6.0"}, {Name: "get-stdin", Version: "7.0.0"}}, nil
+	}
+	t.Cleanup(func() { resolveNpmFn, npxCachedFn = old, oldCached })
+
+	m, _ := Lookup("npm")
+	args := []string{"exec", "cowsay@1.6.0"}
+	parsed := m.parseRun(args)
+	parsed.ToolRun = true
+	tree, err := expandInstall(context.Background(), m, args, 0, parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, r := range tree {
+		got = append(got, r.Name+"@"+r.Version)
+	}
+	if want := []string{"cowsay@1.6.0", "get-stdin@8.0.0", "get-stdin@7.0.0"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("tree = %v, want %v", got, want)
+	}
+
+	// A cache that cannot be read adds nothing and fails nothing.
+	npxCachedFn = func(string, []string) ([]catalog.Resolved, error) { return nil, errors.New("unreadable") }
+	if tree, err := expandInstall(context.Background(), m, args, 0, parsed); err != nil || len(tree) != 2 {
+		t.Errorf("unreadable cache: tree = %v, err = %v", tree, err)
 	}
 }

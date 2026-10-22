@@ -2,12 +2,16 @@ package catalog
 
 import (
 	"context"
+	"crypto/sha512"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -121,6 +125,40 @@ func ResolveNpmInstall(ctx context.Context, projectDir, configDir string, specs,
 		return nil, err
 	}
 	return resolvedFromPackages(pkgs, locked), nil
+}
+
+// NpxCacheKey is the directory under npm's `_npx` cache that libnpmexec
+// installs the given packages into: the first 16 hex digits of the SHA-512
+// of the specs as typed, sorted, newline-joined (libnpmexec/lib/index.js).
+func NpxCacheKey(packages []string) string {
+	sorted := slices.Clone(packages)
+	slices.Sort(sorted)
+	sum := sha512.Sum512([]byte(strings.Join(sorted, "\n")))
+	return hex.EncodeToString(sum[:])[:16]
+}
+
+// NpxCachedTree is the dependency tree an earlier `npx`/`npm exec` of the
+// same packages left in npm's cache (npmCache/_npx/<key>/package-lock.json),
+// or nil when there is none. npm reuses that installation when the package
+// it holds still satisfies the request, with the dependencies it resolved
+// back then — which a fresh resolution today may not name — so a check of
+// the run must cover both.
+func NpxCachedTree(npmCache string, packages []string) ([]Resolved, error) {
+	if npmCache == "" || len(packages) == 0 {
+		return nil, nil
+	}
+	lock, err := os.ReadFile(filepath.Join(npmCache, "_npx", NpxCacheKey(packages), "package-lock.json"))
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	pkgs, err := parseNpmLock(lock, file.Location{})
+	if err != nil {
+		return nil, err
+	}
+	return resolvedFromPackages(pkgs, nil), nil
 }
 
 // NpmConfigIncludes reports the dependency kinds (dev, optional, peer) npm's
