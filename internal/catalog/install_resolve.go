@@ -29,10 +29,12 @@ type Resolved struct {
 	// Locked marks a package the project's lockfile already carried before this
 	// install, so the install is not what brings it in.
 	Locked bool
-	// Optional marks a dependency the resolver recorded as optional: npm
-	// writes it to the lock whatever the omit policy, and leaves it out of
-	// an install run with --omit=optional.
-	Optional bool
+	// npm's dependency kinds, as the lock records them whatever the omit
+	// policy: an install with --omit=dev leaves a Dev package out,
+	// --omit=optional an Optional one, and a DevOptional one — reached both
+	// ways — only when both are omitted. A release found at several paths
+	// carries a kind only if every copy does.
+	Dev, Optional, DevOptional bool
 }
 
 // ErrNoResolver reports that no tool on the host can predict the install.
@@ -219,11 +221,13 @@ func resolvedFromPackages(pkgs []pkg.Package, locked map[string]bool) []Resolved
 		}
 		rs, _ := p.Metadata.(registrySource)
 		out = append(out, Resolved{
-			Name:     p.Name,
-			Version:  p.Version,
-			Registry: reg,
-			Locked:   locked[p.Name+"@"+p.Version],
-			Optional: rs.Optional,
+			Name:        p.Name,
+			Version:     p.Version,
+			Registry:    reg,
+			Locked:      locked[p.Name+"@"+p.Version],
+			Dev:         rs.Dev,
+			Optional:    rs.Optional,
+			DevOptional: rs.DevOptional,
 		})
 	}
 	return out

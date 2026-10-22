@@ -521,6 +521,7 @@ func TestNpmParsersMatchNpm(t *testing.T) {
 		{"--prefix", "../other", "cowsay"}, {"--prefix=sub/../o", "cowsay"}, {"--location=global", "cowsay"},
 		{"--location", "project", "cowsay"}, {"--omit", "dev", "--omit=optional", "--tag", "beta", "--legacy-peer-deps", "cowsay", "--tag", "x"},
 		{"--no-optional", "cowsay"}, {"--legacy-peer-deps=false", "cowsay"}, {"--strict-peer-deps", "--include=dev", "cowsay"},
+		{"--no-optional", "--optional", "cowsay"}, {"--optional", "--no-optional", "cowsay", "moo"},
 		{"--tag", "next", "--tag=latest", "cowsay"},
 		{"--globalconfig", "./corp.npmrc", "cowsay"}, {"--globalconfig=sub/../g.npmrc", "cowsay", "moo"},
 	}

@@ -246,25 +246,36 @@ func TestStageNpmrc(t *testing.T) {
 	}
 }
 
-// npm marks an optional dependency in the lock it writes, and the resolver
-// carries the mark so an install that omits optionals can be checked as it
-// installs.
-func TestParseNpmLockCarriesOptional(t *testing.T) {
+// npm marks each dependency's kind in the lock it writes, and the resolver
+// carries the marks so an install that omits a kind can be checked as it
+// installs. A release at several paths carries a kind only if every copy
+// does, whichever copy the lock's map yields first.
+func TestParseNpmLockCarriesDependencyKinds(t *testing.T) {
 	lock := []byte(`{"lockfileVersion":3,"packages":{
 		"": {"name":"p"},
 		"node_modules/needed": {"version":"1.0.0","resolved":"https://registry.npmjs.org/needed/-/needed-1.0.0.tgz"},
 		"node_modules/extra": {"version":"2.0.0","resolved":"https://registry.npmjs.org/extra/-/extra-2.0.0.tgz","optional":true},
-		"node_modules/devextra": {"version":"3.0.0","resolved":"https://registry.npmjs.org/devextra/-/devextra-3.0.0.tgz","devOptional":true}}}`)
-	pkgs, err := parseNpmLock(lock, file.Location{})
-	if err != nil {
-		t.Fatal(err)
+		"node_modules/devonly": {"version":"3.0.0","resolved":"https://registry.npmjs.org/devonly/-/devonly-3.0.0.tgz","dev":true},
+		"node_modules/both": {"version":"4.0.0","resolved":"https://registry.npmjs.org/both/-/both-4.0.0.tgz","devOptional":true},
+		"node_modules/twice": {"version":"5.0.0","resolved":"https://registry.npmjs.org/twice/-/twice-5.0.0.tgz","optional":true},
+		"node_modules/a/node_modules/twice": {"version":"5.0.0","resolved":"https://registry.npmjs.org/twice/-/twice-5.0.0.tgz"},
+		"node_modules/b/node_modules/twice": {"version":"5.0.0","resolved":"https://registry.npmjs.org/twice/-/twice-5.0.0.tgz","optional":true}}}`)
+	type kinds struct{ Dev, Optional, DevOptional bool }
+	want := map[string]kinds{
+		"needed": {}, "extra": {Optional: true}, "devonly": {Dev: true}, "both": {DevOptional: true}, "twice": {},
 	}
-	got := map[string]bool{}
-	for _, r := range resolvedFromPackages(pkgs, nil) {
-		got[r.Name] = r.Optional
-	}
-	want := map[string]bool{"needed": false, "extra": true, "devextra": true}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("optional marks = %v, want %v", got, want)
+	// Map iteration order varies per run; the merge must not depend on it.
+	for range 20 {
+		pkgs, err := parseNpmLock(lock, file.Location{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := map[string]kinds{}
+		for _, r := range resolvedFromPackages(pkgs, nil) {
+			got[r.Name] = kinds{r.Dev, r.Optional, r.DevOptional}
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("kinds = %v, want %v", got, want)
+		}
 	}
 }

@@ -130,8 +130,11 @@ type npmLockfile struct {
 	Packages map[string]struct {
 		Version  string `json:"version"`
 		Resolved string `json:"resolved"`
-		// Optional and DevOptional mark a dependency npm records in the lock
-		// but leaves out of an install run with --omit=optional.
+		// npm's dependency kinds: recorded in the lock whatever the omit
+		// policy, and left out of an install that omits them. DevOptional
+		// is reached both through a dev edge and an optional one, so only
+		// omitting both leaves it out.
+		Dev         bool `json:"dev"`
 		Optional    bool `json:"optional"`
 		DevOptional bool `json:"devOptional"`
 	} `json:"packages"`
@@ -146,7 +149,7 @@ func parseNpmLock(data []byte, loc file.Location) ([]pkg.Package, error) {
 	if err := json.Unmarshal(data, &lf); err != nil {
 		return nil, err
 	}
-	seen := make(map[string]struct{})
+	seen := make(map[string]int)
 	var pkgs []pkg.Package
 	for key, entry := range lf.Packages {
 		if key == "" || entry.Version == "" || entry.Resolved == "" {
@@ -157,16 +160,27 @@ func parseNpmLock(data []byte, loc file.Location) ([]pkg.Package, error) {
 			continue
 		}
 		dk := name + "@" + entry.Version
-		if _, ok := seen[dk]; ok {
+		kind := registrySource{URL: entry.Resolved, Dev: entry.Dev, Optional: entry.Optional, DevOptional: entry.DevOptional}
+		if i, ok := seen[dk]; ok {
+			// The same release can sit at several paths (nested copies),
+			// each with its own kind. An install leaves the release out
+			// only if it leaves every copy out, so a kind survives the
+			// merge only when every copy carries it; map order must not
+			// decide which copy is read first.
+			have := pkgs[i].Metadata.(registrySource)
+			have.Dev = have.Dev && kind.Dev
+			have.Optional = have.Optional && kind.Optional
+			have.DevOptional = have.DevOptional && kind.DevOptional
+			pkgs[i].Metadata = have
 			continue
 		}
-		seen[dk] = struct{}{}
+		seen[dk] = len(pkgs)
 		pkgs = append(pkgs, pkg.Package{
 			Name:      name,
 			Version:   entry.Version,
 			Type:      pkg.NpmPkg,
 			Locations: file.NewLocationSet(loc),
-			Metadata:  registrySource{URL: entry.Resolved, Optional: entry.Optional || entry.DevOptional},
+			Metadata:  kind,
 		})
 	}
 	return pkgs, nil

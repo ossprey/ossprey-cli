@@ -399,9 +399,11 @@ func markTrustedPackages(pkgs []Package, policy trust.Policy) {
 // reported where a package came from and syft has no type for it.
 type registrySource struct {
 	URL string
-	// Optional marks a dependency the lockfile records but an install may
-	// leave out (npm's optional, which --omit=optional skips).
-	Optional bool
+	// npm's dependency kinds, which the lockfile records whatever the omit
+	// policy and an install may leave out: dev (--omit=dev), optional
+	// (--omit=optional), or devOptional, reached both ways and left out
+	// only when both are omitted.
+	Dev, Optional, DevOptional bool
 }
 
 // registryOf returns the source a lockfile recorded for p — the URL it is

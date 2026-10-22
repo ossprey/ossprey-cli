@@ -287,33 +287,52 @@ func pythonValueFlags(m *Manager) map[string]bool {
 	return valueFlags[m.Bin]
 }
 
-// npmOmit drops from a resolved npm tree the optional dependencies an
-// install with --omit=optional (or --no-optional) leaves out, which npm
-// records in the lockfile regardless; --include=optional restores them.
-// Checking them would block a run on a package it never installs.
+// npmOmit drops from a resolved npm tree the dependencies the install
+// leaves out under npm's omit policy, which the lockfile records
+// regardless: --omit=dev / --omit=optional, and --no-optional, which is
+// --omit=optional. --include wins over --omit for a kind, and --optional /
+// --no-optional is a boolean whose last value wins, --optional counting as
+// an include. A devOptional package is reached both ways and goes only when
+// both are omitted. Checking an omitted package would block a run on
+// something it never installs.
 func npmOmit(tree []catalog.Resolved, flags []string) []catalog.Resolved {
-	omit, include := false, false
+	omit, include := map[string]bool{}, map[string]bool{}
+	optional := ""
 	for i := 0; i < len(flags); i++ {
 		flag, value, hasInline := splitFlagValue(flags[i])
 		if !hasInline && (flag == "--omit" || flag == "--include") && i+1 < len(flags) {
 			value = flags[i+1]
 			i++
 		}
-		switch {
-		case flag == "--no-optional", flag == "--omit" && value == "optional":
-			omit = true
-		case flag == "--include" && value == "optional":
-			include = true
+		switch flag {
+		case "--omit":
+			omit[value] = true
+		case "--include":
+			include[value] = true
+		case "--optional":
+			optional = "true"
+		case "--no-optional":
+			optional = "false"
 		}
 	}
-	if !omit || include {
+	switch optional {
+	case "true":
+		include["optional"] = true
+	case "false":
+		omit["optional"] = true
+	}
+	dropDev := omit["dev"] && !include["dev"]
+	dropOpt := omit["optional"] && !include["optional"]
+	if !dropDev && !dropOpt {
 		return tree
 	}
 	kept := tree[:0:0]
 	for _, r := range tree {
-		if !r.Optional {
-			kept = append(kept, r)
+		switch {
+		case r.Dev && dropDev, r.Optional && dropOpt, r.DevOptional && dropDev && dropOpt:
+			continue
 		}
+		kept = append(kept, r)
 	}
 	return kept
 }
@@ -499,7 +518,7 @@ func npmProjectDir(m *Manager, args []string) string {
 
 // npmResolveFlags are passed from an npm install to the resolving npm. pnpm
 // and yarn spell theirs differently, so nothing of theirs is passed.
-var npmPassFlags = flagSet("--legacy-peer-deps", "--strict-peer-deps", "--no-optional",
+var npmPassFlags = flagSet("--legacy-peer-deps", "--strict-peer-deps", "--no-optional", "--optional",
 	"--omit", "--include", "--registry", "--before", "--tag", "--userconfig", "--globalconfig")
 
 func npmResolveFlags(m *Manager, rest []string) []string {
