@@ -193,7 +193,7 @@ func (a npmArgv) target() installArgs {
 		NpmFlags: a.resolveFlags(), NpmGlobal: a.global(), NpmPrefix: a.prefix(), NpmOmits: a.omits()}
 	if len(a.Packages) > 0 {
 		for _, p := range a.Packages {
-			out.addTarget("npm", strings.TrimSuffix(p, "@latest"))
+			out.addTarget("npm", p)
 		}
 		return out
 	}
@@ -208,10 +208,14 @@ func (a npmArgv) target() installArgs {
 
 // addCommand adds the command of a run with no --package, which is also the
 // package fetched. A bare name is recorded as LocalCommand, since npm and bun
-// run a project's own binary of that name instead of fetching one.
+// run a project's own binary of that name instead of fetching one. The token
+// is kept as typed: `tool@latest` names the tag explicitly, which npm fetches
+// (libnpmexec never takes a tag spec from the local tree) and which the dry
+// run must see, or a `--tag` on the line would resolve a release the run
+// does not use.
 func (p *installArgs) addCommand(token string) {
 	n := len(p.Specs)
-	p.addTarget("npm", strings.TrimSuffix(token, "@latest"))
+	p.addTarget("npm", token)
 	if len(p.Specs) > n && !strings.Contains(strings.TrimPrefix(token, "@"), "@") {
 		p.LocalCommand = token
 	}

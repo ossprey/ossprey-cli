@@ -123,6 +123,33 @@ func ResolveNpmInstall(ctx context.Context, projectDir, configDir string, specs,
 	return resolvedFromPackages(pkgs, locked), nil
 }
 
+// NpmConfigIncludes reports the dependency kinds (dev, optional, peer) npm's
+// effective configuration includes for a command run in dir with flags —
+// project, user and global .npmrc files and the environment, read by `npm
+// config get include` the way the install reads them. An --include anywhere
+// wins over an --omit on the command line, so a filter built from the
+// command line alone must ask here before dropping a kind.
+func NpmConfigIncludes(ctx context.Context, dir string, flags []string) ([]string, error) {
+	npm, err := lookTool("npm")
+	if err != nil {
+		return nil, fmt.Errorf("%w (npm)", ErrNoResolver)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, npm, append([]string{"config", "get", "include"}, flags...)...)
+	cmd.Dir = dir
+	cmd.Env = toolEnv()
+	cmd.WaitDelay = 5 * time.Second
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("npm config get include: %w", err)
+	}
+	// One line, comma-separated ("optional,dev"), empty when none.
+	return strings.FieldsFunc(string(out), func(r rune) bool {
+		return r == ',' || r == '\n' || r == '\r' || r == ' ' || r == '\t'
+	}), nil
+}
+
 // stageNpmProject copies what npm needs to resolve as the project would into
 // dst: package.json with its local dependencies removed, .npmrc for registry
 // configuration, and the npm lockfile where there is one, recording every

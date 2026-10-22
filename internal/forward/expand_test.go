@@ -378,6 +378,23 @@ func TestExpandInstall_ToolRunHasNoProjectContext(t *testing.T) {
 		}
 	}
 
+	// An explicit tag on the spec is what npm fetches, whatever --tag says,
+	// so the dry run sees the token as typed.
+	for _, args := range [][]string{
+		{"exec", "--tag=beta", "cowsay@latest", "--", "moo"},
+		{"exec", "--tag=beta", "--package=cowsay@latest", "--", "cowsay"},
+	} {
+		gotSpecs, gotFlags = nil, nil
+		parsed := m.parseRun(args)
+		parsed.ToolRun = true
+		if _, err := expandInstall(context.Background(), m, args, 0, parsed); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(gotSpecs, []string{"cowsay@latest"}) || !reflect.DeepEqual(gotFlags, []string{"--tag=beta"}) {
+			t.Errorf("%v: specs = %v, flags = %v", args, gotSpecs, gotFlags)
+		}
+	}
+
 	// A registry npm itself reads is the one the dry run resolves against:
 	// npx fetches from it, so a check against the default registry would
 	// check a different package. npm's own parse decides which --registry is
@@ -929,13 +946,24 @@ func TestSplitAttachedShorts(t *testing.T) {
 // not block such a run on a package it never installs. --include=optional
 // restores it.
 func TestExpandInstall_NpmOmitOptional(t *testing.T) {
-	old := resolveNpmFn
+	old, oldInc := resolveNpmFn, npmConfigIncludesFn
 	resolveNpmFn = func(context.Context, string, string, []string, []string) ([]catalog.Resolved, error) {
 		return []catalog.Resolved{{Name: "needed", Version: "1.0.0"}, {Name: "extra", Version: "2.0.0", Optional: true},
 			{Name: "devonly", Version: "3.0.0", Dev: true}, {Name: "both", Version: "4.0.0", DevOptional: true},
 			{Name: "peer", Version: "5.0.0", Peer: true}}, nil
 	}
-	t.Cleanup(func() { resolveNpmFn = old })
+	// npm's configuration includes nothing unless a case says otherwise;
+	// asked is how often npm had to be consulted.
+	var configured []string
+	var configErr error
+	asked := 0
+	var askedFlags []string
+	npmConfigIncludesFn = func(_ context.Context, _ string, flags []string) ([]string, error) {
+		asked++
+		askedFlags = flags
+		return configured, configErr
+	}
+	t.Cleanup(func() { resolveNpmFn, npmConfigIncludesFn = old, oldInc })
 	m, _ := Lookup("npm")
 
 	names := func(tree []catalog.Resolved) []string {
@@ -991,5 +1019,52 @@ func TestExpandInstall_NpmOmitOptional(t *testing.T) {
 		if got := names(tree); !reflect.DeepEqual(got, tt.want) {
 			t.Errorf("%v: tree = %v, want %v", tt.args, got, tt.want)
 		}
+	}
+
+	// An include from npm's configuration wins over an --omit on the line,
+	// so npm is asked — only when the line omits something — and when it
+	// cannot answer nothing is dropped. The location flags make it read the
+	// same project configuration as the command.
+	run := func(args []string, toolRun bool) []string {
+		var parsed installArgs
+		start := 0
+		if toolRun {
+			parsed = m.parseRun(args)
+			parsed.ToolRun = true
+		} else {
+			start, _ = m.installAt(args)
+			parsed = ParseSpecs(m, args[start:])
+		}
+		tree, err := expandInstall(context.Background(), m, args, start, parsed)
+		if err != nil {
+			t.Fatalf("%v: %v", args, err)
+		}
+		return names(tree)
+	}
+	asked = 0
+	run([]string{"exec", "cowsay@1.6.0"}, true)
+	run([]string{"install", "cowsay"}, false)
+	if asked != 0 {
+		t.Errorf("npm asked about includes %d times for commands that omit nothing", asked)
+	}
+	configured = []string{"optional", "dev"}
+	if got := run([]string{"exec", "--omit=optional", "cowsay@1.6.0"}, true); !reflect.DeepEqual(got, []string{"needed", "extra", "devonly", "both", "peer"}) {
+		t.Errorf("configured include=optional over --omit=optional: tree = %v", got)
+	}
+	if got := run([]string{"install", "--omit=dev", "--omit=peer", "cowsay"}, false); !reflect.DeepEqual(got, []string{"needed", "extra", "devonly", "both"}) {
+		t.Errorf("configured include=dev over --omit=dev, peer still omitted: tree = %v", got)
+	}
+	configured, configErr = nil, errors.New("no npm")
+	if got := run([]string{"exec", "--omit=optional", "cowsay@1.6.0"}, true); !reflect.DeepEqual(got, []string{"needed", "extra", "devonly", "both", "peer"}) {
+		t.Errorf("npm unavailable: tree = %v, want everything kept", got)
+	}
+	configErr = nil
+	run([]string{"exec", "-g", "--omit=optional", "cowsay@1.6.0"}, true)
+	if !slices.Contains(askedFlags, "-g") {
+		t.Errorf("global exec asked with flags %v, want -g", askedFlags)
+	}
+	run([]string{"--prefix", "../o", "install", "--omit=optional", "cowsay"}, false)
+	if !slices.Contains(askedFlags, absPath("../o")) {
+		t.Errorf("--prefix install asked with flags %v, want the prefix", askedFlags)
 	}
 }

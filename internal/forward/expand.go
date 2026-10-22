@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/ossprey/ossprey-cli/internal/catalog"
@@ -18,10 +19,11 @@ import (
 // Test seams: expandFn predicts what the named packages bring in; the two
 // resolvers below are what it asks.
 var (
-	expandFn        = expandInstall
-	resolveNpmFn    = catalog.ResolveNpmInstall
-	resolvePythonFn = catalog.ResolvePythonInstall
-	resolveWithUVFn = catalog.ResolvePythonInstallWithUV
+	expandFn            = expandInstall
+	resolveNpmFn        = catalog.ResolveNpmInstall
+	resolvePythonFn     = catalog.ResolvePythonInstall
+	resolveWithUVFn     = catalog.ResolvePythonInstallWithUV
+	npmConfigIncludesFn = catalog.NpmConfigIncludes
 )
 
 // A named install used to check exactly the packages typed. `npm install
@@ -199,13 +201,23 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 				flags = append(flags, "--userconfig", absPath(parsed.Userconfig))
 			}
 			tree, err := resolveNpmFn(ctx, "", npmConfigDirFor(parsed.NpmGlobal, parsed.NpmPrefix), tokens, flags)
-			return npmOmit(tree, parsed.NpmOmits), err
+			if err != nil {
+				return tree, err
+			}
+			omits := npmEffectiveOmits(ctx, parsed.NpmOmits, slices.Concat(flags, npmLocationFlags(parsed.NpmGlobal, parsed.NpmPrefix)))
+			return npmOmit(tree, omits), nil
 		}
-		tree, err := resolveNpmFn(ctx, npmProjectDir(m, args), npmConfigDir(m, args), tokens, npmResolveFlags(m, rest))
+		flags := npmResolveFlags(m, rest)
+		tree, err := resolveNpmFn(ctx, npmProjectDir(m, args), npmConfigDir(m, args), tokens, flags)
+		if err != nil || m.Bin != "npm" {
+			return tree, err
+		}
 		// The omit policy comes from npm's own parse of the whole command,
 		// options before the verb included, with its last-wins and negation
 		// rules; the flag list above is only what the dry run is told.
-		return npmOmit(tree, npmOmitsFor(m, args)), err
+		a := parseNpmArgv(args)
+		omits := npmEffectiveOmits(ctx, a.omits(), slices.Concat(flags, npmLocationFlags(a.global(), a.prefix())))
+		return npmOmit(tree, omits), nil
 	case "pypi":
 		// A short option's value may be attached (`-ihttps://…`); read it
 		// as the resolver will, from a copy, so args stays what the real
@@ -289,23 +301,48 @@ func pythonValueFlags(m *Manager) map[string]bool {
 	return valueFlags[m.Bin]
 }
 
-// npmOmitsFor is npm's effective omit policy for a named npm install, from
-// npm's own parse of the whole command (npmArgv.omits); other managers
-// resolve through npm with no policy of theirs applied.
-func npmOmitsFor(m *Manager, args []string) map[string]bool {
-	if m.Bin != "npm" {
+// npmLocationFlags are the flags that make `npm config get` read the same
+// project configuration as the command: global mode reads none, --prefix
+// names the project.
+func npmLocationFlags(global bool, prefix string) []string {
+	switch {
+	case global:
+		return []string{"-g"}
+	case prefix != "":
+		return []string{"--prefix", absPath(prefix)}
+	}
+	return nil
+}
+
+// npmEffectiveOmits is the command line's omit policy less whatever npm's
+// configuration includes: an include in an .npmrc, the user or global
+// config or the environment wins over an --omit on the line, and the dry
+// run's lockfile cannot say, since it records omitted packages too. npm is
+// asked only when the line omits something, so the common run pays nothing;
+// when it cannot be asked, nothing is dropped, which can only check more.
+func npmEffectiveOmits(ctx context.Context, omits map[string]bool, flags []string) map[string]bool {
+	if len(omits) == 0 {
 		return nil
 	}
-	return parseNpmArgv(args).omits()
+	included, err := npmConfigIncludesFn(ctx, ".", flags)
+	if err != nil {
+		return nil
+	}
+	out := map[string]bool{}
+	for kind := range omits {
+		out[kind] = true
+	}
+	for _, kind := range included {
+		delete(out, kind)
+	}
+	return out
 }
 
 // npmOmit drops from a resolved npm tree the dependencies the install
 // leaves out under npm's omit policy (the kinds in omits: dev, optional,
 // peer), which the lockfile records regardless. A devOptional package is
 // reached both ways and goes only when both are omitted. Checking an
-// omitted package would block a run on something it never installs. The
-// policy is the command line's; one set only in an .npmrc is not read, and
-// missing it can only check more.
+// omitted package would block a run on something it never installs.
 func npmOmit(tree []catalog.Resolved, omits map[string]bool) []catalog.Resolved {
 	if len(omits) == 0 {
 		return tree

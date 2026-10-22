@@ -281,3 +281,30 @@ func TestParseNpmLockCarriesDependencyKinds(t *testing.T) {
 		}
 	}
 }
+
+// Against a real npm: the kinds npm's configuration includes, read as the
+// command would read them — the project's .npmrc from its directory, none
+// in global mode.
+func TestNpmConfigIncludes(t *testing.T) {
+	if _, err := lookTool("npm"); err != nil {
+		t.Skip("no npm")
+	}
+	ctx := context.Background()
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "package.json"), []byte("{}"), 0o644)
+	os.WriteFile(filepath.Join(dir, ".npmrc"), []byte("include[]=optional\ninclude[]=dev\n"), 0o644)
+	got, err := NpmConfigIncludes(ctx, dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, []string{"optional", "dev"}) {
+		t.Errorf("project includes = %v", got)
+	}
+	got, err = NpmConfigIncludes(ctx, dir, []string{"-g"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("global mode read the project's includes: %v", got)
+	}
+}

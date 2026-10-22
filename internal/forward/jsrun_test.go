@@ -31,6 +31,8 @@ func TestNpxRun(t *testing.T) {
 		{[]string{"cowsay", "--package", "evil"}, []check.Spec{npmSpec("cowsay", "")}, "cowsay"},
 		{[]string{"-y", "cowsay", "moo"}, []check.Spec{npmSpec("cowsay", "")}, "cowsay"},
 		{[]string{"cowsay@1.5.0", "--help"}, []check.Spec{npmSpec("cowsay", "1.5.0")}, ""},
+		// An explicit tag is kept as typed: npm fetches it whatever --tag
+		// says, and never takes a tag spec from the local tree.
 		{[]string{"cowsay@latest"}, []check.Spec{npmSpec("cowsay", "")}, ""},
 		{[]string{"@scope/tool@2.0.0", "x"}, []check.Spec{npmSpec("@scope/tool", "2.0.0")}, ""},
 		{[]string{"--", "cowsay", "--yes"}, []check.Spec{npmSpec("cowsay", "")}, "cowsay"},
