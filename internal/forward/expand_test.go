@@ -932,7 +932,8 @@ func TestExpandInstall_NpmOmitOptional(t *testing.T) {
 	old := resolveNpmFn
 	resolveNpmFn = func(context.Context, string, string, []string, []string) ([]catalog.Resolved, error) {
 		return []catalog.Resolved{{Name: "needed", Version: "1.0.0"}, {Name: "extra", Version: "2.0.0", Optional: true},
-			{Name: "devonly", Version: "3.0.0", Dev: true}, {Name: "both", Version: "4.0.0", DevOptional: true}}, nil
+			{Name: "devonly", Version: "3.0.0", Dev: true}, {Name: "both", Version: "4.0.0", DevOptional: true},
+			{Name: "peer", Version: "5.0.0", Peer: true}}, nil
 	}
 	t.Cleanup(func() { resolveNpmFn = old })
 	m, _ := Lookup("npm")
@@ -949,21 +950,30 @@ func TestExpandInstall_NpmOmitOptional(t *testing.T) {
 		toolRun bool
 		want    []string
 	}{
-		{[]string{"exec", "cowsay@1.6.0"}, true, []string{"needed", "extra", "devonly", "both"}},
-		{[]string{"exec", "--omit=optional", "cowsay@1.6.0"}, true, []string{"needed", "devonly", "both"}},
-		{[]string{"exec", "--no-optional", "cowsay@1.6.0"}, true, []string{"needed", "devonly", "both"}},
-		{[]string{"exec", "--omit=optional", "--include=optional", "cowsay@1.6.0"}, true, []string{"needed", "extra", "devonly", "both"}},
-		// The boolean's last value wins, and --optional counts as an include.
-		{[]string{"exec", "--no-optional", "--optional", "cowsay@1.6.0"}, true, []string{"needed", "extra", "devonly", "both"}},
-		{[]string{"exec", "--omit=optional", "--optional", "cowsay@1.6.0"}, true, []string{"needed", "extra", "devonly", "both"}},
-		{[]string{"exec", "--optional", "--no-optional", "cowsay@1.6.0"}, true, []string{"needed", "devonly", "both"}},
+		{[]string{"exec", "cowsay@1.6.0"}, true, []string{"needed", "extra", "devonly", "both", "peer"}},
+		{[]string{"exec", "--omit=optional", "cowsay@1.6.0"}, true, []string{"needed", "devonly", "both", "peer"}},
+		{[]string{"exec", "--no-optional", "cowsay@1.6.0"}, true, []string{"needed", "devonly", "both", "peer"}},
+		{[]string{"exec", "--omit=optional", "--include=optional", "cowsay@1.6.0"}, true, []string{"needed", "extra", "devonly", "both", "peer"}},
+		// The boolean's last value wins, --optional counts as an include,
+		// and an explicit value is read as nopt reads it, negation included.
+		{[]string{"exec", "--no-optional", "--optional", "cowsay@1.6.0"}, true, []string{"needed", "extra", "devonly", "both", "peer"}},
+		{[]string{"exec", "--omit=optional", "--optional", "cowsay@1.6.0"}, true, []string{"needed", "extra", "devonly", "both", "peer"}},
+		{[]string{"exec", "--optional", "--no-optional", "cowsay@1.6.0"}, true, []string{"needed", "devonly", "both", "peer"}},
+		{[]string{"exec", "--optional=false", "cowsay@1.6.0"}, true, []string{"needed", "devonly", "both", "peer"}},
+		{[]string{"exec", "--no-optional=false", "cowsay@1.6.0"}, true, []string{"needed", "extra", "devonly", "both", "peer"}},
 		// A devOptional package is reached both ways: only omitting both
-		// leaves it out.
-		{[]string{"exec", "--omit=dev", "cowsay@1.6.0"}, true, []string{"needed", "extra", "both"}},
-		{[]string{"exec", "--omit=dev", "--omit=optional", "cowsay@1.6.0"}, true, []string{"needed"}},
-		{[]string{"install", "--omit", "optional", "cowsay"}, false, []string{"needed", "devonly", "both"}},
-		{[]string{"install", "--omit=optional", "--optional", "cowsay"}, false, []string{"needed", "extra", "devonly", "both"}},
-		{[]string{"install", "cowsay"}, false, []string{"needed", "extra", "devonly", "both"}},
+		// leaves it out. Peers go with --omit=peer.
+		{[]string{"exec", "--omit=dev", "cowsay@1.6.0"}, true, []string{"needed", "extra", "both", "peer"}},
+		{[]string{"exec", "--omit=dev", "--omit=optional", "cowsay@1.6.0"}, true, []string{"needed", "peer"}},
+		{[]string{"exec", "--omit=peer", "cowsay@1.6.0"}, true, []string{"needed", "extra", "devonly", "both"}},
+		// A named install reads the whole command, options before the verb
+		// included: --include there still wins over --omit after it.
+		{[]string{"install", "--omit", "optional", "cowsay"}, false, []string{"needed", "devonly", "both", "peer"}},
+		{[]string{"install", "--omit=optional", "--optional", "cowsay"}, false, []string{"needed", "extra", "devonly", "both", "peer"}},
+		{[]string{"install", "--optional=false", "cowsay"}, false, []string{"needed", "devonly", "both", "peer"}},
+		{[]string{"install", "--no-optional=false", "--omit=optional", "cowsay"}, false, []string{"needed", "extra", "devonly", "both", "peer"}},
+		{[]string{"--include=optional", "install", "--omit=optional", "cowsay"}, false, []string{"needed", "extra", "devonly", "both", "peer"}},
+		{[]string{"install", "cowsay"}, false, []string{"needed", "extra", "devonly", "both", "peer"}},
 	} {
 		var parsed installArgs
 		start := 0

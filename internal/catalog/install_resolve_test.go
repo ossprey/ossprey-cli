@@ -257,12 +257,14 @@ func TestParseNpmLockCarriesDependencyKinds(t *testing.T) {
 		"node_modules/extra": {"version":"2.0.0","resolved":"https://registry.npmjs.org/extra/-/extra-2.0.0.tgz","optional":true},
 		"node_modules/devonly": {"version":"3.0.0","resolved":"https://registry.npmjs.org/devonly/-/devonly-3.0.0.tgz","dev":true},
 		"node_modules/both": {"version":"4.0.0","resolved":"https://registry.npmjs.org/both/-/both-4.0.0.tgz","devOptional":true},
+		"node_modules/peer": {"version":"6.0.0","resolved":"https://registry.npmjs.org/peer/-/peer-6.0.0.tgz","peer":true},
 		"node_modules/twice": {"version":"5.0.0","resolved":"https://registry.npmjs.org/twice/-/twice-5.0.0.tgz","optional":true},
 		"node_modules/a/node_modules/twice": {"version":"5.0.0","resolved":"https://registry.npmjs.org/twice/-/twice-5.0.0.tgz"},
 		"node_modules/b/node_modules/twice": {"version":"5.0.0","resolved":"https://registry.npmjs.org/twice/-/twice-5.0.0.tgz","optional":true}}}`)
-	type kinds struct{ Dev, Optional, DevOptional bool }
+	type kinds struct{ Dev, Optional, DevOptional, Peer bool }
 	want := map[string]kinds{
 		"needed": {}, "extra": {Optional: true}, "devonly": {Dev: true}, "both": {DevOptional: true}, "twice": {},
+		"peer": {Peer: true},
 	}
 	// Map iteration order varies per run; the merge must not depend on it.
 	for range 20 {
@@ -272,7 +274,7 @@ func TestParseNpmLockCarriesDependencyKinds(t *testing.T) {
 		}
 		got := map[string]kinds{}
 		for _, r := range resolvedFromPackages(pkgs, nil) {
-			got[r.Name] = kinds{r.Dev, r.Optional, r.DevOptional}
+			got[r.Name] = kinds{r.Dev, r.Optional, r.DevOptional, r.Peer}
 		}
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("kinds = %v, want %v", got, want)

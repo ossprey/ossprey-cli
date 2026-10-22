@@ -1101,6 +1101,9 @@ type installArgs struct {
 	NpmFlags  []string
 	NpmGlobal bool
 	NpmPrefix string
+	// NpmOmits are the dependency kinds npm's effective omit policy leaves
+	// out of the install (npmArgv.omits).
+	NpmOmits map[string]bool
 }
 
 // ParseSpecs classifies install arguments. A real-world multi-package install

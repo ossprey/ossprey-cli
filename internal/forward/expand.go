@@ -199,11 +199,13 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 				flags = append(flags, "--userconfig", absPath(parsed.Userconfig))
 			}
 			tree, err := resolveNpmFn(ctx, "", npmConfigDirFor(parsed.NpmGlobal, parsed.NpmPrefix), tokens, flags)
-			return npmOmit(tree, flags), err
+			return npmOmit(tree, parsed.NpmOmits), err
 		}
-		flags := npmResolveFlags(m, rest)
-		tree, err := resolveNpmFn(ctx, npmProjectDir(m, args), npmConfigDir(m, args), tokens, flags)
-		return npmOmit(tree, flags), err
+		tree, err := resolveNpmFn(ctx, npmProjectDir(m, args), npmConfigDir(m, args), tokens, npmResolveFlags(m, rest))
+		// The omit policy comes from npm's own parse of the whole command,
+		// options before the verb included, with its last-wins and negation
+		// rules; the flag list above is only what the dry run is told.
+		return npmOmit(tree, npmOmitsFor(m, args)), err
 	case "pypi":
 		// A short option's value may be attached (`-ihttps://…`); read it
 		// as the resolver will, from a copy, so args stays what the real
@@ -287,49 +289,32 @@ func pythonValueFlags(m *Manager) map[string]bool {
 	return valueFlags[m.Bin]
 }
 
+// npmOmitsFor is npm's effective omit policy for a named npm install, from
+// npm's own parse of the whole command (npmArgv.omits); other managers
+// resolve through npm with no policy of theirs applied.
+func npmOmitsFor(m *Manager, args []string) map[string]bool {
+	if m.Bin != "npm" {
+		return nil
+	}
+	return parseNpmArgv(args).omits()
+}
+
 // npmOmit drops from a resolved npm tree the dependencies the install
-// leaves out under npm's omit policy, which the lockfile records
-// regardless: --omit=dev / --omit=optional, and --no-optional, which is
-// --omit=optional. --include wins over --omit for a kind, and --optional /
-// --no-optional is a boolean whose last value wins, --optional counting as
-// an include. A devOptional package is reached both ways and goes only when
-// both are omitted. Checking an omitted package would block a run on
-// something it never installs.
-func npmOmit(tree []catalog.Resolved, flags []string) []catalog.Resolved {
-	omit, include := map[string]bool{}, map[string]bool{}
-	optional := ""
-	for i := 0; i < len(flags); i++ {
-		flag, value, hasInline := splitFlagValue(flags[i])
-		if !hasInline && (flag == "--omit" || flag == "--include") && i+1 < len(flags) {
-			value = flags[i+1]
-			i++
-		}
-		switch flag {
-		case "--omit":
-			omit[value] = true
-		case "--include":
-			include[value] = true
-		case "--optional":
-			optional = "true"
-		case "--no-optional":
-			optional = "false"
-		}
-	}
-	switch optional {
-	case "true":
-		include["optional"] = true
-	case "false":
-		omit["optional"] = true
-	}
-	dropDev := omit["dev"] && !include["dev"]
-	dropOpt := omit["optional"] && !include["optional"]
-	if !dropDev && !dropOpt {
+// leaves out under npm's omit policy (the kinds in omits: dev, optional,
+// peer), which the lockfile records regardless. A devOptional package is
+// reached both ways and goes only when both are omitted. Checking an
+// omitted package would block a run on something it never installs. The
+// policy is the command line's; one set only in an .npmrc is not read, and
+// missing it can only check more.
+func npmOmit(tree []catalog.Resolved, omits map[string]bool) []catalog.Resolved {
+	if len(omits) == 0 {
 		return tree
 	}
 	kept := tree[:0:0]
 	for _, r := range tree {
 		switch {
-		case r.Dev && dropDev, r.Optional && dropOpt, r.DevOptional && dropDev && dropOpt:
+		case r.Dev && omits["dev"], r.Optional && omits["optional"], r.Peer && omits["peer"],
+			r.DevOptional && omits["dev"] && omits["optional"]:
 			continue
 		}
 		kept = append(kept, r)

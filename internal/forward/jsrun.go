@@ -111,6 +111,33 @@ func (a npmArgv) prefix() string {
 	return ""
 }
 
+// omits is npm's effective omit policy from the recorded options: the kinds
+// (dev, optional, peer) an install leaves out. --include wins over --omit
+// for a kind, and the optional boolean (--optional / --no-optional, last
+// value winning) counts as an include or an omit of optional.
+func (a npmArgv) omits() map[string]bool {
+	omit, include := map[string]bool{}, map[string]bool{}
+	for _, v := range a.Config["omit"] {
+		omit[v] = true
+	}
+	for _, v := range a.Config["include"] {
+		include[v] = true
+	}
+	switch a.last("optional") {
+	case "true":
+		include["optional"] = true
+	case "false":
+		omit["optional"] = true
+	}
+	out := map[string]bool{}
+	for kind := range omit {
+		if !include[kind] {
+			out[kind] = true
+		}
+	}
+	return out
+}
+
 // resolveFlags renders the recorded resolution options back into flags for
 // the dry run, in a fixed key order; npm re-reads them with its own
 // last-wins and array rules, so every occurrence is kept.
@@ -163,7 +190,7 @@ func npxRun(args []string) installArgs {
 
 func (a npmArgv) target() installArgs {
 	out := installArgs{Registry: a.Registry, Userconfig: a.Userconfig,
-		NpmFlags: a.resolveFlags(), NpmGlobal: a.global(), NpmPrefix: a.prefix()}
+		NpmFlags: a.resolveFlags(), NpmGlobal: a.global(), NpmPrefix: a.prefix(), NpmOmits: a.omits()}
 	if len(a.Packages) > 0 {
 		for _, p := range a.Packages {
 			out.addTarget("npm", strings.TrimSuffix(p, "@latest"))
@@ -313,7 +340,12 @@ func parseNpmArgv(in []string) npmArgv {
 			switch {
 			case !hasLa:
 			case la == "true" || la == "false":
+				// nopt reads the word, then negates it for a --no- option:
+				// `--no-optional=false` is optional on.
 				value = la
+				if negated {
+					value = map[string]string{"true": "false", "false": "true"}[la]
+				}
 				i++
 			case kind == npmBoolOrString && !isShortOption(la):
 				i++

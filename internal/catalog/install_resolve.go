@@ -31,10 +31,10 @@ type Resolved struct {
 	Locked bool
 	// npm's dependency kinds, as the lock records them whatever the omit
 	// policy: an install with --omit=dev leaves a Dev package out,
-	// --omit=optional an Optional one, and a DevOptional one — reached both
-	// ways — only when both are omitted. A release found at several paths
-	// carries a kind only if every copy does.
-	Dev, Optional, DevOptional bool
+	// --omit=optional an Optional one, --omit=peer a Peer one, and a
+	// DevOptional one — reached both ways — only when both are omitted. A
+	// release found at several paths carries a kind only if every copy does.
+	Dev, Optional, DevOptional, Peer bool
 }
 
 // ErrNoResolver reports that no tool on the host can predict the install.
@@ -228,6 +228,7 @@ func resolvedFromPackages(pkgs []pkg.Package, locked map[string]bool) []Resolved
 			Dev:         rs.Dev,
 			Optional:    rs.Optional,
 			DevOptional: rs.DevOptional,
+			Peer:        rs.Peer,
 		})
 	}
 	return out

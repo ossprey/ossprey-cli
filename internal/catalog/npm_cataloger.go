@@ -137,6 +137,7 @@ type npmLockfile struct {
 		Dev         bool `json:"dev"`
 		Optional    bool `json:"optional"`
 		DevOptional bool `json:"devOptional"`
+		Peer        bool `json:"peer"`
 	} `json:"packages"`
 }
 
@@ -160,7 +161,7 @@ func parseNpmLock(data []byte, loc file.Location) ([]pkg.Package, error) {
 			continue
 		}
 		dk := name + "@" + entry.Version
-		kind := registrySource{URL: entry.Resolved, Dev: entry.Dev, Optional: entry.Optional, DevOptional: entry.DevOptional}
+		kind := registrySource{URL: entry.Resolved, Dev: entry.Dev, Optional: entry.Optional, DevOptional: entry.DevOptional, Peer: entry.Peer}
 		if i, ok := seen[dk]; ok {
 			// The same release can sit at several paths (nested copies),
 			// each with its own kind. An install leaves the release out
@@ -171,6 +172,7 @@ func parseNpmLock(data []byte, loc file.Location) ([]pkg.Package, error) {
 			have.Dev = have.Dev && kind.Dev
 			have.Optional = have.Optional && kind.Optional
 			have.DevOptional = have.DevOptional && kind.DevOptional
+			have.Peer = have.Peer && kind.Peer
 			pkgs[i].Metadata = have
 			continue
 		}

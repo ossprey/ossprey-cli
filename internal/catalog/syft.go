@@ -401,9 +401,9 @@ type registrySource struct {
 	URL string
 	// npm's dependency kinds, which the lockfile records whatever the omit
 	// policy and an install may leave out: dev (--omit=dev), optional
-	// (--omit=optional), or devOptional, reached both ways and left out
-	// only when both are omitted.
-	Dev, Optional, DevOptional bool
+	// (--omit=optional), peer (--omit=peer), or devOptional, reached both
+	// ways and left out only when both are omitted.
+	Dev, Optional, DevOptional, Peer bool
 }
 
 // registryOf returns the source a lockfile recorded for p — the URL it is
