@@ -183,7 +183,7 @@ func TestResolveNamed_SkipsLockedAndTrustedDependencies(t *testing.T) {
 	ctx := warn.NewContext(context.Background(), true)
 	set := resolveNamed(ctx, m, Options{
 		Trust: trust.Policy{NpmScopes: []string{"@acme"}, Registries: []string{"https://npm.acme.internal/"}},
-	}, 1, parsed, nil, true)
+	}, 1, parsed, nil)
 
 	want := []check.Spec{
 		{Ecosystem: "npm", Name: "express", Version: "5.1.0"},
@@ -212,7 +212,7 @@ func TestResolveNamed_NamedPackageMissingFromTreeIsResolved(t *testing.T) {
 	set := resolveNamed(context.Background(), m, Options{}, 1, parsed, func(_ context.Context, _, name, _ string) (string, error) {
 		asked = name
 		return "2.32.3", nil
-	}, true)
+	})
 	if asked != "Requests" {
 		t.Errorf("registry asked for %q, want Requests", asked)
 	}
@@ -238,22 +238,135 @@ func TestResolveNamed_PyPINamesMatchCanonically(t *testing.T) {
 	set := resolveNamed(context.Background(), m, Options{}, 1, parsed, func(context.Context, string, string, string) (string, error) {
 		t.Error("the registry was asked for a package the resolver reported")
 		return "", nil
-	}, true)
+	})
 	if set.named != 1 || set.deps != 0 || len(set.specs) != 1 {
 		t.Errorf("set = %+v", set)
 	}
 }
 
-// A tool run fetches one package and runs it; it is not expanded.
-func TestRun_ToolRun_DoesNotExpand(t *testing.T) {
+// A tool run fetches one package and runs it, dependencies included, so it
+// is expanded like any named install: `npx cowsay` checks cowsay and what
+// cowsay pulls in, and a malicious dependency blocks the run.
+func TestRun_ToolRun_ExpandsTheFetchedPackage(t *testing.T) {
 	ex := &stubExec{}
-	swap(t, ex.fn, cleanSBOM)
-	swapExpand(t, func(context.Context, *Manager, []string, int, installArgs) ([]catalog.Resolved, error) {
-		t.Error("a tool run was expanded")
-		return nil, nil
+	got, chk := checkedSpecs(t)
+	swap(t, ex.fn, chk)
+	var seen installArgs
+	swapExpand(t, func(_ context.Context, _ *Manager, _ []string, _ int, parsed installArgs) ([]catalog.Resolved, error) {
+		seen = parsed
+		return []catalog.Resolved{
+			{Name: "cowsay", Version: "1.6.0"},
+			{Name: "yargs", Version: "15.4.1"},
+		}, nil
 	})
-	if err := Run(context.Background(), Options{Bin: "uvx", Args: []string{"ruff@0.6.0", "check", "."}}); err != nil {
+	if err := Run(context.Background(), Options{Bin: "npx", Args: []string{"cowsay@1.6.0", "moo"}}); err != nil {
 		t.Fatalf("Run: %v", err)
+	}
+	if !seen.ToolRun {
+		t.Error("the expansion was not told this is a tool run")
+	}
+	want := []check.Spec{
+		{Ecosystem: "npm", Name: "cowsay", Version: "1.6.0"},
+		{Ecosystem: "npm", Name: "yargs", Version: "15.4.1"},
+	}
+	if !reflect.DeepEqual(*got, want) {
+		t.Errorf("checked %+v, want %+v", *got, want)
+	}
+	if !ex.called {
+		t.Error("clean run was not forwarded")
+	}
+}
+
+func TestRun_ToolRun_MalwareInADependencyBlocks(t *testing.T) {
+	ex := &stubExec{}
+	swap(t, ex.fn, func(context.Context, check.Options) (*ossbom.SBOM, error) {
+		s := ossbom.New(ossbom.Environment{})
+		s.AddVulnerability(ossbom.NewMalwareVulnerability("V1", "pkg:npm/yargs@15.4.1", "bad"))
+		return s, nil
+	})
+	swapExpand(t, func(context.Context, *Manager, []string, int, installArgs) ([]catalog.Resolved, error) {
+		return []catalog.Resolved{{Name: "cowsay", Version: "1.6.0"}, {Name: "yargs", Version: "15.4.1"}}, nil
+	})
+	err := Run(context.Background(), Options{Bin: "npx", Args: []string{"cowsay", "moo"}})
+	if !errors.Is(err, ErrBlocked) {
+		t.Fatalf("err = %v, want ErrBlocked", err)
+	}
+	if ex.called {
+		t.Error("blocked run ran npx")
+	}
+}
+
+// A tool run resolves with no project context — npx installs into its own
+// cache, never into the project beside it — and none of the program's own
+// argv is read as a resolver flag.
+func TestExpandInstall_ToolRunHasNoProjectContext(t *testing.T) {
+	dir := t.TempDir()
+	cwd, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chdir(cwd) })
+	os.WriteFile("package.json", []byte("{}"), 0o644)
+	os.WriteFile("package-lock.json", []byte(`{"lockfileVersion":3,"packages":{}}`), 0o644)
+
+	var gotDir string
+	var gotSpecs, gotFlags []string
+	old := resolveNpmFn
+	resolveNpmFn = func(_ context.Context, projectDir string, specs, flags []string) ([]catalog.Resolved, error) {
+		gotDir, gotSpecs, gotFlags = projectDir, specs, flags
+		return nil, nil
+	}
+	t.Cleanup(func() { resolveNpmFn = old })
+
+	m, _ := Lookup("npm")
+	args := []string{"exec", "cowsay@1.6.0", "--", "--legacy-peer-deps", "moo"}
+	start, ok := m.toolRunAt(args)
+	if !ok {
+		t.Fatal("npm exec not seen as a tool run")
+	}
+	parsed := m.parseRun(args[start:])
+	parsed.ToolRun = true
+	if _, err := expandInstall(context.Background(), m, args, start, parsed); err != nil {
+		t.Fatal(err)
+	}
+	if gotDir != "" {
+		t.Errorf("project context %q, want none", gotDir)
+	}
+	if !reflect.DeepEqual(gotSpecs, []string{"cowsay@1.6.0"}) {
+		t.Errorf("specs = %v", gotSpecs)
+	}
+	if gotFlags != nil {
+		t.Errorf("flags = %v, want none from the program's argv", gotFlags)
+	}
+}
+
+// For uvx, only the flags before the command reach the resolver: an index
+// named there matters, `--no-deps` in the program's own argv does not.
+func TestExpandInstall_ToolRunReadsOnlyLeadingFlags(t *testing.T) {
+	var gotSpecs, gotUV, gotPip []string
+	old := resolvePythonFn
+	resolvePythonFn = func(_ context.Context, _ string, specs, uvFlags, pipFlags []string) ([]catalog.Resolved, error) {
+		gotSpecs, gotUV, gotPip = specs, uvFlags, pipFlags
+		return []catalog.Resolved{{Name: "ruff", Version: "0.6.0"}}, nil
+	}
+	t.Cleanup(func() { resolvePythonFn = old })
+
+	m, _ := Lookup("uvx")
+	args := []string{"--index-url", "https://i.example", "--with", "ruff-lsp", "-q", "ruff@0.6.0", "--no-deps", "--index-url", "x"}
+	parsed := parseToolRun(m, args)
+	parsed.ToolRun = true
+	tree, err := expandInstall(context.Background(), m, args, 0, parsed)
+	if err != nil || len(tree) != 1 {
+		t.Fatalf("tree = %v, err = %v", tree, err)
+	}
+	if !reflect.DeepEqual(gotSpecs, []string{"ruff-lsp", "ruff==0.6.0"}) {
+		t.Errorf("specs = %v", gotSpecs)
+	}
+	if want := []string{"--index-url", "https://i.example"}; !reflect.DeepEqual(gotUV, want) {
+		t.Errorf("uv flags = %v, want %v", gotUV, want)
+	}
+	if gotPip != nil {
+		t.Errorf("pip flags = %v, want none (a uv command's flags are uv's)", gotPip)
 	}
 }
 

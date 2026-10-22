@@ -15,8 +15,13 @@ import (
 	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
-// expandFn predicts what the named packages bring in; a test seam.
-var expandFn = expandInstall
+// Test seams: expandFn predicts what the named packages bring in; the two
+// resolvers below are what it asks.
+var (
+	expandFn        = expandInstall
+	resolveNpmFn    = catalog.ResolveNpmInstall
+	resolvePythonFn = catalog.ResolvePythonInstall
+)
 
 // A named install used to check exactly the packages typed. `npm install
 // express` puts 65 packages on disk, and the forwarder checked one — the gap
@@ -59,26 +64,22 @@ func (c checkSet) coverage() string {
 }
 
 // resolveNamed turns the packages named on a command line into the set to
-// check. With expand, the tree they bring in is resolved first and every
-// package in it is checked at the release the manager picked — the named
-// ones included, which is a better answer than the registry's "latest"
-// guess. Without it (a tool run, whose fetched package runs rather than
-// installs), or when the resolution fails, the names alone are resolved as
-// before.
+// check. The tree they bring in is resolved first and every package in it is
+// checked at the release the manager picked — the named ones included, which
+// is a better answer than the registry's "latest" guess. When the resolution
+// fails, the names alone are resolved as before. A tool run (`npx cowsay`)
+// is a named install of one package into the tool's own cache, and is
+// expanded the same way.
 //
 // A dependency the project's lockfile already pinned is not what this
 // install brings in, so it is left to the project scan. Trusted sources
 // apply to the whole tree, now that the resolver has said where each
 // package comes from.
 func resolveNamed(ctx context.Context, m *Manager, opts Options, start int, parsed installArgs,
-	resolve func(context.Context, string, string, string) (string, error), expand bool) checkSet {
+	resolve func(context.Context, string, string, string) (string, error)) checkSet {
 	var set checkSet
-	var tree []catalog.Resolved
-	if expand {
-		var err error
-		tree, err = expandFn(ctx, m, opts.Args, start, parsed)
-		set.expanded, set.unresolved = err == nil, err
-	}
+	tree, err := expandFn(ctx, m, opts.Args, start, parsed)
+	set.expanded, set.unresolved = err == nil, err
 
 	found := make([]bool, len(parsed.Specs))
 	for _, r := range tree {
@@ -176,19 +177,54 @@ func joinNames(specs []check.Spec) string {
 //
 // A nil tree with no error means there is nothing beyond the names to look
 // at: an install told not to resolve dependencies.
+//
+// A tool run (`npx cowsay moo`, `uvx ruff check .`) fetches its package into
+// the tool's own cache, never into the project, so it resolves with no
+// project context; and everything after the command is the program's own
+// argv, so none of it is read as a flag for the resolver.
 func expandInstall(ctx context.Context, m *Manager, args []string, start int, parsed installArgs) ([]catalog.Resolved, error) {
 	rest := args[start:]
 	tokens := specTokens(m, parsed)
 	switch m.Ecosystem {
 	case "npm":
-		return catalog.ResolveNpmInstall(ctx, npmProjectDir(m, args), tokens, npmResolveFlags(m, rest))
+		if parsed.ToolRun {
+			return resolveNpmFn(ctx, "", tokens, nil)
+		}
+		return resolveNpmFn(ctx, npmProjectDir(m, args), tokens, npmResolveFlags(m, rest))
 	case "pypi":
+		if parsed.ToolRun {
+			flags := toolRunLeadingFlags(rest)
+			return resolvePythonFn(ctx, ".", tokens, flags, pipResolveFlags(m, flags))
+		}
 		if hasFlag(rest, "--no-deps") {
 			return nil, nil
 		}
-		return catalog.ResolvePythonInstall(ctx, ".", tokens, uvResolveFlags(m, rest), pipResolveFlags(m, rest))
+		return resolvePythonFn(ctx, ".", tokens, uvResolveFlags(m, rest), pipResolveFlags(m, rest))
 	}
 	return nil, nil
+}
+
+// toolRunLeadingFlags are the resolver flags of a `uvx` / `uv tool run`
+// command: those before the command, read with the tool run's own value
+// table so a value is never taken for the command, and kept only when uv's
+// resolver reads them the same way (`uvx --index-url … ruff`).
+func toolRunLeadingFlags(rest []string) []string {
+	var lead []string
+	for i := 0; i < len(rest); i++ {
+		a := rest[i]
+		if a == "" {
+			continue
+		}
+		if !strings.HasPrefix(a, "-") || a == "--" {
+			break
+		}
+		lead = append(lead, a)
+		if _, _, inline := splitFlagValue(a); !inline && toolRunValueFlags[a] && i+1 < len(rest) {
+			lead = append(lead, rest[i+1])
+			i++
+		}
+	}
+	return pickFlags(lead, toolRunValueFlags, union(pythonCommonFlags, uvOnlyFlags), nil)
 }
 
 // specTokens gives the resolver the packages as the user wrote them, so a

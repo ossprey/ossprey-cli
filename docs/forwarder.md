@@ -64,6 +64,11 @@ is the command follows the tool's own parsing, so `npm exec cowsay --package
 left-pad` checks `left-pad` (npm reads options after the command too), and
 `bunx tsc` checks `typescript`, the package bunx actually fetches for it.
 
+In both cases the fetched package is checked together with the dependencies it
+brings in, resolved as for a named install (below) but with no project
+context: a tool run installs into the tool's own cache, never into the project
+beside it, so `npx cowsay moo` checks cowsay and everything cowsay depends on.
+
 A bare command that the project already has in `node_modules/.bin` — `npx
 eslint .` in a project that depends on eslint — is run from there rather than
 fetched, so it is forwarded unchecked: checking the registry package called

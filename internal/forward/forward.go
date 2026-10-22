@@ -522,6 +522,7 @@ func Run(ctx context.Context, opts Options) error {
 		} else {
 			parsed = parseToolRun(m, opts.Args[start:])
 		}
+		parsed.ToolRun = true
 		if parsed.LocalCommand != "" && localBinFn(parsed.LocalCommand) {
 			// npx and bunx run the project's own binary and fetch nothing.
 			// Checking the registry package of that name would check
@@ -574,14 +575,14 @@ func Run(ctx context.Context, opts Options) error {
 				dir, cleanup := reqFilesDir(parsed.ReqFiles)
 				defer cleanup()
 				req.Dir = dir
-				set = resolveNamed(ctx, m, opts, start, parsed, resolve, !toolRun)
+				set = resolveNamed(ctx, m, opts, start, parsed, resolve)
 				req.Specs = set.specs
 				return scanProjectFn(ctx, req)
 			}, func() { reportUnresolved(ctx, parsed.Specs, set) })
 		}
 		note("ossprey: scanning %s and %s before `%s %s`\n", strings.Join(parsed.ReqFiles, ", "),
 			countPackages(len(parsed.Specs)), m.Bin, strings.Join(opts.Args, " "))
-		set := resolveWithProgress(ctx, m, opts, start, parsed, resolve, !toolRun)
+		set := resolveWithProgress(ctx, m, opts, start, parsed, resolve)
 		req.Specs = set.specs
 		stop := progress.Start(progressTo(), "ossprey: scan in progress")
 		dir, cleanup := reqFilesDir(parsed.ReqFiles)
@@ -605,7 +606,7 @@ func Run(ctx context.Context, opts Options) error {
 			// install rather than ahead of it.
 			var set checkSet
 			return passiveAlongside(ctx, m, opts, len(parsed.Specs), func(ctx context.Context) (*ossbom.SBOM, error) {
-				set = resolveNamed(ctx, m, opts, start, parsed, resolve, !toolRun)
+				set = resolveNamed(ctx, m, opts, start, parsed, resolve)
 				if len(set.specs) == 0 {
 					return nil, errNothingToCheck
 				}
@@ -618,7 +619,7 @@ func Run(ctx context.Context, opts Options) error {
 				})
 			}, func() { reportUnresolved(ctx, parsed.Specs, set) })
 		}
-		set := resolveWithProgress(ctx, m, opts, start, parsed, resolve, !toolRun)
+		set := resolveWithProgress(ctx, m, opts, start, parsed, resolve)
 		if len(set.specs) == 0 {
 			note("ossprey: nothing left to check after version resolution; forwarding\n")
 			return forwardTo()
@@ -1023,14 +1024,11 @@ func passiveAlongside(ctx context.Context, m *Manager, opts Options, n int, work
 // resolveWithProgress is resolveNamed for a gating install: the resolution is
 // the first visible wait, announced before there is a count to report, and
 // its failure is reported only after that animation has stopped, never on
-// top of it. A tool run resolves no tree, so nothing is announced.
+// top of it.
 func resolveWithProgress(ctx context.Context, m *Manager, opts Options, start int, parsed installArgs,
-	resolve func(context.Context, string, string, string) (string, error), expand bool) checkSet {
-	stop := func() {}
-	if expand {
-		stop = progress.Start(progressTo(), "ossprey: resolving dependencies")
-	}
-	set := resolveNamed(ctx, m, opts, start, parsed, resolve, expand)
+	resolve func(context.Context, string, string, string) (string, error)) checkSet {
+	stop := progress.Start(progressTo(), "ossprey: resolving dependencies")
+	set := resolveNamed(ctx, m, opts, start, parsed, resolve)
 	stop()
 	reportUnresolved(ctx, parsed.Specs, set)
 	return set
@@ -1087,6 +1085,9 @@ type installArgs struct {
 	// Tokens are the Specs as the command line spelled them, for a resolver
 	// that reads the manager's own syntax (a range, extras, a marker).
 	Tokens map[check.Spec]string
+	// ToolRun marks a fetch-and-execute: the package goes into the tool's
+	// own cache, and everything after the command is the program's argv.
+	ToolRun bool
 }
 
 // ParseSpecs classifies install arguments. A real-world multi-package install
