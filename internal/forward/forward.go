@@ -1120,6 +1120,9 @@ func ParseSpecs(m *Manager, args []string) installArgs {
 // positional argument is a requirements file (`uv pip sync req.txt`).
 func parseInstallArgs(m *Manager, args []string, positionalReqFiles bool) installArgs {
 	valFlags := valueFlags[m.Bin]
+	if m.Ecosystem == "pypi" {
+		args = splitAttachedShorts(args, valFlags)
+	}
 	reqFlags := requirementFileFlags[m.Bin]
 	pkgFlags := packageValueFlags[m.Bin]
 	srcFlags := sourceFlags[m.Bin]
@@ -1217,6 +1220,7 @@ func (p *installArgs) addTarget(ecosystem, token string) {
 // swallows the command the same way. toolRunValueFlags is therefore taken
 // verbatim from `uv tool run --help`, not guessed.
 func parseToolRun(m *Manager, args []string) installArgs {
+	args = splitAttachedShorts(args, toolRunValueFlags)
 	var out installArgs
 	sourceNamed := false
 	addPkg := func(tok string) {
@@ -1318,6 +1322,24 @@ func splitRequirements(value string) []string {
 
 // splitFlagValue splits "--flag=value" into ("--flag", "value", true). A flag
 // with no inline value returns (flag, "", false).
+// splitAttachedShorts rewrites a short option with its value attached
+// (`-cfile`, `-ihttps://…`, `-p3.12`), as clap and argparse both read it,
+// into the option and the value as two tokens, for every short option in
+// valFlags. A token that is not one of those is left alone, so a run of
+// boolean shorts (`-qq`) stays what it was. The result is a new slice; args
+// is untouched.
+func splitAttachedShorts(args []string, valFlags map[string]bool) []string {
+	out := make([]string, 0, len(args))
+	for _, a := range args {
+		if len(a) > 2 && a[0] == '-' && a[1] != '-' && valFlags[a[:2]] {
+			out = append(out, a[:2], strings.TrimPrefix(a[2:], "="))
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
 func splitFlagValue(arg string) (flag, value string, hasInline bool) {
 	if eq := strings.IndexByte(arg, '='); eq >= 0 {
 		return arg[:eq], arg[eq+1:], true

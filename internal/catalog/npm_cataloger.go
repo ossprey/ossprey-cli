@@ -130,6 +130,10 @@ type npmLockfile struct {
 	Packages map[string]struct {
 		Version  string `json:"version"`
 		Resolved string `json:"resolved"`
+		// Optional and DevOptional mark a dependency npm records in the lock
+		// but leaves out of an install run with --omit=optional.
+		Optional    bool `json:"optional"`
+		DevOptional bool `json:"devOptional"`
 	} `json:"packages"`
 }
 
@@ -162,7 +166,7 @@ func parseNpmLock(data []byte, loc file.Location) ([]pkg.Package, error) {
 			Version:   entry.Version,
 			Type:      pkg.NpmPkg,
 			Locations: file.NewLocationSet(loc),
-			Metadata:  registrySource{URL: entry.Resolved},
+			Metadata:  registrySource{URL: entry.Resolved, Optional: entry.Optional || entry.DevOptional},
 		})
 	}
 	return pkgs, nil

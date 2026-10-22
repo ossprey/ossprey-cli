@@ -397,7 +397,12 @@ func markTrustedPackages(pkgs []Package, policy trust.Policy) {
 
 // registrySource is the metadata our own catalogers attach when the resolver
 // reported where a package came from and syft has no type for it.
-type registrySource struct{ URL string }
+type registrySource struct {
+	URL string
+	// Optional marks a dependency the lockfile records but an install may
+	// leave out (npm's optional, which --omit=optional skips).
+	Optional bool
+}
 
 // registryOf returns the source a lockfile recorded for p — the URL it is
 // fetched from — or "" when none was recorded.

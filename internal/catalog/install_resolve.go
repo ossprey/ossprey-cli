@@ -29,6 +29,10 @@ type Resolved struct {
 	// Locked marks a package the project's lockfile already carried before this
 	// install, so the install is not what brings it in.
 	Locked bool
+	// Optional marks a dependency the resolver recorded as optional: npm
+	// writes it to the lock whatever the omit policy, and leaves it out of
+	// an install run with --omit=optional.
+	Optional bool
 }
 
 // ErrNoResolver reports that no tool on the host can predict the install.
@@ -213,11 +217,13 @@ func resolvedFromPackages(pkgs []pkg.Package, locked map[string]bool) []Resolved
 		if strings.HasPrefix(reg, "git") {
 			continue
 		}
+		rs, _ := p.Metadata.(registrySource)
 		out = append(out, Resolved{
 			Name:     p.Name,
 			Version:  p.Version,
 			Registry: reg,
 			Locked:   locked[p.Name+"@"+p.Version],
+			Optional: rs.Optional,
 		})
 	}
 	return out

@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strings"
 
 	"github.com/ossprey/ossprey-cli/internal/catalog"
@@ -199,10 +198,17 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 			if parsed.Userconfig != "" {
 				flags = append(flags, "--userconfig", absPath(parsed.Userconfig))
 			}
-			return resolveNpmFn(ctx, "", npmConfigDirFor(parsed.NpmGlobal, parsed.NpmPrefix), tokens, flags)
+			tree, err := resolveNpmFn(ctx, "", npmConfigDirFor(parsed.NpmGlobal, parsed.NpmPrefix), tokens, flags)
+			return npmOmit(tree, flags), err
 		}
-		return resolveNpmFn(ctx, npmProjectDir(m, args), npmConfigDir(m, args), tokens, npmResolveFlags(m, rest))
+		flags := npmResolveFlags(m, rest)
+		tree, err := resolveNpmFn(ctx, npmProjectDir(m, args), npmConfigDir(m, args), tokens, flags)
+		return npmOmit(tree, flags), err
 	case "pypi":
+		// A short option's value may be attached (`-ihttps://…`); read it
+		// as the resolver will, from a copy, so args stays what the real
+		// command gets.
+		rest = splitAttachedShorts(rest, pythonValueFlags(m))
 		// uv's global options sit before the verb (`uv --config-file x tool
 		// run …`), outside rest; the ones that change the resolution come
 		// along, and can themselves make the command uv-only.
@@ -257,17 +263,59 @@ func without(set, drop map[string]bool) map[string]bool {
 }
 
 // uvGlobalArgs are the tokens before a uv command's verb, where its global
-// options sit; uvx and pip have no such part. A copy, never a prefix slice
-// of args: a caller appends to it, and an append into args's own backing
-// array would overwrite the verb and arguments the real uv is about to get.
+// options sit, attached short values split; uvx and pip have no such part.
+// A copy, never a prefix slice of args: a caller appends to it, and an
+// append into args's own backing array would overwrite the verb and
+// arguments the real uv is about to get.
 func uvGlobalArgs(m *Manager, args []string) []string {
 	if m.Bin != "uv" {
 		return nil
 	}
 	if idx := verbIndex("uv", args); idx > 0 {
-		return slices.Clone(args[:idx])
+		return splitAttachedShorts(args[:idx], globalValueFlags["uv"])
 	}
 	return nil
+}
+
+// pythonValueFlags are the value-taking flags of a Python manager's
+// command, uv's tool-run table included since `uv tool run` shares the
+// binary.
+func pythonValueFlags(m *Manager) map[string]bool {
+	if m.Bin == "uv" || m.Bin == "uvx" {
+		return union(valueFlags["uv"], toolRunValueFlags)
+	}
+	return valueFlags[m.Bin]
+}
+
+// npmOmit drops from a resolved npm tree the optional dependencies an
+// install with --omit=optional (or --no-optional) leaves out, which npm
+// records in the lockfile regardless; --include=optional restores them.
+// Checking them would block a run on a package it never installs.
+func npmOmit(tree []catalog.Resolved, flags []string) []catalog.Resolved {
+	omit, include := false, false
+	for i := 0; i < len(flags); i++ {
+		flag, value, hasInline := splitFlagValue(flags[i])
+		if !hasInline && (flag == "--omit" || flag == "--include") && i+1 < len(flags) {
+			value = flags[i+1]
+			i++
+		}
+		switch {
+		case flag == "--no-optional", flag == "--omit" && value == "optional":
+			omit = true
+		case flag == "--include" && value == "optional":
+			include = true
+		}
+	}
+	if !omit || include {
+		return tree
+	}
+	kept := tree[:0:0]
+	for _, r := range tree {
+		if !r.Optional {
+			kept = append(kept, r)
+		}
+	}
+	return kept
 }
 
 // uvGlobalFlags are the uvGlobalPass flags given before a uv command's

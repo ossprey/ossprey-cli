@@ -854,6 +854,20 @@ func TestExpandInstall_UVGlobalOptionsAndInterpreterPaths(t *testing.T) {
 		// its backing array would overwrite the verb the real uv is given.
 		{"global part leaves args intact", uv, []string{"--no-config", "tool", "run", "--with", "httpx", "--with", "rich", "ruff"},
 			"", []string{"--no-config"}, false},
+		// A short option's value may be attached, as clap and argparse read
+		// it; the program's own attached option past the command is not.
+		{"attached index", uvx, []string{"-ihttps://i.example", "ruff"},
+			"", []string{"-i", "https://i.example"}, false},
+		{"attached constraints", uvx, []string{"-cc.txt", "ruff"},
+			"", []string{"-c", absPath("c.txt")}, false},
+		{"attached interpreter", uvx, []string{"-p3.12", "ruff"},
+			"", []string{"-p", "3.12"}, true},
+		{"attached option after the command is the program's", uvx, []string{"ruff", "-ihttps://evil.example"},
+			"", nil, false},
+		{"attached index on a named install", uv, []string{"pip", "install", "-ihttps://i.example", "ruff"},
+			".", []string{"-i", "https://i.example"}, false},
+		{"attached global cache dir is not a resolver flag", uv, []string{"--no-config", "pip", "install", "-qq", "ruff"},
+			".", []string{"--no-config"}, false},
 	}
 	for _, tt := range tests {
 		gotDir, gotUV, uvOnly = nil, nil, false
@@ -885,6 +899,77 @@ func TestExpandInstall_UVGlobalOptionsAndInterpreterPaths(t *testing.T) {
 		}
 		if uvOnly != tt.wantUVOnly {
 			t.Errorf("%s: uv-only = %v, want %v", tt.name, uvOnly, tt.wantUVOnly)
+		}
+	}
+}
+
+// An attached short value is read everywhere the manager's own parse would
+// read it: `-wrich` names a package for a tool run, `-cc.txt` is a
+// constraints file and not a package for a named install.
+func TestSplitAttachedShorts(t *testing.T) {
+	got := splitAttachedShorts([]string{"-cc.txt", "-c=d.txt", "-qq", "--with=x", "-w", "rich", "ruff", "-ievil"}, toolRunValueFlags)
+	want := []string{"-c", "c.txt", "-c", "d.txt", "-qq", "--with=x", "-w", "rich", "ruff", "-i", "evil"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	uvx, _ := Lookup("uvx")
+	parsed := parseToolRun(uvx, []string{"-wrich", "ruff", "-wnot-a-package"})
+	if want := []check.Spec{{Ecosystem: "pypi", Name: "rich"}, {Ecosystem: "pypi", Name: "ruff"}}; !reflect.DeepEqual(parsed.Specs, want) {
+		t.Errorf("uvx -wrich ruff: specs = %+v, want %+v", parsed.Specs, want)
+	}
+	uv, _ := Lookup("uv")
+	parsed = ParseSpecs(uv, []string{"-cc.txt", "ruff"})
+	if want := []check.Spec{{Ecosystem: "pypi", Name: "ruff"}}; !reflect.DeepEqual(parsed.Specs, want) {
+		t.Errorf("uv pip install -cc.txt ruff: specs = %+v, want %+v", parsed.Specs, want)
+	}
+}
+
+// npm records an optional dependency in the lock whatever the omit policy,
+// and leaves it out of an install run with --omit=optional: the check must
+// not block such a run on a package it never installs. --include=optional
+// restores it.
+func TestExpandInstall_NpmOmitOptional(t *testing.T) {
+	old := resolveNpmFn
+	resolveNpmFn = func(context.Context, string, string, []string, []string) ([]catalog.Resolved, error) {
+		return []catalog.Resolved{{Name: "needed", Version: "1.0.0"}, {Name: "extra", Version: "2.0.0", Optional: true}}, nil
+	}
+	t.Cleanup(func() { resolveNpmFn = old })
+	m, _ := Lookup("npm")
+
+	names := func(tree []catalog.Resolved) []string {
+		var out []string
+		for _, r := range tree {
+			out = append(out, r.Name)
+		}
+		return out
+	}
+	for _, tt := range []struct {
+		args    []string
+		toolRun bool
+		want    []string
+	}{
+		{[]string{"exec", "cowsay@1.6.0"}, true, []string{"needed", "extra"}},
+		{[]string{"exec", "--omit=optional", "cowsay@1.6.0"}, true, []string{"needed"}},
+		{[]string{"exec", "--no-optional", "cowsay@1.6.0"}, true, []string{"needed"}},
+		{[]string{"exec", "--omit=optional", "--include=optional", "cowsay@1.6.0"}, true, []string{"needed", "extra"}},
+		{[]string{"install", "--omit", "optional", "cowsay"}, false, []string{"needed"}},
+		{[]string{"install", "cowsay"}, false, []string{"needed", "extra"}},
+	} {
+		var parsed installArgs
+		start := 0
+		if tt.toolRun {
+			parsed = m.parseRun(tt.args)
+			parsed.ToolRun = true
+		} else {
+			start, _ = m.installAt(tt.args)
+			parsed = ParseSpecs(m, tt.args[start:])
+		}
+		tree, err := expandInstall(context.Background(), m, tt.args, start, parsed)
+		if err != nil {
+			t.Fatalf("%v: %v", tt.args, err)
+		}
+		if got := names(tree); !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("%v: tree = %v, want %v", tt.args, got, tt.want)
 		}
 	}
 }

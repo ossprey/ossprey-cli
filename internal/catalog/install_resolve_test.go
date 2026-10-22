@@ -11,6 +11,8 @@ import (
 	"testing"
 
 	"github.com/anchore/syft/syft/pkg"
+
+	"github.com/anchore/syft/syft/file"
 )
 
 // The staged copy of a project resolves from registries alone: dependencies
@@ -241,5 +243,28 @@ func TestStageNpmrc(t *testing.T) {
 	got, err := os.ReadFile(filepath.Join(dst, ".npmrc"))
 	if err != nil || !strings.Contains(string(got), "npm.acme.internal") {
 		t.Errorf("staged .npmrc = %q, %v", got, err)
+	}
+}
+
+// npm marks an optional dependency in the lock it writes, and the resolver
+// carries the mark so an install that omits optionals can be checked as it
+// installs.
+func TestParseNpmLockCarriesOptional(t *testing.T) {
+	lock := []byte(`{"lockfileVersion":3,"packages":{
+		"": {"name":"p"},
+		"node_modules/needed": {"version":"1.0.0","resolved":"https://registry.npmjs.org/needed/-/needed-1.0.0.tgz"},
+		"node_modules/extra": {"version":"2.0.0","resolved":"https://registry.npmjs.org/extra/-/extra-2.0.0.tgz","optional":true},
+		"node_modules/devextra": {"version":"3.0.0","resolved":"https://registry.npmjs.org/devextra/-/devextra-3.0.0.tgz","devOptional":true}}}`)
+	pkgs, err := parseNpmLock(lock, file.Location{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, r := range resolvedFromPackages(pkgs, nil) {
+		got[r.Name] = r.Optional
+	}
+	want := map[string]bool{"needed": false, "extra": true, "devextra": true}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("optional marks = %v, want %v", got, want)
 	}
 }
