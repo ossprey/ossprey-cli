@@ -253,3 +253,60 @@ func TestMergeVersionlessFoldsPEP503Spellings(t *testing.T) {
 		t.Errorf("got %+v, want one component", got)
 	}
 }
+
+func TestIsLocalNpmVersion(t *testing.T) {
+	for in, want := range map[string]bool{
+		"link:../bar":         true,
+		"file:../bar":         true,
+		"file:./pkg.tgz":      true,
+		"workspace:*":         true,
+		"workspace:^1.2.3":    true,
+		"portal:../lib":       true,
+		"  link:../bar":       true, // leading space tolerated
+		"1.3.0":               false,
+		"^1.2.3":              false,
+		"":                    false,
+		"npm:left-pad@1.3.0":  false, // an alias resolves to a real release
+		"git+https://x/y.git": false,
+		"https://x/y.tgz":     false,
+		"linkify@1.0.0":       false, // a name that merely starts with "link"
+	} {
+		if got := isLocalNpmVersion(in); got != want {
+			t.Errorf("isLocalNpmVersion(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+// A package-lock.json entry whose "version" is a link:/file: protocol spec (no
+// "resolved" field) is the project's own code; it must not reach the API as a
+// component like pkg:npm/bar@link:../bar, while real registry deps still do.
+func TestCatalog_NpmLockLocalVersionIsNotAComponent(t *testing.T) {
+	for _, spec := range []string{"link:../bar", "file:../bar"} {
+		got := catalogSet(t, map[string]string{"package-lock.json": `{"name":"app","version":"1.0.0","lockfileVersion":3,"packages":{
+ "":{"name":"app","version":"1.0.0"},
+ "node_modules/bar":{"version":"` + spec + `"},
+ "node_modules/left-pad":{"version":"1.3.0","resolved":"https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"}}}`})
+		if !got["npm/left-pad@1.3.0"] {
+			t.Errorf("%s: registry dep missing: %v", spec, got)
+		}
+		if hasName(got, "npm/bar") {
+			t.Errorf("%s: local entry emitted as a component: %v", spec, got)
+		}
+	}
+}
+
+// A package.json local/workspace dependency must not become a (versionless)
+// component that then resolves the local name against the public registry.
+func TestCatalog_PackageJsonLocalDepIsNotAComponent(t *testing.T) {
+	for _, spec := range []string{"file:../bar", "link:../bar", "workspace:*", "portal:../bar"} {
+		got := catalogSet(t, map[string]string{
+			"package.json": `{"name":"app","version":"1.0.0","dependencies":{"bar":"` + spec + `","left-pad":"1.3.0"}}`,
+		})
+		if !got["npm/left-pad@1.3.0"] {
+			t.Errorf("%s: registry dep missing: %v", spec, got)
+		}
+		if hasName(got, "npm/bar") {
+			t.Errorf("%s: local dep emitted as a component: %v", spec, got)
+		}
+	}
+}
