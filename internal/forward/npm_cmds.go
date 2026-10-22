@@ -6,19 +6,20 @@ import (
 	"unicode"
 )
 
-// Copied from lib/utils/cmd-list.js in npm 10.9. npm accepts every alias and
-// every unambiguous abbreviation of a command or alias, so `npm isntall x`,
-// `npm upgrade x` and `npm insta x` all install. TestNpmCmdListMatchesNpm
-// diffs these tables and npmDeref against the installed npm.
+// Copied from lib/utils/cmd-list.js in npm 11.19.1, the npm CI pins (see
+// .github/workflows/ci.yml). npm accepts every alias and every unambiguous
+// abbreviation of a command or alias, so `npm isntall x`, `npm upgrade x` and
+// `npm insta x` all install. TestNpmCmdListMatchesNpm diffs these tables and
+// npmDeref against the installed npm, so it is held to that version.
 var npmCommands = []string{
-	"access", "adduser", "audit", "bugs", "cache", "ci", "completion", "config",
-	"dedupe", "deprecate", "diff", "dist-tag", "docs", "doctor", "edit", "exec",
-	"explain", "explore", "find-dupes", "fund", "get", "help", "help-search", "hook",
-	"init", "install", "install-ci-test", "install-test", "link", "ll", "login",
-	"logout", "ls", "org", "outdated", "owner", "pack", "ping", "pkg", "prefix",
-	"profile", "prune", "publish", "query", "rebuild", "repo", "restart", "root",
-	"run-script", "sbom", "search", "set", "shrinkwrap", "star", "stars", "start",
-	"stop", "team", "test", "token", "uninstall", "unpublish", "unstar", "update",
+	"access", "adduser", "approve-scripts", "audit", "bugs", "cache", "ci", "completion",
+	"config", "dedupe", "deny-scripts", "deprecate", "diff", "dist-tag", "docs", "doctor",
+	"edit", "exec", "explain", "explore", "find-dupes", "fund", "get", "help", "help-search",
+	"init", "install", "install-ci-test", "install-scripts", "install-test", "link", "ll",
+	"login", "logout", "ls", "org", "outdated", "owner", "pack", "ping", "pkg", "prefix",
+	"profile", "prune", "publish", "query", "rebuild", "repo", "restart", "root", "run",
+	"sbom", "search", "set", "shrinkwrap", "stage", "star", "stars", "start", "stop", "team",
+	"test", "token", "trust", "undeprecate", "uninstall", "unpublish", "unstar", "update",
 	"version", "view", "whoami",
 }
 
@@ -27,15 +28,15 @@ var npmAliases = map[string]string{
 	"find": "search", "add": "install", "unlink": "uninstall", "remove": "uninstall",
 	"rm": "uninstall", "r": "uninstall", "un": "uninstall", "rb": "rebuild", "list": "ls",
 	"ln": "link", "create": "init", "i": "install", "it": "install-test",
-	"cit": "install-ci-test", "up": "update", "c": "config", "s": "search", "se": "search",
-	"tst": "test", "t": "test", "ddp": "dedupe", "v": "view", "run": "run-script",
-	"clean-install": "ci", "clean-install-test": "install-ci-test", "x": "exec",
-	"why": "explain", "la": "ll", "verison": "version", "ic": "ci", "innit": "init",
-	"in": "install", "ins": "install", "inst": "install", "insta": "install",
+	"cit": "install-ci-test", "u": "update", "up": "update", "c": "config", "s": "search",
+	"se": "search", "tst": "test", "t": "test", "ddp": "dedupe", "v": "view",
+	"run-script": "run", "clean-install": "ci", "clean-install-test": "install-ci-test",
+	"x": "exec", "why": "explain", "la": "ll", "verison": "version", "ic": "ci",
+	"innit": "init", "in": "install", "ins": "install", "inst": "install", "insta": "install",
 	"instal": "install", "isnt": "install", "isnta": "install", "isntal": "install",
 	"isntall": "install", "install-clean": "ci", "isntall-clean": "ci", "hlep": "help",
-	"dist-tags": "dist-tag", "upgrade": "update", "udpate": "update", "rum": "run-script",
-	"sit": "install-ci-test", "urn": "run-script", "ogr": "org", "add-user": "adduser",
+	"dist-tags": "dist-tag", "upgrade": "update", "udpate": "update", "rum": "run",
+	"sit": "install-ci-test", "urn": "run", "ogr": "org", "add-user": "adduser",
 }
 
 // npmInstallCommands are the commands that install packages: named ones, or

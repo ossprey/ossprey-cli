@@ -1,11 +1,12 @@
 // Package forward implements the package-manager forwarder: it inspects an
-// install command (npm/yarn/bun/pip/poetry/uv), checks the named packages against
-// the Ossprey API, blocks the install if any are malicious, and otherwise execs
-// the real package manager with the original arguments untouched.
+// install command (npm/yarn/bun/pip/poetry/uv), checks the packages it would
+// install against the Ossprey API, blocks the install if any are malicious,
+// and otherwise execs the real package manager with the original arguments
+// untouched.
 //
-// Scope: only the packages named on the command line are checked. Transitive
-// dependencies are NOT resolved here — run `ossprey scan` after install for
-// full-tree coverage.
+// A named install is checked with the dependencies it brings in, resolved by
+// the manager's own kind of dry run (see expand.go); when that dry run cannot
+// be had, the named packages are checked alone and a warning says so.
 package forward
 
 import (
@@ -425,9 +426,10 @@ type Options struct {
 	// the machine needs no login and no API key. Ignored unless Passive.
 	MonitorID string
 	// Trust names sources whose packages are neither checked nor sent. A named
-	// install applies only its npm scopes: which registry a package not yet
-	// installed will be fetched from is recorded nowhere until the lockfile is
-	// written. Project scans apply all of it.
+	// install applies its npm scopes to the names typed, and both rules to
+	// the tree the resolver's dry run reports, with the registry that dry run
+	// recorded for each package (uv records none). Project scans apply all
+	// of it, from the lockfile.
 	Trust trust.Policy
 }
 
@@ -459,6 +461,9 @@ func Run(ctx context.Context, opts Options) error {
 		return execFn(ctx, m.Bin, opts.Args)
 	}
 
+	// coverage is what a named install's verdict covered, for the verbose
+	// clean line; a manifest scan has none.
+	coverage := ""
 	finish := func(sbom *ossbom.SBOM, err error) error {
 		if err != nil {
 			// Main prints the error; drain here so its safety-net drain does
@@ -466,7 +471,7 @@ func Run(ctx context.Context, opts Options) error {
 			flushWarnings(ctx)
 			return err
 		}
-		return reportAndForward(ctx, m, opts, sbom)
+		return reportAndForward(ctx, m, opts, sbom, coverage)
 	}
 
 	resolve := opts.Resolve
@@ -564,27 +569,30 @@ func Run(ctx context.Context, opts Options) error {
 		}
 		if opts.Passive {
 			req.SubmitOnly = true
+			var set checkSet
 			return passiveAlongside(ctx, m, opts, len(parsed.Specs), func(ctx context.Context) (*ossbom.SBOM, error) {
 				dir, cleanup := reqFilesDir(parsed.ReqFiles)
 				defer cleanup()
 				req.Dir = dir
-				req.Specs = resolveSpecs(ctx, resolve, parsed.Specs)
+				set = resolveNamed(ctx, m, opts, start, parsed, resolve, !toolRun)
+				req.Specs = set.specs
 				return scanProjectFn(ctx, req)
-			})
+			}, func() { reportUnresolved(ctx, parsed.Specs, set) })
 		}
 		note("ossprey: scanning %s and %s before `%s %s`\n", strings.Join(parsed.ReqFiles, ", "),
 			countPackages(len(parsed.Specs)), m.Bin, strings.Join(opts.Args, " "))
+		set := resolveWithProgress(ctx, m, opts, start, parsed, resolve, !toolRun)
+		req.Specs = set.specs
 		stop := progress.Start(progressTo(), "ossprey: scan in progress")
 		dir, cleanup := reqFilesDir(parsed.ReqFiles)
 		defer cleanup()
 		req.Dir = dir
-		req.Specs = resolveSpecs(ctx, resolve, parsed.Specs)
 		sbom, err := scanProjectFn(ctx, req)
 		stop()
 		return finish(sbom, err)
 
 	case len(parsed.Specs) > 0:
-		// Explicit packages named — check exactly those.
+		// Explicit packages named — check those and what they bring in.
 		if other := slices.Concat(parsed.NonPackages, parsed.ReqFiles); len(other) > 0 {
 			note("ossprey: not checking non-registry install targets: %s (run `ossprey scan` for full coverage)\n",
 				strings.Join(other, ", "))
@@ -592,32 +600,35 @@ func Run(ctx context.Context, opts Options) error {
 		if opts.Passive {
 			// This invocation leaves no lockfile here to read afterwards (pip,
 			// `uv pip install`, a global or redirected install), so the names
-			// on the command line are all we will ever know. Resolve and
-			// submit them beside the install rather than ahead of it.
+			// on the command line, and what the resolver says they bring in,
+			// are all we will ever know. Resolve and submit them beside the
+			// install rather than ahead of it.
+			var set checkSet
 			return passiveAlongside(ctx, m, opts, len(parsed.Specs), func(ctx context.Context) (*ossbom.SBOM, error) {
-				resolved := resolveSpecs(ctx, resolve, parsed.Specs)
-				if len(resolved) == 0 {
+				set = resolveNamed(ctx, m, opts, start, parsed, resolve, !toolRun)
+				if len(set.specs) == 0 {
 					return nil, errNothingToCheck
 				}
 				return checkFn(ctx, check.Options{
-					Specs:      resolved,
+					Specs:      set.specs,
 					APIURL:     opts.APIURL,
 					APIKey:     opts.APIKey,
 					SubmitOnly: true,
 					MonitorID:  opts.MonitorID,
 				})
-			})
+			}, func() { reportUnresolved(ctx, parsed.Specs, set) })
 		}
-		resolved := resolveSpecs(ctx, resolve, parsed.Specs)
-		if len(resolved) == 0 {
+		set := resolveWithProgress(ctx, m, opts, start, parsed, resolve, !toolRun)
+		if len(set.specs) == 0 {
 			note("ossprey: nothing left to check after version resolution; forwarding\n")
 			return forwardTo()
 		}
+		coverage = set.coverage()
 		// The scan is the one part of a forwarded install that takes visible
 		// time, and until it prints something the terminal looks hung.
-		stop := progress.Scan(progressTo(), len(resolved))
+		stop := progress.Scan(progressTo(), len(set.specs))
 		sbom, err := checkFn(ctx, check.Options{
-			Specs:     resolved,
+			Specs:     set.specs,
 			APIURL:    opts.APIURL,
 			APIKey:    opts.APIKey,
 			MonitorID: opts.MonitorID,
@@ -643,7 +654,7 @@ func Run(ctx context.Context, opts Options) error {
 					Dir: dir, APIURL: opts.APIURL, APIKey: opts.APIKey,
 					MonitorID: opts.MonitorID, SubmitOnly: true, Trust: opts.Trust,
 				})
-			})
+			}, nil)
 		}
 		note("ossprey: no packages named; scanning project manifest before `%s %s`\n",
 			m.Bin, strings.Join(opts.Args, " "))
@@ -672,7 +683,8 @@ func Run(ctx context.Context, opts Options) error {
 // runs before version resolution so a private package is never looked up on
 // the public registry, which is where the noise it exists to remove came from.
 //
-// Only the npm scope rule can apply here; see Options.Trust.
+// Only the npm scope rule can apply here, before anything is resolved; the
+// registry rule applies to the resolved tree in resolveNamed. See Options.Trust.
 func dropTrusted(ctx context.Context, policy trust.Policy, specs []check.Spec) []check.Spec {
 	if policy.Empty() {
 		return specs
@@ -711,8 +723,9 @@ func resolveSpecs(ctx context.Context, resolve func(context.Context, string, str
 }
 
 // reportAndForward blocks (ErrBlocked) if sbom carries malware, else execs the
-// real manager with the original args.
-func reportAndForward(ctx context.Context, m *Manager, opts Options, sbom *ossbom.SBOM) error {
+// real manager with the original args. coverage, when set, says what the
+// verdict covered ("1 requested + 64 dependencies").
+func reportAndForward(ctx context.Context, m *Manager, opts Options, sbom *ossbom.SBOM, coverage string) error {
 	// Warnings gathered while cataloguing and resolving go out first, so the
 	// verdict is the last thing on screen rather than the first thing scrolled
 	// past (OSS-2001).
@@ -746,9 +759,10 @@ func reportAndForward(ctx context.Context, m *Manager, opts Options, sbom *ossbo
 			m.Bin, strings.Join(opts.Args, " "))
 	} else {
 		// The count is load-bearing: "no malware found" alone read the same
-		// whether 40 packages were checked or none were.
-		note("ossprey: no malware found in %s, forwarding to %s\n",
-			countPackages(n), m.Bin)
+		// whether 40 packages were checked or none were — and whether the
+		// named package's dependencies were among them.
+		note("ossprey: no malware found in %s%s, forwarding to %s\n",
+			countPackages(n), coverage, m.Bin)
 	}
 	// Already drained at the top of this function, ahead of the verdict.
 	return execFn(ctx, m.Bin, opts.Args)
@@ -966,8 +980,10 @@ func passiveAfterInstall(ctx context.Context, m *Manager, opts Options) error {
 
 // passiveAlongside runs work concurrently with the real package manager, for
 // the one manager that leaves nothing to read afterwards (pip). The install
-// starts immediately; the submission catches up with it.
-func passiveAlongside(ctx context.Context, m *Manager, opts Options, n int, work func(context.Context) (*ossbom.SBOM, error)) error {
+// starts immediately; the submission catches up with it. late, if set, runs
+// once the manager has exited and work is done, for anything that must print
+// but must not print from beside the manager.
+func passiveAlongside(ctx context.Context, m *Manager, opts Options, n int, work func(context.Context) (*ossbom.SBOM, error), late func()) error {
 	type outcome struct {
 		sbom *ossbom.SBOM
 		err  error
@@ -996,9 +1012,36 @@ func passiveAlongside(ctx context.Context, m *Manager, opts Options, n int, work
 		stop()
 	}
 
+	if late != nil {
+		late()
+	}
 	flushWarnings(ctx)
 	reportPassive(opts, res.sbom, res.err)
 	return execErr
+}
+
+// resolveWithProgress is resolveNamed for a gating install: the resolution is
+// the first visible wait, announced before there is a count to report, and
+// its failure is reported only after that animation has stopped, never on
+// top of it. A tool run resolves no tree, so nothing is announced.
+func resolveWithProgress(ctx context.Context, m *Manager, opts Options, start int, parsed installArgs,
+	resolve func(context.Context, string, string, string) (string, error), expand bool) checkSet {
+	stop := func() {}
+	if expand {
+		stop = progress.Start(progressTo(), "ossprey: resolving dependencies")
+	}
+	set := resolveNamed(ctx, m, opts, start, parsed, resolve, expand)
+	stop()
+	reportUnresolved(ctx, parsed.Specs, set)
+	return set
+}
+
+// reportUnresolved prints the fallback line for a set whose tree was not
+// resolved, and nothing for one whose tree was.
+func reportUnresolved(ctx context.Context, specs []check.Spec, set checkSet) {
+	if set.unresolved != nil {
+		reportUnexpanded(ctx, specs, set.unresolved)
+	}
 }
 
 // reportPassive states what the passive submission did. It never returns an
@@ -1041,6 +1084,9 @@ type installArgs struct {
 	// bunx take from the project's node_modules/.bin when it is there instead
 	// of fetching the package of that name.
 	LocalCommand string
+	// Tokens are the Specs as the command line spelled them, for a resolver
+	// that reads the manager's own syntax (a range, extras, a marker).
+	Tokens map[check.Spec]string
 }
 
 // ParseSpecs classifies install arguments. A real-world multi-package install
@@ -1138,6 +1184,10 @@ func (p *installArgs) addTarget(ecosystem, token string) {
 		return
 	}
 	p.Specs = append(p.Specs, s)
+	if p.Tokens == nil {
+		p.Tokens = map[check.Spec]string{}
+	}
+	p.Tokens[s] = token
 }
 
 // parseToolRun classifies fetch-and-execute arguments (`uvx [opts] <cmd>
