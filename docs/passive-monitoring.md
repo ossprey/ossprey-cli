@@ -36,8 +36,10 @@ install still starts immediately. That covers:
   ../other add`, `poetry -C ../svc add`). A redirect that points here
   (`--prefix .`) keeps the post-install path.
 
-In that mode only the named packages are covered, not their transitives — the
-same scope a gating `ossprey npm install foo` has.
+In that mode the named packages are submitted with the dependencies the
+resolver's dry run says they bring in — the same scope a gating `ossprey npm
+install foo` has (see [the forwarder](forwarder.md)) — or the names alone when
+that dry run is not possible.
 
 There are two ways to run it, and the difference is where the credential lives.
 

@@ -56,7 +56,9 @@ flowchart TD
     L -- "no" --> W{"passive mode?"}
 
     W -- "no: gating" --> X{"packages named?"}
-    X -- "yes" --> R{"a requirements<br/>file too?"}
+    X -- "yes" --> E["dry-run the resolver:<br/>what would this install add?"]
+    E -- "resolved" --> R{"a requirements<br/>file too?"}
+    E -- "failed: warn, fall back<br/>to the names alone" --> R
     R -- "no" --> Y["check those packages"]
     R -- "yes: pip install -r f pkg" --> RZ["scan the project manifest<br/>plus the named packages"]
     X -- "no: bare install" --> Z["scan the project manifest"]
@@ -73,6 +75,17 @@ flowchart TD
     AC -- "no: pip, uv pip, bun,<br/>uv tool install, npx,<br/>-g, --prefix ../x" --> AG["exec the real manager<br/>and submit the named<br/>packages alongside it"]
     AG --> AF
 ```
+
+A named gating install does not check only what was typed. `npm install
+express` installs 65 packages, so before the check the manager's own kind of
+resolver is asked what the install would add, without installing anything —
+`npm install --package-lock-only --ignore-scripts` in a throwaway copy of the
+project for the npm-side managers, `uv pip compile --no-build` or `pip install
+--dry-run --only-binary=:all:` for the Python ones — and the whole tree is
+checked at once (`internal/catalog/install_resolve.go`, driven from
+`internal/forward/expand.go`). When that dry run cannot be had, the named
+packages are checked alone and one warning line says so; the install is never
+blocked for want of a prediction.
 
 The passive branch is the one worth reading twice. It never gates, so it never
 sits in front of the install: where a lockfile will land, the install runs
