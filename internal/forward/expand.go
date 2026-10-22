@@ -40,6 +40,9 @@ type checkSet struct {
 	// expanded reports that the dependency tree was resolved, so deps is the
 	// real count rather than a tree never looked at.
 	expanded bool
+	// unresolved is why it was not, for the caller to report once the
+	// terminal is free: nothing here prints.
+	unresolved error
 }
 
 // coverage states what a verdict covered, for the verbose clean line: a count
@@ -74,10 +77,7 @@ func resolveNamed(ctx context.Context, m *Manager, opts Options, start int, pars
 	if expand {
 		var err error
 		tree, err = expandFn(ctx, m, opts.Args, start, parsed)
-		if err != nil {
-			reportUnexpanded(ctx, parsed.Specs, err, opts.Passive)
-		}
-		set.expanded = err == nil
+		set.expanded, set.unresolved = err == nil, err
 	}
 
 	found := make([]bool, len(parsed.Specs))
@@ -125,14 +125,14 @@ func resolveNamed(ctx context.Context, m *Manager, opts Options, start int, pars
 // the names alone must not read as a verdict on the install. The resolver's
 // own output goes behind the verbose gutter, as a cataloger's does.
 //
-// With collect (passive mode) the line is only collected: it would otherwise
-// print from beside the running manager, which owns the terminal, and a
-// passive run blocks nothing on the answer anyway.
-func reportUnexpanded(ctx context.Context, specs []check.Spec, err error, collect bool) {
+// Callers print it only once the terminal is theirs: after the progress
+// animation has stopped, and in passive mode after the manager has exited,
+// never from beside either.
+func reportUnexpanded(ctx context.Context, specs []check.Spec, err error) {
 	headline, detail := catalog.ResolveFailure(err)
 	line := fmt.Sprintf("could not resolve the dependencies of %s (%s); checking the named packages only",
 		joinNames(specs), headline)
-	if collect || (env.Verbose() && len(detail) > 0) {
+	if env.Verbose() && len(detail) > 0 {
 		warn.Add(ctx, warn.Entry{Class: "resolve-install", One: line, Many: "%d installs' dependencies could not be resolved",
 			Item: line, Detail: detail, DetailLabel: "resolver"})
 		return

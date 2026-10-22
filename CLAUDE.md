@@ -212,13 +212,21 @@ Every rule is a hole in the scan by design, so the rules are narrow:
   rather than keeping the first, since one lockfile fetching it publicly is
   enough to need a check. Don't add pnpm (no URL) or Pipfile.lock (index
   *name*) without real URLs.
-- **Named forwarded installs apply only the scope rule** (`dropTrusted`, before
-  `resolveSpecs` so nothing private is looked up publicly). Inferring the
-  registry from `pip.conf`/`.npmrc` was rejected: missing an `extra-index-url`
-  would trust a package pip then fetches publicly. The status quo there is
-  already right — a private-only name 404s and is skipped once; a squatted
-  public one gets checked. An all-trusted named install must forward directly:
-  an empty spec list otherwise reads as a bare install and scans the project.
+- **Named forwarded installs apply only the scope rule to the names typed**
+  (`dropTrusted`, before anything is resolved so nothing private is looked up
+  publicly). Inferring the registry from `pip.conf`/`.npmrc` was rejected:
+  missing an `extra-index-url` would trust a package pip then fetches
+  publicly. The dry run that expands a named install (OSS-2481) changes that
+  for what it reports: `resolveNamed` applies both rules to the resolved tree,
+  with the registry the resolver recorded for each package (npm's lock
+  `resolved`, pip's `download_info.url`; uv records none, so there the
+  registry rule cannot match and the package is checked). That is the same
+  "provenance is what the resolver recorded" rule as a project scan, not an
+  inference from config. A private-only name that the dry run cannot resolve
+  fails the whole dry run and falls back to the names, where the old status
+  quo still holds — it 404s and is skipped once; a squatted public one gets
+  checked. An all-trusted named install must forward directly: an empty spec
+  list otherwise reads as a bare install and scans the project.
 - **Machine-level only, never from the repo** — a PR could otherwise trust its
   own registry. A bad entry is dropped with a warning (`loadTrust`), which only
   means more is checked; `trust add/remove` refuse to rewrite a file they could

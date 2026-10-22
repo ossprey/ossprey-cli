@@ -102,8 +102,10 @@ still put code on your machine:
 For these, run `ossprey scan` on the project afterwards.
 
 Packages from [trusted sources](trust.md) are deliberately not checked. A named
-install applies only the npm scope rule, and a bare install applies both rules,
-from the lockfile.
+install applies the npm scope rule to the packages typed, and both rules to the
+tree its dry run resolves, using the registry that dry run recorded for each
+package (npm and pip record one; uv does not, so a uv-resolved package is
+always checked). A bare install applies both rules, from the lockfile.
 
 **Two modes, picked automatically:**
 

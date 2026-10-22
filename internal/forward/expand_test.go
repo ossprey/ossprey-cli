@@ -386,3 +386,33 @@ func TestNpmProjectDir(t *testing.T) {
 		t.Errorf("pnpm lockfile npm cannot read: got %q, want none", got)
 	}
 }
+
+// Passive, the fallback line still prints when quiet — a fail-open is never
+// silent — but only once the manager has exited, since from the moment it
+// starts the terminal is its.
+func TestRun_PassiveNamedInstall_ExpansionFallbackPrintsAfterTheManager(t *testing.T) {
+	printedBeforeManager := ""
+	execFn := func(context.Context, string, []string) error {
+		printedBeforeManager = errOut.(*bytes.Buffer).String()
+		return nil
+	}
+	swap(t, execFn, cleanSBOM)
+	swapExpand(t, func(context.Context, *Manager, []string, int, installArgs) ([]catalog.Resolved, error) {
+		return nil, errors.New("no resolver on PATH (uv or python)")
+	})
+
+	out, err := quietOutput(t, warn.NewContext(context.Background(), false), Options{
+		Bin: "pip", Args: []string{"install", "flask"}, Passive: true,
+		ResolveLatest: func(context.Context, string, string) (string, error) { return "3.0.0", nil },
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if printedBeforeManager != "" {
+		t.Errorf("printed beside the manager:\n%s", printedBeforeManager)
+	}
+	want := "ossprey: warning: could not resolve the dependencies of flask (no resolver on PATH (uv or python)); checking the named packages only\n"
+	if out != want {
+		t.Errorf("got %q, want %q", out, want)
+	}
+}

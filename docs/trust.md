@@ -77,10 +77,13 @@ and the [PATH shims](shims.md), in both blocking and
 - **Bare installs** (`npm install`, `npm ci`, `uv sync`, `poetry install`) and
   passive installs scan the project's lockfile, so both rules apply.
 - **Named installs** (`npm install @org/web`, `pip install my-lib`) apply the
-  **npm scope** rule only. A package that is not installed yet has no lockfile
-  entry, and guessing its source from `pip.conf` or `.npmrc` could trust a
-  package that pip then fetches from an extra public index. A private name
-  that is missing from the public registry is already skipped with a single
+  **npm scope** rule to the packages typed, and both rules to the tree the
+  [forwarder's dry run](forwarder.md) resolves, using the registry that dry
+  run recorded for each package (npm's lockfile and pip's report record one;
+  uv does not, so a uv-resolved package is always checked). Nothing is guessed
+  from `pip.conf` or `.npmrc`: guessing could trust a package that pip then
+  fetches from an extra public index. A private name that the dry run cannot
+  resolve falls back to the names typed, where it is skipped with a single
   warning. A name that *does* exist publicly is checked, which is the result
   you want.
 

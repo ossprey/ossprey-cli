@@ -426,9 +426,10 @@ type Options struct {
 	// the machine needs no login and no API key. Ignored unless Passive.
 	MonitorID string
 	// Trust names sources whose packages are neither checked nor sent. A named
-	// install applies only its npm scopes: which registry a package not yet
-	// installed will be fetched from is recorded nowhere until the lockfile is
-	// written. Project scans apply all of it.
+	// install applies its npm scopes to the names typed, and both rules to
+	// the tree the resolver's dry run reports, with the registry that dry run
+	// recorded for each package (uv records none). Project scans apply all
+	// of it, from the lockfile.
 	Trust trust.Policy
 }
 
@@ -568,21 +569,24 @@ func Run(ctx context.Context, opts Options) error {
 		}
 		if opts.Passive {
 			req.SubmitOnly = true
+			var set checkSet
 			return passiveAlongside(ctx, m, opts, len(parsed.Specs), func(ctx context.Context) (*ossbom.SBOM, error) {
 				dir, cleanup := reqFilesDir(parsed.ReqFiles)
 				defer cleanup()
 				req.Dir = dir
-				req.Specs = resolveNamed(ctx, m, opts, start, parsed, resolve, !toolRun).specs
+				set = resolveNamed(ctx, m, opts, start, parsed, resolve, !toolRun)
+				req.Specs = set.specs
 				return scanProjectFn(ctx, req)
-			})
+			}, func() { reportUnresolved(ctx, parsed.Specs, set) })
 		}
 		note("ossprey: scanning %s and %s before `%s %s`\n", strings.Join(parsed.ReqFiles, ", "),
 			countPackages(len(parsed.Specs)), m.Bin, strings.Join(opts.Args, " "))
+		set := resolveWithProgress(ctx, m, opts, start, parsed, resolve, !toolRun)
+		req.Specs = set.specs
 		stop := progress.Start(progressTo(), "ossprey: scan in progress")
 		dir, cleanup := reqFilesDir(parsed.ReqFiles)
 		defer cleanup()
 		req.Dir = dir
-		req.Specs = resolveNamed(ctx, m, opts, start, parsed, resolve, !toolRun).specs
 		sbom, err := scanProjectFn(ctx, req)
 		stop()
 		return finish(sbom, err)
@@ -599,8 +603,9 @@ func Run(ctx context.Context, opts Options) error {
 			// on the command line, and what the resolver says they bring in,
 			// are all we will ever know. Resolve and submit them beside the
 			// install rather than ahead of it.
+			var set checkSet
 			return passiveAlongside(ctx, m, opts, len(parsed.Specs), func(ctx context.Context) (*ossbom.SBOM, error) {
-				set := resolveNamed(ctx, m, opts, start, parsed, resolve, !toolRun)
+				set = resolveNamed(ctx, m, opts, start, parsed, resolve, !toolRun)
 				if len(set.specs) == 0 {
 					return nil, errNothingToCheck
 				}
@@ -611,16 +616,9 @@ func Run(ctx context.Context, opts Options) error {
 					SubmitOnly: true,
 					MonitorID:  opts.MonitorID,
 				})
-			})
+			}, func() { reportUnresolved(ctx, parsed.Specs, set) })
 		}
-		// Resolving the tree is the first visible wait, and it comes before
-		// there is a count to announce. A tool run resolves no tree.
-		stop := func() {}
-		if !toolRun {
-			stop = progress.Start(progressTo(), "ossprey: resolving dependencies")
-		}
-		set := resolveNamed(ctx, m, opts, start, parsed, resolve, !toolRun)
-		stop()
+		set := resolveWithProgress(ctx, m, opts, start, parsed, resolve, !toolRun)
 		if len(set.specs) == 0 {
 			note("ossprey: nothing left to check after version resolution; forwarding\n")
 			return forwardTo()
@@ -628,7 +626,7 @@ func Run(ctx context.Context, opts Options) error {
 		coverage = set.coverage()
 		// The scan is the one part of a forwarded install that takes visible
 		// time, and until it prints something the terminal looks hung.
-		stop = progress.Scan(progressTo(), len(set.specs))
+		stop := progress.Scan(progressTo(), len(set.specs))
 		sbom, err := checkFn(ctx, check.Options{
 			Specs:     set.specs,
 			APIURL:    opts.APIURL,
@@ -656,7 +654,7 @@ func Run(ctx context.Context, opts Options) error {
 					Dir: dir, APIURL: opts.APIURL, APIKey: opts.APIKey,
 					MonitorID: opts.MonitorID, SubmitOnly: true, Trust: opts.Trust,
 				})
-			})
+			}, nil)
 		}
 		note("ossprey: no packages named; scanning project manifest before `%s %s`\n",
 			m.Bin, strings.Join(opts.Args, " "))
@@ -685,7 +683,8 @@ func Run(ctx context.Context, opts Options) error {
 // runs before version resolution so a private package is never looked up on
 // the public registry, which is where the noise it exists to remove came from.
 //
-// Only the npm scope rule can apply here; see Options.Trust.
+// Only the npm scope rule can apply here, before anything is resolved; the
+// registry rule applies to the resolved tree in resolveNamed. See Options.Trust.
 func dropTrusted(ctx context.Context, policy trust.Policy, specs []check.Spec) []check.Spec {
 	if policy.Empty() {
 		return specs
@@ -981,8 +980,10 @@ func passiveAfterInstall(ctx context.Context, m *Manager, opts Options) error {
 
 // passiveAlongside runs work concurrently with the real package manager, for
 // the one manager that leaves nothing to read afterwards (pip). The install
-// starts immediately; the submission catches up with it.
-func passiveAlongside(ctx context.Context, m *Manager, opts Options, n int, work func(context.Context) (*ossbom.SBOM, error)) error {
+// starts immediately; the submission catches up with it. late, if set, runs
+// once the manager has exited and work is done, for anything that must print
+// but must not print from beside the manager.
+func passiveAlongside(ctx context.Context, m *Manager, opts Options, n int, work func(context.Context) (*ossbom.SBOM, error), late func()) error {
 	type outcome struct {
 		sbom *ossbom.SBOM
 		err  error
@@ -1011,9 +1012,36 @@ func passiveAlongside(ctx context.Context, m *Manager, opts Options, n int, work
 		stop()
 	}
 
+	if late != nil {
+		late()
+	}
 	flushWarnings(ctx)
 	reportPassive(opts, res.sbom, res.err)
 	return execErr
+}
+
+// resolveWithProgress is resolveNamed for a gating install: the resolution is
+// the first visible wait, announced before there is a count to report, and
+// its failure is reported only after that animation has stopped, never on
+// top of it. A tool run resolves no tree, so nothing is announced.
+func resolveWithProgress(ctx context.Context, m *Manager, opts Options, start int, parsed installArgs,
+	resolve func(context.Context, string, string, string) (string, error), expand bool) checkSet {
+	stop := func() {}
+	if expand {
+		stop = progress.Start(progressTo(), "ossprey: resolving dependencies")
+	}
+	set := resolveNamed(ctx, m, opts, start, parsed, resolve, expand)
+	stop()
+	reportUnresolved(ctx, parsed.Specs, set)
+	return set
+}
+
+// reportUnresolved prints the fallback line for a set whose tree was not
+// resolved, and nothing for one whose tree was.
+func reportUnresolved(ctx context.Context, specs []check.Spec, set checkSet) {
+	if set.unresolved != nil {
+		reportUnexpanded(ctx, specs, set.unresolved)
+	}
 }
 
 // reportPassive states what the passive submission did. It never returns an
