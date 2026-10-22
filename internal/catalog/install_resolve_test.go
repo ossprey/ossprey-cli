@@ -262,13 +262,23 @@ func TestParseNpmLockCarriesDependencyKinds(t *testing.T) {
 		"node_modules/renamed": {"name":"left-pad","version":"1.3.0","resolved":"https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"},
 		"node_modules/twice": {"version":"5.0.0","resolved":"https://registry.npmjs.org/twice/-/twice-5.0.0.tgz","optional":true},
 		"node_modules/a/node_modules/twice": {"version":"5.0.0","resolved":"https://registry.npmjs.org/twice/-/twice-5.0.0.tgz"},
-		"node_modules/b/node_modules/twice": {"version":"5.0.0","resolved":"https://registry.npmjs.org/twice/-/twice-5.0.0.tgz","optional":true}}}`)
-	type kinds struct{ Dev, Optional, DevOptional, Peer bool }
+		"node_modules/b/node_modules/twice": {"version":"5.0.0","resolved":"https://registry.npmjs.org/twice/-/twice-5.0.0.tgz","optional":true},
+		"node_modules/mixed": {"version":"1.0.0","resolved":"https://npm.acme.internal/mixed/-/mixed-1.0.0.tgz"},
+		"node_modules/c/node_modules/mixed-alias": {"name":"mixed","version":"1.0.0","resolved":"https://registry.npmjs.org/mixed/-/mixed-1.0.0.tgz"}}}`)
+	type kinds struct {
+		Registry                         string
+		Dev, Optional, DevOptional, Peer bool
+	}
+	reg := func(name string) string { return "https://registry.npmjs.org/" + name }
 	want := map[string]kinds{
-		"needed": {}, "extra": {Optional: true}, "devonly": {Dev: true}, "both": {DevOptional: true}, "twice": {},
-		"peer": {Peer: true},
+		"needed": {Registry: reg("needed/-/needed-1.0.0.tgz")}, "extra": {Registry: reg("extra/-/extra-2.0.0.tgz"), Optional: true},
+		"devonly": {Registry: reg("devonly/-/devonly-3.0.0.tgz"), Dev: true}, "both": {Registry: reg("both/-/both-4.0.0.tgz"), DevOptional: true},
+		"twice": {Registry: reg("twice/-/twice-5.0.0.tgz")}, "peer": {Registry: reg("peer/-/peer-6.0.0.tgz"), Peer: true},
 		// An alias is the real package, named by the entry, not its directory.
-		"left-pad": {},
+		"left-pad": {Registry: reg("left-pad/-/left-pad-1.3.0.tgz")},
+		// Copies fetched from different registries record none: one public
+		// copy is enough to need a check, whichever copy is read first.
+		"mixed": {},
 	}
 	// Map iteration order varies per run; the merge must not depend on it.
 	for range 20 {
@@ -278,7 +288,7 @@ func TestParseNpmLockCarriesDependencyKinds(t *testing.T) {
 		}
 		got := map[string]kinds{}
 		for _, r := range resolvedFromPackages(pkgs, nil) {
-			got[r.Name] = kinds{r.Dev, r.Optional, r.DevOptional, r.Peer}
+			got[r.Name] = kinds{r.Registry, r.Dev, r.Optional, r.DevOptional, r.Peer}
 		}
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("kinds = %v, want %v", got, want)

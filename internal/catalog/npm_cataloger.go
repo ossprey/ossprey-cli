@@ -173,8 +173,14 @@ func parseNpmLock(data []byte, loc file.Location) ([]pkg.Package, error) {
 			// each with its own kind. An install leaves the release out
 			// only if it leaves every copy out, so a kind survives the
 			// merge only when every copy carries it; map order must not
-			// decide which copy is read first.
+			// decide which copy is read first. Nor may it decide the
+			// registry: copies fetched from different places record none,
+			// since no registry means checked and one copy fetched
+			// publicly is enough to need that.
 			have := pkgs[i].Metadata.(registrySource)
+			if have.URL != kind.URL {
+				have.URL = ""
+			}
 			have.Dev = have.Dev && kind.Dev
 			have.Optional = have.Optional && kind.Optional
 			have.DevOptional = have.DevOptional && kind.DevOptional
