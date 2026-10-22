@@ -357,6 +357,7 @@ func TestExpandInstall_ToolRunHasNoProjectContext(t *testing.T) {
 		{[]string{"exec", "--prefix", "../other", "cowsay@1.6.0"}, absPath("../other"), nil},
 		{[]string{"--omit=dev", "exec", "--before=2024-01-01", "--tag", "beta", "--legacy-peer-deps", "cowsay@1.6.0", "--", "--before=x"},
 			dir, []string{"--before=2024-01-01", "--legacy-peer-deps", "--omit=dev", "--tag=beta"}},
+		{[]string{"exec", "--globalconfig", "corp.npmrc", "cowsay@1.6.0"}, dir, []string{"--globalconfig=" + absPath("corp.npmrc")}},
 	} {
 		gotConfig, gotFlags = "unset", nil
 		parsed := m.parseRun(tt.args)
@@ -624,9 +625,9 @@ func TestResolverFlags(t *testing.T) {
 		{"uv to pip renames the default index and constraints, drops what pip cannot honour",
 			pipResolveFlags(uv, []string{"--index", "https://i.example", "--extra-index-url", "https://e.example", "--default-index=https://d.example", "--resolution", "lowest", "--constraints", "c.txt", "--overrides=o.txt", "httpx"}),
 			[]string{"--index-url=https://d.example", "--constraint", "c.txt"}},
-		{"npm makes --userconfig absolute",
-			npmResolveFlags(npm, []string{"--userconfig", "u.npmrc", "--userconfig=./v.npmrc", "express"}),
-			[]string{"--userconfig", absPath("u.npmrc"), "--userconfig=" + absPath("v.npmrc")}},
+		{"npm makes --userconfig and --globalconfig absolute",
+			npmResolveFlags(npm, []string{"--userconfig", "u.npmrc", "--userconfig=./v.npmrc", "--globalconfig", "g.npmrc", "express"}),
+			[]string{"--userconfig", absPath("u.npmrc"), "--userconfig=" + absPath("v.npmrc"), "--globalconfig", absPath("g.npmrc")}},
 	}
 	for _, tt := range tests {
 		if !reflect.DeepEqual(tt.got, tt.want) {
@@ -772,8 +773,15 @@ func TestNpmConfigDir(t *testing.T) {
 
 func TestAbsFlagValues(t *testing.T) {
 	got := absFlagValues([]string{"-c", "c.txt", "--overrides=o.txt", "-f", "https://w.example/", "--pre", "--index-url", "https://i.example"},
-		flagSet("-c", "--overrides", "-f"))
+		flagSet("-c", "--overrides", "-f"), ".")
 	want := []string{"-c", absPath("c.txt"), "--overrides=" + absPath("o.txt"), "-f", "https://w.example/", "--pre", "--index-url", "https://i.example"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	// Against another base, as a command under --directory resolves; an
+	// absolute path is left alone.
+	got = absFlagValues([]string{"-c", "c.txt", "--overrides=" + absPath("o.txt")}, flagSet("-c", "--overrides"), "sub")
+	want = []string{"-c", absPath("sub/c.txt"), "--overrides=" + absPath("o.txt")}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
 	}
@@ -816,14 +824,26 @@ func TestExpandInstall_UVGlobalOptionsAndInterpreterPaths(t *testing.T) {
 			".", []string{"--no-config"}, false},
 		{"--directory before the verb", uv, []string{"--directory", "sub", "pip", "install", "ruff"},
 			absPath("sub"), nil, false},
-		{"--project after the verb", uv, []string{"pip", "install", "--project", "p", "ruff"},
-			absPath("p"), nil, false},
 		{"interpreter path", uvx, []string{"-p", ".venv/bin/python", "ruff"},
 			"", []string{"-p", absPath(".venv/bin/python")}, true},
 		{"interpreter version", uvx, []string{"--python=3.12", "ruff"},
 			"", []string{"--python=3.12"}, true},
 		{"interpreter name", uvx, []string{"--python", "pypy", "ruff"},
 			"", []string{"--python", "pypy"}, true},
+		// --directory moves the run before anything else, so its relative
+		// paths are read there; the resolver still runs in its scratch dir.
+		{"tool run paths under --directory", uvx, []string{"--directory", "sub", "--constraints", "c.txt", "ruff"},
+			"", []string{"--constraints", absPath("sub/c.txt")}, false},
+		{"global --directory before tool run", uv, []string{"--directory", "sub", "--config-file", "u.toml", "tool", "run", "-c", "c.txt", "ruff"},
+			"", []string{"--config-file", absPath("sub/u.toml"), "-c", absPath("sub/c.txt")}, true},
+		// --project names a project, not a directory: a tool run reads no
+		// project configuration so it is dropped, a named install passes it.
+		{"tool run drops --project", uvx, []string{"--project", "p", "-c", "c.txt", "ruff"},
+			"", []string{"-c", absPath("c.txt")}, false},
+		{"named install passes --project", uv, []string{"--project", "p", "pip", "install", "ruff"},
+			".", []string{"--project", absPath("p")}, false},
+		{"named install --project after the verb", uv, []string{"pip", "install", "--project", "p", "ruff"},
+			".", []string{"--project", absPath("p")}, false},
 	}
 	for _, tt := range tests {
 		gotDir, gotUV, uvOnly = nil, nil, false

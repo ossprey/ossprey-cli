@@ -73,10 +73,10 @@ type npmArgv struct {
 // dist-tag, and the global/prefix/location trio that decides which .npmrc
 // npm reads.
 var npmRunConfig = flagSet("legacy-peer-deps", "strict-peer-deps", "optional", "omit", "include",
-	"before", "tag", "global", "prefix", "location")
+	"before", "tag", "globalconfig", "global", "prefix", "location")
 
 // npmConfigKeys are npmRunConfig's keys in a fixed order, for output.
-var npmConfigKeys = []string{"before", "include", "legacy-peer-deps", "omit", "optional", "strict-peer-deps", "tag"}
+var npmConfigKeys = []string{"before", "globalconfig", "include", "legacy-peer-deps", "omit", "optional", "strict-peer-deps", "tag"}
 
 func (a *npmArgv) record(key, value string) {
 	if !npmRunConfig[key] {
@@ -123,6 +123,10 @@ func (a npmArgv) resolveFlags() []string {
 				out = append(out, "--"+key)
 			case npmConfig[key].isBool() && v == "false":
 				out = append(out, "--no-"+key)
+			case key == "globalconfig":
+				// A path, resolved against the command's directory as nopt
+				// does; the dry run runs in another.
+				out = append(out, "--"+key+"="+absPath(v))
 			default:
 				out = append(out, "--"+key+"="+v)
 			}

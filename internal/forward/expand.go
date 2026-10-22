@@ -205,22 +205,29 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 		// uv's global options sit before the verb (`uv --config-file x tool
 		// run …`), outside rest; the ones that change the resolution come
 		// along, and can themselves make the command uv-only.
-		global, globalNeedsUV := uvGlobalFlags(m, args)
 		if parsed.ToolRun {
 			// No project: uv's tool commands read no project configuration,
 			// so the resolver runs where there is none (dir ""), and paths in
-			// the flags are made absolute to survive the move.
-			uvFlags := append(global, toolRunLeadingFlags(rest)...)
-			if globalNeedsUV || needsUV(toolRunLead(rest), toolRunValueFlags) {
+			// the flags are made absolute — against the directory the run
+			// changes to, if any — to survive the move.
+			lead := toolRunLead(rest)
+			base := uvDir(append(uvGlobalArgs(m, args), lead...), uvValueFlags())
+			global, globalNeedsUV := uvGlobalFlags(m, args, base, true)
+			uvFlags := append(global, toolRunLeadingFlags(rest, base)...)
+			if globalNeedsUV || needsUV(lead, toolRunValueFlags) {
 				return resolveWithUVFn(ctx, "", tokens, uvFlags)
 			}
-			return resolvePythonFn(ctx, "", tokens, uvFlags, toolRunPipFlags(rest))
+			return resolvePythonFn(ctx, "", tokens, uvFlags, toolRunPipFlags(rest, base))
 		}
 		if hasFlag(rest, "--no-deps") {
 			return nil, nil
 		}
-		dir := uvDir(m, args)
-		uvFlags := append(global, uvResolveFlags(m, rest)...)
+		dir := "."
+		if m.Bin == "uv" {
+			dir = uvDir(args, uvValueFlags())
+		}
+		global, globalNeedsUV := uvGlobalFlags(m, args, dir, false)
+		uvFlags := append(global, absFlagValues(uvResolveFlags(m, rest), flagSet("--project"), dir)...)
 		if m.Bin == "uv" && (globalNeedsUV || needsUV(rest, valueFlags[m.Bin])) {
 			return resolveWithUVFn(ctx, dir, tokens, uvFlags)
 		}
@@ -233,61 +240,88 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 // what a resolve finds: which configuration it reads, and whether it may go
 // to the network. --directory and --project change where it runs instead;
 // see uvDir.
-var uvGlobalPass = flagSet("--config-file", "--no-config", "--offline", "--allow-insecure-host")
+var uvGlobalPass = flagSet("--config-file", "--no-config", "--offline", "--allow-insecure-host", "--project")
+
+// toolRunNoPass are uvGlobalPass flags a tool run must not pass on: uvx
+// reads no project configuration, so handing --project to `uv pip compile`
+// would make it read one the real command does not.
+var toolRunNoPass = flagSet("--project")
+
+func without(set, drop map[string]bool) map[string]bool {
+	out := union(set)
+	for k := range drop {
+		delete(out, k)
+	}
+	return out
+}
+
+// uvGlobalArgs are the tokens before a uv command's verb, where its global
+// options sit; uvx and pip have no such part.
+func uvGlobalArgs(m *Manager, args []string) []string {
+	if m.Bin != "uv" {
+		return nil
+	}
+	if idx := verbIndex("uv", args); idx > 0 {
+		return args[:idx]
+	}
+	return nil
+}
 
 // uvGlobalFlags are the uvGlobalPass flags given before a uv command's
-// verb, with paths made absolute, and whether one of them makes the command
-// uv-only. uvx and pip have no such part.
-func uvGlobalFlags(m *Manager, args []string) ([]string, bool) {
-	if m.Bin != "uv" {
-		return nil, false
-	}
-	idx := verbIndex("uv", args)
-	if idx < 0 {
-		return nil, false
-	}
-	lead := args[:idx]
+// verb (less toolRunNoPass for a tool run), with paths made absolute
+// against base, and whether one of them makes the command uv-only.
+func uvGlobalFlags(m *Manager, args []string, base string, toolRun bool) ([]string, bool) {
+	lead := uvGlobalArgs(m, args)
 	valFlags := globalValueFlags["uv"]
-	return absFlagValues(pickFlags(lead, valFlags, uvGlobalPass, nil), pythonPathFlags),
+	allowed := uvGlobalPass
+	if toolRun {
+		allowed = without(uvGlobalPass, toolRunNoPass)
+	}
+	return absFlagValues(pickFlags(lead, valFlags, allowed, nil), pythonPathFlags, base),
 		needsUV(lead, valFlags)
 }
 
-// uvDir is where a named uv install resolves: the last --directory or
-// --project given, before or after the verb, since that is the project
-// whose configuration uv reads; else the working directory.
-func uvDir(m *Manager, args []string) string {
-	if m.Bin != "uv" {
-		return "."
-	}
+// uvDir is the directory a uv command runs in: the last --directory among
+// the tokens given, which uv changes to before anything else, so the
+// command's relative paths and a project command's configuration are read
+// there; else the working directory. For a tool run only uv's own tokens
+// are passed, never the program's. --project is not a directory change: it
+// names where a project is discovered, and is passed on as a flag.
+func uvDir(tokens []string, valFlags map[string]bool) string {
 	dir := "."
-	valFlags := union(globalValueFlags["uv"], valueFlags["uv"])
-	for i := 0; i < len(args); i++ {
-		flag, value, hasInline := splitFlagValue(args[i])
-		if !hasInline && valFlags[flag] && i+1 < len(args) {
-			value = args[i+1]
+	for i := 0; i < len(tokens); i++ {
+		flag, value, hasInline := splitFlagValue(tokens[i])
+		if !hasInline && valFlags[flag] && i+1 < len(tokens) {
+			value = tokens[i+1]
 			i++
 		}
-		if (flag == "--directory" || flag == "--project") && value != "" {
-			dir = absPath(value)
+		if flag == "--directory" && value != "" {
+			dir = absIn(dir, value)
 		}
 	}
 	return dir
+}
+
+// uvValueFlags is every uv flag that takes a value, before or after the verb.
+var uvValueFlags = func() map[string]bool {
+	return union(globalValueFlags["uv"], valueFlags["uv"], toolRunValueFlags)
 }
 
 // toolRunLeadingFlags are the resolver flags of a `uvx` / `uv tool run`
 // command: those before the command, read with the tool run's own value
 // table so a value is never taken for the command, and kept only when uv's
 // resolver reads them the same way (`uvx --index-url … ruff`).
-func toolRunLeadingFlags(rest []string) []string {
-	return absFlagValues(pickFlags(toolRunLead(rest), toolRunValueFlags, union(pythonCommonFlags, uvOnlyFlags), nil), pythonPathFlags)
+func toolRunLeadingFlags(rest []string, base string) []string {
+	allowed := without(union(pythonCommonFlags, uvOnlyFlags), toolRunNoPass)
+	return absFlagValues(pickFlags(toolRunLead(rest), toolRunValueFlags, allowed, nil), pythonPathFlags, base)
 }
 
 // toolRunPipFlags are the same leading flags as pip's resolver reads them,
 // for a host with no working uv: the index a uvx run names must reach the
 // fallback too, or it would resolve against a different one. A flag pip
 // cannot honour never does; see needsUV.
-func toolRunPipFlags(rest []string) []string {
-	return absFlagValues(pickFlags(toolRunLead(rest), toolRunValueFlags, pipFallbackFlags, pipFallbackRenames), pythonPathFlags)
+func toolRunPipFlags(rest []string, base string) []string {
+	return absFlagValues(pickFlags(toolRunLead(rest), toolRunValueFlags, pipFallbackFlags, pipFallbackRenames), pythonPathFlags, base)
 }
 
 // uvOnlyResolution are the uv flags that change which release is picked and
@@ -328,7 +362,7 @@ var pipFallbackRenames = map[string]string{"--default-index": "--index-url", "--
 // absFlagValues leaves alone; -p/--python is a path only when it looks like
 // one (`.venv/bin/python`), else a version or a name (`3.12`, `pypy`).
 var pythonPathFlags = flagSet("-c", "--constraint", "--constraints", "--overrides",
-	"-f", "--find-links", "--config-file", "-p", "--python")
+	"-f", "--find-links", "--config-file", "-p", "--python", "--project")
 
 var pathLikeOnlyFlags = flagSet("-p", "--python")
 
@@ -415,7 +449,7 @@ func npmProjectDir(m *Manager, args []string) string {
 // npmResolveFlags are passed from an npm install to the resolving npm. pnpm
 // and yarn spell theirs differently, so nothing of theirs is passed.
 var npmPassFlags = flagSet("--legacy-peer-deps", "--strict-peer-deps", "--no-optional",
-	"--omit", "--include", "--registry", "--before", "--tag", "--userconfig")
+	"--omit", "--include", "--registry", "--before", "--tag", "--userconfig", "--globalconfig")
 
 func npmResolveFlags(m *Manager, rest []string) []string {
 	if m.Bin != "npm" {
@@ -424,25 +458,28 @@ func npmResolveFlags(m *Manager, rest []string) []string {
 	return absUserconfig(pickFlags(rest, valueFlags[m.Bin], npmPassFlags, nil))
 }
 
-// absUserconfig makes a --userconfig path absolute: npm resolves it against
-// the directory the command ran in, and the dry run runs in another.
+// absUserconfig makes npm's --userconfig and --globalconfig paths absolute:
+// npm resolves them against the directory the command ran in, and the dry
+// run runs in another.
 func absUserconfig(flags []string) []string {
-	return absFlagValues(flags, flagSet("--userconfig"))
+	return absFlagValues(flags, flagSet("--userconfig", "--globalconfig"), ".")
 }
 
 // absFlagValues makes the values of the flags in paths absolute, in both
 // `--flag value` and `--flag=value` form, leaving a URL as it is. The
-// command's relative paths are against its own directory; the dry run runs
-// in another.
-func absFlagValues(flags []string, paths map[string]bool) []string {
+// command resolves its relative paths against base (its own directory,
+// which uv's --directory may have moved); the dry run runs in another.
+func absFlagValues(flags []string, paths map[string]bool, base string) []string {
 	for i := 0; i < len(flags); i++ {
 		flag, inline, hasInline := splitFlagValue(flags[i])
 		if !paths[flag] {
 			continue
 		}
-		abs := absIfPath
-		if pathLikeOnlyFlags[flag] {
-			abs = absIfPathLike
+		abs := func(v string) string {
+			if strings.Contains(v, "://") || (pathLikeOnlyFlags[flag] && !strings.ContainsAny(v, `/\`)) {
+				return v
+			}
+			return absIn(base, v)
 		}
 		switch {
 		case hasInline:
@@ -455,19 +492,12 @@ func absFlagValues(flags []string, paths map[string]bool) []string {
 	return flags
 }
 
-func absIfPath(v string) string {
-	if strings.Contains(v, "://") {
+// absIn is v as an absolute path, relative paths taken from base.
+func absIn(base, v string) string {
+	if filepath.IsAbs(v) {
 		return v
 	}
-	return absPath(v)
-}
-
-// absIfPathLike makes v absolute only when it has a path separator in it.
-func absIfPathLike(v string) string {
-	if strings.ContainsAny(v, `/\`) {
-		return absPath(v)
-	}
-	return v
+	return absPath(filepath.Join(base, v))
 }
 
 // npmConfigDir is the directory whose .npmrc npm reads as this install's
@@ -558,7 +588,7 @@ var pythonCommonFlags = flagSet("--pre", "--no-index", "-i", "--index-url", "--e
 var uvOnlyFlags = flagSet("--index", "--default-index", "--prerelease", "--resolution",
 	"--exclude-newer", "--exclude-newer-package", "-p", "--python", "--python-platform",
 	"--allow-insecure-host", "--index-strategy", "--only-binary", "--no-binary",
-	"--constraints", "--overrides", "--no-config", "--config-file", "--offline")
+	"--constraints", "--overrides", "--no-config", "--config-file", "--offline", "--project")
 
 // pipOnlyFlags are pip's own, passed when pip resolves a pip command.
 var pipOnlyFlags = flagSet("--trusted-host", "--platform", "--implementation", "--abi",

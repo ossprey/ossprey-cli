@@ -418,9 +418,9 @@ Module._load = function (request, parent, isMain) {
       // a Date (before) as the word, a path (prefix) relative to the cwd,
       // everything else as its string.
       config: Object.fromEntries(['legacy-peer-deps', 'strict-peer-deps', 'optional', 'omit', 'include',
-        'before', 'tag', 'global', 'prefix', 'location'].filter(k => conf[k] !== undefined).map(k =>
+        'before', 'tag', 'globalconfig', 'global', 'prefix', 'location'].filter(k => conf[k] !== undefined).map(k =>
           [k, [].concat(conf[k]).map(v => v instanceof Date ? 'date'
-            : k === 'prefix' ? require('path').relative(process.cwd(), String(v)) : String(v))])),
+            : k === 'prefix' || k === 'globalconfig' ? require('path').relative(process.cwd(), String(v)) : String(v))])),
     }))
   }
 }
@@ -478,7 +478,7 @@ func TestNpmParsersMatchNpm(t *testing.T) {
 				switch k {
 				case "before":
 					v = "date"
-				case "prefix":
+				case "prefix", "globalconfig":
 					v = filepath.ToSlash(filepath.Clean(v))
 				}
 				out = append(out, v)
@@ -522,6 +522,7 @@ func TestNpmParsersMatchNpm(t *testing.T) {
 		{"--location", "project", "cowsay"}, {"--omit", "dev", "--omit=optional", "--tag", "beta", "--legacy-peer-deps", "cowsay", "--tag", "x"},
 		{"--no-optional", "cowsay"}, {"--legacy-peer-deps=false", "cowsay"}, {"--strict-peer-deps", "--include=dev", "cowsay"},
 		{"--tag", "next", "--tag=latest", "cowsay"},
+		{"--globalconfig", "./corp.npmrc", "cowsay"}, {"--globalconfig=sub/../g.npmrc", "cowsay", "moo"},
 	}
 	for _, args := range npx {
 		want, got := norm(oracle("npx-cli.js", args)), norm(parseNpmArgv(npxArgv(args)))
