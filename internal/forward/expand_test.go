@@ -344,6 +344,38 @@ func TestExpandInstall_ToolRunHasNoProjectContext(t *testing.T) {
 		t.Errorf("flags = %v, want none from the program's argv", gotFlags)
 	}
 
+	// The .npmrc npm reads follows its global mode and --prefix, as npm's own
+	// parse reports them; the other resolution options npm attributes to
+	// itself reach the dry run too, and the program's `--before` does not.
+	for _, tt := range []struct {
+		args       []string
+		wantConfig string
+		wantFlags  []string
+	}{
+		{[]string{"exec", "-g", "cowsay@1.6.0"}, "", nil},
+		{[]string{"exec", "--location=global", "cowsay@1.6.0"}, "", nil},
+		{[]string{"exec", "--prefix", "../other", "cowsay@1.6.0"}, absPath("../other"), nil},
+		{[]string{"--omit=dev", "exec", "--before=2024-01-01", "--tag", "beta", "--legacy-peer-deps", "cowsay@1.6.0", "--", "--before=x"},
+			dir, []string{"--before=2024-01-01", "--legacy-peer-deps", "--omit=dev", "--tag=beta"}},
+	} {
+		gotConfig, gotFlags = "unset", nil
+		parsed := m.parseRun(tt.args)
+		parsed.ToolRun = true
+		if _, err := expandInstall(context.Background(), m, tt.args, 0, parsed); err != nil {
+			t.Fatal(err)
+		}
+		if tt.wantConfig == "" || gotConfig == "" {
+			if gotConfig != tt.wantConfig {
+				t.Errorf("%v: config dir %q, want %q", tt.args, gotConfig, tt.wantConfig)
+			}
+		} else if gotConfig != tt.wantConfig && !sameDir(t, gotConfig, tt.wantConfig) {
+			t.Errorf("%v: config dir %q, want %q", tt.args, gotConfig, tt.wantConfig)
+		}
+		if !reflect.DeepEqual(gotFlags, tt.wantFlags) {
+			t.Errorf("%v: flags = %v, want %v", tt.args, gotFlags, tt.wantFlags)
+		}
+	}
+
 	// A registry npm itself reads is the one the dry run resolves against:
 	// npx fetches from it, so a check against the default registry would
 	// check a different package. npm's own parse decides which --registry is
@@ -744,5 +776,81 @@ func TestAbsFlagValues(t *testing.T) {
 	want := []string{"-c", absPath("c.txt"), "--overrides=" + absPath("o.txt"), "-f", "https://w.example/", "--pre", "--index-url", "https://i.example"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// uv's global options sit before the verb and change what a resolve finds:
+// they reach the resolver, --config-file and --offline make the command
+// uv-only, and --directory/--project set where a named install resolves. A
+// path-shaped interpreter is made absolute for a tool run, a version or a
+// name left alone.
+func TestExpandInstall_UVGlobalOptionsAndInterpreterPaths(t *testing.T) {
+	var gotDir, gotUV []string
+	uvOnly := false
+	old, oldUV := resolvePythonFn, resolveWithUVFn
+	resolvePythonFn = func(_ context.Context, dir string, _, uvFlags, _ []string) ([]catalog.Resolved, error) {
+		gotDir, gotUV, uvOnly = []string{dir}, uvFlags, false
+		return nil, nil
+	}
+	resolveWithUVFn = func(_ context.Context, dir string, _, uvFlags []string) ([]catalog.Resolved, error) {
+		gotDir, gotUV, uvOnly = []string{dir}, uvFlags, true
+		return nil, nil
+	}
+	t.Cleanup(func() { resolvePythonFn, resolveWithUVFn = old, oldUV })
+
+	uv, _ := Lookup("uv")
+	uvx, _ := Lookup("uvx")
+	tests := []struct {
+		name       string
+		m          *Manager
+		args       []string
+		wantDir    string
+		wantUV     []string
+		wantUVOnly bool
+	}{
+		{"config file before tool run", uv, []string{"--config-file", "alt.toml", "tool", "run", "ruff"},
+			"", []string{"--config-file", absPath("alt.toml")}, true},
+		{"no-config and offline before pip install", uv, []string{"--no-config", "--offline", "pip", "install", "ruff"},
+			".", []string{"--no-config", "--offline"}, true},
+		{"no-config alone keeps the pip fallback", uv, []string{"--no-config", "pip", "install", "ruff"},
+			".", []string{"--no-config"}, false},
+		{"--directory before the verb", uv, []string{"--directory", "sub", "pip", "install", "ruff"},
+			absPath("sub"), nil, false},
+		{"--project after the verb", uv, []string{"pip", "install", "--project", "p", "ruff"},
+			absPath("p"), nil, false},
+		{"interpreter path", uvx, []string{"-p", ".venv/bin/python", "ruff"},
+			"", []string{"-p", absPath(".venv/bin/python")}, true},
+		{"interpreter version", uvx, []string{"--python=3.12", "ruff"},
+			"", []string{"--python=3.12"}, true},
+		{"interpreter name", uvx, []string{"--python", "pypy", "ruff"},
+			"", []string{"--python", "pypy"}, true},
+	}
+	for _, tt := range tests {
+		gotDir, gotUV, uvOnly = nil, nil, false
+		var parsed installArgs
+		start := 0
+		if tt.m == uvx {
+			parsed = parseToolRun(tt.m, tt.args)
+			parsed.ToolRun = true
+		} else if s, ok := tt.m.toolRunAt(tt.args); ok {
+			start = s
+			parsed = parseToolRun(tt.m, tt.args[start:])
+			parsed.ToolRun = true
+		} else {
+			start, _ = tt.m.installAt(tt.args)
+			parsed = ParseSpecs(tt.m, tt.args[start:])
+		}
+		if _, err := expandInstall(context.Background(), tt.m, tt.args, start, parsed); err != nil {
+			t.Fatalf("%s: %v", tt.name, err)
+		}
+		if gotDir == nil || gotDir[0] != tt.wantDir {
+			t.Errorf("%s: dir = %v, want %q", tt.name, gotDir, tt.wantDir)
+		}
+		if !reflect.DeepEqual(gotUV, tt.wantUV) {
+			t.Errorf("%s: uv flags = %v, want %v", tt.name, gotUV, tt.wantUV)
+		}
+		if uvOnly != tt.wantUVOnly {
+			t.Errorf("%s: uv-only = %v, want %v", tt.name, uvOnly, tt.wantUVOnly)
+		}
 	}
 }

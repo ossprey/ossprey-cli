@@ -61,6 +61,74 @@ type npmArgv struct {
 	// directory the command ran in, as nopt's path type resolves it; a
 	// resolver running elsewhere must make it absolute first.
 	Userconfig string
+	// Config holds the other options npm attributes to itself that change
+	// what a run fetches or where npm reads its configuration (npmRunConfig),
+	// each value in order, booleans as "true"/"false". Nothing after the
+	// command's own `--` boundary is ever recorded here.
+	Config map[string][]string
+}
+
+// npmRunConfig names the npm options a tool run's dry run must be given to
+// resolve what npm will: the peer and omit rules, a release ceiling, the
+// dist-tag, and the global/prefix/location trio that decides which .npmrc
+// npm reads.
+var npmRunConfig = flagSet("legacy-peer-deps", "strict-peer-deps", "optional", "omit", "include",
+	"before", "tag", "global", "prefix", "location")
+
+// npmConfigKeys are npmRunConfig's keys in a fixed order, for output.
+var npmConfigKeys = []string{"before", "include", "legacy-peer-deps", "omit", "optional", "strict-peer-deps", "tag"}
+
+func (a *npmArgv) record(key, value string) {
+	if !npmRunConfig[key] {
+		return
+	}
+	if a.Config == nil {
+		a.Config = map[string][]string{}
+	}
+	a.Config[key] = append(a.Config[key], value)
+}
+
+func (a npmArgv) last(key string) string {
+	if v := a.Config[key]; len(v) > 0 {
+		return v[len(v)-1]
+	}
+	return ""
+}
+
+// global reports whether npm runs in global mode, where it reads no project
+// .npmrc: `-g`/`--global` or `--location global`, the last value winning
+// for each as in nopt.
+func (a npmArgv) global() bool {
+	return a.last("global") == "true" || a.last("location") == "global"
+}
+
+// prefix is the --prefix npm was given, cleaned and still relative to the
+// command's directory, or "".
+func (a npmArgv) prefix() string {
+	if p := a.last("prefix"); p != "" {
+		return filepath.Clean(p)
+	}
+	return ""
+}
+
+// resolveFlags renders the recorded resolution options back into flags for
+// the dry run, in a fixed key order; npm re-reads them with its own
+// last-wins and array rules, so every occurrence is kept.
+func (a npmArgv) resolveFlags() []string {
+	var out []string
+	for _, key := range npmConfigKeys {
+		for _, v := range a.Config[key] {
+			switch {
+			case npmConfig[key].isBool() && v == "true":
+				out = append(out, "--"+key)
+			case npmConfig[key].isBool() && v == "false":
+				out = append(out, "--no-"+key)
+			default:
+				out = append(out, "--"+key+"="+v)
+			}
+		}
+	}
+	return out
 }
 
 // npmExecAt matches `npm exec` under any name npm takes for it (`x`, `exe`).
@@ -90,7 +158,8 @@ func npxRun(args []string) installArgs {
 }
 
 func (a npmArgv) target() installArgs {
-	out := installArgs{Registry: a.Registry, Userconfig: a.Userconfig}
+	out := installArgs{Registry: a.Registry, Userconfig: a.Userconfig,
+		NpmFlags: a.resolveFlags(), NpmGlobal: a.global(), NpmPrefix: a.prefix()}
 	if len(a.Packages) > 0 {
 		for _, p := range a.Packages {
 			out.addTarget("npm", strings.TrimSuffix(p, "@latest"))
@@ -233,15 +302,21 @@ func parseNpmArgv(in []string) npmArgv {
 		}
 
 		if negated || (known && kind.isBool()) || (!known && !hadEq) {
+			value := "true"
+			if negated {
+				value = "false"
+			}
 			switch {
 			case !hasLa:
 			case la == "true" || la == "false":
+				value = la
 				i++
 			case kind == npmBoolOrString && !isShortOption(la):
 				i++
 			case kind == npmBoolOrAlways && la == "always":
 				i++
 			}
+			out.record(key, value)
 			continue
 		}
 
@@ -260,6 +335,8 @@ func parseNpmArgv(in []string) npmArgv {
 				out.Registry = la // the last wins, and is the one validated below
 			case "userconfig":
 				out.Userconfig = filepath.Clean(la)
+			default:
+				out.record(key, la)
 			}
 			i++
 			continue

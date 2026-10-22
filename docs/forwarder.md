@@ -145,11 +145,14 @@ always checked). A bare install applies both rules, from the lockfile.
   The flags that change what gets resolved are passed along (`--legacy-peer-deps`,
   `--omit`, `--registry`, `--tag` for npm; `--index-url`/`-i`,
   `--extra-index-url`, `--find-links`, `--constraint`, `--pre` and friends for
-  pip and uv). Index configuration in `.npmrc`, `pip.conf` or `uv.toml` and the
-  environment applies as it would to the real command: the dry run reads the
-  `.npmrc` npm itself reads (the project's, from any subdirectory; none for a
-  global install), and a `uvx` run is resolved with no project configuration,
-  as uvx itself runs. A uv or uvx command with a flag pip cannot honour
+  pip and uv; for `npx` and `npm exec`, every such option npm itself reads,
+  wherever it sits on the line, and nothing from the program's own arguments;
+  for uv, its global options before the verb as well). Index configuration in
+  `.npmrc`, `pip.conf` or `uv.toml` and the environment applies as it would to
+  the real command: the dry run reads the `.npmrc` npm itself reads (the
+  project's, from any subdirectory, or the `--prefix`; none for a global
+  install), and a `uvx` run is resolved with no project configuration, as uvx
+  itself runs. A uv or uvx command with a flag pip cannot honour
   (`--index`, `--extra-index-url`, `--overrides`, `--resolution` and the like)
   is resolved by uv only: on a machine without uv such a command is not
   predicted and the named packages are checked, with the warning below.

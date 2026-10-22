@@ -414,6 +414,13 @@ Module._load = function (request, parent, isMain) {
       // nopt's path type resolves against the cwd; relative to it again so
       // the port, which keeps the path as given, compares equal.
       userconfig: conf.userconfig === undefined ? '' : require('path').relative(process.cwd(), String(conf.userconfig)),
+      // The options a tool run's dry run is given, as npm attributed them:
+      // a Date (before) as the word, a path (prefix) relative to the cwd,
+      // everything else as its string.
+      config: Object.fromEntries(['legacy-peer-deps', 'strict-peer-deps', 'optional', 'omit', 'include',
+        'before', 'tag', 'global', 'prefix', 'location'].filter(k => conf[k] !== undefined).map(k =>
+          [k, [].concat(conf[k]).map(v => v instanceof Date ? 'date'
+            : k === 'prefix' ? require('path').relative(process.cwd(), String(v)) : String(v))])),
     }))
   }
 }
@@ -442,12 +449,13 @@ func TestNpmParsersMatchNpm(t *testing.T) {
 			Call        bool
 			Registry    string
 			Userconfig  string
+			Config      map[string][]string
 		}
 		if err := json.Unmarshal(out, &got); err != nil {
 			t.Fatalf("%s %q: %v (%s)", cli, args, err, out)
 		}
 		return npmArgv{Packages: got.Packages, Call: got.Call, Positionals: got.Positionals,
-			Registry: got.Registry, Userconfig: filepath.ToSlash(got.Userconfig)}
+			Registry: got.Registry, Userconfig: filepath.ToSlash(got.Userconfig), Config: got.Config}
 	}
 	norm := func(a npmArgv) npmArgv {
 		if len(a.Packages) == 0 {
@@ -457,6 +465,32 @@ func TestNpmParsersMatchNpm(t *testing.T) {
 			a.Positionals = nil
 		}
 		a.Userconfig = filepath.ToSlash(a.Userconfig)
+		if len(a.Config) == 0 {
+			a.Config = nil
+		}
+		// The port keeps a date as typed and a prefix as given; the oracle
+		// reports the word and the cwd-relative path. nopt keeps one value
+		// for a scalar, every value for an array (omit, include).
+		cfg := map[string][]string{}
+		for k, vs := range a.Config {
+			out := []string{}
+			for _, v := range vs {
+				switch k {
+				case "before":
+					v = "date"
+				case "prefix":
+					v = filepath.ToSlash(filepath.Clean(v))
+				}
+				out = append(out, v)
+			}
+			if k != "omit" && k != "include" {
+				out = out[len(out)-1:]
+			}
+			cfg[k] = out
+		}
+		if len(cfg) > 0 {
+			a.Config = cfg
+		}
 		return a
 	}
 
@@ -481,6 +515,13 @@ func TestNpmParsersMatchNpm(t *testing.T) {
 		{"cowsay", "--registry", "https://after.example"},
 		{"--userconfig=./y.npmrc", "cowsay"}, {"--userconfig", "sub/../z.npmrc", "cowsay", "moo"},
 		{"--unknown=1", "cowsay"}, {"-d", "cowsay"}, {"--yes=true", "cowsay"}, {"--version"}, {},
+		// The resolution options and the .npmrc selectors npm reads for the
+		// run, with the program's own `--before` left to the program.
+		{"--before=2024-01-01", "cowsay", "--before=2020-01-01"}, {"-g", "cowsay"}, {"--global", "cowsay", "moo"},
+		{"--prefix", "../other", "cowsay"}, {"--prefix=sub/../o", "cowsay"}, {"--location=global", "cowsay"},
+		{"--location", "project", "cowsay"}, {"--omit", "dev", "--omit=optional", "--tag", "beta", "--legacy-peer-deps", "cowsay", "--tag", "x"},
+		{"--no-optional", "cowsay"}, {"--legacy-peer-deps=false", "cowsay"}, {"--strict-peer-deps", "--include=dev", "cowsay"},
+		{"--tag", "next", "--tag=latest", "cowsay"},
 	}
 	for _, args := range npx {
 		want, got := norm(oracle("npx-cli.js", args)), norm(parseNpmArgv(npxArgv(args)))
@@ -495,6 +536,7 @@ func TestNpmParsersMatchNpm(t *testing.T) {
 		{"exec", "cowsay", "--package", "left-pad"}, {"--yes", "exec", "cowsay"},
 		{"exec", "--pack=cowsay", "--", "cowsay"}, {"exec", "-c", "echo hi"},
 		{"exec", "--workspace", "web", "cowsay"}, {"exec", "-gy", "cowsay"}, {"exec", "--no-yes", "cowsay"},
+		{"exec", "--prefix", "../o", "cowsay"}, {"exec", "cowsay", "--before=2024-01-01"}, {"--omit=dev", "exec", "cowsay"},
 	}
 	for _, args := range npmExec {
 		want := norm(oracle("npm-cli.js", args))

@@ -189,35 +189,89 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 	switch m.Ecosystem {
 	case "npm":
 		if parsed.ToolRun {
-			var flags []string
+			// Everything npm's own parse attributed to npm, and nothing from
+			// the program's argv.
+			flags := append([]string(nil), parsed.NpmFlags...)
 			if parsed.Registry != "" {
 				flags = append(flags, "--registry", parsed.Registry)
 			}
 			if parsed.Userconfig != "" {
 				flags = append(flags, "--userconfig", absPath(parsed.Userconfig))
 			}
-			return resolveNpmFn(ctx, "", npmLocalPrefix(), tokens, flags)
+			return resolveNpmFn(ctx, "", npmConfigDirFor(parsed.NpmGlobal, parsed.NpmPrefix), tokens, flags)
 		}
 		return resolveNpmFn(ctx, npmProjectDir(m, args), npmConfigDir(m, args), tokens, npmResolveFlags(m, rest))
 	case "pypi":
+		// uv's global options sit before the verb (`uv --config-file x tool
+		// run …`), outside rest; the ones that change the resolution come
+		// along, and can themselves make the command uv-only.
+		global, globalNeedsUV := uvGlobalFlags(m, args)
 		if parsed.ToolRun {
 			// No project: uv's tool commands read no project configuration,
 			// so the resolver runs where there is none (dir ""), and paths in
 			// the flags are made absolute to survive the move.
-			if needsUV(toolRunLead(rest), toolRunValueFlags) {
-				return resolveWithUVFn(ctx, "", tokens, toolRunLeadingFlags(rest))
+			uvFlags := append(global, toolRunLeadingFlags(rest)...)
+			if globalNeedsUV || needsUV(toolRunLead(rest), toolRunValueFlags) {
+				return resolveWithUVFn(ctx, "", tokens, uvFlags)
 			}
-			return resolvePythonFn(ctx, "", tokens, toolRunLeadingFlags(rest), toolRunPipFlags(rest))
+			return resolvePythonFn(ctx, "", tokens, uvFlags, toolRunPipFlags(rest))
 		}
 		if hasFlag(rest, "--no-deps") {
 			return nil, nil
 		}
-		if m.Bin == "uv" && needsUV(rest, valueFlags[m.Bin]) {
-			return resolveWithUVFn(ctx, ".", tokens, uvResolveFlags(m, rest))
+		dir := uvDir(m, args)
+		uvFlags := append(global, uvResolveFlags(m, rest)...)
+		if m.Bin == "uv" && (globalNeedsUV || needsUV(rest, valueFlags[m.Bin])) {
+			return resolveWithUVFn(ctx, dir, tokens, uvFlags)
 		}
-		return resolvePythonFn(ctx, ".", tokens, uvResolveFlags(m, rest), pipResolveFlags(m, rest))
+		return resolvePythonFn(ctx, dir, tokens, uvFlags, pipResolveFlags(m, rest))
 	}
 	return nil, nil
+}
+
+// uvGlobalPass are uv's global options (valid before the verb) that change
+// what a resolve finds: which configuration it reads, and whether it may go
+// to the network. --directory and --project change where it runs instead;
+// see uvDir.
+var uvGlobalPass = flagSet("--config-file", "--no-config", "--offline", "--allow-insecure-host")
+
+// uvGlobalFlags are the uvGlobalPass flags given before a uv command's
+// verb, with paths made absolute, and whether one of them makes the command
+// uv-only. uvx and pip have no such part.
+func uvGlobalFlags(m *Manager, args []string) ([]string, bool) {
+	if m.Bin != "uv" {
+		return nil, false
+	}
+	idx := verbIndex("uv", args)
+	if idx < 0 {
+		return nil, false
+	}
+	lead := args[:idx]
+	valFlags := globalValueFlags["uv"]
+	return absFlagValues(pickFlags(lead, valFlags, uvGlobalPass, nil), pythonPathFlags),
+		needsUV(lead, valFlags)
+}
+
+// uvDir is where a named uv install resolves: the last --directory or
+// --project given, before or after the verb, since that is the project
+// whose configuration uv reads; else the working directory.
+func uvDir(m *Manager, args []string) string {
+	if m.Bin != "uv" {
+		return "."
+	}
+	dir := "."
+	valFlags := union(globalValueFlags["uv"], valueFlags["uv"])
+	for i := 0; i < len(args); i++ {
+		flag, value, hasInline := splitFlagValue(args[i])
+		if !hasInline && valFlags[flag] && i+1 < len(args) {
+			value = args[i+1]
+			i++
+		}
+		if (flag == "--directory" || flag == "--project") && value != "" {
+			dir = absPath(value)
+		}
+	}
+	return dir
 }
 
 // toolRunLeadingFlags are the resolver flags of a `uvx` / `uv tool run`
@@ -247,7 +301,7 @@ func toolRunPipFlags(rest []string) []string {
 // them is resolved by uv alone, or not at all.
 var uvOnlyResolution = flagSet("--index", "--extra-index-url", "--overrides", "--resolution",
 	"--prerelease", "--exclude-newer", "--exclude-newer-package", "--index-strategy",
-	"-p", "--python", "--python-platform", "--config-file")
+	"-p", "--python", "--python-platform", "--config-file", "--offline")
 
 // needsUV reports whether a uv command carries a flag only uv can honour
 // (uvOnlyResolution).
@@ -271,9 +325,12 @@ var pipFallbackRenames = map[string]string{"--default-index": "--index-url", "--
 
 // pythonPathFlags take a file or directory, which the resolver must be able
 // to find from wherever it runs. --find-links may be a URL instead, which
-// absFlagValues leaves alone.
+// absFlagValues leaves alone; -p/--python is a path only when it looks like
+// one (`.venv/bin/python`), else a version or a name (`3.12`, `pypy`).
 var pythonPathFlags = flagSet("-c", "--constraint", "--constraints", "--overrides",
-	"-f", "--find-links", "--config-file")
+	"-f", "--find-links", "--config-file", "-p", "--python")
+
+var pathLikeOnlyFlags = flagSet("-p", "--python")
 
 // toolRunLead is the part of a tool run's arguments before the command: the
 // flags uv reads, with their values.
@@ -383,11 +440,15 @@ func absFlagValues(flags []string, paths map[string]bool) []string {
 		if !paths[flag] {
 			continue
 		}
+		abs := absIfPath
+		if pathLikeOnlyFlags[flag] {
+			abs = absIfPathLike
+		}
 		switch {
 		case hasInline:
-			flags[i] = flag + "=" + absIfPath(inline)
+			flags[i] = flag + "=" + abs(inline)
 		case i+1 < len(flags):
-			flags[i+1] = absIfPath(flags[i+1])
+			flags[i+1] = abs(flags[i+1])
 			i++
 		}
 	}
@@ -401,6 +462,14 @@ func absIfPath(v string) string {
 	return absPath(v)
 }
 
+// absIfPathLike makes v absolute only when it has a path separator in it.
+func absIfPathLike(v string) string {
+	if strings.ContainsAny(v, `/\`) {
+		return absPath(v)
+	}
+	return v
+}
+
 // npmConfigDir is the directory whose .npmrc npm reads as this install's
 // project configuration: none in global mode, where npm ignores the project
 // file; the --prefix given, which is the project there; else npm's local
@@ -411,7 +480,7 @@ func npmConfigDir(m *Manager, args []string) string {
 		return npmLocalPrefix()
 	}
 	valFlags := union(globalValueFlags[m.Bin], valueFlags[m.Bin])
-	prefix := ""
+	global, prefix := false, ""
 	for i := 0; i < len(args); i++ {
 		flag, value, hasInline := splitFlagValue(args[i])
 		if !hasInline && valFlags[flag] && i+1 < len(args) {
@@ -420,7 +489,7 @@ func npmConfigDir(m *Manager, args []string) string {
 		}
 		switch flag {
 		case "-g", "--global":
-			return ""
+			global = true
 		case "--location":
 			// Not in npm's value table (its value is one of three words), so
 			// read it here: `--location global` as well as `--location=global`.
@@ -429,13 +498,22 @@ func npmConfigDir(m *Manager, args []string) string {
 				i++
 			}
 			if value == "global" {
-				return ""
+				global = true
 			}
 		case "--prefix", "-C":
 			prefix = value
 		}
 	}
-	if prefix != "" {
+	return npmConfigDirFor(global, prefix)
+}
+
+// npmConfigDirFor is npmConfigDir once global mode and the --prefix are
+// known, as a tool run's npm parse reports them.
+func npmConfigDirFor(global bool, prefix string) string {
+	switch {
+	case global:
+		return ""
+	case prefix != "":
 		return absPath(prefix)
 	}
 	return npmLocalPrefix()
@@ -480,7 +558,7 @@ var pythonCommonFlags = flagSet("--pre", "--no-index", "-i", "--index-url", "--e
 var uvOnlyFlags = flagSet("--index", "--default-index", "--prerelease", "--resolution",
 	"--exclude-newer", "--exclude-newer-package", "-p", "--python", "--python-platform",
 	"--allow-insecure-host", "--index-strategy", "--only-binary", "--no-binary",
-	"--constraints", "--overrides", "--no-config", "--config-file")
+	"--constraints", "--overrides", "--no-config", "--config-file", "--offline")
 
 // pipOnlyFlags are pip's own, passed when pip resolves a pip command.
 var pipOnlyFlags = flagSet("--trusted-host", "--platform", "--implementation", "--abi",

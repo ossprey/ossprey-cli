@@ -1094,6 +1094,13 @@ type installArgs struct {
 	Registry string
 	// Userconfig is the --userconfig npm reads, from the same parse.
 	Userconfig string
+	// NpmFlags are the other resolution options npm attributes to itself in
+	// a tool run (`--before`, `--tag`, `--omit`, the peer rules), rendered
+	// for the dry run; NpmGlobal and NpmPrefix are its global mode and
+	// --prefix, which decide the .npmrc npm reads.
+	NpmFlags  []string
+	NpmGlobal bool
+	NpmPrefix string
 }
 
 // ParseSpecs classifies install arguments. A real-world multi-package install
