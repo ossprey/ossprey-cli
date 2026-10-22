@@ -188,13 +188,16 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 	switch m.Ecosystem {
 	case "npm":
 		if parsed.ToolRun {
-			return resolveNpmFn(ctx, "", tokens, nil)
+			var flags []string
+			if parsed.Registry != "" {
+				flags = []string{"--registry", parsed.Registry}
+			}
+			return resolveNpmFn(ctx, "", tokens, flags)
 		}
 		return resolveNpmFn(ctx, npmProjectDir(m, args), tokens, npmResolveFlags(m, rest))
 	case "pypi":
 		if parsed.ToolRun {
-			flags := toolRunLeadingFlags(rest)
-			return resolvePythonFn(ctx, ".", tokens, flags, pipResolveFlags(m, flags))
+			return resolvePythonFn(ctx, ".", tokens, toolRunLeadingFlags(rest), toolRunPipFlags(rest))
 		}
 		if hasFlag(rest, "--no-deps") {
 			return nil, nil
@@ -209,6 +212,21 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 // table so a value is never taken for the command, and kept only when uv's
 // resolver reads them the same way (`uvx --index-url … ruff`).
 func toolRunLeadingFlags(rest []string) []string {
+	return pickFlags(toolRunLead(rest), toolRunValueFlags, union(pythonCommonFlags, uvOnlyFlags), nil)
+}
+
+// toolRunPipFlags are the same leading flags as pip's resolver reads them,
+// for a host with no working uv: the index a uvx run names must reach the
+// fallback too, or it would resolve against a different one.
+func toolRunPipFlags(rest []string) []string {
+	return pickFlags(toolRunLead(rest), toolRunValueFlags,
+		union(pythonCommonFlags, flagSet("--index", "--default-index")),
+		map[string]string{"--index": "--extra-index-url", "--default-index": "--index-url"})
+}
+
+// toolRunLead is the part of a tool run's arguments before the command: the
+// flags uv reads, with their values.
+func toolRunLead(rest []string) []string {
 	var lead []string
 	for i := 0; i < len(rest); i++ {
 		a := rest[i]
@@ -224,7 +242,7 @@ func toolRunLeadingFlags(rest []string) []string {
 			i++
 		}
 	}
-	return pickFlags(lead, toolRunValueFlags, union(pythonCommonFlags, uvOnlyFlags), nil)
+	return lead
 }
 
 // specTokens gives the resolver the packages as the user wrote them, so a

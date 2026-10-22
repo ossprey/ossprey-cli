@@ -319,7 +319,7 @@ func TestExpandInstall_ToolRunHasNoProjectContext(t *testing.T) {
 	t.Cleanup(func() { resolveNpmFn = old })
 
 	m, _ := Lookup("npm")
-	args := []string{"exec", "cowsay@1.6.0", "--", "--legacy-peer-deps", "moo"}
+	args := []string{"exec", "cowsay@1.6.0", "--", "--legacy-peer-deps", "--registry", "https://evil.example", "moo"}
 	start, ok := m.toolRunAt(args)
 	if !ok {
 		t.Fatal("npm exec not seen as a tool run")
@@ -337,6 +337,24 @@ func TestExpandInstall_ToolRunHasNoProjectContext(t *testing.T) {
 	}
 	if gotFlags != nil {
 		t.Errorf("flags = %v, want none from the program's argv", gotFlags)
+	}
+
+	// A registry npm itself reads is the one the dry run resolves against:
+	// npx fetches from it, so a check against the default registry would
+	// check a different package. npm's own parse decides which --registry is
+	// npm's; the program's is behind the "--" npx inserts before the command.
+	npx, _ := Lookup("npx")
+	args = []string{"--registry=https://npm.acme.internal/", "cowsay", "--registry", "https://evil.example"}
+	parsed = npx.parseRun(args)
+	parsed.ToolRun = true
+	if _, err := expandInstall(context.Background(), npx, args, 0, parsed); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"--registry", "https://npm.acme.internal/"}; !reflect.DeepEqual(gotFlags, want) {
+		t.Errorf("flags = %v, want %v", gotFlags, want)
+	}
+	if !reflect.DeepEqual(gotSpecs, []string{"cowsay"}) {
+		t.Errorf("specs = %v", gotSpecs)
 	}
 }
 
@@ -365,8 +383,20 @@ func TestExpandInstall_ToolRunReadsOnlyLeadingFlags(t *testing.T) {
 	if want := []string{"--index-url", "https://i.example"}; !reflect.DeepEqual(gotUV, want) {
 		t.Errorf("uv flags = %v, want %v", gotUV, want)
 	}
-	if gotPip != nil {
-		t.Errorf("pip flags = %v, want none (a uv command's flags are uv's)", gotPip)
+	// The pip fallback, for a host with no working uv, resolves against the
+	// same index, in pip's spelling.
+	if want := []string{"--index-url", "https://i.example"}; !reflect.DeepEqual(gotPip, want) {
+		t.Errorf("pip flags = %v, want %v", gotPip, want)
+	}
+
+	args = []string{"--index", "https://i.example", "ruff"}
+	parsed = parseToolRun(m, args)
+	parsed.ToolRun = true
+	if _, err := expandInstall(context.Background(), m, args, 0, parsed); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"--extra-index-url", "https://i.example"}; !reflect.DeepEqual(gotPip, want) {
+		t.Errorf("pip flags = %v, want %v", gotPip, want)
 	}
 }
 

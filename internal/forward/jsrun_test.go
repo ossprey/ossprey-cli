@@ -410,6 +410,7 @@ Module._load = function (request, parent, isMain) {
       positionals: conf.argv.remain.slice(1),
       packages: pkg.map(String),
       call: conf.call !== undefined,
+      registry: conf.registry === undefined ? '' : String(conf.registry),
     }))
   }
 }
@@ -436,11 +437,12 @@ func TestNpmParsersMatchNpm(t *testing.T) {
 			Positionals []string
 			Packages    []string
 			Call        bool
+			Registry    string
 		}
 		if err := json.Unmarshal(out, &got); err != nil {
 			t.Fatalf("%s %q: %v (%s)", cli, args, err, out)
 		}
-		return npmArgv{Packages: got.Packages, Call: got.Call, Positionals: got.Positionals}
+		return npmArgv{Packages: got.Packages, Call: got.Call, Positionals: got.Positionals, Registry: got.Registry}
 	}
 	norm := func(a npmArgv) npmArgv {
 		if len(a.Packages) == 0 {
@@ -466,6 +468,11 @@ func TestNpmParsersMatchNpm(t *testing.T) {
 		{"--shell", "bash", "cowsay"}, {"--color", "always", "cowsay"}, {"--browser", "firefox", "cowsay"},
 		{"--workspace", "a", "cowsay"}, {"-w", "a", "cowsay"}, {"--package", "cowsay", "--", "cowsay", "moo"},
 		{"--pack=cowsay", "cowsay"}, {"--reg", "https://r.example", "cowsay"}, {"--unknown-thing", "cowsay", "moo"},
+		// nopt types registry as a url: an invalid value drops the option, and
+		// the last value is the one validated.
+		{"--registry", "nope", "cowsay"}, {"--registry", "https://a.example", "--registry", "nope", "cowsay"},
+		{"--registry", "https://a.example", "--registry", "https://b.example/", "cowsay"},
+		{"cowsay", "--registry", "https://after.example"},
 		{"--unknown=1", "cowsay"}, {"-d", "cowsay"}, {"--yes=true", "cowsay"}, {"--version"}, {},
 	}
 	for _, args := range npx {

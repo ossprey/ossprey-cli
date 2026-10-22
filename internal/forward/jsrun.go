@@ -1,6 +1,7 @@
 package forward
 
 import (
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -52,6 +53,10 @@ type npmArgv struct {
 	Call bool
 	// Positionals are the non-option tokens in order; the first is the command.
 	Positionals []string
+	// Registry is the --registry value npm will fetch from, when one is given
+	// (the last wins, as in nopt). It is read by npm, not by the program run,
+	// so the resolver must use it too.
+	Registry string
 }
 
 // npmExecAt matches `npm exec` under any name npm takes for it (`x`, `exe`).
@@ -81,7 +86,7 @@ func npxRun(args []string) installArgs {
 }
 
 func (a npmArgv) target() installArgs {
-	var out installArgs
+	out := installArgs{Registry: a.Registry}
 	if len(a.Packages) > 0 {
 		for _, p := range a.Packages {
 			out.addTarget("npm", strings.TrimSuffix(p, "@latest"))
@@ -247,6 +252,8 @@ func parseNpmArgv(in []string) npmArgv {
 				out.Packages = append(out.Packages, la)
 			case "call":
 				out.Call = true
+			case "registry":
+				out.Registry = la // the last wins, and is the one validated below
 			}
 			i++
 			continue
@@ -254,6 +261,17 @@ func parseNpmArgv(in []string) npmArgv {
 		if key == "call" {
 			out.Call = true
 		}
+	}
+	// nopt types registry as a url and drops the option when its value is
+	// not one, so a run with `--registry nope` fetches from the default.
+	if u, err := url.Parse(out.Registry); err != nil || u.Scheme == "" || u.Host == "" {
+		out.Registry = ""
+	} else {
+		// nopt keeps the parsed URL's href, so a bare host gains its "/".
+		if u.Path == "" {
+			u.Path = "/"
+		}
+		out.Registry = u.String()
 	}
 	return out
 }

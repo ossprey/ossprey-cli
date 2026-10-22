@@ -1088,6 +1088,10 @@ type installArgs struct {
 	// ToolRun marks a fetch-and-execute: the package goes into the tool's
 	// own cache, and everything after the command is the program's argv.
 	ToolRun bool
+	// Registry is the registry an npm-side tool run names on its command line
+	// (`npx --registry …`), taken from npm's own parse of the argv so the
+	// program's arguments can never supply it.
+	Registry string
 }
 
 // ParseSpecs classifies install arguments. A real-world multi-package install
