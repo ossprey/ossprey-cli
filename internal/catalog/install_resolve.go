@@ -161,6 +161,30 @@ func NpxCachedTree(npmCache string, packages []string) ([]Resolved, error) {
 	return resolvedFromPackages(pkgs, nil), nil
 }
 
+// NpmConfigGet reads one key of npm's effective configuration for a command
+// run in dir with flags — the command line, the environment and the project,
+// user and global .npmrc files, as `npm config get <key>` reports it. flags
+// are the command's own location and config-file selectors (-g, --prefix,
+// --userconfig, --globalconfig), so the answer is the one the real command
+// sees. The value is returned trimmed, empty when npm has none.
+func NpmConfigGet(ctx context.Context, dir, key string, flags []string) (string, error) {
+	npm, err := lookTool("npm")
+	if err != nil {
+		return "", fmt.Errorf("%w (npm)", ErrNoResolver)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, npm, append([]string{"config", "get", key}, flags...)...)
+	cmd.Dir = dir
+	cmd.Env = toolEnv()
+	cmd.WaitDelay = 5 * time.Second
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("npm config get %s: %w", key, err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
 // NpmConfigIncludes reports the dependency kinds (dev, optional, peer) npm's
 // effective configuration includes for a command run in dir with flags —
 // project, user and global .npmrc files and the environment, read by `npm
@@ -168,22 +192,12 @@ func NpxCachedTree(npmCache string, packages []string) ([]Resolved, error) {
 // wins over an --omit on the command line, so a filter built from the
 // command line alone must ask here before dropping a kind.
 func NpmConfigIncludes(ctx context.Context, dir string, flags []string) ([]string, error) {
-	npm, err := lookTool("npm")
+	out, err := NpmConfigGet(ctx, dir, "include", flags)
 	if err != nil {
-		return nil, fmt.Errorf("%w (npm)", ErrNoResolver)
-	}
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, npm, append([]string{"config", "get", "include"}, flags...)...)
-	cmd.Dir = dir
-	cmd.Env = toolEnv()
-	cmd.WaitDelay = 5 * time.Second
-	out, err := cmd.Output()
-	if err != nil {
-		return nil, fmt.Errorf("npm config get include: %w", err)
+		return nil, err
 	}
 	// One line, comma-separated ("optional,dev"), empty when none.
-	return strings.FieldsFunc(string(out), func(r rune) bool {
+	return strings.FieldsFunc(out, func(r rune) bool {
 		return r == ',' || r == '\n' || r == '\r' || r == ' ' || r == '\t'
 	}), nil
 }

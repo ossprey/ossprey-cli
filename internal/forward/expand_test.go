@@ -325,7 +325,23 @@ func TestExpandInstall_ToolRunHasNoProjectContext(t *testing.T) {
 		cacheDir, cachePackages = dir, packages
 		return nil, nil
 	}
-	t.Cleanup(func() { resolveNpmFn, npxCachedFn = old, oldCached })
+	// npm's configuration names no cache unless a case says so; configAsked
+	// records the flags npm was asked with.
+	oldGet := npmConfigGetFn
+	configured := ""
+	asked := false
+	var configAsked []string
+	npmConfigGetFn = func(_ context.Context, _, key string, flags []string) (string, error) {
+		if key != "cache" {
+			t.Errorf("npm config get %s asked", key)
+		}
+		asked, configAsked = true, flags
+		if configured == "" {
+			return "", errors.New("no npm")
+		}
+		return configured, nil
+	}
+	t.Cleanup(func() { resolveNpmFn, npxCachedFn, npmConfigGetFn = old, oldCached, oldGet })
 
 	m, _ := Lookup("npm")
 	args := []string{"exec", "cowsay@1.6.0", "--", "--legacy-peer-deps", "--registry", "https://evil.example", "moo"}
@@ -387,17 +403,25 @@ func TestExpandInstall_ToolRunHasNoProjectContext(t *testing.T) {
 
 	// The npx cache is looked up under the packages as typed (the --package
 	// values, else the command) in npm's cache: --cache, with nopt's home
-	// expansion, else the default.
+	// expansion, else what npm's configuration files say, read with the
+	// command's own config-file flags, else the default.
 	home, _ := os.UserHomeDir()
 	for _, tt := range []struct {
 		args         []string
+		configured   string
 		wantCache    string
+		wantAsked    bool
+		wantFlags    []string
 		wantPackages []string
 	}{
-		{[]string{"exec", "cowsay@1.6.0", "--", "moo"}, filepath.Join(home, ".npm"), []string{"cowsay@1.6.0"}},
-		{[]string{"exec", "--cache", "~/c", "--package=cowsay@1.6.0", "--package", "left-pad", "--", "cowsay"}, filepath.Join(home, "c"), []string{"cowsay@1.6.0", "left-pad"}},
+		{[]string{"exec", "cowsay@1.6.0", "--", "moo"}, "", filepath.Join(home, ".npm"), true, nil, []string{"cowsay@1.6.0"}},
+		{[]string{"exec", "--cache", "~/c", "--package=cowsay@1.6.0", "--package", "left-pad", "--", "cowsay"}, "", filepath.Join(home, "c"), false, nil, []string{"cowsay@1.6.0", "left-pad"}},
+		{[]string{"exec", "--userconfig", "~/u.npmrc", "cowsay@1.6.0"}, filepath.Join(home, "custom-cache"), filepath.Join(home, "custom-cache"),
+			true, []string{"--userconfig", filepath.Join(home, "u.npmrc")}, []string{"cowsay@1.6.0"}},
+		{[]string{"exec", "-g", "cowsay@1.6.0"}, filepath.Join(home, "custom-cache"), filepath.Join(home, "custom-cache"),
+			true, []string{"-g"}, []string{"cowsay@1.6.0"}},
 	} {
-		cacheDir, cachePackages = "", nil
+		cacheDir, cachePackages, asked, configAsked, configured = "", nil, false, nil, tt.configured
 		parsed := m.parseRun(tt.args)
 		parsed.ToolRun = true
 		if _, err := expandInstall(context.Background(), m, tt.args, 0, parsed); err != nil {
@@ -408,6 +432,9 @@ func TestExpandInstall_ToolRunHasNoProjectContext(t *testing.T) {
 		}
 		if !reflect.DeepEqual(cachePackages, tt.wantPackages) {
 			t.Errorf("%v: npx cache keyed by %v, want %v", tt.args, cachePackages, tt.wantPackages)
+		}
+		if asked != tt.wantAsked || (asked && len(configAsked) != len(tt.wantFlags)) || (len(tt.wantFlags) > 0 && !reflect.DeepEqual(configAsked, tt.wantFlags)) {
+			t.Errorf("%v: npm config get cache asked = %v with %v, want %v with %v", tt.args, asked, configAsked, tt.wantAsked, tt.wantFlags)
 		}
 	}
 
@@ -990,8 +1017,9 @@ func TestSplitAttachedShorts(t *testing.T) {
 // not block such a run on a package it never installs. --include=optional
 // restores it.
 func TestExpandInstall_NpmOmitOptional(t *testing.T) {
-	old, oldInc, oldCached := resolveNpmFn, npmConfigIncludesFn, npxCachedFn
+	old, oldInc, oldCached, oldGet := resolveNpmFn, npmConfigIncludesFn, npxCachedFn, npmConfigGetFn
 	npxCachedFn = func(string, []string) ([]catalog.Resolved, error) { return nil, nil }
+	npmConfigGetFn = func(context.Context, string, string, []string) (string, error) { return "", errors.New("no npm") }
 	resolveNpmFn = func(context.Context, string, string, []string, []string) ([]catalog.Resolved, error) {
 		return []catalog.Resolved{{Name: "needed", Version: "1.0.0"}, {Name: "extra", Version: "2.0.0", Optional: true},
 			{Name: "devonly", Version: "3.0.0", Dev: true}, {Name: "both", Version: "4.0.0", DevOptional: true},
@@ -1008,7 +1036,9 @@ func TestExpandInstall_NpmOmitOptional(t *testing.T) {
 		askedFlags = flags
 		return configured, configErr
 	}
-	t.Cleanup(func() { resolveNpmFn, npmConfigIncludesFn, npxCachedFn = old, oldInc, oldCached })
+	t.Cleanup(func() {
+		resolveNpmFn, npmConfigIncludesFn, npxCachedFn, npmConfigGetFn = old, oldInc, oldCached, oldGet
+	})
 	m, _ := Lookup("npm")
 
 	names := func(tree []catalog.Resolved) []string {
@@ -1118,34 +1148,78 @@ func TestExpandInstall_NpmOmitOptional(t *testing.T) {
 // with the dependencies resolved back then: the check covers that tree as
 // well as today's resolution, deduplicated.
 func TestExpandInstall_ToolRunCoversTheNpxCache(t *testing.T) {
-	old, oldCached := resolveNpmFn, npxCachedFn
+	old, oldCached, oldGet := resolveNpmFn, npxCachedFn, npmConfigGetFn
+	// Today's resolution fetches get-stdin from the internal registry, as a
+	// dev dependency; the cache holds the same release fetched publicly,
+	// and an older one.
 	resolveNpmFn = func(context.Context, string, string, []string, []string) ([]catalog.Resolved, error) {
-		return []catalog.Resolved{{Name: "cowsay", Version: "1.6.0"}, {Name: "get-stdin", Version: "8.0.0"}}, nil
+		return []catalog.Resolved{{Name: "cowsay", Version: "1.6.0"},
+			{Name: "get-stdin", Version: "8.0.0", Registry: "https://npm.acme.internal/get-stdin/-/get-stdin-8.0.0.tgz", Dev: true}}, nil
 	}
 	npxCachedFn = func(string, []string) ([]catalog.Resolved, error) {
-		return []catalog.Resolved{{Name: "cowsay", Version: "1.6.0"}, {Name: "get-stdin", Version: "7.0.0"}}, nil
+		return []catalog.Resolved{{Name: "cowsay", Version: "1.6.0"},
+			{Name: "get-stdin", Version: "8.0.0", Registry: "https://registry.npmjs.org/get-stdin/-/get-stdin-8.0.0.tgz"},
+			{Name: "get-stdin", Version: "7.0.0", Registry: "https://registry.npmjs.org/get-stdin/-/get-stdin-7.0.0.tgz"}}, nil
 	}
-	t.Cleanup(func() { resolveNpmFn, npxCachedFn = old, oldCached })
+	npmConfigGetFn = func(context.Context, string, string, []string) (string, error) { return "", errors.New("no npm") }
+	t.Cleanup(func() { resolveNpmFn, npxCachedFn, npmConfigGetFn = old, oldCached, oldGet })
 
-	m, _ := Lookup("npm")
-	args := []string{"exec", "cowsay@1.6.0"}
-	parsed := m.parseRun(args)
+	names := func(tree []catalog.Resolved) []string {
+		var out []string
+		for _, r := range tree {
+			out = append(out, r.Name+"@"+r.Version)
+		}
+		return out
+	}
+	// Both ways of running a tool through npm read the cache.
+	for _, tt := range []struct {
+		manager string
+		args    []string
+	}{
+		{"npm", []string{"exec", "cowsay@1.6.0"}},
+		{"npx", []string{"cowsay@1.6.0"}},
+	} {
+		m, _ := Lookup(tt.manager)
+		parsed := m.parseRun(tt.args)
+		parsed.ToolRun = true
+		tree, err := expandInstall(context.Background(), m, tt.args, 0, parsed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := []string{"cowsay@1.6.0", "get-stdin@8.0.0", "get-stdin@7.0.0"}; !reflect.DeepEqual(names(tree), want) {
+			t.Errorf("%s %v: tree = %v, want %v", tt.manager, tt.args, names(tree), want)
+		}
+		// A release both report keeps neither sighting's excuse: the
+		// registries disagree so none is recorded, and only the fresh copy
+		// was a dev dependency.
+		if got := tree[1]; got.Registry != "" || got.Dev {
+			t.Errorf("%s %v: merged sighting = %+v, want no registry and not dev", tt.manager, tt.args, got)
+		}
+	}
+
+	// So a registry the fresh fetch trusts does not cover the cached copy
+	// fetched publicly: the release is checked.
+	npx, _ := Lookup("npx")
+	args := []string{"cowsay@1.6.0"}
+	parsed := npx.parseRun(args)
 	parsed.ToolRun = true
-	tree, err := expandInstall(context.Background(), m, args, 0, parsed)
-	if err != nil {
-		t.Fatal(err)
+	ctx := warn.NewContext(context.Background(), true)
+	set := resolveNamed(ctx, npx, Options{Args: args, Trust: trust.Policy{Registries: []string{"https://npm.acme.internal/"}}}, 0, parsed, nil)
+	want := []check.Spec{
+		{Ecosystem: "npm", Name: "cowsay", Version: "1.6.0"},
+		{Ecosystem: "npm", Name: "get-stdin", Version: "8.0.0"},
+		{Ecosystem: "npm", Name: "get-stdin", Version: "7.0.0"},
 	}
-	var got []string
-	for _, r := range tree {
-		got = append(got, r.Name+"@"+r.Version)
+	if !reflect.DeepEqual(set.specs, want) {
+		t.Errorf("specs = %+v, want %+v", set.specs, want)
 	}
-	if want := []string{"cowsay@1.6.0", "get-stdin@8.0.0", "get-stdin@7.0.0"}; !reflect.DeepEqual(got, want) {
-		t.Errorf("tree = %v, want %v", got, want)
+	if drained := warn.Drain(ctx); strings.Contains(drained, "trusted") {
+		t.Errorf("a publicly cached release was trusted:\n%s", drained)
 	}
 
 	// A cache that cannot be read adds nothing and fails nothing.
 	npxCachedFn = func(string, []string) ([]catalog.Resolved, error) { return nil, errors.New("unreadable") }
-	if tree, err := expandInstall(context.Background(), m, args, 0, parsed); err != nil || len(tree) != 2 {
+	if tree, err := expandInstall(context.Background(), npx, args, 0, parsed); err != nil || len(tree) != 2 {
 		t.Errorf("unreadable cache: tree = %v, err = %v", tree, err)
 	}
 }

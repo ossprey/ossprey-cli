@@ -313,6 +313,34 @@ func TestNpmConfigIncludes(t *testing.T) {
 	}
 }
 
+// `npm config get` answers for the command's own configuration: the
+// project's .npmrc in local mode, not in global mode, and the default where
+// nothing is configured.
+func TestNpmConfigGet(t *testing.T) {
+	if _, err := lookTool("npm"); err != nil {
+		t.Skip("no npm")
+	}
+	ctx := context.Background()
+	dir := t.TempDir()
+	custom := filepath.Join(dir, "custom-cache")
+	os.WriteFile(filepath.Join(dir, "package.json"), []byte("{}"), 0o644)
+	os.WriteFile(filepath.Join(dir, ".npmrc"), []byte("cache="+filepath.ToSlash(custom)+"\n"), 0o644)
+	got, err := NpmConfigGet(ctx, dir, "cache", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Clean(got) != custom {
+		t.Errorf("project cache = %q, want %q", got, custom)
+	}
+	got, err = NpmConfigGet(ctx, dir, "cache", []string{"-g"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == "" || filepath.Clean(got) == custom {
+		t.Errorf("global mode cache = %q, want npm's default", got)
+	}
+}
+
 // The npx cache key is libnpmexec's: known answers computed with node's
 // crypto over the same sorted, newline-joined specs.
 func TestNpxCacheKey(t *testing.T) {

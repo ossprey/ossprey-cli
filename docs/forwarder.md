@@ -68,6 +68,9 @@ In both cases the fetched package is checked together with the dependencies it
 brings in, resolved as for a named install (below) but with no project
 context: a tool run installs into the tool's own cache, never into the project
 beside it, so `npx cowsay moo` checks cowsay and everything cowsay depends on.
+npm may rerun what an earlier `npx` of the same package left in its cache
+rather than resolve afresh, so that cached tree is checked too, read from
+the cache npm's own configuration names.
 
 A bare command that the project already has in `node_modules/.bin` — `npx
 eslint .` in a project that depends on eslint — is run from there rather than

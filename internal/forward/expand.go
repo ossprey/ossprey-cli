@@ -25,6 +25,7 @@ var (
 	resolvePythonFn     = catalog.ResolvePythonInstall
 	resolveWithUVFn     = catalog.ResolvePythonInstallWithUV
 	npmConfigIncludesFn = catalog.NpmConfigIncludes
+	npmConfigGetFn      = catalog.NpmConfigGet
 	npxCachedFn         = catalog.NpxCachedTree
 )
 
@@ -206,13 +207,15 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 			if err != nil {
 				return tree, err
 			}
-			if m.Bin == "npm" {
+			// The flags that make `npm config get` read what this command
+			// reads: its config files and location.
+			configFlags := slices.Concat(flags, npmLocationFlags(parsed.NpmGlobal, parsed.NpmPrefix))
+			if m.Bin == "npm" || m.Bin == "npx" {
 				// npm may reuse what an earlier run left in its npx cache,
 				// dependencies and all, rather than what resolves today.
-				tree = withNpxCached(tree, parsed)
+				tree = withNpxCached(ctx, tree, parsed, configFlags)
 			}
-			omits := npmEffectiveOmits(ctx, parsed.NpmOmits, slices.Concat(flags, npmLocationFlags(parsed.NpmGlobal, parsed.NpmPrefix)))
-			return npmOmit(tree, omits), nil
+			return npmOmit(tree, npmEffectiveOmits(ctx, parsed.NpmOmits, configFlags)), nil
 		}
 		flags := npmResolveFlags(m, rest)
 		tree, err := resolveNpmFn(ctx, npmProjectDir(m, args), npmConfigDir(m, args), tokens, flags)
@@ -312,28 +315,52 @@ func pythonValueFlags(m *Manager) map[string]bool {
 // run of the same packages left in npm's npx cache: npm reuses that
 // installation when the package it holds still satisfies the request, with
 // the dependencies resolved back then, so the run may execute either tree.
-// The cache is npm's --cache, else npm_config_cache, else npm's default
-// (~/.npm, %LocalAppData%\npm-cache). An unreadable cache adds nothing.
-func withNpxCached(tree []catalog.Resolved, parsed installArgs) []catalog.Resolved {
-	cached, err := npxCachedFn(npmCacheDir(parsed.NpmCache), parsed.NpxPackages)
+// A release both report is one sighting with two provenances, merged so
+// that neither can hide the other (mergeSighting). An unreadable cache adds
+// nothing.
+func withNpxCached(ctx context.Context, tree []catalog.Resolved, parsed installArgs, configFlags []string) []catalog.Resolved {
+	cached, err := npxCachedFn(npmCacheDir(ctx, parsed.NpmCache, configFlags), parsed.NpxPackages)
 	if err != nil || len(cached) == 0 {
 		return tree
 	}
-	seen := map[string]bool{}
-	for _, r := range tree {
-		seen[r.Name+"@"+r.Version] = true
+	seen := map[string]int{}
+	for i, r := range tree {
+		seen[r.Name+"@"+r.Version] = i
 	}
 	for _, r := range cached {
-		if !seen[r.Name+"@"+r.Version] {
-			tree = append(tree, r)
+		if i, ok := seen[r.Name+"@"+r.Version]; ok {
+			tree[i] = mergeSighting(tree[i], r)
+			continue
 		}
+		tree = append(tree, r)
 	}
 	return tree
 }
 
+// mergeSighting folds two reports of the same release into one that is
+// checked unless both would be left alone: a dependency kind survives only
+// when both carry it (the install omits the release only if it omits every
+// copy), the registry only when both agree (a trusted fresh fetch must not
+// cover a cached copy fetched publicly, and no registry means checked), and
+// the project lock covers it only if both say so.
+func mergeSighting(a, b catalog.Resolved) catalog.Resolved {
+	if a.Registry != b.Registry {
+		a.Registry = ""
+	}
+	a.Locked = a.Locked && b.Locked
+	a.Dev = a.Dev && b.Dev
+	a.Optional = a.Optional && b.Optional
+	a.DevOptional = a.DevOptional && b.DevOptional
+	a.Peer = a.Peer && b.Peer
+	return a
+}
+
 // npmCacheDir is where npm keeps its cache for this run: --cache as parsed,
-// npm_config_cache, or npm's platform default.
-func npmCacheDir(flag string) string {
+// npm_config_cache, else what npm's configuration files say (`npm config get
+// cache`, read with the command's own config-file and location flags, which
+// also yields npm's platform default), else that default worked out here
+// when npm cannot be asked.
+func npmCacheDir(ctx context.Context, flag string, configFlags []string) string {
 	if flag != "" {
 		return absPath(flag)
 	}
@@ -341,6 +368,9 @@ func npmCacheDir(flag string) string {
 		if v := os.Getenv(name); v != "" {
 			return absPath(expandHome(v))
 		}
+	}
+	if v, err := npmConfigGetFn(ctx, ".", "cache", configFlags); err == nil && v != "" {
+		return absPath(expandHome(v))
 	}
 	if runtime.GOOS == "windows" {
 		if v := os.Getenv("LOCALAPPDATA"); v != "" {
