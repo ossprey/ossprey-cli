@@ -34,6 +34,11 @@ type Resolved struct {
 // ErrNoResolver reports that no tool on the host can predict the install.
 var ErrNoResolver = errors.New("no resolver on PATH")
 
+// ErrNeedsUV reports a uv command only uv can predict, on a host with no
+// working uv: one that adds an index, since pip's dry run would pick
+// releases by a different rule (see ResolvePythonInstallWithUV).
+var ErrNeedsUV = errors.New("an added index needs uv to resolve, and none works on PATH")
+
 // ResolveNpmInstall predicts what `npm install <specs>` would put in the tree,
 // by generating a lockfile in a throwaway copy of the project — never in the
 // project itself — with `npm install --package-lock-only --ignore-scripts`,
@@ -241,6 +246,20 @@ func ResolvePythonInstall(ctx context.Context, dir string, specs, uvFlags, pipFl
 		return nil, fmt.Errorf("pip %s is older than %s (needs --dry-run --report)", v, pipMinimum)
 	}
 	return resolveWithPip(ctx, python, dir, specs, pipFlags)
+}
+
+// ResolvePythonInstallWithUV is ResolvePythonInstall with no pip fallback,
+// for a uv command whose flags pip cannot honour: `--index` and
+// `--extra-index-url` make uv take a package from the first index that has
+// it, where pip takes the best version across every index, so pip's dry run
+// could check a release uv does not install, with nothing saying so. Without
+// a working uv it fails with ErrNeedsUV, and the caller checks the names.
+func ResolvePythonInstallWithUV(ctx context.Context, dir string, specs, uvFlags []string) ([]Resolved, error) {
+	uv, ok := lookupUV(ctx)
+	if !ok {
+		return nil, ErrNeedsUV
+	}
+	return resolveWithUV(ctx, uv, dir, specs, uvFlags)
 }
 
 // resolveWithUV compiles the requirements with `uv pip compile`, which

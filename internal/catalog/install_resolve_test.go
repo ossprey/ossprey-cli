@@ -154,6 +154,17 @@ func TestResolveNpmInstallUsesTheProjectLockfile(t *testing.T) {
 	}
 }
 
+// With no working uv, a uv command that adds an index is not resolved by
+// pip in its place: pip picks releases by a different rule, so the caller
+// gets ErrNeedsUV and checks the names.
+func TestResolvePythonInstallWithUVNeedsUV(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	got, err := ResolvePythonInstallWithUV(context.Background(), t.TempDir(), []string{"ruff"}, []string{"--index", "https://i.example"})
+	if !errors.Is(err, ErrNeedsUV) || got != nil {
+		t.Errorf("got %v, %v; want ErrNeedsUV", got, err)
+	}
+}
+
 // Against a real resolver: the Python tree for a named requirement, extras
 // included, with nothing built.
 func TestResolvePythonInstall(t *testing.T) {

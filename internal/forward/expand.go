@@ -21,6 +21,7 @@ var (
 	expandFn        = expandInstall
 	resolveNpmFn    = catalog.ResolveNpmInstall
 	resolvePythonFn = catalog.ResolvePythonInstall
+	resolveWithUVFn = catalog.ResolvePythonInstallWithUV
 )
 
 // A named install used to check exactly the packages typed. `npm install
@@ -200,10 +201,16 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 		return resolveNpmFn(ctx, npmProjectDir(m, args), tokens, npmResolveFlags(m, rest))
 	case "pypi":
 		if parsed.ToolRun {
+			if addsIndex(toolRunLead(rest), toolRunValueFlags) {
+				return resolveWithUVFn(ctx, ".", tokens, toolRunLeadingFlags(rest))
+			}
 			return resolvePythonFn(ctx, ".", tokens, toolRunLeadingFlags(rest), toolRunPipFlags(rest))
 		}
 		if hasFlag(rest, "--no-deps") {
 			return nil, nil
+		}
+		if m.Bin == "uv" && addsIndex(rest, valueFlags[m.Bin]) {
+			return resolveWithUVFn(ctx, ".", tokens, uvResolveFlags(m, rest))
 		}
 		return resolvePythonFn(ctx, ".", tokens, uvResolveFlags(m, rest), pipResolveFlags(m, rest))
 	}
@@ -220,13 +227,36 @@ func toolRunLeadingFlags(rest []string) []string {
 
 // toolRunPipFlags are the same leading flags as pip's resolver reads them,
 // for a host with no working uv: the index a uvx run names must reach the
-// fallback too, or it would resolve against a different one. --index is left
-// out for the reason pipResolveFlags gives.
+// fallback too, or it would resolve against a different one. An added index
+// never does; see addsIndex.
 func toolRunPipFlags(rest []string) []string {
-	return pickFlags(toolRunLead(rest), toolRunValueFlags,
-		union(pythonCommonFlags, flagSet("--default-index")),
+	return pickFlags(toolRunLead(rest), toolRunValueFlags, pipFallbackFlags,
 		map[string]string{"--default-index": "--index-url"})
 }
+
+// uvIndexFlags add an index to uv's default rather than replacing it. uv
+// takes a package from the first index that has it; pip takes the best
+// version across every index it is given. So pip's dry run for a uv command
+// that adds an index could check a release uv does not install, and a name
+// that exists only on the private index would resolve publicly, where a
+// squatted copy may be waiting. Such a command is resolved by uv alone.
+var uvIndexFlags = flagSet("--index", "--extra-index-url")
+
+// addsIndex reports whether a uv command adds an index (uvIndexFlags).
+func addsIndex(rest []string, valFlags map[string]bool) bool {
+	return len(pickFlags(rest, valFlags, uvIndexFlags, nil)) > 0
+}
+
+// pipFallbackFlags are the uv flags pip's dry run reads the same way, for a
+// uv command resolved by pip: uv's --default-index replaces the default
+// index, as pip's --index-url does.
+var pipFallbackFlags = func() map[string]bool {
+	out := union(pythonCommonFlags, flagSet("--default-index"))
+	for f := range uvIndexFlags {
+		delete(out, f)
+	}
+	return out
+}()
 
 // toolRunLead is the part of a tool run's arguments before the command: the
 // flags uv reads, with their values.
@@ -367,19 +397,15 @@ func uvResolveFlags(m *Manager, rest []string) []string {
 	return nil
 }
 
-// pipResolveFlags are passed to `pip install --dry-run`. uv's --default-index
-// is pip's --index-url. uv's --index is deliberately not mapped: uv takes a
-// package from the first index that has it, pip the best version across
-// every index, so pip with an --extra-index-url can pick a release uv would
-// not. Left out, a private-index package fails the fallback and the names
-// are checked with the warning, rather than a different release checked as
-// if it were the one installed.
+// pipResolveFlags are passed to `pip install --dry-run`. For a uv command
+// only pipFallbackFlags are read, and one that adds an index never reaches
+// pip at all (addsIndex).
 func pipResolveFlags(m *Manager, rest []string) []string {
 	switch m.Bin {
 	case "pip", "pip3":
 		return pickFlags(rest, valueFlags[m.Bin], union(pythonCommonFlags, pipOnlyFlags), nil)
 	case "uv":
-		return pickFlags(rest, valueFlags[m.Bin], union(pythonCommonFlags, flagSet("--default-index")),
+		return pickFlags(rest, valueFlags[m.Bin], pipFallbackFlags,
 			map[string]string{"--default-index": "--index-url"})
 	}
 	return nil

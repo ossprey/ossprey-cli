@@ -146,7 +146,11 @@ always checked). A bare install applies both rules, from the lockfile.
   `--omit`, `--registry`, `--tag` for npm; `--index-url`/`-i`,
   `--extra-index-url`, `--find-links`, `--constraint`, `--pre` and friends for
   pip and uv). Index configuration in `.npmrc`, `pip.conf` or `uv.toml` and the
-  environment applies as it would to the real install.
+  environment applies as it would to the real install. A uv or uvx command that
+  adds an index (`--index`, `--extra-index-url`) is resolved by uv only: uv takes
+  a package from the first index that has it and pip the best version across
+  all of them, so on a machine without uv such a command is not predicted and
+  the named packages are checked, with the warning below.
 
   The named package itself is then checked at the release the resolver picked.
   When the dry run fails — no resolver, offline, a build-only package, the

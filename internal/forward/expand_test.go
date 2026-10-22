@@ -402,11 +402,9 @@ func TestExpandInstall_ToolRunReadsOnlyLeadingFlags(t *testing.T) {
 		t.Errorf("pip flags = %v, want %v", gotPip, want)
 	}
 
-	// uv's --index has no pip equivalent (first index wins vs best version
-	// across indexes), so the fallback is given no index rather than a
-	// different selection rule; --default-index replaces the default, which
-	// pip's --index-url does too.
-	args = []string{"--index", "https://i.example", "--default-index", "https://d.example", "ruff"}
+	// --default-index replaces the default index, as pip's --index-url does,
+	// so the fallback gets it in pip's spelling.
+	args = []string{"--default-index", "https://d.example", "ruff"}
 	parsed = parseToolRun(m, args)
 	parsed.ToolRun = true
 	if _, err := expandInstall(context.Background(), m, args, 0, parsed); err != nil {
@@ -414,6 +412,86 @@ func TestExpandInstall_ToolRunReadsOnlyLeadingFlags(t *testing.T) {
 	}
 	if want := []string{"--index-url", "https://d.example"}; !reflect.DeepEqual(gotPip, want) {
 		t.Errorf("pip flags = %v, want %v", gotPip, want)
+	}
+}
+
+// A uv command that adds an index is resolved by uv alone: uv takes a
+// package from the first index that has it, pip the best version across
+// every index, so pip's dry run could check a release uv does not install —
+// or resolve a private-only name from PyPI, where a squatted copy may wait.
+// With no working uv it is not resolved at all, and the names are checked
+// with the warning.
+func TestExpandInstall_AnAddedIndexIsResolvedByUVOnly(t *testing.T) {
+	var gotUV []string
+	pipCalled := false
+	old, oldUV := resolvePythonFn, resolveWithUVFn
+	resolvePythonFn = func(_ context.Context, _ string, _, _, _ []string) ([]catalog.Resolved, error) {
+		pipCalled = true
+		return []catalog.Resolved{{Name: "ruff", Version: "0.6.0"}}, nil
+	}
+	resolveWithUVFn = func(_ context.Context, _ string, _, uvFlags []string) ([]catalog.Resolved, error) {
+		gotUV = uvFlags
+		return nil, catalog.ErrNeedsUV
+	}
+	t.Cleanup(func() { resolvePythonFn, resolveWithUVFn = old, oldUV })
+
+	uvx, _ := Lookup("uvx")
+	uv, _ := Lookup("uv")
+	tests := []struct {
+		name   string
+		m      *Manager
+		args   []string
+		wantUV []string
+	}{
+		{"uvx --index", uvx, []string{"--index", "https://i.example", "--default-index", "https://d.example", "ruff"},
+			[]string{"--index", "https://i.example", "--default-index", "https://d.example"}},
+		{"uvx --extra-index-url", uvx, []string{"--extra-index-url=https://i.example", "ruff"},
+			[]string{"--extra-index-url=https://i.example"}},
+		{"uv pip install --index", uv, []string{"pip", "install", "--index", "https://i.example", "ruff"},
+			[]string{"--index", "https://i.example"}},
+		{"uv add --extra-index-url", uv, []string{"add", "--extra-index-url", "https://i.example", "ruff"},
+			[]string{"--extra-index-url", "https://i.example"}},
+	}
+	for _, tt := range tests {
+		gotUV, pipCalled = nil, false
+		var parsed installArgs
+		start := 0
+		if tt.m == uvx {
+			parsed = parseToolRun(tt.m, tt.args)
+			parsed.ToolRun = true
+		} else {
+			start, _ = tt.m.installAt(tt.args)
+			parsed = ParseSpecs(tt.m, tt.args[start:])
+		}
+		tree, err := expandInstall(context.Background(), tt.m, tt.args, start, parsed)
+		if !errors.Is(err, catalog.ErrNeedsUV) || tree != nil {
+			t.Errorf("%s: tree = %v, err = %v, want ErrNeedsUV", tt.name, tree, err)
+		}
+		if pipCalled {
+			t.Errorf("%s: pip fallback was offered", tt.name)
+		}
+		if !reflect.DeepEqual(gotUV, tt.wantUV) {
+			t.Errorf("%s: uv flags = %v, want %v", tt.name, gotUV, tt.wantUV)
+		}
+	}
+
+	// An index the command does not add stays on the fallback path: pip's
+	// own --extra-index-url is pip's rule, and --index-url replaces the
+	// default for both.
+	pip, _ := Lookup("pip")
+	for _, tt := range []struct {
+		m    *Manager
+		args []string
+	}{
+		{pip, []string{"install", "--extra-index-url", "https://i.example", "ruff"}},
+		{uv, []string{"pip", "install", "--index-url", "https://i.example", "ruff"}},
+	} {
+		pipCalled = false
+		start, _ := tt.m.installAt(tt.args)
+		_, err := expandInstall(context.Background(), tt.m, tt.args, start, ParseSpecs(tt.m, tt.args[start:]))
+		if err != nil || !pipCalled {
+			t.Errorf("%s %v: err = %v, pip fallback called = %v", tt.m.Bin, tt.args, err, pipCalled)
+		}
 	}
 }
 
@@ -489,8 +567,8 @@ func TestResolverFlags(t *testing.T) {
 		{"uv to uv keeps its own",
 			uvResolveFlags(uv, []string{"--index", "https://i.example", "--prerelease=allow", "--dev", "httpx"}),
 			[]string{"--index", "https://i.example", "--prerelease=allow"}},
-		{"uv to pip renames the default index and drops --index",
-			pipResolveFlags(uv, []string{"--index", "https://i.example", "--default-index=https://d.example", "--resolution", "lowest", "httpx"}),
+		{"uv to pip renames the default index and drops the added ones",
+			pipResolveFlags(uv, []string{"--index", "https://i.example", "--extra-index-url", "https://e.example", "--default-index=https://d.example", "--resolution", "lowest", "httpx"}),
 			[]string{"--index-url=https://d.example"}},
 		{"npm makes --userconfig absolute",
 			npmResolveFlags(npm, []string{"--userconfig", "u.npmrc", "--userconfig=./v.npmrc", "express"}),
