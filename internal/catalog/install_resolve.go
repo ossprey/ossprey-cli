@@ -63,6 +63,10 @@ func ResolveNpmInstall(ctx context.Context, projectDir string, specs, flags []st
 		if err := stageNpmProject(projectDir, tmp, locked); err != nil {
 			return nil, err
 		}
+	} else if err := stageNpmrc(".", tmp); err != nil {
+		// No project, but npm still reads the .npmrc where it is run: a scoped
+		// private registry applies to `npx @org/cli` and `npm install -g` too.
+		return nil, err
 	}
 
 	args := append([]string{"install",
@@ -120,10 +124,8 @@ func stageNpmProject(src, dst string, locked map[string]bool) error {
 	if err := os.WriteFile(filepath.Join(dst, "package.json"), cleaned, 0o644); err != nil {
 		return err
 	}
-	if rc, err := os.ReadFile(filepath.Join(src, ".npmrc")); err == nil {
-		if err := os.WriteFile(filepath.Join(dst, ".npmrc"), rc, 0o600); err != nil {
-			return err
-		}
+	if err := stageNpmrc(src, dst); err != nil {
+		return err
 	}
 	// A shrinkwrap outranks a package-lock, and is staged under the lock's
 	// name so npm writes its result where it is read back from.
@@ -140,6 +142,16 @@ func stageNpmProject(src, dst string, locked map[string]bool) error {
 		return os.WriteFile(filepath.Join(dst, "package-lock.json"), lock, 0o644)
 	}
 	return nil
+}
+
+// stageNpmrc copies the .npmrc npm would read in src, where there is one, so
+// the dry run resolves against the same registries as the real command.
+func stageNpmrc(src, dst string) error {
+	rc, err := os.ReadFile(filepath.Join(src, ".npmrc"))
+	if err != nil {
+		return nil
+	}
+	return os.WriteFile(filepath.Join(dst, ".npmrc"), rc, 0o600)
 }
 
 // localFreePackageJSON drops the dependencies npm could only resolve from the

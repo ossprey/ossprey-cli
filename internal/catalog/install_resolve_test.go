@@ -186,3 +186,24 @@ func contains(xs []string, x string) bool {
 	}
 	return false
 }
+
+// The .npmrc where the command runs is staged with or without a project, so
+// a scoped private registry reaches the dry run for `npx @org/cli` and
+// `npm install -g` as it reaches npm itself.
+func TestStageNpmrc(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	if err := stageNpmrc(src, dst); err != nil {
+		t.Fatalf("no .npmrc: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, ".npmrc")); err == nil {
+		t.Error("an .npmrc was staged from nothing")
+	}
+	os.WriteFile(filepath.Join(src, ".npmrc"), []byte("@acme:registry=https://npm.acme.internal/\n"), 0o600)
+	if err := stageNpmrc(src, dst); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(dst, ".npmrc"))
+	if err != nil || !strings.Contains(string(got), "npm.acme.internal") {
+		t.Errorf("staged .npmrc = %q, %v", got, err)
+	}
+}
