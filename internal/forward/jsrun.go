@@ -438,28 +438,13 @@ func projectHasBin(name string) bool {
 	if name == "" || strings.ContainsAny(name, `/\`) {
 		return false
 	}
-	dir, err := os.Getwd()
-	if err != nil {
-		return false
-	}
-	for {
-		_, pkgErr := os.Stat(filepath.Join(dir, "package.json"))
-		nm, nmErr := os.Stat(filepath.Join(dir, "node_modules"))
-		if pkgErr == nil || (nmErr == nil && nm.IsDir()) {
-			bin := filepath.Join(dir, "node_modules", ".bin", name)
-			for _, ext := range binExts() {
-				if fi, err := os.Stat(bin + ext); err == nil && !fi.IsDir() {
-					return true
-				}
-			}
-			return false
+	bin := filepath.Join(npmLocalPrefix(), "node_modules", ".bin", name)
+	for _, ext := range binExts() {
+		if fi, err := os.Stat(bin + ext); err == nil && !fi.IsDir() {
+			return true
 		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return false
-		}
-		dir = parent
 	}
+	return false
 }
 
 func binExts() []string {

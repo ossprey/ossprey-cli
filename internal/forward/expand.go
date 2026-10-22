@@ -196,20 +196,23 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 			if parsed.Userconfig != "" {
 				flags = append(flags, "--userconfig", absPath(parsed.Userconfig))
 			}
-			return resolveNpmFn(ctx, "", tokens, flags)
+			return resolveNpmFn(ctx, "", npmLocalPrefix(), tokens, flags)
 		}
-		return resolveNpmFn(ctx, npmProjectDir(m, args), tokens, npmResolveFlags(m, rest))
+		return resolveNpmFn(ctx, npmProjectDir(m, args), npmConfigDir(m, args), tokens, npmResolveFlags(m, rest))
 	case "pypi":
 		if parsed.ToolRun {
-			if addsIndex(toolRunLead(rest), toolRunValueFlags) {
-				return resolveWithUVFn(ctx, ".", tokens, toolRunLeadingFlags(rest))
+			// No project: uv's tool commands read no project configuration,
+			// so the resolver runs where there is none (dir ""), and paths in
+			// the flags are made absolute to survive the move.
+			if needsUV(toolRunLead(rest), toolRunValueFlags) {
+				return resolveWithUVFn(ctx, "", tokens, toolRunLeadingFlags(rest))
 			}
-			return resolvePythonFn(ctx, ".", tokens, toolRunLeadingFlags(rest), toolRunPipFlags(rest))
+			return resolvePythonFn(ctx, "", tokens, toolRunLeadingFlags(rest), toolRunPipFlags(rest))
 		}
 		if hasFlag(rest, "--no-deps") {
 			return nil, nil
 		}
-		if m.Bin == "uv" && addsIndex(rest, valueFlags[m.Bin]) {
+		if m.Bin == "uv" && needsUV(rest, valueFlags[m.Bin]) {
 			return resolveWithUVFn(ctx, ".", tokens, uvResolveFlags(m, rest))
 		}
 		return resolvePythonFn(ctx, ".", tokens, uvResolveFlags(m, rest), pipResolveFlags(m, rest))
@@ -222,41 +225,55 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 // table so a value is never taken for the command, and kept only when uv's
 // resolver reads them the same way (`uvx --index-url … ruff`).
 func toolRunLeadingFlags(rest []string) []string {
-	return pickFlags(toolRunLead(rest), toolRunValueFlags, union(pythonCommonFlags, uvOnlyFlags), nil)
+	return absFlagValues(pickFlags(toolRunLead(rest), toolRunValueFlags, union(pythonCommonFlags, uvOnlyFlags), nil), pythonPathFlags)
 }
 
 // toolRunPipFlags are the same leading flags as pip's resolver reads them,
 // for a host with no working uv: the index a uvx run names must reach the
-// fallback too, or it would resolve against a different one. An added index
-// never does; see addsIndex.
+// fallback too, or it would resolve against a different one. A flag pip
+// cannot honour never does; see needsUV.
 func toolRunPipFlags(rest []string) []string {
-	return pickFlags(toolRunLead(rest), toolRunValueFlags, pipFallbackFlags,
-		map[string]string{"--default-index": "--index-url"})
+	return absFlagValues(pickFlags(toolRunLead(rest), toolRunValueFlags, pipFallbackFlags, pipFallbackRenames), pythonPathFlags)
 }
 
-// uvIndexFlags add an index to uv's default rather than replacing it. uv
-// takes a package from the first index that has it; pip takes the best
-// version across every index it is given. So pip's dry run for a uv command
-// that adds an index could check a release uv does not install, and a name
-// that exists only on the private index would resolve publicly, where a
-// squatted copy may be waiting. Such a command is resolved by uv alone.
-var uvIndexFlags = flagSet("--index", "--extra-index-url")
+// uvOnlyResolution are the uv flags that change which release is picked and
+// that pip's dry run cannot be given. --index and --extra-index-url add an
+// index: uv takes a package from the first index that has it, pip the best
+// version across every index, so pip could check a release uv does not
+// install, and a name that exists only on the private index would resolve
+// publicly, where a squatted copy may be waiting. --overrides, --resolution,
+// --prerelease, --exclude-newer, --index-strategy and the interpreter flags
+// have no pip spelling with the same effect. A uv command carrying any of
+// them is resolved by uv alone, or not at all.
+var uvOnlyResolution = flagSet("--index", "--extra-index-url", "--overrides", "--resolution",
+	"--prerelease", "--exclude-newer", "--exclude-newer-package", "--index-strategy",
+	"-p", "--python", "--python-platform", "--config-file")
 
-// addsIndex reports whether a uv command adds an index (uvIndexFlags).
-func addsIndex(rest []string, valFlags map[string]bool) bool {
-	return len(pickFlags(rest, valFlags, uvIndexFlags, nil)) > 0
+// needsUV reports whether a uv command carries a flag only uv can honour
+// (uvOnlyResolution).
+func needsUV(rest []string, valFlags map[string]bool) bool {
+	return len(pickFlags(rest, valFlags, uvOnlyResolution, nil)) > 0
 }
 
 // pipFallbackFlags are the uv flags pip's dry run reads the same way, for a
-// uv command resolved by pip: uv's --default-index replaces the default
-// index, as pip's --index-url does.
+// uv command resolved by pip, with pipFallbackRenames giving pip's spelling:
+// uv's --default-index replaces the default index, as pip's --index-url
+// does, and uv's --constraints is pip's --constraint.
 var pipFallbackFlags = func() map[string]bool {
-	out := union(pythonCommonFlags, flagSet("--default-index"))
-	for f := range uvIndexFlags {
+	out := union(pythonCommonFlags, flagSet("--default-index", "--constraints"))
+	for f := range uvOnlyResolution {
 		delete(out, f)
 	}
 	return out
 }()
+
+var pipFallbackRenames = map[string]string{"--default-index": "--index-url", "--constraints": "--constraint"}
+
+// pythonPathFlags take a file or directory, which the resolver must be able
+// to find from wherever it runs. --find-links may be a URL instead, which
+// absFlagValues leaves alone.
+var pythonPathFlags = flagSet("-c", "--constraint", "--constraints", "--overrides",
+	"-f", "--find-links", "--config-file")
 
 // toolRunLead is the part of a tool run's arguments before the command: the
 // flags uv reads, with their values.
@@ -353,15 +370,99 @@ func npmResolveFlags(m *Manager, rest []string) []string {
 // absUserconfig makes a --userconfig path absolute: npm resolves it against
 // the directory the command ran in, and the dry run runs in another.
 func absUserconfig(flags []string) []string {
-	for i, f := range flags {
+	return absFlagValues(flags, flagSet("--userconfig"))
+}
+
+// absFlagValues makes the values of the flags in paths absolute, in both
+// `--flag value` and `--flag=value` form, leaving a URL as it is. The
+// command's relative paths are against its own directory; the dry run runs
+// in another.
+func absFlagValues(flags []string, paths map[string]bool) []string {
+	for i := 0; i < len(flags); i++ {
+		flag, inline, hasInline := splitFlagValue(flags[i])
+		if !paths[flag] {
+			continue
+		}
 		switch {
-		case f == "--userconfig" && i+1 < len(flags):
-			flags[i+1] = absPath(flags[i+1])
-		case strings.HasPrefix(f, "--userconfig="):
-			flags[i] = "--userconfig=" + absPath(strings.TrimPrefix(f, "--userconfig="))
+		case hasInline:
+			flags[i] = flag + "=" + absIfPath(inline)
+		case i+1 < len(flags):
+			flags[i+1] = absIfPath(flags[i+1])
+			i++
 		}
 	}
 	return flags
+}
+
+func absIfPath(v string) string {
+	if strings.Contains(v, "://") {
+		return v
+	}
+	return absPath(v)
+}
+
+// npmConfigDir is the directory whose .npmrc npm reads as this install's
+// project configuration: none in global mode, where npm ignores the project
+// file; the --prefix given, which is the project there; else npm's local
+// prefix. The dry run stages that file so it resolves against the registries
+// the install will use.
+func npmConfigDir(m *Manager, args []string) string {
+	if m.Bin != "npm" {
+		return npmLocalPrefix()
+	}
+	valFlags := union(globalValueFlags[m.Bin], valueFlags[m.Bin])
+	prefix := ""
+	for i := 0; i < len(args); i++ {
+		flag, value, hasInline := splitFlagValue(args[i])
+		if !hasInline && valFlags[flag] && i+1 < len(args) {
+			value = args[i+1]
+			i++
+		}
+		switch flag {
+		case "-g", "--global":
+			return ""
+		case "--location":
+			// Not in npm's value table (its value is one of three words), so
+			// read it here: `--location global` as well as `--location=global`.
+			if !hasInline && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				value = args[i+1]
+				i++
+			}
+			if value == "global" {
+				return ""
+			}
+		case "--prefix", "-C":
+			prefix = value
+		}
+	}
+	if prefix != "" {
+		return absPath(prefix)
+	}
+	return npmLocalPrefix()
+}
+
+// npmLocalPrefix is npm's local prefix for the working directory: the
+// nearest directory, here or above, with a package.json or a node_modules
+// directory, else the working directory itself. It is where npm reads
+// project configuration and looks for the project's binaries.
+func npmLocalPrefix() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "."
+	}
+	for dir := cwd; ; {
+		if _, err := os.Stat(filepath.Join(dir, "package.json")); err == nil {
+			return dir
+		}
+		if fi, err := os.Stat(filepath.Join(dir, "node_modules")); err == nil && fi.IsDir() {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return cwd
+		}
+		dir = parent
+	}
 }
 
 func absPath(p string) string {
@@ -377,8 +478,9 @@ var pythonCommonFlags = flagSet("--pre", "--no-index", "-i", "--index-url", "--e
 
 // uvOnlyFlags are uv's own, passed when uv resolves a uv command.
 var uvOnlyFlags = flagSet("--index", "--default-index", "--prerelease", "--resolution",
-	"--exclude-newer", "-p", "--python", "--python-platform", "--allow-insecure-host",
-	"--index-strategy", "--only-binary", "--no-binary", "--constraints")
+	"--exclude-newer", "--exclude-newer-package", "-p", "--python", "--python-platform",
+	"--allow-insecure-host", "--index-strategy", "--only-binary", "--no-binary",
+	"--constraints", "--overrides", "--no-config", "--config-file")
 
 // pipOnlyFlags are pip's own, passed when pip resolves a pip command.
 var pipOnlyFlags = flagSet("--trusted-host", "--platform", "--implementation", "--abi",
@@ -398,15 +500,14 @@ func uvResolveFlags(m *Manager, rest []string) []string {
 }
 
 // pipResolveFlags are passed to `pip install --dry-run`. For a uv command
-// only pipFallbackFlags are read, and one that adds an index never reaches
-// pip at all (addsIndex).
+// only pipFallbackFlags are read, and one with a flag pip cannot honour
+// never reaches pip at all (needsUV).
 func pipResolveFlags(m *Manager, rest []string) []string {
 	switch m.Bin {
 	case "pip", "pip3":
 		return pickFlags(rest, valueFlags[m.Bin], union(pythonCommonFlags, pipOnlyFlags), nil)
 	case "uv":
-		return pickFlags(rest, valueFlags[m.Bin], pipFallbackFlags,
-			map[string]string{"--default-index": "--index-url"})
+		return pickFlags(rest, valueFlags[m.Bin], pipFallbackFlags, pipFallbackRenames)
 	}
 	return nil
 }

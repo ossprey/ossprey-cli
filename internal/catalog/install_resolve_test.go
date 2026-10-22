@@ -117,7 +117,7 @@ func TestResolveNpmInstallUsesTheProjectLockfile(t *testing.T) {
 		"": {"name":"app","version":"1.0.0","dependencies":{"is-number":"6.0.0"}},
 		"node_modules/is-number": {"version":"6.0.0","resolved":"https://registry.npmjs.org/is-number/-/is-number-6.0.0.tgz","integrity":"sha512-Wu1VHeILBK8KAWJUAiSZQX94GmOE45Rg6/538fKwiloUNqMK8Vzsl1CuMwkT7Dbko9jncHE5mvTKLZCTz1Lz/g=="}}}`)
 
-	got, err := ResolveNpmInstall(ctx, dir, []string{"is-odd@3.0.1"}, nil)
+	got, err := ResolveNpmInstall(ctx, dir, "", []string{"is-odd@3.0.1"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestResolveNpmInstallUsesTheProjectLockfile(t *testing.T) {
 	}
 
 	// No project: the named package and its tree, nothing locked.
-	got, err = ResolveNpmInstall(ctx, "", []string{"is-odd@3.0.1"}, nil)
+	got, err = ResolveNpmInstall(ctx, "", "", []string{"is-odd@3.0.1"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,6 +162,31 @@ func TestResolvePythonInstallWithUVNeedsUV(t *testing.T) {
 	got, err := ResolvePythonInstallWithUV(context.Background(), t.TempDir(), []string{"ruff"}, []string{"--index", "https://i.example"})
 	if !errors.Is(err, ErrNeedsUV) || got != nil {
 		t.Errorf("got %v, %v; want ErrNeedsUV", got, err)
+	}
+}
+
+// Against a real uv: a tool run is resolved with no project configuration,
+// as uvx runs with none, so a uv.toml in the working directory that `uv pip
+// compile` would otherwise read — here pointing at an index that does not
+// exist — changes nothing. The project-aware form reads it and fails.
+func TestResolvePythonInstallWithUVIgnoresProjectConfigWithoutADir(t *testing.T) {
+	if testing.Short() {
+		t.Skip("network")
+	}
+	ctx := context.Background()
+	if _, ok := lookupUV(ctx); !ok {
+		t.Skip("no uv")
+	}
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "uv.toml"), []byte("index-url = \"https://ossprey-no-such-index.invalid/simple\"\n"), 0o644)
+	t.Chdir(dir)
+
+	got, err := ResolvePythonInstallWithUV(ctx, "", []string{"cowsay==6.1"}, nil)
+	if err != nil || len(got) == 0 {
+		t.Fatalf("tool run read the project's uv.toml: %v, %v", got, err)
+	}
+	if _, err := ResolvePythonInstallWithUV(ctx, ".", []string{"cowsay==6.1"}, nil); err == nil {
+		t.Error("the project-aware resolve ignored uv.toml, so this test proves nothing")
 	}
 }
 

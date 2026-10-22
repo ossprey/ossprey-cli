@@ -310,11 +310,11 @@ func TestExpandInstall_ToolRunHasNoProjectContext(t *testing.T) {
 	os.WriteFile("package.json", []byte("{}"), 0o644)
 	os.WriteFile("package-lock.json", []byte(`{"lockfileVersion":3,"packages":{}}`), 0o644)
 
-	var gotDir string
+	var gotDir, gotConfig string
 	var gotSpecs, gotFlags []string
 	old := resolveNpmFn
-	resolveNpmFn = func(_ context.Context, projectDir string, specs, flags []string) ([]catalog.Resolved, error) {
-		gotDir, gotSpecs, gotFlags = projectDir, specs, flags
+	resolveNpmFn = func(_ context.Context, projectDir, configDir string, specs, flags []string) ([]catalog.Resolved, error) {
+		gotDir, gotConfig, gotSpecs, gotFlags = projectDir, configDir, specs, flags
 		return nil, nil
 	}
 	t.Cleanup(func() { resolveNpmFn = old })
@@ -332,6 +332,10 @@ func TestExpandInstall_ToolRunHasNoProjectContext(t *testing.T) {
 	}
 	if gotDir != "" {
 		t.Errorf("project context %q, want none", gotDir)
+	}
+	// No project context, but npm reads this project's .npmrc for the run.
+	if !sameDir(t, gotConfig, dir) {
+		t.Errorf("config dir %q, want %q", gotConfig, dir)
 	}
 	if !reflect.DeepEqual(gotSpecs, []string{"cowsay@1.6.0"}) {
 		t.Errorf("specs = %v", gotSpecs)
@@ -375,9 +379,10 @@ func TestExpandInstall_ToolRunHasNoProjectContext(t *testing.T) {
 // named there matters, `--no-deps` in the program's own argv does not.
 func TestExpandInstall_ToolRunReadsOnlyLeadingFlags(t *testing.T) {
 	var gotSpecs, gotUV, gotPip []string
+	gotDir := "unset"
 	old := resolvePythonFn
-	resolvePythonFn = func(_ context.Context, _ string, specs, uvFlags, pipFlags []string) ([]catalog.Resolved, error) {
-		gotSpecs, gotUV, gotPip = specs, uvFlags, pipFlags
+	resolvePythonFn = func(_ context.Context, dir string, specs, uvFlags, pipFlags []string) ([]catalog.Resolved, error) {
+		gotDir, gotSpecs, gotUV, gotPip = dir, specs, uvFlags, pipFlags
 		return []catalog.Resolved{{Name: "ruff", Version: "0.6.0"}}, nil
 	}
 	t.Cleanup(func() { resolvePythonFn = old })
@@ -393,6 +398,11 @@ func TestExpandInstall_ToolRunReadsOnlyLeadingFlags(t *testing.T) {
 	if !reflect.DeepEqual(gotSpecs, []string{"ruff-lsp", "ruff==0.6.0"}) {
 		t.Errorf("specs = %v", gotSpecs)
 	}
+	// uvx reads no project configuration, so neither does the resolver: it
+	// runs with no directory, i.e. nowhere a uv.toml could be found.
+	if gotDir != "" {
+		t.Errorf("resolver dir = %q, want none", gotDir)
+	}
 	if want := []string{"--index-url", "https://i.example"}; !reflect.DeepEqual(gotUV, want) {
 		t.Errorf("uv flags = %v, want %v", gotUV, want)
 	}
@@ -403,25 +413,31 @@ func TestExpandInstall_ToolRunReadsOnlyLeadingFlags(t *testing.T) {
 	}
 
 	// --default-index replaces the default index, as pip's --index-url does,
-	// so the fallback gets it in pip's spelling.
-	args = []string{"--default-index", "https://d.example", "ruff"}
+	// and --constraints is pip's --constraint, so the fallback gets them in
+	// pip's spelling. Paths are made absolute, since the resolver runs
+	// elsewhere; a --find-links URL is left alone.
+	args = []string{"--default-index", "https://d.example", "--constraints", "c.txt", "-f", "https://w.example/", "ruff"}
 	parsed = parseToolRun(m, args)
 	parsed.ToolRun = true
 	if _, err := expandInstall(context.Background(), m, args, 0, parsed); err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"--index-url", "https://d.example"}; !reflect.DeepEqual(gotPip, want) {
+	if want := []string{"--index-url", "https://d.example", "--constraint", absPath("c.txt"), "-f", "https://w.example/"}; !reflect.DeepEqual(gotPip, want) {
 		t.Errorf("pip flags = %v, want %v", gotPip, want)
+	}
+	if want := []string{"--default-index", "https://d.example", "--constraints", absPath("c.txt"), "-f", "https://w.example/"}; !reflect.DeepEqual(gotUV, want) {
+		t.Errorf("uv flags = %v, want %v", gotUV, want)
 	}
 }
 
-// A uv command that adds an index is resolved by uv alone: uv takes a
-// package from the first index that has it, pip the best version across
-// every index, so pip's dry run could check a release uv does not install —
-// or resolve a private-only name from PyPI, where a squatted copy may wait.
-// With no working uv it is not resolved at all, and the names are checked
-// with the warning.
-func TestExpandInstall_AnAddedIndexIsResolvedByUVOnly(t *testing.T) {
+// A uv command whose flags pip cannot honour is resolved by uv alone. An
+// added index: uv takes a package from the first index that has it, pip the
+// best version across every index, so pip's dry run could check a release
+// uv does not install — or resolve a private-only name from PyPI, where a
+// squatted copy may wait. --overrides, --resolution and the like change the
+// pick and have no pip spelling. With no working uv such a command is not
+// resolved at all, and the names are checked with the warning.
+func TestExpandInstall_UVOnlyFlagsAreResolvedByUVOnly(t *testing.T) {
 	var gotUV []string
 	pipCalled := false
 	old, oldUV := resolvePythonFn, resolveWithUVFn
@@ -451,6 +467,12 @@ func TestExpandInstall_AnAddedIndexIsResolvedByUVOnly(t *testing.T) {
 			[]string{"--index", "https://i.example"}},
 		{"uv add --extra-index-url", uv, []string{"add", "--extra-index-url", "https://i.example", "ruff"},
 			[]string{"--extra-index-url", "https://i.example"}},
+		{"uvx --overrides", uvx, []string{"--overrides", "o.txt", "ruff"},
+			[]string{"--overrides", absPath("o.txt")}},
+		{"uvx --resolution", uvx, []string{"--resolution=lowest", "ruff"},
+			[]string{"--resolution=lowest"}},
+		{"uv pip install --exclude-newer", uv, []string{"pip", "install", "--exclude-newer", "2024-01-01", "ruff"},
+			[]string{"--exclude-newer", "2024-01-01"}},
 	}
 	for _, tt := range tests {
 		gotUV, pipCalled = nil, false
@@ -567,9 +589,9 @@ func TestResolverFlags(t *testing.T) {
 		{"uv to uv keeps its own",
 			uvResolveFlags(uv, []string{"--index", "https://i.example", "--prerelease=allow", "--dev", "httpx"}),
 			[]string{"--index", "https://i.example", "--prerelease=allow"}},
-		{"uv to pip renames the default index and drops the added ones",
-			pipResolveFlags(uv, []string{"--index", "https://i.example", "--extra-index-url", "https://e.example", "--default-index=https://d.example", "--resolution", "lowest", "httpx"}),
-			[]string{"--index-url=https://d.example"}},
+		{"uv to pip renames the default index and constraints, drops what pip cannot honour",
+			pipResolveFlags(uv, []string{"--index", "https://i.example", "--extra-index-url", "https://e.example", "--default-index=https://d.example", "--resolution", "lowest", "--constraints", "c.txt", "--overrides=o.txt", "httpx"}),
+			[]string{"--index-url=https://d.example", "--constraint", "c.txt"}},
 		{"npm makes --userconfig absolute",
 			npmResolveFlags(npm, []string{"--userconfig", "u.npmrc", "--userconfig=./v.npmrc", "express"}),
 			[]string{"--userconfig", absPath("u.npmrc"), "--userconfig=" + absPath("v.npmrc")}},
@@ -655,5 +677,72 @@ func TestRun_PassiveNamedInstall_ExpansionFallbackPrintsAfterTheManager(t *testi
 	want := "ossprey: warning: could not resolve the dependencies of flask (no resolver on PATH (uv or python)); checking the named packages only\n"
 	if out != want {
 		t.Errorf("got %q, want %q", out, want)
+	}
+}
+
+func sameDir(t *testing.T, a, b string) bool {
+	t.Helper()
+	ra, err1 := filepath.EvalSymlinks(a)
+	rb, err2 := filepath.EvalSymlinks(b)
+	return err1 == nil && err2 == nil && ra == rb
+}
+
+// The dry run stages the .npmrc npm itself would read as project
+// configuration: none in global mode, the --prefix when given, else the one
+// at npm's local prefix — the nearest directory up from the working
+// directory with a package.json or node_modules, so a run from a project
+// subdirectory gets the project's file, not the subdirectory's.
+func TestNpmConfigDir(t *testing.T) {
+	root := t.TempDir()
+	proj := filepath.Join(root, "proj")
+	sub := filepath.Join(proj, "sub")
+	bare := filepath.Join(root, "bare")
+	for _, d := range []string{sub, bare} {
+		os.MkdirAll(d, 0o755)
+	}
+	os.WriteFile(filepath.Join(proj, "package.json"), []byte("{}"), 0o644)
+	npm, _ := Lookup("npm")
+	pnpm, _ := Lookup("pnpm")
+
+	tests := []struct {
+		name string
+		cwd  string
+		m    *Manager
+		args []string
+		want string
+	}{
+		{"project root", proj, npm, []string{"install", "x"}, proj},
+		{"project subdirectory", sub, npm, []string{"install", "x"}, proj},
+		{"no project at all", bare, npm, []string{"install", "x"}, bare},
+		{"global", sub, npm, []string{"install", "-g", "x"}, ""},
+		{"--global", sub, npm, []string{"install", "--global", "x"}, ""},
+		{"--location=global", sub, npm, []string{"install", "--location=global", "x"}, ""},
+		{"--location global", sub, npm, []string{"install", "--location", "global", "x"}, ""},
+		{"--location=project", sub, npm, []string{"install", "--location=project", "x"}, proj},
+		{"--prefix", sub, npm, []string{"--prefix", "..", "install", "x"}, proj},
+		{"-C after the verb", bare, npm, []string{"install", "-C", "../proj", "x"}, proj},
+		{"pnpm reads the project's", sub, pnpm, []string{"add", "x"}, proj},
+	}
+	for _, tt := range tests {
+		t.Chdir(tt.cwd)
+		got := npmConfigDir(tt.m, tt.args)
+		if tt.want == "" || got == "" {
+			if got != tt.want {
+				t.Errorf("%s: got %q, want %q", tt.name, got, tt.want)
+			}
+			continue
+		}
+		if !sameDir(t, got, tt.want) {
+			t.Errorf("%s: got %q, want %q", tt.name, got, tt.want)
+		}
+	}
+}
+
+func TestAbsFlagValues(t *testing.T) {
+	got := absFlagValues([]string{"-c", "c.txt", "--overrides=o.txt", "-f", "https://w.example/", "--pre", "--index-url", "https://i.example"},
+		flagSet("-c", "--overrides", "-f"))
+	want := []string{"-c", absPath("c.txt"), "--overrides=" + absPath("o.txt"), "-f", "https://w.example/", "--pre", "--index-url", "https://i.example"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
 	}
 }

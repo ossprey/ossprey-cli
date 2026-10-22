@@ -35,9 +35,9 @@ type Resolved struct {
 var ErrNoResolver = errors.New("no resolver on PATH")
 
 // ErrNeedsUV reports a uv command only uv can predict, on a host with no
-// working uv: one that adds an index, since pip's dry run would pick
+// working uv: one whose flags pip's dry run cannot honour, so it would pick
 // releases by a different rule (see ResolvePythonInstallWithUV).
-var ErrNeedsUV = errors.New("an added index needs uv to resolve, and none works on PATH")
+var ErrNeedsUV = errors.New("its uv flags need uv to resolve, and none works on PATH")
 
 // ResolveNpmInstall predicts what `npm install <specs>` would put in the tree,
 // by generating a lockfile in a throwaway copy of the project — never in the
@@ -47,12 +47,14 @@ var ErrNeedsUV = errors.New("an added index needs uv to resolve, and none works 
 //
 // projectDir is the project the install lands in, or "" for an install with
 // no project context (global, redirected elsewhere, or a yarn/pnpm lockfile
-// npm cannot read). With a project, its package.json and npm lockfile are
-// copied in so npm keeps the versions the project already pins, and the
+// npm cannot read). With a project, its package.json, .npmrc and npm lockfile
+// are copied in so npm keeps the versions the project already pins, and the
 // packages that lockfile already named come back Locked. Local and workspace
 // dependencies are dropped from the copy, since their paths do not exist
-// there. flags are passed to npm after its own.
-func ResolveNpmInstall(ctx context.Context, projectDir string, specs, flags []string) ([]Resolved, error) {
+// there. Without one, configDir names the directory whose .npmrc npm reads as
+// the command's project configuration (npm's local prefix), or "" when it
+// reads none, as in global mode. flags are passed to npm after its own.
+func ResolveNpmInstall(ctx context.Context, projectDir, configDir string, specs, flags []string) ([]Resolved, error) {
 	npm, err := lookTool("npm")
 	if err != nil {
 		return nil, fmt.Errorf("%w (npm)", ErrNoResolver)
@@ -68,10 +70,12 @@ func ResolveNpmInstall(ctx context.Context, projectDir string, specs, flags []st
 		if err := stageNpmProject(projectDir, tmp, locked); err != nil {
 			return nil, err
 		}
-	} else if err := stageNpmrc(".", tmp); err != nil {
-		// No project, but npm still reads the .npmrc where it is run: a scoped
-		// private registry applies to `npx @org/cli` and `npm install -g` too.
-		return nil, err
+	} else if configDir != "" {
+		// No project, but npm still reads a project-level .npmrc: a scoped
+		// private registry applies to `npx @org/cli` too.
+		if err := stageNpmrc(configDir, tmp); err != nil {
+			return nil, err
+		}
 	}
 
 	args := append([]string{"install",
@@ -228,8 +232,12 @@ func resolvedFromPackages(pkgs []pkg.Package, locked map[string]bool) []Resolved
 // from the very tree being checked. Such a package fails the resolution, and
 // the caller falls back to checking the names alone, rather than running it.
 //
-// dir is where relative paths in the flags resolve (the user's cwd). uvFlags
-// go to `uv pip compile`, pipFlags to `pip install`, whichever is used.
+// dir is where the resolver runs: where relative paths in the flags resolve
+// and whose configuration (uv.toml, [tool.uv]) uv reads. "" runs it in a
+// scratch directory with no project configuration at all, as uv's own tool
+// commands do (`uvx` reads user and system configuration only); the caller
+// then makes any path in the flags absolute. uvFlags go to `uv pip compile`,
+// pipFlags to `pip install`, whichever is used.
 func ResolvePythonInstall(ctx context.Context, dir string, specs, uvFlags, pipFlags []string) ([]Resolved, error) {
 	if uv, ok := lookupUV(ctx); ok {
 		return resolveWithUV(ctx, uv, dir, specs, uvFlags)
@@ -251,9 +259,11 @@ func ResolvePythonInstall(ctx context.Context, dir string, specs, uvFlags, pipFl
 // ResolvePythonInstallWithUV is ResolvePythonInstall with no pip fallback,
 // for a uv command whose flags pip cannot honour: `--index` and
 // `--extra-index-url` make uv take a package from the first index that has
-// it, where pip takes the best version across every index, so pip's dry run
-// could check a release uv does not install, with nothing saying so. Without
-// a working uv it fails with ErrNeedsUV, and the caller checks the names.
+// it, where pip takes the best version across every index; `--overrides`,
+// `--resolution`, `--exclude-newer` and the like change which release is
+// picked and have no pip spelling. pip's dry run could then check a release
+// uv does not install, with nothing saying so. Without a working uv it fails
+// with ErrNeedsUV, and the caller checks the names.
 func ResolvePythonInstallWithUV(ctx context.Context, dir string, specs, uvFlags []string) ([]Resolved, error) {
 	uv, ok := lookupUV(ctx)
 	if !ok {
@@ -283,6 +293,9 @@ func resolveWithUV(ctx context.Context, uv, dir string, specs, flags []string) (
 		"--no-build",
 	}, flags...)
 	args = append(args, req)
+	if dir == "" {
+		dir = tmp
+	}
 
 	budget := resolverTimeout()
 	ctx, cancel := context.WithTimeout(ctx, budget)
@@ -316,6 +329,9 @@ func resolveWithPip(ctx context.Context, python, dir string, specs, flags []stri
 	defer os.RemoveAll(tmp)
 	args := append([]string{"--only-binary=:all:"}, flags...)
 	args = append(args, specs...)
+	if dir == "" {
+		dir = tmp
+	}
 	pkgs, err := runPipResolve(ctx, python, tmp, "", dir, args, file.Location{})
 	if err != nil {
 		return nil, err
