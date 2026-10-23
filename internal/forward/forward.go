@@ -1137,7 +1137,7 @@ func ParseSpecs(m *Manager, args []string) installArgs {
 func parseInstallArgs(m *Manager, args []string, positionalReqFiles bool) installArgs {
 	valFlags := valueFlags[m.Bin]
 	if m.Ecosystem == "pypi" {
-		args = splitAttachedShorts(args, valFlags)
+		args = splitAttachedShorts(args, pythonOptionFlags(m), clapEquals(m))
 	}
 	reqFlags := requirementFileFlags[m.Bin]
 	pkgFlags := packageValueFlags[m.Bin]
@@ -1244,7 +1244,7 @@ var bareName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 // swallows the command the same way. toolRunValueFlags is therefore taken
 // verbatim from `uv tool run --help`, not guessed.
 func parseToolRun(m *Manager, args []string) installArgs {
-	args = splitAttachedShorts(args, toolRunValueFlags)
+	args = splitAttachedShorts(args, toolRunValueFlags, true)
 	var out installArgs
 	sourceNamed := false
 	addPkg := func(tok string) {
@@ -1361,16 +1361,21 @@ func splitRequirements(value string) []string {
 // splitFlagValue splits "--flag=value" into ("--flag", "value", true). A flag
 // with no inline value returns (flag, "", false).
 // splitAttachedShorts rewrites a short option with its value attached
-// (`-cfile`, `-ihttps://…`, `-p3.12`), as clap and argparse both read it,
+// (`-cfile`, `-ihttps://…`, `-p3.12`), as clap and optparse both read it,
 // into the option and the value as two tokens, for every short option in
-// valFlags. A token that is not one of those is left alone, so a run of
-// boolean shorts (`-qq`) stays what it was. So is the value of the option
-// before it: pip takes the next token as `--config-settings`' value whatever
-// it looks like, so in `--config-settings -Cfoo=bar requests` the second
-// token is a setting and not a `-C`; splitting it read `foo=bar` as a
-// package. Everything after `--` is positional and is copied as it is. The
-// result is a new slice; args is untouched.
-func splitAttachedShorts(args []string, valFlags map[string]bool) []string {
+// valFlags — which must list every value-taking option the parser knows,
+// requirements-file and package flags included, since a token owed to the
+// option before it is copied as it is: pip takes the next token as the value
+// of `--config-settings` or `-r` whatever it looks like, so in
+// `--config-settings -Cfoo=bar requests` the second token is a setting and
+// in `-r -constraints.txt` a file, and splitting either read a package that
+// is not being installed. A token that is not a listed short is left alone,
+// so a run of boolean shorts (`-qq`) stays what it was, and so is everything
+// after `--`. The `=` of `-c=file` is dropped only where the parser drops it
+// (stripEquals: clap does, so uv reads `file`; optparse does not, so pip
+// reads the file named `=file`). The result is a new slice; args is
+// untouched.
+func splitAttachedShorts(args []string, valFlags map[string]bool, stripEquals bool) []string {
 	out := make([]string, 0, len(args))
 	value := false // the token before was an option still owed its value
 	for i, a := range args {
@@ -1380,7 +1385,11 @@ func splitAttachedShorts(args []string, valFlags map[string]bool) []string {
 		case a == "--":
 			return append(out, args[i:]...)
 		case len(a) > 2 && a[0] == '-' && a[1] != '-' && valFlags[a[:2]]:
-			out = append(out, a[:2], strings.TrimPrefix(a[2:], "="))
+			v := a[2:]
+			if stripEquals {
+				v = strings.TrimPrefix(v, "=")
+			}
+			out = append(out, a[:2], v)
 			continue
 		case strings.HasPrefix(a, "-"):
 			flag, _, hasInline := splitFlagValue(a)
@@ -1389,6 +1398,12 @@ func splitAttachedShorts(args []string, valFlags map[string]bool) []string {
 		out = append(out, a)
 	}
 	return out
+}
+
+// clapEquals reports whether m's parser drops the `=` of an attached short
+// value (`-c=file`): uv's clap does, pip's optparse keeps it in the value.
+func clapEquals(m *Manager) bool {
+	return m.Bin == "uv" || m.Bin == "uvx"
 }
 
 func splitFlagValue(arg string) (flag, value string, hasInline bool) {

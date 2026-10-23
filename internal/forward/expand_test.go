@@ -1679,22 +1679,40 @@ func TestExpandInstall_UVGlobalOptionsAndInterpreterPaths(t *testing.T) {
 // read it: `-wrich` names a package for a tool run, `-cc.txt` is a
 // constraints file and not a package for a named install.
 func TestSplitAttachedShorts(t *testing.T) {
-	got := splitAttachedShorts([]string{"-cc.txt", "-c=d.txt", "-qq", "--with=x", "-w", "rich", "ruff", "-ievil"}, toolRunValueFlags)
+	got := splitAttachedShorts([]string{"-cc.txt", "-c=d.txt", "-qq", "--with=x", "-w", "rich", "ruff", "-ievil"}, toolRunValueFlags, true)
 	want := []string{"-c", "c.txt", "-c", "d.txt", "-qq", "--with=x", "-w", "rich", "ruff", "-i", "evil"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
 	}
 	// An option's value is copied as it is, whatever it looks like, and so
 	// is everything after `--`.
-	got = splitAttachedShorts([]string{"--with", "-cnot-a-file", "-c", "-ialso-a-value", "-wrich", "--", "-ievil"}, toolRunValueFlags)
+	got = splitAttachedShorts([]string{"--with", "-cnot-a-file", "-c", "-ialso-a-value", "-wrich", "--", "-ievil"}, toolRunValueFlags, true)
 	want = []string{"--with", "-cnot-a-file", "-c", "-ialso-a-value", "-w", "rich", "--", "-ievil"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
 	}
+	// optparse keeps the `=` of an attached value: pip's `-c=c.txt` names
+	// the file `=c.txt`, and a dry run reading `c.txt` would check another
+	// file's pins. Its `-r` takes the next token whatever it looks like.
+	pip, _ := Lookup("pip")
+	got = splitAttachedShorts([]string{"-c=c.txt", "-r", "-constraints.txt", "-rfile.txt", "requests"}, pythonOptionFlags(pip), clapEquals(pip))
+	want = []string{"-c", "=c.txt", "-r", "-constraints.txt", "-r", "file.txt", "requests"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("pip: got %v, want %v", got, want)
+	}
+	parsed := ParseSpecs(pip, []string{"-r", "-constraints.txt", "-rfile.txt", "-c=c.txt", "requests"})
+	if want := []string{"-constraints.txt", "file.txt"}; !reflect.DeepEqual(parsed.ReqFiles, want) {
+		t.Errorf("pip install -r -constraints.txt -rfile.txt: req files = %v, want %v", parsed.ReqFiles, want)
+	}
+	if want := []check.Spec{{Ecosystem: "pypi", Name: "requests"}}; !reflect.DeepEqual(parsed.Specs, want) {
+		t.Errorf("pip install -r -constraints.txt -rfile.txt -c=c.txt requests: specs = %+v, want %+v", parsed.Specs, want)
+	}
+	if got := pipResolveFlags(pip, splitAttachedShorts([]string{"-c=c.txt", "requests"}, pythonOptionFlags(pip), clapEquals(pip))); !reflect.DeepEqual(got, []string{"-c", "=c.txt"}) {
+		t.Errorf("pip -c=c.txt resolver flags = %v, want [-c =c.txt]", got)
+	}
 	// pip takes the next token as --config-settings' value whatever it looks
 	// like, so this installs requests with one setting and nothing named foo.
-	pip, _ := Lookup("pip")
-	parsed := ParseSpecs(pip, []string{"--config-settings", "-Cfoo=bar", "requests"})
+	parsed = ParseSpecs(pip, []string{"--config-settings", "-Cfoo=bar", "requests"})
 	if want := []check.Spec{{Ecosystem: "pypi", Name: "requests"}}; !reflect.DeepEqual(parsed.Specs, want) {
 		t.Errorf("pip install --config-settings -Cfoo=bar requests: specs = %+v, want %+v", parsed.Specs, want)
 	}

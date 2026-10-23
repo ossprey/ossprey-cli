@@ -299,7 +299,7 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 		// A short option's value may be attached (`-ihttps://…`); read it
 		// as the resolver will, from a copy, so args stays what the real
 		// command gets.
-		rest = splitAttachedShorts(rest, pythonValueFlags(m))
+		rest = splitAttachedShorts(rest, pythonOptionFlags(m), clapEquals(m))
 		// uv's global options sit before the verb (`uv --config-file x tool
 		// run …`), outside rest; the ones that change the resolution come
 		// along, and can themselves make the command uv-only.
@@ -416,19 +416,21 @@ func uvGlobalArgs(m *Manager, args []string) []string {
 		return nil
 	}
 	if idx := verbIndex("uv", args); idx > 0 {
-		return splitAttachedShorts(args[:idx], globalValueFlags["uv"])
+		return splitAttachedShorts(args[:idx], globalValueFlags["uv"], true)
 	}
 	return nil
 }
 
-// pythonValueFlags are the value-taking flags of a Python manager's
-// command, uv's tool-run table included since `uv tool run` shares the
-// binary.
-func pythonValueFlags(m *Manager) map[string]bool {
+// pythonOptionFlags are every value-taking option a Python manager's parser
+// knows — its resolution flags, requirements-file, package and source
+// flags, and for uv the tool-run flags — the set splitAttachedShorts needs
+// to tell an attached short value from a token owed to the option before.
+func pythonOptionFlags(m *Manager) map[string]bool {
+	sets := []map[string]bool{valueFlags[m.Bin], requirementFileFlags[m.Bin], packageValueFlags[m.Bin], sourceFlags[m.Bin]}
 	if m.Bin == "uv" || m.Bin == "uvx" {
-		return union(valueFlags["uv"], toolRunValueFlags)
+		sets = append(sets, valueFlags["uv"], requirementFileFlags["uv"], packageValueFlags["uv"], sourceFlags["uv"], toolRunValueFlags)
 	}
-	return valueFlags[m.Bin]
+	return union(sets...)
 }
 
 // withNpxCached adds to a fresh resolution of a tool run whatever an earlier
