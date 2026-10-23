@@ -401,7 +401,15 @@ func parseNpmArgv(in []string) npmArgv {
 			case kind == npmBoolOrAlways && la == "always":
 				i++
 			}
-			out.record(key, value)
+			// A negated path option (`--no-cache`, `--no-prefix`) is a
+			// boolean nopt drops as invalid for the type ("invalid config
+			// cache=false … Must be valid filesystem path"), so npm keeps
+			// its default; recording the word rendered a cache named
+			// `false`. A literal `--cache=false` is the path `false`, which
+			// npm does use, and takes the value branch below.
+			if !npmPathConfig[key] {
+				out.record(key, value)
+			}
 			continue
 		}
 

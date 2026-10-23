@@ -8,10 +8,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/BurntSushi/toml"
 	"io/fs"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	"github.com/anchore/syft/syft/file"
 	"github.com/anchore/syft/syft/pkg"
 )
@@ -65,13 +66,15 @@ var ErrNeedsUV = errors.New("its uv flags need uv to resolve, and none works on 
 //
 // projectDir is the project the install lands in, or "" for an install with
 // no project context (global, redirected elsewhere, or a yarn/pnpm lockfile
-// npm cannot read). With a project, its package.json, .npmrc and npm lockfile
-// are copied in so npm keeps the versions the project already pins, and the
+// npm cannot read). With a project, its package.json and npm lockfile are
+// copied in so npm keeps the versions the project already pins, and the
 // packages that lockfile already named come back Locked. Local and workspace
 // dependencies are dropped from the copy, since their paths do not exist
-// there. Without one, configDir names the directory whose .npmrc npm reads as
-// the command's project configuration (npm's local prefix), or "" when it
-// reads none, as in global mode. flags are passed to npm after its own.
+// there. In either case configDir names the directory whose .npmrc npm reads
+// as the command's project configuration (npm's local prefix — from a
+// workspace member the root, whose file npm reads in place of the member's),
+// or "" when it reads none, as in global mode. flags are passed to npm after
+// its own.
 func ResolveNpmInstall(ctx context.Context, projectDir, configDir string, specs, flags []string) ([]Resolved, error) {
 	npm, err := lookTool("npm")
 	if err != nil {
@@ -84,25 +87,8 @@ func ResolveNpmInstall(ctx context.Context, projectDir, configDir string, specs,
 	defer os.RemoveAll(tmp)
 
 	locked := map[string]bool{}
-	if projectDir != "" {
-		if err := stageNpmProject(projectDir, tmp, locked); err != nil {
-			return nil, err
-		}
-	} else {
-		if configDir != "" {
-			// No project, but npm still reads a project-level .npmrc: a
-			// scoped private registry applies to `npx @org/cli` too.
-			if err := stageNpmrc(configDir, tmp); err != nil {
-				return nil, err
-			}
-		}
-		// A manifest of its own, or npm takes the nearest ancestor with one
-		// as the project — scratch sits under one when TMPDIR points inside
-		// a project — and the dry run then rewrites that project's
-		// package.json and lockfile (verified against npm 11.19.1).
-		if err := os.WriteFile(filepath.Join(tmp, "package.json"), []byte("{\"name\":\"ossprey-scratch\",\"private\":true}\n"), 0o600); err != nil {
-			return nil, err
-		}
+	if err := stageNpmScratch(projectDir, configDir, tmp, locked); err != nil {
+		return nil, err
 	}
 
 	args := append([]string{"install",
@@ -157,43 +143,19 @@ func ResolveNpmInstall(ctx context.Context, projectDir, configDir string, specs,
 // The answer may be relative, as uv printed it; the caller resolves it
 // against the directory the run changes to.
 func UVCacheDir(ctx context.Context, flags []string) (string, error) {
-	uv, err := lookTool("uv")
-	if err != nil {
-		return "", fmt.Errorf("%w (uv)", ErrNoResolver)
-	}
-	scratch, err := os.MkdirTemp("", "ossprey-uv-")
-	if err != nil {
-		return "", err
-	}
-	defer os.RemoveAll(scratch)
-	// The configuration the tool run reads, named explicitly: a bare
-	// scratch directory does not stop uv discovering a project's uv.toml
-	// above it, which uvx ignores, and scratch sits under a project when
-	// TMPDIR points inside one.
-	if flags, err = uvToolRunConfig(flags, scratch); err != nil {
-		return "", err
-	}
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, uv, append([]string{"cache", "dir"}, flags...)...)
-	cmd.Dir = scratch
-	cmd.Env = toolEnv()
-	cmd.WaitDelay = 5 * time.Second
-	out, err := cmd.Output()
-	if err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
-			return "", fmt.Errorf("uv cache dir: %w: %s", err, strings.TrimSpace(string(ee.Stderr)))
-		}
-		return "", fmt.Errorf("uv cache dir: %w", err)
-	}
-	return strings.TrimSpace(string(out)), nil
+	return uvProbe(ctx, flags, "cache", "dir")
 }
 
 // UVToolDir is where uv keeps installed tools (`uv tool dir`), which
 // honours UV_TOOL_DIR, a user-level uv.toml and the configuration flags
 // given; asked from a scratch directory for the reason UVCacheDir is.
 func UVToolDir(ctx context.Context, flags []string) (string, error) {
+	return uvProbe(ctx, flags, "tool", "dir")
+}
+
+// uvProbe runs one of uv's directory queries with the tool run's
+// configuration flags and returns its one-line answer.
+func uvProbe(ctx context.Context, flags []string, query ...string) (string, error) {
 	uv, err := lookTool("uv")
 	if err != nil {
 		return "", fmt.Errorf("%w (uv)", ErrNoResolver)
@@ -212,17 +174,18 @@ func UVToolDir(ctx context.Context, flags []string) (string, error) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, uv, append([]string{"tool", "dir"}, flags...)...)
+	cmd := exec.CommandContext(ctx, uv, append(slices.Clone(query), flags...)...)
 	cmd.Dir = scratch
 	cmd.Env = toolEnv()
 	cmd.WaitDelay = 5 * time.Second
 	out, err := cmd.Output()
 	if err != nil {
+		name := "uv " + strings.Join(query, " ")
 		var ee *exec.ExitError
 		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
-			return "", fmt.Errorf("uv tool dir: %w: %s", err, strings.TrimSpace(string(ee.Stderr)))
+			return "", fmt.Errorf("%s: %w: %s", name, err, strings.TrimSpace(string(ee.Stderr)))
 		}
-		return "", fmt.Errorf("uv tool dir: %w", err)
+		return "", fmt.Errorf("%s: %w", name, err)
 	}
 	return strings.TrimSpace(string(out)), nil
 }
@@ -279,6 +242,11 @@ func UVCachedTree(cacheDir string, want map[string]string) ([]Resolved, error) {
 		}
 		for _, env := range envs {
 			if _, err := os.Stat(filepath.Join(env, "pyvenv.cfg")); err != nil {
+				continue
+			}
+			// Most cached environments hold none of the names; their
+			// dist-info directories say so without a METADATA read each.
+			if !holdsNames(env, want) {
 				continue
 			}
 			// A damaged environment hides only itself: the one uv reuses
@@ -450,6 +418,34 @@ func pep440Equal(want, have string) bool {
 
 // holdsAll reports whether pkgs has every package in want, at the exact
 // version where one is given, as PEP 440 compares versions.
+// holdsNames reports whether env's site-packages has a dist-info directory
+// for every name in want (canonical PyPI names), by listing them rather
+// than reading metadata: a dist-info is `<name>-<version>.dist-info` with
+// the name's separators folded to `_` and its case kept (`Django-5.0`,
+// `PyYAML-6.0`), so the part before the first `-` canonicalises to the
+// name. Versions are matched afterwards from the metadata itself.
+func holdsNames(env string, want map[string]string) bool {
+	names := map[string]bool{}
+	for _, pattern := range []string{"lib/python*/site-packages/*.dist-info", "Lib/site-packages/*.dist-info"} {
+		matches, err := fs.Glob(os.DirFS(env), pattern)
+		if err != nil {
+			continue
+		}
+		for _, m := range matches {
+			base := strings.TrimSuffix(path.Base(m), ".dist-info")
+			if i := strings.IndexByte(base, '-'); i > 0 {
+				names[canonicalPackageName(base[:i])] = true
+			}
+		}
+	}
+	for name := range want {
+		if !names[name] {
+			return false
+		}
+	}
+	return true
+}
+
 func holdsAll(pkgs []Resolved, want map[string]string) bool {
 	for name, version := range want {
 		found := false
@@ -634,6 +630,31 @@ func NpmConfigOmits(ctx context.Context, dir string, flags []string) ([]string, 
 // dst: package.json with its local dependencies removed, .npmrc for registry
 // configuration, and the npm lockfile where there is one, recording every
 // package that lockfile already names in locked.
+// stageNpmScratch lays out the dry run's directory: the project's manifest
+// and lockfile when there is one, else a manifest of scratch's own (or npm
+// takes the nearest ancestor with one as the project — scratch sits under
+// one when TMPDIR points inside a project — and the dry run then rewrites
+// that project's package.json and lockfile, verified against npm 11.19.1);
+// and in either case the .npmrc of configDir, the directory npm reads
+// project configuration from for this command. From a declared workspace
+// member that is the root's file, not the member's, which npm ignores with
+// a warning; staging the member's resolved a scoped private registry
+// against public npm. A scoped registry applies to `npx @org/cli` and
+// `npm install -g` too, which have no project.
+func stageNpmScratch(projectDir, configDir, dst string, locked map[string]bool) error {
+	if projectDir != "" {
+		if err := stageNpmProject(projectDir, dst, locked); err != nil {
+			return err
+		}
+	} else if err := os.WriteFile(filepath.Join(dst, "package.json"), []byte("{\"name\":\"ossprey-scratch\",\"private\":true}\n"), 0o600); err != nil {
+		return err
+	}
+	if configDir == "" {
+		return nil
+	}
+	return stageNpmrc(configDir, dst)
+}
+
 func stageNpmProject(src, dst string, locked map[string]bool) error {
 	data, err := os.ReadFile(filepath.Join(src, "package.json"))
 	if err != nil {
@@ -644,9 +665,6 @@ func stageNpmProject(src, dst string, locked map[string]bool) error {
 		return fmt.Errorf("package.json: %w", err)
 	}
 	if err := os.WriteFile(filepath.Join(dst, "package.json"), cleaned, 0o644); err != nil {
-		return err
-	}
-	if err := stageNpmrc(src, dst); err != nil {
 		return err
 	}
 	// A shrinkwrap outranks a package-lock, and is staged under the lock's
@@ -666,8 +684,8 @@ func stageNpmProject(src, dst string, locked map[string]bool) error {
 	return nil
 }
 
-// stageNpmrc copies the .npmrc npm would read in src, where there is one, so
-// the dry run resolves against the same registries as the real command.
+// stageNpmrc copies src's .npmrc, where there is one, so the dry run
+// resolves against the same registries as the real command.
 func stageNpmrc(src, dst string) error {
 	rc, err := os.ReadFile(filepath.Join(src, ".npmrc"))
 	if err != nil {
@@ -864,17 +882,9 @@ func resolveWithUV(ctx context.Context, uv, dir string, specs, flags []string) (
 // may sit under a project when TMPDIR points inside one, where `uv pip
 // compile` would read configuration uvx ignores.
 func uvToolRunConfig(flags []string, scratch string) ([]string, error) {
-	path := ""
-	for i := 0; i < len(flags); i++ {
-		switch f := flags[i]; {
-		case f == "--no-config":
-			return flags, nil
-		case f == "--config-file" && i+1 < len(flags):
-			path = flags[i+1]
-			i++
-		case strings.HasPrefix(f, "--config-file="):
-			path = strings.TrimPrefix(f, "--config-file=")
-		}
+	path, noConfig := UVConfigFileFlag(flags)
+	if noConfig {
+		return flags, nil
 	}
 	fromEnv := false
 	if path == "" {
@@ -940,6 +950,26 @@ func uvToolRunConfig(flags []string, scratch string) ([]string, error) {
 		}
 	}
 	return append(out, "--config-file", stripped), nil
+}
+
+// UVConfigFileFlag reads the configuration-file options among a uv
+// command's flags as uv does: the last --config-file, in either spelling,
+// names the file, and --no-config anywhere means no file is read. One
+// reading for the scratch copy, the uv-only routing and the probes, so none
+// of them can read the same flags differently.
+func UVConfigFileFlag(flags []string) (path string, noConfig bool) {
+	for i := 0; i < len(flags); i++ {
+		switch f := flags[i]; {
+		case f == "--no-config":
+			noConfig = true
+		case f == "--config-file" && i+1 < len(flags):
+			path = flags[i+1]
+			i++
+		case strings.HasPrefix(f, "--config-file="):
+			path = strings.TrimPrefix(f, "--config-file=")
+		}
+	}
+	return path, noConfig
 }
 
 // anchorUVConfigPaths makes absolute every relative local path among the
@@ -1061,17 +1091,9 @@ func UVConfigShapesResolution(flags []string, dir string) bool {
 			return true
 		}
 	}
-	path := ""
-	for i := 0; i < len(flags); i++ {
-		switch f := flags[i]; {
-		case f == "--no-config":
-			return false
-		case f == "--config-file" && i+1 < len(flags):
-			path = flags[i+1]
-			i++
-		case strings.HasPrefix(f, "--config-file="):
-			path = strings.TrimPrefix(f, "--config-file=")
-		}
+	path, noConfig := UVConfigFileFlag(flags)
+	if noConfig {
+		return false
 	}
 	if path == "" {
 		path = os.Getenv("UV_CONFIG_FILE")

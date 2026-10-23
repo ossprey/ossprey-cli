@@ -515,6 +515,29 @@ func TestExpandInstall_ToolRunHasNoProjectContext(t *testing.T) {
 	}
 }
 
+// stubUVHost keeps a test's reading of uv's configuration, cache and
+// installed tools off the host: a user-level uv.toml with an [[index]] (as
+// codeartifact-login writes one) would otherwise route the run to the real
+// uv resolver, and a `uv tool install` or a cached environment on the host
+// would change what the cached-tree readers return.
+func stubUVHost(t *testing.T) {
+	t.Helper()
+	oldNeeds, oldDir, oldCached, oldToolDir, oldInstalled := uvConfigNeedsUVFn, uvCacheDirFn, uvCachedFn, uvToolDirFn, uvInstalledFn
+	uvConfigNeedsUVFn = func([]string, string) bool { return false }
+	uvCacheDirFn = func(context.Context, []string) (string, error) { return "", errors.New("stubbed") }
+	uvCachedFn = func(string, map[string]string) ([]catalog.Resolved, error) { return nil, nil }
+	uvToolDirFn = func(context.Context, []string) (string, error) { return "", errors.New("stubbed") }
+	uvInstalledFn = func(string, string) ([]catalog.Resolved, error) { return nil, nil }
+	t.Cleanup(func() {
+		uvConfigNeedsUVFn, uvCacheDirFn, uvCachedFn, uvToolDirFn, uvInstalledFn = oldNeeds, oldDir, oldCached, oldToolDir, oldInstalled
+	})
+	for _, v := range []string{"UV_CONFIG_FILE", "UV_CONSTRAINT", "UV_OVERRIDE", "UV_BUILD_CONSTRAINT", "UV_FIND_LINKS", "UV_PYTHON", "UV_NO_CACHE", "UV_INDEX", "UV_INDEX_URL", "UV_DEFAULT_INDEX", "UV_EXTRA_INDEX_URL"} {
+		t.Setenv(v, "")
+	}
+	t.Setenv("UV_CACHE_DIR", t.TempDir())
+	t.Setenv("UV_TOOL_DIR", t.TempDir())
+}
+
 // For uvx, only the flags before the command reach the resolver: an index
 // named there matters, `--no-deps` in the program's own argv does not.
 func TestExpandInstall_ToolRunReadsOnlyLeadingFlags(t *testing.T) {
@@ -526,6 +549,7 @@ func TestExpandInstall_ToolRunReadsOnlyLeadingFlags(t *testing.T) {
 		return []catalog.Resolved{{Name: "ruff", Version: "0.6.0"}}, nil
 	}
 	t.Cleanup(func() { resolvePythonFn = old })
+	stubUVHost(t)
 
 	m, _ := Lookup("uvx")
 	args := []string{"--index-url", "https://i.example", "--with", "ruff-lsp", "-q", "ruff@0.6.0", "--no-deps", "--index-url", "x"}
@@ -590,11 +614,7 @@ func TestExpandInstall_UVOnlyFlagsAreResolvedByUVOnly(t *testing.T) {
 		return nil, catalog.ErrNeedsUV
 	}
 	t.Cleanup(func() { resolvePythonFn, resolveWithUVFn = old, oldUV })
-	// The host's own uv cache and installed tools are read even when the
-	// resolution fails; here they must hold nothing.
-	t.Setenv("UV_CACHE_DIR", t.TempDir())
-	t.Setenv("UV_TOOL_DIR", t.TempDir())
-	t.Setenv("UV_CONFIG_FILE", "")
+	stubUVHost(t)
 
 	uvx, _ := Lookup("uvx")
 	uv, _ := Lookup("uv")
@@ -840,7 +860,11 @@ func TestExpandInstall_ToolRunNamesRelativeEnvPaths(t *testing.T) {
 		{"UV_CONSTRAINT", "constraints.lock", []string{"ruff"}, []string{"--constraints", absPath("constraints.lock")}},
 		{"UV_FIND_LINKS", "wheels", []string{"ruff"}, []string{"--find-links", absPath("wheels")}},
 		{"UV_BUILD_CONSTRAINT", "b.txt", []string{"ruff"}, []string{"--build-constraints", absPath("b.txt")}},
-		{"UV_FIND_LINKS", "https://w.example/simple ./wheels", []string{"ruff"}, []string{"--find-links", "https://w.example/simple", "--find-links", absPath("wheels")}},
+		// uv splits UV_FIND_LINKS on commas, not whitespace: a space is part
+		// of the path.
+		{"UV_FIND_LINKS", "https://w.example/simple,./wheels, w2", []string{"ruff"}, []string{"--find-links", "https://w.example/simple", "--find-links", absPath("wheels"), "--find-links", absPath("w2")}},
+		{"UV_FIND_LINKS", "my wheels", []string{"ruff"}, []string{"--find-links", absPath("my wheels")}},
+		{"UV_CONSTRAINT", "c1.txt,c2.txt", []string{"ruff"}, []string{"--constraints", absPath("c1.txt,c2.txt")}},
 		{"UV_FIND_LINKS", "https://w.example/simple", []string{"ruff"}, nil},
 		{"UV_PYTHON", ".venv/bin/python", []string{"ruff"}, []string{"--python", absPath(".venv/bin/python")}},
 		{"UV_PYTHON", "3.12", []string{"ruff"}, nil},
@@ -1032,6 +1056,20 @@ func TestResolveNamed_UnresolvedSetResolvesTheNamesToo(t *testing.T) {
 	}
 	if want := []check.Spec{{Ecosystem: "npm", Name: "tool", Version: "2.0.0"}}; !reflect.DeepEqual(set.specs, want) {
 		t.Errorf("trusted cached copy: specs = %+v, want %+v", set.specs, want)
+	}
+	// One PyPI release spelled two ways is one release: a cached
+	// environment's metadata says `Django 5.0`, the registry `django 5.0`.
+	swapExpand(t, func(context.Context, *Manager, []string, int, installArgs) ([]catalog.Resolved, error) {
+		return []catalog.Resolved{{Name: "Django", Version: "5.0"}}, errors.New("uv: index unreachable")
+	})
+	uvx, _ := Lookup("uvx")
+	parsed = parseToolRun(uvx, []string{"django"})
+	parsed.ToolRun = true
+	set = resolveNamed(context.Background(), uvx, Options{}, 0, parsed, func(context.Context, string, string, string) (string, error) {
+		return "5.0", nil
+	})
+	if want := []check.Spec{{Ecosystem: "pypi", Name: "Django", Version: "5.0"}}; !reflect.DeepEqual(set.specs, want) {
+		t.Errorf("two spellings: specs = %+v, want %+v", set.specs, want)
 	}
 }
 
@@ -1566,6 +1604,7 @@ func TestExpandInstall_UVGlobalOptionsAndInterpreterPaths(t *testing.T) {
 		return nil, nil
 	}
 	t.Cleanup(func() { resolvePythonFn, resolveWithUVFn = old, oldUV })
+	stubUVHost(t)
 
 	uv, _ := Lookup("uv")
 	uvx, _ := Lookup("uvx")
@@ -2161,5 +2200,27 @@ func TestExpandInstall_ToolRunCoversTheNpxCache(t *testing.T) {
 	npxCachedFn = func(string, []string) ([]catalog.Resolved, error) { return nil, errors.New("unreadable") }
 	if tree, err := expandInstall(context.Background(), npx, args, 0, parsed); err != nil || len(tree) != 2 {
 		t.Errorf("unreadable cache: tree = %v, err = %v", tree, err)
+	}
+}
+
+// npm's omit policy is npm's: bun reads none of its configuration, so a
+// bunx run is never pruned by an .npmrc omit, optional=false or the like.
+func TestExpandInstall_BunxIsNotPrunedByNpmsOmitPolicy(t *testing.T) {
+	old, oldOmits := resolveNpmFn, npmConfigOmitsFn
+	resolveNpmFn = func(context.Context, string, string, []string, []string) ([]catalog.Resolved, error) {
+		return []catalog.Resolved{{Name: "cli", Version: "1.0.0"}, {Name: "extra", Version: "2.0.0", Optional: true}}, nil
+	}
+	npmConfigOmitsFn = func(context.Context, string, []string) ([]string, error) {
+		t.Error("npm's omit policy was asked for a bunx run")
+		return []string{"optional"}, nil
+	}
+	t.Cleanup(func() { resolveNpmFn, npmConfigOmitsFn = old, oldOmits })
+	bunx, _ := Lookup("bunx")
+	args := []string{"cli"}
+	parsed := bunx.parseRun(args)
+	parsed.ToolRun = true
+	tree, err := expandInstall(context.Background(), bunx, args, 0, parsed)
+	if err != nil || len(tree) != 2 {
+		t.Errorf("tree = %v, err = %v, want both packages", tree, err)
 	}
 }

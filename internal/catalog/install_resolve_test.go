@@ -249,6 +249,44 @@ func TestStageNpmrc(t *testing.T) {
 	}
 }
 
+// The dry run reads the .npmrc npm reads for the command: configDir's, which
+// from a declared workspace member is the root's and not the member's (npm
+// ignores the member's file with a warning), with or without a project
+// staged, and none in global mode.
+func TestStageNpmScratchStagesTheConfigDirsNpmrc(t *testing.T) {
+	root := t.TempDir()
+	member := filepath.Join(root, "packages", "a")
+	os.MkdirAll(member, 0o755)
+	os.WriteFile(filepath.Join(root, "package.json"), []byte(`{"name":"root","workspaces":["packages/*"]}`), 0o644)
+	os.WriteFile(filepath.Join(root, ".npmrc"), []byte("@acme:registry=https://npm.acme.internal/\n"), 0o600)
+	os.WriteFile(filepath.Join(member, "package.json"), []byte(`{"name":"a","dependencies":{"left-pad":"^1.0.0"}}`), 0o644)
+	os.WriteFile(filepath.Join(member, ".npmrc"), []byte("@acme:registry=https://wrong.example/\n"), 0o600)
+	for _, tt := range []struct {
+		name, projectDir, configDir, want string
+	}{
+		{"member project, root config", member, root, "npm.acme.internal"},
+		{"no project, root config", "", root, "npm.acme.internal"},
+		{"global: no config", member, "", ""},
+	} {
+		dst := t.TempDir()
+		if err := stageNpmScratch(tt.projectDir, tt.configDir, dst, map[string]bool{}); err != nil {
+			t.Fatalf("%s: %v", tt.name, err)
+		}
+		if _, err := os.Stat(filepath.Join(dst, "package.json")); err != nil {
+			t.Errorf("%s: no package.json staged", tt.name)
+		}
+		rc, err := os.ReadFile(filepath.Join(dst, ".npmrc"))
+		switch {
+		case tt.want == "" && err == nil:
+			t.Errorf("%s: an .npmrc was staged: %q", tt.name, rc)
+		case tt.want != "" && !strings.Contains(string(rc), tt.want):
+			t.Errorf("%s: staged .npmrc = %q, %v", tt.name, rc, err)
+		case strings.Contains(string(rc), "wrong.example"):
+			t.Errorf("%s: the member's .npmrc was staged", tt.name)
+		}
+	}
+}
+
 // npm marks each dependency's kind in the lock it writes, and the resolver
 // carries the marks so an install that omits a kind can be checked as it
 // installs. A release at several paths carries a kind only if every copy

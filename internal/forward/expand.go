@@ -136,15 +136,17 @@ func resolveNamed(ctx context.Context, m *Manager, opts Options, start int, pars
 			missing = append(missing, s)
 		}
 	}
+	// One release spelled two ways is one release: a cached environment's
+	// metadata says `Django 5.0`, the registry `django 5.0`.
 	have := map[check.Spec]bool{}
 	for _, s := range set.specs {
-		have[s] = true
+		have[canonicalSpec(s)] = true
 	}
 	for _, r := range resolveSpecs(ctx, resolve, missing) {
-		if have[r] {
+		if have[canonicalSpec(r)] {
 			continue
 		}
-		have[r] = true
+		have[canonicalSpec(r)] = true
 		if i := namedIndex(m.Ecosystem, parsed.Specs, r.Name); i < 0 || !found[i] {
 			set.named++
 			if i >= 0 {
@@ -199,6 +201,15 @@ func namedIndex(ecosystem string, specs []check.Spec, name string) int {
 }
 
 var pep503Separators = regexp.MustCompile(`[-_.]+`)
+
+// canonicalSpec is s with its name as the registry compares names: PEP 503
+// for PyPI, as typed for npm, where `is_js` and `is-js` are two packages.
+func canonicalSpec(s check.Spec) check.Spec {
+	if s.Ecosystem == "pypi" {
+		s.Name = canonicalPyPI(s.Name)
+	}
+	return s
+}
 
 func canonicalPyPI(name string) string {
 	return pep503Separators.ReplaceAllString(strings.ToLower(strings.TrimSpace(name)), "-")
@@ -259,9 +270,11 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 				}
 			}
 			tree, err := resolveNpmFn(ctx, "", configDir, tokens, flags)
-			if err == nil && len(tree) > 0 {
+			if err == nil && len(tree) > 0 && (m.Bin == "npm" || m.Bin == "npx") {
 				// The omit policy shapes a fresh install only: a reused npx
 				// installation is not pruned, so what it holds stays checked.
+				// It is npm's policy: bun reads none of npm's configuration,
+				// so a bunx run installs what an .npmrc would have npm omit.
 				tree = npmOmit(tree, npmEffectiveOmits(ctx, configFlags))
 			}
 			if m.Bin == "npm" || m.Bin == "npx" {
@@ -442,21 +455,10 @@ func pythonOptionFlags(m *Manager) map[string]bool {
 // nothing.
 func withNpxCached(ctx context.Context, tree []catalog.Resolved, parsed installArgs, cache string) []catalog.Resolved {
 	cached, err := npxCachedFn(cache, parsed.NpxPackages)
-	if err != nil || len(cached) == 0 {
+	if err != nil {
 		return tree
 	}
-	seen := map[string]int{}
-	for i, r := range tree {
-		seen[r.Name+"@"+r.Version] = i
-	}
-	for _, r := range cached {
-		if i, ok := seen[r.Name+"@"+r.Version]; ok {
-			tree[i] = mergeSighting(tree[i], r)
-			continue
-		}
-		tree = append(tree, r)
-	}
-	return tree
+	return unionSightings(tree, cached, npmSightingKey)
 }
 
 // withUVCached adds to a fresh resolution of a uv tool run whatever uv may
@@ -486,13 +488,13 @@ func withUVCached(ctx context.Context, tree []catalog.Resolved, parsed installAr
 			want[canonicalPyPI(s.Name)] = s.Version
 		}
 		if cached, err := uvCachedFn(cache, want); err == nil {
-			tree = unionSightings(tree, cached)
+			tree = unionSightings(tree, cached, pypiSightingKey)
 		}
 	}
 	// The cache flags govern the cache; an installed tool runs regardless.
 	if parsed.InstalledTool != "" {
 		if installed, err := uvInstalledFn(uvToolDir(ctx, opts, base), parsed.InstalledTool); err == nil {
-			tree = unionSightings(tree, installed)
+			tree = unionSightings(tree, installed, pypiSightingKey)
 		}
 	}
 	return tree
@@ -529,12 +531,17 @@ func envTrue(name string) bool {
 var uvEnvPathVars = []struct {
 	env, flag string
 	aliases   []string
+	// sep is what uv splits the variable's entries on: whitespace for the
+	// requirements-file variables, a comma for UV_FIND_LINKS (verified
+	// with --show-settings on uv 0.11: `./w1,./w2` is two entries and
+	// `./w1 ./w2` one path).
+	sep string
 }{
-	{"UV_CONSTRAINT", "--constraints", []string{"-c", "--constraint"}},
-	{"UV_OVERRIDE", "--overrides", []string{"--override"}},
-	{"UV_BUILD_CONSTRAINT", "--build-constraints", []string{"-b", "--build-constraint"}},
-	{"UV_FIND_LINKS", "--find-links", []string{"-f"}},
-	{"UV_PYTHON", "--python", []string{"-p"}},
+	{"UV_CONSTRAINT", "--constraints", []string{"-c", "--constraint"}, ""},
+	{"UV_OVERRIDE", "--overrides", []string{"--override"}, ""},
+	{"UV_BUILD_CONSTRAINT", "--build-constraints", []string{"-b", "--build-constraint"}, ""},
+	{"UV_FIND_LINKS", "--find-links", []string{"-f"}, ","},
+	{"UV_PYTHON", "--python", []string{"-p"}, ""},
 }
 
 // flagPresent reports whether any of the flags is among opts, as a token
@@ -575,6 +582,14 @@ func uvEnvPathFlags(opts []string, base string) []string {
 		// `wheels` are paths); UV_PYTHON also takes a version or a name,
 		// so only a path-shaped value of it is one.
 		entries := strings.Fields(value)
+		if v.sep != "" {
+			entries = nil
+			for _, e := range strings.Split(value, v.sep) {
+				if e = strings.TrimSpace(e); e != "" {
+					entries = append(entries, e)
+				}
+			}
+		}
 		isPath := func(e string) bool { return !strings.Contains(e, "://") }
 		if v.env == "UV_PYTHON" {
 			entries = []string{strings.TrimSpace(value)}
@@ -609,26 +624,31 @@ func looksLikePath(e string) bool {
 }
 
 // unionSightings adds to tree the releases in extra it does not name, and
-// merges those it does (mergeSighting). PyPI names match as PyPI matches
-// them, which is also fine for npm's, where the spelling is the name.
-func unionSightings(tree, extra []catalog.Resolved) []catalog.Resolved {
+// merges those it does (mergeSighting), two reports being of one release
+// when key agrees: PyPI's comparison for a uv tree, the spelling for an
+// npm one, where `lodash.get` and `lodash-get` are two packages and a PyPI
+// key would fold one into the other and drop it from the check.
+func unionSightings(tree, extra []catalog.Resolved, key func(catalog.Resolved) string) []catalog.Resolved {
 	if len(extra) == 0 {
 		return tree
 	}
 	seen := map[string]int{}
 	for i, r := range tree {
-		seen[canonicalPyPI(r.Name)+"@"+r.Version] = i
+		seen[key(r)] = i
 	}
 	for _, r := range extra {
-		if i, ok := seen[canonicalPyPI(r.Name)+"@"+r.Version]; ok {
+		if i, ok := seen[key(r)]; ok {
 			tree[i] = mergeSighting(tree[i], r)
 			continue
 		}
-		seen[canonicalPyPI(r.Name)+"@"+r.Version] = len(tree)
+		seen[key(r)] = len(tree)
 		tree = append(tree, r)
 	}
 	return tree
 }
+
+func npmSightingKey(r catalog.Resolved) string  { return r.Name + "@" + r.Version }
+func pypiSightingKey(r catalog.Resolved) string { return canonicalPyPI(r.Name) + "@" + r.Version }
 
 // uvEnvConfigFlag names the file UV_CONFIG_FILE names as --config-file for
 // the resolver and the probes, which run elsewhere than the real command: a
@@ -638,10 +658,8 @@ func unionSightings(tree, extra []catalog.Resolved) []catalog.Resolved {
 // configuration and would resolve from indexes the run does not use. A
 // --config-file or --no-config on the line already decides the file.
 func uvEnvConfigFlag(opts []string, base string) []string {
-	for _, a := range opts {
-		if a == "--no-config" || a == "--config-file" || strings.HasPrefix(a, "--config-file=") {
-			return nil
-		}
+	if path, noConfig := catalog.UVConfigFileFlag(opts); path != "" || noConfig {
+		return nil
 	}
 	v := os.Getenv("UV_CONFIG_FILE")
 	if v == "" {
@@ -662,9 +680,11 @@ func uvToolDir(ctx context.Context, opts []string, base string) string {
 	if v, err := uvToolDirFn(ctx, selectors); err == nil && v != "" {
 		return absIn(base, v)
 	}
+	// uv's documented defaults (`uv help tool dir`): the data directory's
+	// tools, which on Windows is %APPDATA%\uv\data\tools.
 	if runtime.GOOS == "windows" {
 		if v := os.Getenv("APPDATA"); v != "" {
-			return filepath.Join(v, "uv", "tools")
+			return filepath.Join(v, "uv", "data", "tools")
 		}
 		return ""
 	}
@@ -707,14 +727,23 @@ func uvCacheDir(ctx context.Context, opts []string, base string) (dir string, mo
 	if v, err := uvCacheDirFn(ctx, selectors); err == nil && v != "" {
 		return absIn(base, v), !filepath.IsAbs(v)
 	}
-	dir, err := os.UserCacheDir()
+	// uv's documented defaults (`uv help cache dir`): $XDG_CACHE_HOME/uv or
+	// ~/.cache/uv on macOS and Linux alike — not os.UserCacheDir, which is
+	// ~/Library/Caches on macOS — and %LOCALAPPDATA%\uv\cache on Windows.
+	if runtime.GOOS == "windows" {
+		if v := os.Getenv("LOCALAPPDATA"); v != "" {
+			return filepath.Join(v, "uv", "cache"), false
+		}
+		return "", false
+	}
+	if v := os.Getenv("XDG_CACHE_HOME"); v != "" {
+		return filepath.Join(v, "uv"), false
+	}
+	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", false
 	}
-	if runtime.GOOS == "windows" {
-		return filepath.Join(dir, "uv", "cache"), false
-	}
-	return filepath.Join(dir, "uv"), false
+	return filepath.Join(home, ".cache", "uv"), false
 }
 
 // uvCacheSelectors are the uv options that change which configuration

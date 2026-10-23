@@ -571,6 +571,8 @@ func TestNpmParsersMatchNpm(t *testing.T) {
 		// nopt expands a leading ~/ in a path-typed option.
 		{"--userconfig", "~/u.npmrc", "cowsay"}, {"--globalconfig=~/g.npmrc", "cowsay"}, {"--prefix", "~/p", "cowsay"},
 		{"--cache", "~/c", "cowsay"}, {"--cache=./c", "cowsay", "moo"},
+		// A negated path option is invalid to npm, which keeps its default.
+		{"--no-cache", "cowsay"}, {"--no-prefix", "cowsay"}, {"--no-globalconfig", "cowsay", "moo"}, {"--cache=false", "cowsay"},
 	}
 	for _, args := range npx {
 		want, got := norm(oracle("npx-cli.js", args)), norm(parseNpmArgv(npxArgv(args)))
