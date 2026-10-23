@@ -543,8 +543,8 @@ func TestUVToolRunConfig(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", usr)
 	os.MkdirAll(filepath.Join(sys, "uv"), 0o755)
 	os.MkdirAll(filepath.Join(usr, "uv"), 0o755)
-	os.WriteFile(filepath.Join(sys, "uv", "uv.toml"), []byte("index-url = \"https://sys.example/simple\"\npython-preference = \"managed\"\n\n[pip]\nindex-url = \"https://syspip.example/simple\"\n"), 0o644)
-	os.WriteFile(filepath.Join(usr, "uv", "uv.toml"), []byte("index-url = \"https://usr.example/simple\"\n"), 0o644)
+	os.WriteFile(filepath.Join(sys, "uv", "uv.toml"), []byte("index-url = \"https://sys.example/simple\"\npython-preference = \"managed\"\nextra-index-url = [\"https://sysextra.example/simple\"]\n\n[[index]]\nname = \"sysidx\"\nurl = \"https://sysidx.example/simple\"\n\n[pip]\nindex-url = \"https://syspip.example/simple\"\n"), 0o644)
+	os.WriteFile(filepath.Join(usr, "uv", "uv.toml"), []byte("index-url = \"https://usr.example/simple\"\nextra-index-url = [\"https://usrextra.example/simple\"]\n\n[[index]]\nname = \"usridx\"\nurl = \"https://usridx.example/simple\"\n"), 0o644)
 	got, err = uvToolRunConfig([]string{"--offline"}, scratch)
 	if err != nil || !reflect.DeepEqual(got, []string{"--offline", "--config-file", stripped}) {
 		t.Fatalf("discovered config: flags = %v, err = %v", got, err)
@@ -552,6 +552,14 @@ func TestUVToolRunConfig(t *testing.T) {
 	data, _ = os.ReadFile(stripped)
 	if s := string(data); !strings.Contains(s, "usr.example") || !strings.Contains(s, "managed") || strings.Contains(s, "sys.example") || strings.Contains(s, "pip") {
 		t.Errorf("merged copy:\n%s", s)
+	}
+	// Arrays are joined as uv joins them, the user's entries first: a plain
+	// array and an array of tables alike.
+	for _, pair := range [][2]string{{"usrextra.example", "sysextra.example"}, {"usridx", "sysidx"}} {
+		u, y := strings.Index(string(data), pair[0]), strings.Index(string(data), pair[1])
+		if u < 0 || y < 0 || u > y {
+			t.Errorf("merged copy keeps %s before %s (at %d, %d):\n%s", pair[0], pair[1], u, y, data)
+		}
 	}
 	// With no [pip] table anywhere, uv discovers the files itself.
 	os.WriteFile(filepath.Join(sys, "uv", "uv.toml"), []byte("python-preference = \"managed\"\n"), 0o644)

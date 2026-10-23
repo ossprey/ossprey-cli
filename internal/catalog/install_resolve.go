@@ -770,7 +770,8 @@ func resolveWithUV(ctx context.Context, uv, dir string, specs, flags []string) (
 // fetches from the former and `uv pip compile` from the latter), so the
 // configuration the run reads — the file named by --config-file or
 // UV_CONFIG_FILE, else the user-level uv.toml over the system-level one,
-// merged as uv merges them (field by field, the user's winning) — is
+// merged as uv merges them (field by field, the user's winning; arrays
+// joined, the user's entries first) — is
 // written into scratch without that table and named by --config-file. A
 // run with --no-config reads none, and configuration without a [pip]
 // table is left for uv to discover as it is; a file uv cannot parse is
@@ -863,8 +864,31 @@ func mergeTOML(base, over map[string]any) {
 				continue
 			}
 		}
+		if joined, ok := concatTOML(v, base[k]); ok {
+			base[k] = joined
+			continue
+		}
 		base[k] = v
 	}
+}
+
+// concatTOML joins two arrays as uv joins them across its configuration
+// files: the higher-precedence entries first (verified against uv 0.11 with
+// --show-settings: the user's extra-index-url and [[index]] entries precede
+// the system's). An array of tables decodes as []map[string]any, a plain
+// one as []any; unlike kinds are not joined.
+func concatTOML(over, base any) (any, bool) {
+	switch o := over.(type) {
+	case []any:
+		if b, ok := base.([]any); ok {
+			return slices.Concat(o, b), true
+		}
+	case []map[string]any:
+		if b, ok := base.([]map[string]any); ok {
+			return slices.Concat(o, b), true
+		}
+	}
+	return nil, false
 }
 
 // uvConfigSources are the configuration files uv discovers for a tool run,

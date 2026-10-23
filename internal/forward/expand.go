@@ -254,16 +254,27 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 			base := uvDir(append(uvGlobalArgs(m, args), lead...), uvValueFlags())
 			global, globalNeedsUV := uvGlobalFlags(m, args, base, true)
 			uvFlags := append(global, toolRunLeadingFlags(rest, base)...)
-			// A relative UV_CONFIG_FILE is read where the run runs; the
-			// resolver and the probes run elsewhere, so they are told the
-			// file by its absolute path.
-			envConfig := uvEnvConfigFlag(slices.Concat(uvGlobalArgs(m, args), lead), base)
+			// UV_CONFIG_FILE names configuration pip does not read, and a
+			// relative one is read where the run runs: the resolver and the
+			// probes are told the file by its absolute path, as a flag,
+			// which also keeps the run on the uv-only path.
+			opts := slices.Concat(uvGlobalArgs(m, args), lead)
+			envConfig := uvEnvConfigFlag(opts, base)
 			uvFlags = append(uvFlags, envConfig...)
-			// So is a relative UV_CACHE_DIR: uv resolves it against the
-			// directory it runs in, and the resolver's scratch directory
-			// has no cache, so an offline run would resolve nothing.
-			envCache := uvEnvCacheFlag(slices.Concat(uvGlobalArgs(m, args), lead), base)
-			uvFlags = append(uvFlags, envCache...)
+			opts = append(opts, envConfig...)
+			// The cache the run reads, found once for the resolver and the
+			// cached-environment lookup. A path uv reads against the
+			// directory it runs in (a relative UV_CACHE_DIR, or a relative
+			// cache-dir in its configuration) is one the resolver's scratch
+			// directory does not have, so the resolver is told it absolutely;
+			// an absolute path reads the same from anywhere.
+			var cache string
+			if uvReadsCache(opts) {
+				var moved bool
+				if cache, moved = uvCacheDir(ctx, opts, base); moved {
+					uvFlags = append(uvFlags, "--cache-dir", cache)
+				}
+			}
 			// --with-requirements files are installed into the same
 			// environment, so they resolve together with the packages: a
 			// release that satisfies each alone may not satisfy both.
@@ -280,7 +291,7 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 			}
 			// uv may reuse a tool environment it cached for an earlier run,
 			// dependencies and all, rather than what resolves today.
-			return withUVCached(ctx, tree, parsed, slices.Concat(uvGlobalArgs(m, args), lead, envConfig, envCache), base), nil
+			return withUVCached(ctx, tree, parsed, opts, base, cache), nil
 		}
 		if hasFlag(rest, "--no-deps") {
 			return nil, nil
@@ -291,8 +302,14 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 		}
 		global, globalNeedsUV := uvGlobalFlags(m, args, dir, false)
 		uvFlags := append(global, absFlagValues(uvResolveFlags(m, rest), flagSet("--project"), dir)...)
-		if m.Bin == "uv" && (globalNeedsUV || needsUV(rest, valueFlags[m.Bin])) {
-			return resolveWithUVFn(ctx, dir, tokens, uvFlags)
+		if m.Bin == "uv" {
+			// Configuration UV_CONFIG_FILE names is uv's alone: pip would
+			// resolve without it, from indexes the run does not use.
+			envConfig := uvEnvConfigFlag(args, dir)
+			uvFlags = append(uvFlags, envConfig...)
+			if globalNeedsUV || needsUV(rest, valueFlags[m.Bin]) || len(envConfig) > 0 {
+				return resolveWithUVFn(ctx, dir, tokens, uvFlags)
+			}
 		}
 		return resolvePythonFn(ctx, dir, tokens, uvFlags, pipResolveFlags(m, rest))
 	}
@@ -385,14 +402,8 @@ func withNpxCached(ctx context.Context, tree []catalog.Resolved, parsed installA
 // resolves afresh (--refresh, --reinstall) reuses no cached environment,
 // and --cache-dir names the cache, relative to base, the directory the
 // run changes to. An unreadable cache or tool directory adds nothing.
-func withUVCached(ctx context.Context, tree []catalog.Resolved, parsed installArgs, opts []string, base string) []catalog.Resolved {
-	readsCache := true
-	for _, a := range opts {
-		if a == "-n" || a == "--no-cache" || a == "--refresh" || a == "--reinstall" {
-			readsCache = false
-		}
-	}
-	if readsCache {
+func withUVCached(ctx context.Context, tree []catalog.Resolved, parsed installArgs, opts []string, base, cache string) []catalog.Resolved {
+	if uvReadsCache(opts) && cache != "" {
 		// A requirement with a marker is installed only where the marker
 		// holds, which the resolver decides; an environment is not asked
 		// to hold it.
@@ -403,7 +414,7 @@ func withUVCached(ctx context.Context, tree []catalog.Resolved, parsed installAr
 			}
 			want[canonicalPyPI(s.Name)] = s.Version
 		}
-		if cached, err := uvCachedFn(uvCacheDir(ctx, opts, base), want); err == nil {
+		if cached, err := uvCachedFn(cache, want); err == nil {
 			tree = unionSightings(tree, cached)
 		}
 	}
@@ -414,6 +425,18 @@ func withUVCached(ctx context.Context, tree []catalog.Resolved, parsed installAr
 		}
 	}
 	return tree
+}
+
+// uvReadsCache says whether a uv command may reuse what its cache holds:
+// not with --no-cache (a temporary directory instead), nor when --refresh
+// or --reinstall resolves afresh.
+func uvReadsCache(opts []string) bool {
+	for _, a := range opts {
+		if a == "-n" || a == "--no-cache" || a == "--refresh" || a == "--reinstall" {
+			return false
+		}
+	}
+	return true
 }
 
 // unionSightings adds to tree the releases in extra it does not name, and
@@ -438,11 +461,13 @@ func unionSightings(tree, extra []catalog.Resolved) []catalog.Resolved {
 	return tree
 }
 
-// uvEnvConfigFlag names a relative UV_CONFIG_FILE by its absolute path, as
-// a --config-file flag, for a run that names no configuration itself: uv
-// reads the variable relative to the directory the run runs in, and the
-// resolver and the cache and tool-directory probes run elsewhere. An
-// absolute value needs nothing, since every subprocess inherits it.
+// uvEnvConfigFlag names the file UV_CONFIG_FILE names as --config-file for
+// the resolver and the probes, which run elsewhere than the real command: a
+// relative value is read against the directory uv runs in (verified), so
+// it is made absolute against the run's directory first. The flag is also
+// what keeps the run on the uv-only path, since pip reads none of that
+// configuration and would resolve from indexes the run does not use. A
+// --config-file or --no-config on the line already decides the file.
 func uvEnvConfigFlag(opts []string, base string) []string {
 	for _, a := range opts {
 		if a == "--no-config" || a == "--config-file" || strings.HasPrefix(a, "--config-file=") {
@@ -450,31 +475,10 @@ func uvEnvConfigFlag(opts []string, base string) []string {
 		}
 	}
 	v := os.Getenv("UV_CONFIG_FILE")
-	if v == "" || filepath.IsAbs(v) {
+	if v == "" {
 		return nil
 	}
 	return []string{"--config-file", absIn(base, v)}
-}
-
-// uvEnvCacheFlag names a relative UV_CACHE_DIR by its absolute path, as
-// --cache-dir, for the resolver that runs in a scratch directory: uv
-// resolves the variable against the directory it runs in (verified: `uv
-// cache dir` answers `c` wherever it is asked), which for the real run is
-// base and for the resolver is scratch, where there is no cache. The flag
-// is uv's own, so it reaches uv alone and does not make the run uv-only.
-// A --cache-dir on the line already names the cache, and an absolute path
-// reads the same from anywhere.
-func uvEnvCacheFlag(opts []string, base string) []string {
-	for _, a := range opts {
-		if flag, _, _ := splitFlagValue(a); flag == "--cache-dir" {
-			return nil
-		}
-	}
-	v := os.Getenv("UV_CACHE_DIR")
-	if v == "" || filepath.IsAbs(v) {
-		return nil
-	}
-	return []string{"--cache-dir", absIn(base, v)}
 }
 
 // uvToolDir is where uv keeps installed tools for this run: UV_TOOL_DIR,
@@ -513,33 +517,35 @@ func uvToolDir(ctx context.Context, opts []string, base string) string {
 // uv's, resolved against base, the directory the run changes to: for
 // `uvx --directory sub --cache-dir c` uv uses sub/c (verified, as is a
 // relative cache-dir in a config file, which uv resolves against the
-// directory it runs in, not the file's).
-func uvCacheDir(ctx context.Context, opts []string, base string) string {
+// directory it runs in, not the file's). moved says the path is one uv
+// reads against the directory it runs in — a relative UV_CACHE_DIR, or a
+// relative answer — so a resolver running elsewhere must be told it.
+func uvCacheDir(ctx context.Context, opts []string, base string) (dir string, moved bool) {
 	for i, a := range opts {
 		if flag, value, inline := splitFlagValue(a); flag == "--cache-dir" {
 			if inline {
-				return absIn(base, value)
+				return absIn(base, value), false
 			}
 			if i+1 < len(opts) {
-				return absIn(base, opts[i+1])
+				return absIn(base, opts[i+1]), false
 			}
 		}
 	}
 	if v := os.Getenv("UV_CACHE_DIR"); v != "" {
-		return absIn(base, v)
+		return absIn(base, v), !filepath.IsAbs(v)
 	}
 	selectors := absFlagValues(pickFlags(opts, uvValueFlags(), uvCacheSelectors, nil), pythonPathFlags, base)
 	if v, err := uvCacheDirFn(ctx, selectors); err == nil && v != "" {
-		return absIn(base, v)
+		return absIn(base, v), !filepath.IsAbs(v)
 	}
 	dir, err := os.UserCacheDir()
 	if err != nil {
-		return ""
+		return "", false
 	}
 	if runtime.GOOS == "windows" {
-		return filepath.Join(dir, "uv", "cache")
+		return filepath.Join(dir, "uv", "cache"), false
 	}
-	return filepath.Join(dir, "uv")
+	return filepath.Join(dir, "uv"), false
 }
 
 // uvCacheSelectors are the uv options that change which configuration

@@ -684,7 +684,9 @@ func TestExpandInstall_ToolRunNamesARelativeEnvConfigFile(t *testing.T) {
 		{"custom.toml", []string{"--directory", "sub", "ruff@0.6.0"}, []string{"--config-file", absPath("sub/custom.toml")}, []string{"--config-file", absPath("sub/custom.toml")}, false},
 		{"custom.toml", []string{"--config-file", "mine.toml", "ruff@0.6.0"}, []string{"--config-file", absPath("mine.toml")}, []string{"--config-file", absPath("mine.toml")}, false},
 		{"custom.toml", []string{"--no-config", "ruff@0.6.0"}, []string{"--no-config"}, []string{"--no-config"}, true},
-		{absPath("custom.toml"), []string{"ruff@0.6.0"}, nil, nil, true},
+		// An absolute one reads the same from anywhere, and still keeps
+		// the run off the pip fallback, which reads none of it.
+		{absPath("custom.toml"), []string{"ruff@0.6.0"}, []string{"--config-file", absPath("custom.toml")}, []string{"--config-file", absPath("custom.toml")}, false},
 	} {
 		t.Setenv("UV_CONFIG_FILE", tt.env)
 		gotUV, gotSelectors, pipCalled = nil, nil, false
@@ -702,11 +704,12 @@ func TestExpandInstall_ToolRunNamesARelativeEnvConfigFile(t *testing.T) {
 	}
 }
 
-// A relative UV_CACHE_DIR is read against the directory uv runs in, and
-// the resolver runs in scratch, where there is no cache: it is told the
-// cache by its absolute path, as --cache-dir, which is uv's flag alone and
-// so leaves the pip fallback in place. A --cache-dir on the line and an
-// absolute variable need nothing.
+// A relative UV_CACHE_DIR, or a relative cache-dir in uv's configuration,
+// is read against the directory uv runs in, and the resolver runs in
+// scratch, where there is no cache: it is told the cache by its absolute
+// path, as --cache-dir, which is uv's flag alone and so leaves the pip
+// fallback in place. A --cache-dir on the line, an absolute path and a run
+// that reads no cache need nothing.
 func TestExpandInstall_ToolRunNamesARelativeEnvCacheDir(t *testing.T) {
 	var gotUV []string
 	old, oldUV, oldDir, oldCached, oldToolDir, oldInstalled := resolvePythonFn, resolveWithUVFn, uvCacheDirFn, uvCachedFn, uvToolDirFn, uvInstalledFn
@@ -727,19 +730,33 @@ func TestExpandInstall_ToolRunNamesARelativeEnvCacheDir(t *testing.T) {
 	})
 	t.Setenv("UV_CONFIG_FILE", "")
 	uvx, _ := Lookup("uvx")
+	// uv's own answer may be relative too, for a relative cache-dir in its
+	// configuration, which it reads against the directory it runs in.
+	uvAnswer := ""
+	uvCacheDirFn = func(context.Context, []string) (string, error) {
+		if uvAnswer == "" {
+			return "", errors.New("none")
+		}
+		return uvAnswer, nil
+	}
 	for _, tt := range []struct {
-		env    string
-		args   []string
-		wantUV []string
+		env, answer string
+		args        []string
+		wantUV      []string
 	}{
-		{"c", []string{"ruff@0.6.0"}, []string{"--cache-dir", absPath("c")}},
-		{"c", []string{"--directory", "sub", "ruff@0.6.0"}, []string{"--cache-dir", absPath("sub/c")}},
-		{"c", []string{"--cache-dir", "mine", "ruff@0.6.0"}, []string{"--cache-dir", absPath("mine")}},
-		{"c", []string{"--cache-dir=mine", "ruff@0.6.0"}, []string{"--cache-dir=" + absPath("mine")}},
-		{absPath("c"), []string{"ruff@0.6.0"}, nil},
-		{"", []string{"ruff@0.6.0"}, nil},
+		{"c", "", []string{"ruff@0.6.0"}, []string{"--cache-dir", absPath("c")}},
+		{"c", "", []string{"--directory", "sub", "ruff@0.6.0"}, []string{"--cache-dir", absPath("sub/c")}},
+		{"c", "", []string{"--cache-dir", "mine", "ruff@0.6.0"}, []string{"--cache-dir", absPath("mine")}},
+		{"c", "", []string{"--cache-dir=mine", "ruff@0.6.0"}, []string{"--cache-dir=" + absPath("mine")}},
+		{"c", "", []string{"--no-cache", "ruff@0.6.0"}, []string{"--no-cache"}},
+		{absPath("c"), "", []string{"ruff@0.6.0"}, nil},
+		{"", "", []string{"ruff@0.6.0"}, nil},
+		{"", "rel", []string{"ruff@0.6.0"}, []string{"--cache-dir", absPath("rel")}},
+		{"", "rel", []string{"--directory", "sub", "ruff@0.6.0"}, []string{"--cache-dir", absPath("sub/rel")}},
+		{"", absPath("abs"), []string{"ruff@0.6.0"}, nil},
 	} {
 		t.Setenv("UV_CACHE_DIR", tt.env)
+		uvAnswer = tt.answer
 		gotUV = nil
 		parsed := parseToolRun(uvx, tt.args)
 		parsed.ToolRun = true
