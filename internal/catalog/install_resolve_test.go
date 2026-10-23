@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -429,5 +430,151 @@ func TestNpxCachedTreeMatchesARealRun(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("the real run's cache was not found: %v", got)
+	}
+
+	// Several packages are keyed in npm's sort order, which is not byte
+	// order: `is_js` sorts before `is-odd` for npm and after it for bytes.
+	cmd = exec.Command(npx, "--yes", "--cache", cache, "--package", "is-odd@3.0.1", "--package", "is_js@0.9.0", "--", "node", "-e", "")
+	cmd.Env = toolEnv()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Skipf("npx: %v: %s", err, out)
+	}
+	got, err = NpxCachedTree(cache, []string{"is-odd@3.0.1", "is_js@0.9.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, r := range got {
+		names[r.Name+"@"+r.Version] = true
+	}
+	if !names["is-odd@3.0.1"] || !names["is_js@0.9.0"] {
+		t.Errorf("the two-package run's cache was not found under npm's key: %v", got)
+	}
+}
+
+// uv's cached tool environments: two levels of hashed directories, each a
+// venv whose site-packages (lib/pythonX.Y on POSIX, Lib on Windows) name
+// the installed releases. Only an environment holding every wanted package
+// at the pinned version counts, and names match as PyPI matches them.
+func TestUVCachedTree(t *testing.T) {
+	cache := t.TempDir()
+	venv := func(path string, pkgs map[string]string, windows bool) {
+		site := filepath.Join(path, "lib", "python3.13", "site-packages")
+		if windows {
+			site = filepath.Join(path, "Lib", "site-packages")
+		}
+		os.MkdirAll(site, 0o755)
+		os.WriteFile(filepath.Join(path, "pyvenv.cfg"), []byte("uv = 0.11\n"), 0o644)
+		for name, version := range pkgs {
+			dir := filepath.Join(site, strings.ReplaceAll(name, "-", "_")+"-"+version+".dist-info")
+			os.MkdirAll(dir, 0o755)
+			os.WriteFile(filepath.Join(dir, "METADATA"), []byte("Metadata-Version: 2.1\nName: "+name+"\nVersion: "+version+"\n\nbody\n"), 0o644)
+		}
+	}
+	envs := filepath.Join(cache, "environments-v2")
+	venv(filepath.Join(envs, "k1", "e1"), map[string]string{"CowSay": "6.1", "six": "1.16.0"}, false)
+	venv(filepath.Join(envs, "k2", "e2"), map[string]string{"cowsay": "6.1", "six": "1.17.0", "rich": "13.0.0"}, true)
+	venv(filepath.Join(envs, "k3", "e3"), map[string]string{"cowsay": "6.0", "six": "1.15.0"}, false)
+	venv(filepath.Join(envs, "k4", "e4"), map[string]string{"ruff": "0.6.0"}, false)
+	os.MkdirAll(filepath.Join(envs, "k5", "notavenv"), 0o755)
+
+	names := func(rs []Resolved) []string {
+		var out []string
+		for _, r := range rs {
+			out = append(out, canonicalPackageName(r.Name)+"@"+r.Version)
+		}
+		slices.Sort(out)
+		return out
+	}
+	got, err := UVCachedTree(cache, map[string]string{"cowsay": "6.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"cowsay@6.1", "rich@13.0.0", "six@1.16.0", "six@1.17.0"}; !reflect.DeepEqual(names(got), want) {
+		t.Errorf("cowsay==6.1: %v, want %v", names(got), want)
+	}
+	got, err = UVCachedTree(cache, map[string]string{"cowsay": "", "rich": ""})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"cowsay@6.1", "rich@13.0.0", "six@1.17.0"}; !reflect.DeepEqual(names(got), want) {
+		t.Errorf("cowsay --with rich: %v, want %v", names(got), want)
+	}
+	if got, err := UVCachedTree(cache, map[string]string{"cowsay": "5.0"}); err != nil || got != nil {
+		t.Errorf("unheld version: %v, %v", got, err)
+	}
+	if got, err := UVCachedTree(filepath.Join(cache, "missing"), map[string]string{"cowsay": ""}); err != nil || got != nil {
+		t.Errorf("no cache: %v, %v", got, err)
+	}
+}
+
+// Against a real uv: a tool run leaves an environment the lookup finds under
+// the cache it was told to use, and `uv cache dir` reports that cache.
+func TestUVCachedTreeMatchesARealRun(t *testing.T) {
+	if testing.Short() {
+		t.Skip("network")
+	}
+	uv, err := lookTool("uv")
+	if err != nil {
+		t.Skip("no uv")
+	}
+	cache := t.TempDir()
+	if got, err := UVCacheDir(context.Background(), []string{"--cache-dir", cache}); err != nil || filepath.Clean(got) != cache {
+		t.Errorf("uv cache dir --cache-dir: %q, %v", got, err)
+	}
+	cmd := exec.Command(uv, "tool", "run", "--cache-dir", cache, "--from", "cowsay==6.1", "cowsay", "-t", "hi")
+	cmd.Env = toolEnv()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Skipf("uv tool run: %v: %s", err, out)
+	}
+	got, err := UVCachedTree(cache, map[string]string{"cowsay": "6.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, r := range got {
+		if canonicalPackageName(r.Name) == "cowsay" && r.Version == "6.1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the real run's environment was not found: %v", got)
+	}
+}
+
+// npm sorts the specs with node's localeCompare('en'); the port is held to
+// the installed node over every printable ASCII character and a set of
+// specs that tell byte order and collation apart.
+func TestNpmCollateMatchesNode(t *testing.T) {
+	node, err := lookTool("node")
+	if err != nil {
+		t.Skip("no node")
+	}
+	var chars []string
+	for c := ' '; c < 127; c++ {
+		chars = append(chars, string(c))
+	}
+	specs := []string{"a-b", "a_b", "a.b", "ab", "a b", "aB", "Ab", "AB", "a1", "a@1", "@s/x", "@s-x",
+		"a-b@1.0.0", "a_b@1.0.0", "x", "x-", "x_", "x.", "x0", "xa", "xA", "X", "b", "B", "a--b", "a-_b",
+		"a_-b", "left-pad", "left_pad", "is-odd", "is_js", "lodash._baseuniq", "lodash-es", "-a", "_a",
+		".a", "~a", "a~", "a^1", "a>1", "a=1", "a<1", "a|1", "a$", "a#", "a%", "a&", "a*", "a+", "a,b",
+		"a;b", "a:b", "a!b", "a?b", "a/b", "a\\b", "a(b", "a)b", "a[b", "a]b", "a{b", "a}b", "a`b",
+		"a\"b", "a'b", "cowsay@1.6.0", "cowsay@latest", "cowsay", "@scope/tool@^2", "tool@>=1 <2"}
+	for _, in := range [][]string{chars, specs} {
+		input, _ := json.Marshal(in)
+		cmd := exec.Command(node, "-e", `process.stdout.write(JSON.stringify(JSON.parse(process.argv[1]).sort((a, b) => a.localeCompare(b, "en"))))`, string(input))
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var want []string
+		if err := json.Unmarshal(out, &want); err != nil {
+			t.Fatal(err)
+		}
+		got := slices.Clone(in)
+		slices.SortFunc(got, npmCollate)
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("collation differs from node:\n got %q\nwant %q", got, want)
+		}
 	}
 }

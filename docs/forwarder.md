@@ -70,7 +70,9 @@ context: a tool run installs into the tool's own cache, never into the project
 beside it, so `npx cowsay moo` checks cowsay and everything cowsay depends on.
 npm may rerun what an earlier `npx` of the same package left in its cache
 rather than resolve afresh, so that cached tree is checked too, read from
-the cache npm's own configuration names.
+the cache npm's own configuration names. uv likewise reuses a tool
+environment it cached for an earlier `uvx` of the same package, so the
+packages installed in any cached environment holding it are checked too.
 
 A bare command that the project already has in `node_modules/.bin` — `npx
 eslint .` in a project that depends on eslint — is run from there rather than

@@ -1147,6 +1147,88 @@ func TestExpandInstall_NpmOmitOptional(t *testing.T) {
 // npm reuses what an earlier run of the same packages left in its npx cache,
 // with the dependencies resolved back then: the check covers that tree as
 // well as today's resolution, deduplicated.
+// A uv tool run may reuse a tool environment cached by an earlier run, with
+// the dependencies resolved back then, so the cached environment's packages
+// are checked beside the fresh resolution. The cache is --cache-dir, else
+// what uv reports; a run that reads no cache or resolves afresh adds nothing.
+func TestExpandInstall_ToolRunCoversTheUVCache(t *testing.T) {
+	old, oldUV, oldCached, oldDir := resolvePythonFn, resolveWithUVFn, uvCachedFn, uvCacheDirFn
+	fresh := func(context.Context, string, []string, []string) ([]catalog.Resolved, error) {
+		return []catalog.Resolved{{Name: "cowsay", Version: "6.1"}, {Name: "six", Version: "1.17.0"}}, nil
+	}
+	resolvePythonFn = func(ctx context.Context, dir string, specs, uvFlags, _ []string) ([]catalog.Resolved, error) {
+		return fresh(ctx, dir, specs, uvFlags)
+	}
+	resolveWithUVFn = fresh
+	var cacheDir string
+	var cacheWant map[string]string
+	asked := 0
+	uvCachedFn = func(dir string, want map[string]string) ([]catalog.Resolved, error) {
+		cacheDir, cacheWant = dir, want
+		asked++
+		return []catalog.Resolved{{Name: "cowsay", Version: "6.1"}, {Name: "six", Version: "1.16.0"}}, nil
+	}
+	uvCacheDirFn = func(context.Context, []string) (string, error) { return "/from/uv", nil }
+	t.Cleanup(func() { resolvePythonFn, resolveWithUVFn, uvCachedFn, uvCacheDirFn = old, oldUV, oldCached, oldDir })
+
+	names := func(tree []catalog.Resolved) []string {
+		var out []string
+		for _, r := range tree {
+			out = append(out, r.Name+"@"+r.Version)
+		}
+		return out
+	}
+	uvx, _ := Lookup("uvx")
+	uv, _ := Lookup("uv")
+	for _, tt := range []struct {
+		m         *Manager
+		args      []string
+		wantCache string
+		wantWant  map[string]string
+		wantTree  []string
+	}{
+		{uvx, []string{"cowsay@6.1", "-t", "hi"}, absPath("/from/uv"), map[string]string{"cowsay": "6.1"},
+			[]string{"cowsay@6.1", "six@1.17.0", "six@1.16.0"}},
+		{uvx, []string{"--cache-dir", "c", "--with", "Rich", "cowsay", "-t", "hi"}, absPath("c"), map[string]string{"cowsay": "", "rich": ""},
+			[]string{"cowsay@6.1", "six@1.17.0", "six@1.16.0"}},
+		{uv, []string{"--cache-dir=d", "tool", "run", "--index", "https://i.example", "cowsay"}, absPath("d"), map[string]string{"cowsay": ""},
+			[]string{"cowsay@6.1", "six@1.17.0", "six@1.16.0"}},
+		{uvx, []string{"--no-cache", "cowsay"}, "", nil, []string{"cowsay@6.1", "six@1.17.0"}},
+		{uvx, []string{"--refresh", "cowsay"}, "", nil, []string{"cowsay@6.1", "six@1.17.0"}},
+		{uv, []string{"-n", "tool", "run", "cowsay"}, "", nil, []string{"cowsay@6.1", "six@1.17.0"}},
+	} {
+		cacheDir, cacheWant, asked = "", nil, 0
+		start := 0
+		if tt.m == uv {
+			var ok bool
+			if start, ok = uv.toolRunAt(tt.args); !ok {
+				t.Fatalf("%v: not a tool run", tt.args)
+			}
+		}
+		parsed := parseToolRun(tt.m, tt.args[start:])
+		parsed.ToolRun = true
+		tree, err := expandInstall(context.Background(), tt.m, tt.args, start, parsed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(names(tree), tt.wantTree) {
+			t.Errorf("%s %v: tree = %v, want %v", tt.m.Bin, tt.args, names(tree), tt.wantTree)
+		}
+		if (asked == 0) != (tt.wantWant == nil) || cacheDir != tt.wantCache || !reflect.DeepEqual(cacheWant, tt.wantWant) {
+			t.Errorf("%s %v: cache read %d times from %q for %v, want %q for %v", tt.m.Bin, tt.args, asked, cacheDir, cacheWant, tt.wantCache, tt.wantWant)
+		}
+	}
+
+	// An unreadable cache adds nothing and fails nothing.
+	uvCachedFn = func(string, map[string]string) ([]catalog.Resolved, error) { return nil, errors.New("unreadable") }
+	args := []string{"cowsay@6.1"}
+	parsed := parseToolRun(uvx, args)
+	parsed.ToolRun = true
+	if tree, err := expandInstall(context.Background(), uvx, args, 0, parsed); err != nil || len(tree) != 2 {
+		t.Errorf("unreadable cache: tree = %v, err = %v", tree, err)
+	}
+}
+
 func TestExpandInstall_ToolRunCoversTheNpxCache(t *testing.T) {
 	old, oldCached, oldGet := resolveNpmFn, npxCachedFn, npmConfigGetFn
 	// Today's resolution fetches get-stdin from the internal registry, as a
@@ -1215,6 +1297,31 @@ func TestExpandInstall_ToolRunCoversTheNpxCache(t *testing.T) {
 	}
 	if drained := warn.Drain(ctx); strings.Contains(drained, "trusted") {
 		t.Errorf("a publicly cached release was trusted:\n%s", drained)
+	}
+
+	// The omit policy prunes the fresh prediction only: npm reuses a cached
+	// installation as it is, so an optional dependency it holds runs under
+	// --omit=optional too, and stays checked.
+	resolveNpmFn = func(context.Context, string, string, []string, []string) ([]catalog.Resolved, error) {
+		return []catalog.Resolved{{Name: "cowsay", Version: "1.6.0"}, {Name: "extra", Version: "2.0.0", Optional: true}}, nil
+	}
+	npxCachedFn = func(string, []string) ([]catalog.Resolved, error) {
+		return []catalog.Resolved{{Name: "cowsay", Version: "1.6.0"}, {Name: "extra", Version: "2.0.0", Optional: true},
+			{Name: "extra", Version: "1.0.0", Optional: true}}, nil
+	}
+	omitArgs := []string{"--omit=optional", "cowsay@1.6.0"}
+	omitParsed := npx.parseRun(omitArgs)
+	omitParsed.ToolRun = true
+	tree, err := expandInstall(context.Background(), npx, omitArgs, 0, omitParsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"cowsay@1.6.0", "extra@2.0.0", "extra@1.0.0"}; !reflect.DeepEqual(names(tree), want) {
+		t.Errorf("--omit=optional with a cache: tree = %v, want %v", names(tree), want)
+	}
+	npxCachedFn = func(string, []string) ([]catalog.Resolved, error) { return nil, nil }
+	if tree, err := expandInstall(context.Background(), npx, omitArgs, 0, omitParsed); err != nil || !reflect.DeepEqual(names(tree), []string{"cowsay@1.6.0"}) {
+		t.Errorf("--omit=optional without a cache: tree = %v, err = %v", names(tree), err)
 	}
 
 	// A cache that cannot be read adds nothing and fails nothing.

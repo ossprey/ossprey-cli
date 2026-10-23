@@ -27,6 +27,8 @@ var (
 	npmConfigIncludesFn = catalog.NpmConfigIncludes
 	npmConfigGetFn      = catalog.NpmConfigGet
 	npxCachedFn         = catalog.NpxCachedTree
+	uvCacheDirFn        = catalog.UVCacheDir
+	uvCachedFn          = catalog.UVCachedTree
 )
 
 // A named install used to check exactly the packages typed. `npm install
@@ -210,12 +212,15 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 			// The flags that make `npm config get` read what this command
 			// reads: its config files and location.
 			configFlags := slices.Concat(flags, npmLocationFlags(parsed.NpmGlobal, parsed.NpmPrefix))
+			// The omit policy shapes a fresh install only: a reused npx
+			// installation is not pruned, so what it holds stays checked.
+			tree = npmOmit(tree, npmEffectiveOmits(ctx, parsed.NpmOmits, configFlags))
 			if m.Bin == "npm" || m.Bin == "npx" {
 				// npm may reuse what an earlier run left in its npx cache,
 				// dependencies and all, rather than what resolves today.
 				tree = withNpxCached(ctx, tree, parsed, configFlags)
 			}
-			return npmOmit(tree, npmEffectiveOmits(ctx, parsed.NpmOmits, configFlags)), nil
+			return tree, nil
 		}
 		flags := npmResolveFlags(m, rest)
 		tree, err := resolveNpmFn(ctx, npmProjectDir(m, args), npmConfigDir(m, args), tokens, flags)
@@ -245,10 +250,19 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 			base := uvDir(append(uvGlobalArgs(m, args), lead...), uvValueFlags())
 			global, globalNeedsUV := uvGlobalFlags(m, args, base, true)
 			uvFlags := append(global, toolRunLeadingFlags(rest, base)...)
+			var tree []catalog.Resolved
+			var err error
 			if globalNeedsUV || needsUV(lead, toolRunValueFlags) {
-				return resolveWithUVFn(ctx, "", tokens, uvFlags)
+				tree, err = resolveWithUVFn(ctx, "", tokens, uvFlags)
+			} else {
+				tree, err = resolvePythonFn(ctx, "", tokens, uvFlags, toolRunPipFlags(rest, base))
 			}
-			return resolvePythonFn(ctx, "", tokens, uvFlags, toolRunPipFlags(rest, base))
+			if err != nil {
+				return tree, err
+			}
+			// uv may reuse a tool environment it cached for an earlier run,
+			// dependencies and all, rather than what resolves today.
+			return withUVCached(ctx, tree, parsed, slices.Concat(uvGlobalArgs(m, args), lead)), nil
 		}
 		if hasFlag(rest, "--no-deps") {
 			return nil, nil
@@ -335,6 +349,72 @@ func withNpxCached(ctx context.Context, tree []catalog.Resolved, parsed installA
 		tree = append(tree, r)
 	}
 	return tree
+}
+
+// withUVCached adds to a fresh resolution of a uv tool run whatever a cached
+// tool environment holding the named packages installed earlier: uv reuses
+// such an environment when it satisfies the request, with the dependencies
+// resolved back then, so the run may execute either tree. opts are uv's
+// options for the run, before and after the verb: a run that reads no cache
+// (--no-cache) or resolves afresh (--refresh, --reinstall) adds nothing, and
+// --cache-dir names the cache. An unreadable cache adds nothing.
+func withUVCached(ctx context.Context, tree []catalog.Resolved, parsed installArgs, opts []string) []catalog.Resolved {
+	for _, a := range opts {
+		if a == "-n" || a == "--no-cache" || a == "--refresh" || a == "--reinstall" {
+			return tree
+		}
+	}
+	want := map[string]string{}
+	for _, s := range parsed.Specs {
+		want[canonicalPyPI(s.Name)] = s.Version
+	}
+	cached, err := uvCachedFn(uvCacheDir(ctx, opts), want)
+	if err != nil || len(cached) == 0 {
+		return tree
+	}
+	seen := map[string]int{}
+	for i, r := range tree {
+		seen[canonicalPyPI(r.Name)+"@"+r.Version] = i
+	}
+	for _, r := range cached {
+		if i, ok := seen[canonicalPyPI(r.Name)+"@"+r.Version]; ok {
+			tree[i] = mergeSighting(tree[i], r)
+			continue
+		}
+		tree = append(tree, r)
+	}
+	return tree
+}
+
+// uvCacheDir is where uv keeps its cache for this run: --cache-dir among
+// opts, else what uv says (`uv cache dir`, which honours UV_CACHE_DIR and
+// its own configuration), else that variable, else uv's platform default
+// when uv cannot be asked.
+func uvCacheDir(ctx context.Context, opts []string) string {
+	for i, a := range opts {
+		if flag, value, inline := splitFlagValue(a); flag == "--cache-dir" {
+			if inline {
+				return absPath(value)
+			}
+			if i+1 < len(opts) {
+				return absPath(opts[i+1])
+			}
+		}
+	}
+	if v, err := uvCacheDirFn(ctx, nil); err == nil && v != "" {
+		return absPath(v)
+	}
+	if v := os.Getenv("UV_CACHE_DIR"); v != "" {
+		return absPath(v)
+	}
+	base, err := os.UserCacheDir()
+	if err != nil {
+		return ""
+	}
+	if runtime.GOOS == "windows" {
+		return filepath.Join(base, "uv", "cache")
+	}
+	return filepath.Join(base, "uv")
 }
 
 // mergeSighting folds two reports of the same release into one that is

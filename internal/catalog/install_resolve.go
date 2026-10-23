@@ -127,14 +127,197 @@ func ResolveNpmInstall(ctx context.Context, projectDir, configDir string, specs,
 	return resolvedFromPackages(pkgs, locked), nil
 }
 
+// UVCacheDir is where uv keeps its cache (`uv cache dir`), which honours
+// UV_CACHE_DIR and a user-level uv.toml. flags are uv's own global options
+// that move it (--cache-dir).
+func UVCacheDir(ctx context.Context, flags []string) (string, error) {
+	uv, err := lookTool("uv")
+	if err != nil {
+		return "", fmt.Errorf("%w (uv)", ErrNoResolver)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, uv, append([]string{"cache", "dir"}, flags...)...)
+	cmd.Env = toolEnv()
+	cmd.WaitDelay = 5 * time.Second
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("uv cache dir: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// UVCachedTree is every package installed in a tool environment uv has
+// cached under cacheDir that holds all of want (canonical PyPI name to the
+// exact version asked for, "" for any), or nil when none does. `uvx` and
+// `uv tool run` reuse such an environment (environments-v2/<key>/<key>, a
+// venv) when it satisfies the request, with the dependencies it resolved
+// back then, so a check of the run must cover both. Which environment uv
+// would pick is its own hash of the request; every candidate holding the
+// named packages is read, which can only check more. Provenance is not
+// recorded by the venv, so nothing read here is trusted by registry.
+func UVCachedTree(cacheDir string, want map[string]string) ([]Resolved, error) {
+	if cacheDir == "" || len(want) == 0 {
+		return nil, nil
+	}
+	keys, err := os.ReadDir(filepath.Join(cacheDir, "environments-v2"))
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var out []Resolved
+	seen := map[string]bool{}
+	for _, key := range keys {
+		dir := filepath.Join(cacheDir, "environments-v2", key.Name())
+		envs := []string{dir}
+		if subs, err := os.ReadDir(dir); err == nil {
+			for _, sub := range subs {
+				envs = append(envs, filepath.Join(dir, sub.Name()))
+			}
+		}
+		for _, env := range envs {
+			if _, err := os.Stat(filepath.Join(env, "pyvenv.cfg")); err != nil {
+				continue
+			}
+			pkgs, err := venvPackages(env)
+			if err != nil {
+				return nil, err
+			}
+			if !holdsAll(pkgs, want) {
+				continue
+			}
+			for _, r := range pkgs {
+				if k := canonicalPackageName(r.Name) + "@" + r.Version; !seen[k] {
+					seen[k] = true
+					out = append(out, r)
+				}
+			}
+		}
+	}
+	return out, nil
+}
+
+// venvPackages reads the installed distributions of a virtual environment
+// from the METADATA of each dist-info in its site-packages (lib/pythonX.Y
+// on POSIX, Lib on Windows).
+func venvPackages(env string) ([]Resolved, error) {
+	var files []string
+	for _, pattern := range []string{
+		filepath.Join(env, "lib", "python*", "site-packages", "*.dist-info", "METADATA"),
+		filepath.Join(env, "Lib", "site-packages", "*.dist-info", "METADATA"),
+	} {
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, matches...)
+	}
+	var out []Resolved
+	seen := map[string]bool{}
+	for _, f := range files {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			return nil, err
+		}
+		var name, version string
+		for _, line := range strings.Split(string(data), "\n") {
+			if line == "" {
+				break // end of headers
+			}
+			if v, ok := strings.CutPrefix(line, "Name:"); ok && name == "" {
+				name = strings.TrimSpace(v)
+			} else if v, ok := strings.CutPrefix(line, "Version:"); ok && version == "" {
+				version = strings.TrimSpace(v)
+			}
+		}
+		if name == "" || version == "" {
+			continue
+		}
+		if k := canonicalPackageName(name) + "@" + version; !seen[k] {
+			seen[k] = true
+			out = append(out, Resolved{Name: name, Version: version})
+		}
+	}
+	return out, nil
+}
+
+// holdsAll reports whether pkgs has every package in want, at the exact
+// version where one is given.
+func holdsAll(pkgs []Resolved, want map[string]string) bool {
+	for name, version := range want {
+		found := false
+		for _, r := range pkgs {
+			if canonicalPackageName(r.Name) == name && (version == "" || r.Version == version) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
 // NpxCacheKey is the directory under npm's `_npx` cache that libnpmexec
 // installs the given packages into: the first 16 hex digits of the SHA-512
-// of the specs as typed, sorted, newline-joined (libnpmexec/lib/index.js).
+// of the specs as typed, sorted as npm sorts them, newline-joined
+// (libnpmexec/lib/index.js).
 func NpxCacheKey(packages []string) string {
 	sorted := slices.Clone(packages)
-	slices.Sort(sorted)
+	slices.SortFunc(sorted, npmCollate)
 	sum := sha512.Sum512([]byte(strings.Join(sorted, "\n")))
 	return hex.EncodeToString(sum[:])[:16]
+}
+
+// npmCollateOrder is the order node's `localeCompare('en')` (ICU root
+// collation) gives printable ASCII at the primary level: punctuation and
+// symbols first, then digits, then letters with case ignored. Byte order
+// differs (`-` before `_`, uppercase before lowercase), and a key computed
+// in byte order looks up a different cache entry than npm writes for
+// `--package a_b --package a-b`. `TestNpmCollateMatchesNode` holds this to
+// the installed node.
+const npmCollateOrder = " _-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$0123456789abcdefghijklmnopqrstuvwxyz"
+
+// npmCollate orders two specs as libnpmexec does: by primary weight first
+// (letters case-folded), then, for strings equal at that level, lowercase
+// before uppercase at the first case difference, then byte order so the
+// sort is total. Anything outside printable ASCII sorts after it, by code
+// point; package specs are ASCII.
+func npmCollate(a, b string) int {
+	if c := slices.Compare(collationKey(a, false), collationKey(b, false)); c != 0 {
+		return c
+	}
+	if c := slices.Compare(collationKey(a, true), collationKey(b, true)); c != 0 {
+		return c
+	}
+	return strings.Compare(a, b)
+}
+
+func collationKey(s string, tertiary bool) []int {
+	key := make([]int, 0, len(s))
+	for _, r := range s {
+		if tertiary {
+			if r >= 'A' && r <= 'Z' {
+				key = append(key, 1)
+			} else {
+				key = append(key, 0)
+			}
+			continue
+		}
+		lr := r
+		if r >= 'A' && r <= 'Z' {
+			lr = r + 'a' - 'A'
+		}
+		if i := strings.IndexRune(npmCollateOrder, lr); i >= 0 {
+			key = append(key, i)
+		} else {
+			key = append(key, len(npmCollateOrder)+int(r))
+		}
+	}
+	return key
 }
 
 // NpxCachedTree is the dependency tree an earlier `npx`/`npm exec` of the
