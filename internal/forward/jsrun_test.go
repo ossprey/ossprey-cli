@@ -82,6 +82,26 @@ func TestNpmExecRun(t *testing.T) {
 	}
 }
 
+// A command bunx fetches under another package's name keeps its tag on the
+// token the resolver reads: `tsc@latest` is `typescript@latest`, not the
+// configured tag's TypeScript.
+func TestBunxRun_AliasKeepsTheTag(t *testing.T) {
+	bunx, _ := Lookup("bunx")
+	for _, tt := range []struct {
+		args []string
+		want []string
+	}{
+		{[]string{"tsc@latest", "--noEmit"}, []string{"typescript@latest"}},
+		{[]string{"claude@2.0.0"}, []string{"@anthropic-ai/claude-code@2.0.0"}},
+		{[]string{"tsc"}, []string{"typescript"}},
+	} {
+		parsed := bunx.parseRun(tt.args)
+		if got := specTokens(bunx, parsed); !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("%v: tokens = %v, want %v", tt.args, got, tt.want)
+		}
+	}
+}
+
 func TestBunxRun(t *testing.T) {
 	tests := []struct {
 		args      []string
@@ -420,7 +440,7 @@ Module._load = function (request, parent, isMain) {
       // a Date (before) as the word, a path (prefix) relative to the cwd,
       // everything else as its string.
       config: Object.fromEntries(['legacy-peer-deps', 'strict-peer-deps', 'optional', 'omit', 'include',
-        'before', 'tag', 'globalconfig', 'global', 'prefix', 'location', 'cache', 'offline', 'prefer-offline'].filter(k => conf[k] !== undefined).map(k =>
+        'before', 'tag', 'globalconfig', 'global', 'prefix', 'location', 'cache', 'offline', 'prefer-offline', 'workspaces'].filter(k => conf[k] !== undefined).map(k =>
           [k, [].concat(conf[k]).map(v => v instanceof Date ? 'date'
             : k === 'prefix' || k === 'globalconfig' || k === 'cache' ? require('path').relative(process.cwd(), String(v)) : String(v))])),
     }))
@@ -517,6 +537,9 @@ func TestNpmParsersMatchNpm(t *testing.T) {
 		{"--ignore-existing", "cowsay"}, {"-q", "cowsay"}, {"--quiet", "cowsay", "moo"},
 		{"--loglevel", "silent", "cowsay", "moo"}, {"--", "cowsay", "--yes"}, {"cowsay@1.5.0", "--help"},
 		{"@scope/pkg@1.0.0", "arg"}, {"-gy", "cowsay"}, {"--prefer-offline", "cowsay"}, {"--offline", "--cache", "c", "cowsay"}, {"--no-offline", "cowsay"},
+		// nopt toggles the negation per prefix.
+		{"--no-no-optional", "cowsay"}, {"--no-no-no-optional", "cowsay"}, {"--no-no-optional=false", "cowsay"},
+		{"--workspaces=false", "cowsay"}, {"--no-workspaces", "cowsay"},
 		{"--cache", "/tmp/c", "cowsay"}, {"--userconfig", "./x.npmrc", "cowsay", "moo"},
 		{"--shell", "bash", "cowsay"}, {"--color", "always", "cowsay"}, {"--browser", "firefox", "cowsay"},
 		{"--workspace", "a", "cowsay"}, {"-w", "a", "cowsay"}, {"--package", "cowsay", "--", "cowsay", "moo"},

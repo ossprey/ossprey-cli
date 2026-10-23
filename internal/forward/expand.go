@@ -215,7 +215,7 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 			if parsed.Userconfig != "" {
 				flags = append(flags, "--userconfig", absPath(parsed.Userconfig))
 			}
-			tree, err := resolveNpmFn(ctx, "", npmConfigDirFor(parsed.NpmGlobal, parsed.NpmPrefix), tokens, flags)
+			tree, err := resolveNpmFn(ctx, "", npmConfigDirFor(parsed.NpmGlobal, parsed.NpmPrefix, parsed.NpmWorkspacesOff), tokens, flags)
 			// The flags that make `npm config get` read what this command
 			// reads: its config files and location.
 			configFlags := slices.Concat(flags, npmLocationFlags(parsed.NpmGlobal, parsed.NpmPrefix))
@@ -739,6 +739,10 @@ func toolRunPipFlags(rest []string, base string) []string {
 var uvOnlyResolution = flagSet("--index", "--extra-index-url", "--overrides", "--resolution",
 	"--prerelease", "--exclude-newer", "--exclude-newer-package", "--index-strategy",
 	"-p", "--python", "--python-platform", "--config-file", "--offline",
+	// Building from source is what pip's dry run is told never to do
+	// (--only-binary=:all:), so it would pick the newest release with a
+	// wheel where uv builds the newest of all.
+	"--no-binary", "--no-binary-package",
 	// The cache uv reads offline or prefers, and whether it reads or
 	// refreshes it, decide what it resolves against; pip has no such cache.
 	"--cache-dir", "-n", "--no-cache", "--refresh", "--refresh-package", "--reinstall", "--reinstall-package")
@@ -973,19 +977,41 @@ func npmConfigDir(m *Manager, args []string) string {
 	// rules: `--global --no-global` and `--global=false` are local installs,
 	// and -C is --prefix.
 	a := parseNpmArgv(args)
-	return npmConfigDirFor(a.global(), a.prefix())
+	return npmConfigDirFor(a.global(), a.prefix(), a.workspacesOff())
 }
 
-// npmConfigDirFor is npmConfigDir once global mode and the --prefix are
-// known, as a tool run's npm parse reports them.
-func npmConfigDirFor(global bool, prefix string) string {
+// npmConfigDirFor is npmConfigDir once global mode, the --prefix and
+// whether workspaces are off are known, as a tool run's npm parse reports
+// them.
+func npmConfigDirFor(global bool, prefix string, workspacesOff bool) string {
 	switch {
 	case global:
 		return ""
 	case prefix != "":
 		return absPath(prefix)
 	}
-	return npmLocalPrefix()
+	return npmConfigPrefix(workspacesOff)
+}
+
+// npmConfigPrefix is the directory whose .npmrc npm reads from the working
+// directory: its local prefix, or the workspace root when that prefix is a
+// declared member. npm's config loader walks on past the nearest
+// package.json looking for an ancestor whose workspaces name it, takes that
+// as the prefix and ignores the member's own .npmrc with a warning
+// (verified against npm 11.19.1: `npm prefix` from a member answers the
+// root, and --workspaces=false stops the walk).
+func npmConfigPrefix(workspacesOff bool) string {
+	prefix := npmLocalPrefix()
+	if workspacesOff {
+		return prefix
+	}
+	if _, err := os.Stat(filepath.Join(prefix, "package.json")); err != nil {
+		return prefix
+	}
+	if root := catalog.NpmWorkspaceRoot(prefix); root != "" {
+		return root
+	}
+	return prefix
 }
 
 // npmLocalPrefix is npm's local prefix for the working directory: the
@@ -1026,7 +1052,7 @@ var pythonCommonFlags = flagSet("--pre", "--no-index", "-i", "--index-url", "--e
 // uvOnlyFlags are uv's own, passed when uv resolves a uv command.
 var uvOnlyFlags = flagSet("--index", "--default-index", "--prerelease", "--resolution",
 	"--exclude-newer", "--exclude-newer-package", "-p", "--python", "--python-platform",
-	"--allow-insecure-host", "--index-strategy", "--only-binary", "--no-binary",
+	"--allow-insecure-host", "--index-strategy", "--only-binary", "--no-binary", "--no-binary-package",
 	"--constraints", "--overrides", "--no-config", "--config-file", "--offline", "--project",
 	"--cache-dir", "-n", "--no-cache", "--refresh", "--refresh-package", "--reinstall", "--reinstall-package")
 

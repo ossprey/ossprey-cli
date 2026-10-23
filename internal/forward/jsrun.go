@@ -73,7 +73,7 @@ type npmArgv struct {
 // dist-tag, and the global/prefix/location trio that decides which .npmrc
 // npm reads.
 var npmRunConfig = flagSet("legacy-peer-deps", "strict-peer-deps", "optional", "omit", "include",
-	"before", "tag", "globalconfig", "global", "prefix", "location", "cache", "offline", "prefer-offline")
+	"before", "tag", "globalconfig", "global", "prefix", "location", "cache", "offline", "prefer-offline", "workspaces")
 
 // npmPathConfig are the npmRunConfig keys nopt types as paths: a leading
 // `~/` is the home directory (nopt's validatePath), and the rest is read
@@ -99,7 +99,7 @@ func expandHome(v string) string {
 
 // npmConfigKeys are npmRunConfig's keys in a fixed order, for output.
 var npmConfigKeys = []string{"before", "cache", "globalconfig", "include", "legacy-peer-deps", "offline", "omit", "optional",
-	"prefer-offline", "strict-peer-deps", "tag"}
+	"prefer-offline", "strict-peer-deps", "tag", "workspaces"}
 
 func (a *npmArgv) record(key, value string) {
 	if !npmRunConfig[key] {
@@ -132,6 +132,12 @@ func (a npmArgv) global() bool {
 // command's directory, or "".
 func (a npmArgv) prefix() string {
 	return a.last("prefix")
+}
+
+// workspacesOff reports --workspaces=false (or --no-workspaces), which
+// keeps npm's config discovery at the nearest package.json.
+func (a npmArgv) workspacesOff() bool {
+	return a.last("workspaces") == "false"
 }
 
 // cache is the --cache npm was given, or "".
@@ -230,7 +236,7 @@ func npxRun(args []string) installArgs {
 
 func (a npmArgv) target() installArgs {
 	out := installArgs{Registry: a.Registry, Userconfig: a.Userconfig,
-		NpmFlags: a.resolveFlags(), NpmGlobal: a.global(), NpmPrefix: a.prefix(), NpmOmits: a.omits(),
+		NpmFlags: a.resolveFlags(), NpmGlobal: a.global(), NpmPrefix: a.prefix(), NpmWorkspacesOff: a.workspacesOff(), NpmOmits: a.omits(),
 		NpmCache: a.cache(), NpxPackages: a.npxPackages()}
 	if len(a.Packages) > 0 {
 		for _, p := range a.Packages {
@@ -363,9 +369,11 @@ func parseNpmArgv(in []string) npmArgv {
 			}
 		}
 		key := strings.TrimLeft(arg, "-")
-		negated := false
+		// nopt toggles the negation per `no-` prefix (`--no-no-optional` is
+		// optional on), and any prefix makes the option boolean.
+		hadPrefix, negated := false, false
 		for strings.HasPrefix(strings.ToLower(key), "no-") {
-			negated = true
+			hadPrefix, negated = true, !negated
 			key = key[3:]
 		}
 		if full := npmAbbrev(key); full != "" {
@@ -377,7 +385,7 @@ func parseNpmArgv(in []string) npmArgv {
 			la = args[i+1]
 		}
 
-		if negated || (known && kind.isBool()) || (!known && !hadEq) {
+		if hadPrefix || (known && kind.isBool()) || (!known && !hadEq) {
 			value := "true"
 			if negated {
 				value = "false"
@@ -574,7 +582,15 @@ func bunxRun(args []string) installArgs {
 		out.addCommand(a)
 		if n := len(out.Specs); n > 0 {
 			if alias, ok := bunxAliases[out.Specs[n-1].Name]; ok {
+				// The token travels to the resolver as typed, so it is
+				// renamed too: `tsc@latest` is `typescript@latest`, tag kept.
+				s := out.Specs[n-1]
+				toks := out.Tokens[s]
+				delete(out.Tokens, s)
 				out.Specs[n-1].Name = alias
+				for _, tok := range toks {
+					out.Tokens[out.Specs[n-1]] = append(out.Tokens[out.Specs[n-1]], alias+strings.TrimPrefix(tok, s.Name))
+				}
 			}
 		}
 		return out

@@ -602,6 +602,9 @@ func TestExpandInstall_UVOnlyFlagsAreResolvedByUVOnly(t *testing.T) {
 			[]string{"--overrides", absPath("o.txt")}},
 		{"uvx --resolution", uvx, []string{"--resolution=lowest", "ruff"},
 			[]string{"--resolution=lowest"}},
+		// Building from source is what pip's dry run is told never to do.
+		{"uvx --no-binary", uvx, []string{"--no-binary", "ruff"}, []string{"--no-binary"}},
+		{"uvx --no-binary-package", uvx, []string{"--no-binary-package", "ruff", "ruff"}, []string{"--no-binary-package", "ruff"}},
 		{"uv pip install --exclude-newer", uv, []string{"pip", "install", "--exclude-newer", "2024-01-01", "ruff"},
 			[]string{"--exclude-newer", "2024-01-01"}},
 	}
@@ -1124,6 +1127,16 @@ func TestNpmConfigDir(t *testing.T) {
 		os.MkdirAll(d, 0o755)
 	}
 	os.WriteFile(filepath.Join(proj, "package.json"), []byte("{}"), 0o644)
+	ws := filepath.Join(root, "ws")
+	member := filepath.Join(ws, "packages", "app")
+	other := filepath.Join(ws, "other")
+	nmOnly := filepath.Join(ws, "packages", "nm")
+	for _, d := range []string{filepath.Join(member, "src"), other, filepath.Join(nmOnly, "node_modules")} {
+		os.MkdirAll(d, 0o755)
+	}
+	os.WriteFile(filepath.Join(ws, "package.json"), []byte(`{"workspaces":["packages/*"]}`), 0o644)
+	os.WriteFile(filepath.Join(member, "package.json"), []byte(`{"name":"app"}`), 0o644)
+	os.WriteFile(filepath.Join(other, "package.json"), []byte(`{"name":"other"}`), 0o644)
 	npm, _ := Lookup("npm")
 	pnpm, _ := Lookup("pnpm")
 
@@ -1146,6 +1159,18 @@ func TestNpmConfigDir(t *testing.T) {
 		{"-C after the verb", bare, npm, []string{"install", "-C", "../proj", "x"}, proj},
 		// npm's last-wins and negation rules: these are local installs.
 		{"--global=false", sub, npm, []string{"install", "--global=false", "x"}, proj},
+		// A declared workspace member's configuration is the root's: npm
+		// walks on to the root and ignores the member's .npmrc. Not with
+		// workspaces off, not for a non-member, and not for a prefix found
+		// by node_modules alone, which no workspace glob names.
+		{"workspace member", member, npm, []string{"install", "x"}, ws},
+		{"workspace member subdirectory", filepath.Join(member, "src"), npm, []string{"install", "x"}, ws},
+		{"workspace member, tool run", member, npm, []string{"exec", "x"}, ws},
+		{"workspace member, --workspaces=false", member, npm, []string{"install", "--workspaces=false", "x"}, member},
+		{"workspace member, --no-workspaces", member, npm, []string{"install", "--no-workspaces", "x"}, member},
+		{"workspace member, --prefix", member, npm, []string{"install", "--prefix", ".", "x"}, member},
+		{"not a member", other, npm, []string{"install", "x"}, other},
+		{"node_modules only under a glob", nmOnly, npm, []string{"install", "x"}, nmOnly},
 		{"--global then --no-global", sub, npm, []string{"install", "--global", "--no-global", "x"}, proj},
 		{"--location overridden", sub, npm, []string{"install", "--location=global", "--location=project", "x"}, proj},
 		{"--no-global then -g", sub, npm, []string{"install", "--no-global", "-g", "x"}, ""},

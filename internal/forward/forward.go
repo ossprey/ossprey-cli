@@ -1109,6 +1109,9 @@ type installArgs struct {
 	NpmFlags  []string
 	NpmGlobal bool
 	NpmPrefix string
+	// NpmWorkspacesOff is --workspaces=false, which stops npm's config
+	// discovery at the nearest package.json rather than a workspace root.
+	NpmWorkspacesOff bool
 	// NpmOmits are the dependency kinds npm's effective omit policy leaves
 	// out of the install (npmArgv.omits).
 	NpmOmits map[string]bool

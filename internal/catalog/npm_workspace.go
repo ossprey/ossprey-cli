@@ -26,6 +26,30 @@ func isWorkspaceMember(dir, root string) bool {
 	}
 }
 
+// NpmWorkspaceRoot is the ancestor of dir that npm's config loader takes as
+// the local prefix when dir is a declared workspace member: the nearest
+// one whose package.json workspaces name dir (mapWorkspaces reads only
+// package.json, so pnpm-workspace.yaml does not count here). "" when none
+// does. Ancestors without a package.json are passed over, as npm passes them.
+func NpmWorkspaceRoot(dir string) string {
+	dir = filepath.Clean(dir)
+	for a := filepath.Dir(dir); a != filepath.Dir(a); a = filepath.Dir(a) {
+		data, err := os.ReadFile(filepath.Join(a, "package.json"))
+		if err != nil {
+			continue
+		}
+		globs := parsePackageJSONWorkspaces(data)
+		if len(globs) == 0 {
+			continue
+		}
+		rel, err := filepath.Rel(a, dir)
+		if err == nil && matchesWorkspaceGlobs(globs, filepath.ToSlash(rel)) {
+			return a
+		}
+	}
+	return ""
+}
+
 // declaresMember reports whether ancestor's workspace globs cover dir.
 func declaresMember(ancestor, dir string) bool {
 	globs := workspaceGlobs(ancestor)
