@@ -587,6 +587,82 @@ func TestUVToolRunConfig(t *testing.T) {
 	}
 }
 
+// Configuration that changes what resolves, from the environment or a file
+// uv reads, is reported; configuration that does not is not.
+func TestUVConfigShapesResolution(t *testing.T) {
+	for _, v := range uvResolutionEnv {
+		t.Setenv(v, "")
+	}
+	t.Setenv("UV_CONFIG_FILE", "")
+	sys, usr := t.TempDir(), t.TempDir()
+	t.Setenv("XDG_CONFIG_DIRS", sys)
+	t.Setenv("XDG_CONFIG_HOME", usr)
+	os.MkdirAll(filepath.Join(usr, "uv"), 0o755)
+	proj := t.TempDir()
+	write := func(path, body string) {
+		os.MkdirAll(filepath.Dir(path), 0o755)
+		os.WriteFile(path, []byte(body), 0o644)
+	}
+
+	if UVConfigShapesResolution(nil, "") {
+		t.Error("nothing configured: shapes")
+	}
+	t.Setenv("UV_INDEX_URL", "https://i.example/simple")
+	if !UVConfigShapesResolution(nil, "") || !UVConfigShapesResolution([]string{"--no-config"}, "") {
+		t.Error("UV_INDEX_URL: does not shape (--no-config stops files, not variables)")
+	}
+	t.Setenv("UV_INDEX_URL", "")
+
+	write(filepath.Join(usr, "uv", "uv.toml"), "python-preference = \"managed\"\n")
+	if !UVConfigShapesResolution(nil, "") {
+		t.Error("user python-preference: does not shape")
+	}
+	write(filepath.Join(usr, "uv", "uv.toml"), "cache-dir = \"/tmp/c\"\n")
+	if UVConfigShapesResolution(nil, "") {
+		t.Error("user cache-dir only: shapes")
+	}
+	write(filepath.Join(usr, "uv", "uv.toml"), "[pip]\nindex-url = \"https://pip.example/simple\"\n")
+	if !UVConfigShapesResolution(nil, "") {
+		t.Error("user [pip] index-url: does not shape")
+	}
+	if UVConfigShapesResolution([]string{"--no-config"}, "") {
+		t.Error("--no-config: the user file still shapes")
+	}
+	named := filepath.Join(t.TempDir(), "named.toml")
+	write(named, "link-mode = \"copy\"\n")
+	if UVConfigShapesResolution([]string{"--config-file", named}, "") {
+		t.Error("--config-file names a harmless file, yet the user file shapes")
+	}
+	write(named, "[[index]]\nurl = \"https://i.example/simple\"\n")
+	if !UVConfigShapesResolution([]string{"--config-file=" + named}, "") {
+		t.Error("--config-file with [[index]]: does not shape")
+	}
+	if !UVConfigShapesResolution([]string{"--config-file", filepath.Join(t.TempDir(), "absent.toml")}, "") {
+		t.Error("an unreadable file: does not shape (cannot be reproduced for pip)")
+	}
+
+	// A project's configuration counts for a named install at its
+	// directory (uv.toml, or pyproject.toml's [tool.uv]), not for a tool run.
+	write(filepath.Join(usr, "uv", "uv.toml"), "")
+	write(filepath.Join(proj, "pyproject.toml"), "[project]\nname = \"x\"\n\n[tool.uv]\nextra-index-url = [\"https://i.example/simple\"]\n")
+	sub := filepath.Join(proj, "src")
+	os.MkdirAll(sub, 0o755)
+	if !UVConfigShapesResolution(nil, proj) || !UVConfigShapesResolution(nil, sub) {
+		t.Error("project [tool.uv] extra-index-url: does not shape")
+	}
+	if UVConfigShapesResolution(nil, "") {
+		t.Error("tool run: the project file shapes")
+	}
+	write(filepath.Join(proj, "pyproject.toml"), "[project]\nname = \"x\"\n\n[tool.uv]\ndev-dependencies = []\n")
+	if UVConfigShapesResolution(nil, proj) {
+		t.Error("project [tool.uv] without resolution keys: shapes")
+	}
+	write(filepath.Join(proj, "uv.toml"), "resolution = \"lowest\"\n")
+	if !UVConfigShapesResolution(nil, proj) {
+		t.Error("project uv.toml resolution: does not shape")
+	}
+}
+
 // Against a real uv: a [pip] index that would break `uv pip compile` does
 // not reach a tool run's resolution, since uvx does not read it either.
 func TestResolvePythonInstallWithUVReadsConfigAsAToolRun(t *testing.T) {

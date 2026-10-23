@@ -28,6 +28,7 @@ var (
 	npmConfigGetFn      = catalog.NpmConfigGet
 	npxCachedFn         = catalog.NpxCachedTree
 	uvCacheDirFn        = catalog.UVCacheDir
+	uvConfigNeedsUVFn   = catalog.UVConfigShapesResolution
 	uvCachedFn          = catalog.UVCachedTree
 	uvToolDirFn         = catalog.UVToolDir
 	uvInstalledFn       = catalog.UVInstalledTree
@@ -291,7 +292,10 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 			tokens = slices.Concat(tokens, reqFileTokens(parsed.ReqFiles, base))
 			var tree []catalog.Resolved
 			var err error
-			if globalNeedsUV || needsUV(lead, toolRunValueFlags) || len(envConfig) > 0 {
+			// Configuration outside the line — a UV_INDEX_URL, an index in
+			// the user's uv.toml — shapes the real run as a flag would, and
+			// pip reads none of it: such a run resolves with uv or not at all.
+			if globalNeedsUV || needsUV(lead, toolRunValueFlags) || len(envConfig) > 0 || uvConfigNeedsUVFn(opts, "") {
 				tree, err = resolveWithUVFn(ctx, "", tokens, uvFlags)
 			} else {
 				tree, err = resolvePythonFn(ctx, "", tokens, uvFlags, toolRunPipFlags(rest, base))
@@ -317,7 +321,7 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 			// resolve without it, from indexes the run does not use.
 			envConfig := uvEnvConfigFlag(args, dir)
 			uvFlags = append(uvFlags, envConfig...)
-			if globalNeedsUV || needsUV(rest, valueFlags[m.Bin]) || len(envConfig) > 0 {
+			if globalNeedsUV || needsUV(rest, valueFlags[m.Bin]) || len(envConfig) > 0 || uvConfigNeedsUVFn(args, dir) {
 				return resolveWithUVFn(ctx, dir, tokens, uvFlags)
 			}
 		}

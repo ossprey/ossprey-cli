@@ -895,6 +895,131 @@ func concatTOML(over, base any) (any, bool) {
 	return nil, false
 }
 
+// uvResolutionKeys are the uv settings, in a configuration file or its
+// environment, that change which releases resolve: the indexes and how they
+// are searched, prerelease and resolution strategy, date cut-offs, build
+// policy, the interpreter, and dependency overrides. pip's dry run honours
+// none of them from uv's configuration.
+var uvResolutionKeys = []string{"index", "index-url", "default-index", "extra-index-url", "find-links", "no-index",
+	"index-strategy", "prerelease", "resolution", "exclude-newer", "exclude-newer-package", "torch-backend",
+	"no-binary", "no-binary-package", "no-build", "no-build-package", "python", "python-preference",
+	"override-dependencies", "constraint-dependencies", "build-constraint-dependencies", "dependency-metadata",
+	"sources", "environments", "offline", "no-sources"}
+
+// uvResolutionEnv are the UV_* variables uv reads for the same settings.
+var uvResolutionEnv = []string{"UV_INDEX", "UV_INDEX_URL", "UV_DEFAULT_INDEX", "UV_EXTRA_INDEX_URL", "UV_FIND_LINKS",
+	"UV_NO_INDEX", "UV_INDEX_STRATEGY", "UV_PRERELEASE", "UV_RESOLUTION", "UV_EXCLUDE_NEWER", "UV_TORCH_BACKEND",
+	"UV_NO_BINARY", "UV_NO_BINARY_PACKAGE", "UV_NO_BUILD", "UV_NO_BUILD_PACKAGE", "UV_PYTHON", "UV_PYTHON_PREFERENCE",
+	"UV_OVERRIDE", "UV_CONSTRAINT", "UV_BUILD_CONSTRAINT", "UV_OFFLINE", "UV_NO_SOURCES"}
+
+// UVConfigShapesResolution reports whether uv's configuration outside the
+// command line would change what resolves: a UV_* variable for an index,
+// strategy, cut-off, build policy, interpreter or override, or such a
+// setting in the configuration uv reads — the file --config-file or
+// UV_CONFIG_FILE names, else the project's uv.toml or pyproject.toml
+// [tool.uv] at dir or above when dir is a project, and the user- and
+// system-level uv.toml. A [pip] table counts too, since a pip-interface
+// command reads it. --no-config stops the files, not the variables. The pip
+// fallback reads none of this, so a uv command under such configuration
+// must resolve with uv or not at all. A file that cannot be read or parsed
+// counts as shaping, erring toward uv.
+func UVConfigShapesResolution(flags []string, dir string) bool {
+	for _, v := range uvResolutionEnv {
+		if os.Getenv(v) != "" {
+			return true
+		}
+	}
+	path := ""
+	for i := 0; i < len(flags); i++ {
+		switch f := flags[i]; {
+		case f == "--no-config":
+			return false
+		case f == "--config-file" && i+1 < len(flags):
+			path = flags[i+1]
+			i++
+		case strings.HasPrefix(f, "--config-file="):
+			path = strings.TrimPrefix(f, "--config-file=")
+		}
+	}
+	if path == "" {
+		path = os.Getenv("UV_CONFIG_FILE")
+	}
+	if path != "" {
+		return tomlShapesResolution(path, "")
+	}
+	if dir != "" {
+		// uv discovers the nearest uv.toml or pyproject.toml above dir,
+		// uv.toml winning beside a pyproject.toml.
+		for d := absDir(dir); ; d = filepath.Dir(d) {
+			if _, err := os.Stat(filepath.Join(d, "uv.toml")); err == nil {
+				return tomlShapesResolution(filepath.Join(d, "uv.toml"), "")
+			}
+			if _, err := os.Stat(filepath.Join(d, "pyproject.toml")); err == nil {
+				if tomlShapesResolution(filepath.Join(d, "pyproject.toml"), "tool.uv") {
+					return true
+				}
+				break
+			}
+			if filepath.Dir(d) == d {
+				break
+			}
+		}
+	}
+	for _, source := range uvConfigSources() {
+		if _, err := os.Stat(source); err != nil {
+			continue
+		}
+		if tomlShapesResolution(source, "") {
+			return true
+		}
+	}
+	return false
+}
+
+func absDir(dir string) string {
+	if abs, err := filepath.Abs(dir); err == nil {
+		return abs
+	}
+	return dir
+}
+
+// tomlShapesResolution reports whether the table at dotted path table (the
+// whole file for "") in the TOML file, or its [pip] sub-table, sets any of
+// uvResolutionKeys. Unreadable or unparseable is true: what cannot be read
+// cannot be reproduced for pip.
+func tomlShapesResolution(path, table string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return true
+	}
+	var cfg map[string]any
+	if _, err := toml.Decode(string(data), &cfg); err != nil {
+		return true
+	}
+	if table != "" {
+		for _, part := range strings.Split(table, ".") {
+			sub, ok := cfg[part].(map[string]any)
+			if !ok {
+				return false
+			}
+			cfg = sub
+		}
+	}
+	for _, k := range uvResolutionKeys {
+		if _, ok := cfg[k]; ok {
+			return true
+		}
+	}
+	if pip, ok := cfg["pip"].(map[string]any); ok {
+		for _, k := range uvResolutionKeys {
+			if _, ok := pip[k]; ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // uvConfigSources are the configuration files uv discovers for a tool run,
 // lowest precedence first: the system-level uv.toml (/etc/uv/uv.toml, or
 // the first under $XDG_CONFIG_DIRS; %PROGRAMDATA%\uv\uv.toml on Windows),

@@ -718,6 +718,70 @@ func TestExpandInstall_ToolRunNamesARelativeEnvConfigFile(t *testing.T) {
 	}
 }
 
+// uv's configuration outside the command line — a UV_INDEX_URL, an index in
+// the user's uv.toml — shapes the real run as a flag would, and pip reads
+// none of it, so such a command is uv-only: for a tool run and a named
+// install alike. Configuration that does not touch the resolution leaves the
+// pip fallback in place.
+func TestExpandInstall_ConfiguredIndexesAreResolvedByUVOnly(t *testing.T) {
+	uvCalled, pipCalled := false, false
+	old, oldUV, oldNeeds := resolvePythonFn, resolveWithUVFn, uvConfigNeedsUVFn
+	resolvePythonFn = func(context.Context, string, []string, []string, []string) ([]catalog.Resolved, error) {
+		pipCalled = true
+		return nil, nil
+	}
+	resolveWithUVFn = func(context.Context, string, []string, []string) ([]catalog.Resolved, error) {
+		uvCalled = true
+		return nil, nil
+	}
+	t.Cleanup(func() { resolvePythonFn, resolveWithUVFn, uvConfigNeedsUVFn = old, oldUV, oldNeeds })
+	t.Setenv("UV_CACHE_DIR", t.TempDir())
+	t.Setenv("UV_TOOL_DIR", t.TempDir())
+	t.Setenv("UV_CONFIG_FILE", "")
+	uvx, _ := Lookup("uvx")
+	uv, _ := Lookup("uv")
+	for _, tt := range []struct {
+		name   string
+		m      *Manager
+		args   []string
+		shapes bool
+		wantUV bool
+	}{
+		{"uvx, index configured", uvx, []string{"ruff"}, true, true},
+		{"uvx, nothing configured", uvx, []string{"ruff"}, false, false},
+		{"uv pip install, index configured", uv, []string{"pip", "install", "ruff"}, true, true},
+		{"uv pip install, nothing configured", uv, []string{"pip", "install", "ruff"}, false, false},
+	} {
+		var askedFlags []string
+		askedDir := "unset"
+		uvConfigNeedsUVFn = func(flags []string, dir string) bool {
+			askedFlags, askedDir = flags, dir
+			return tt.shapes
+		}
+		uvCalled, pipCalled = false, false
+		start := 0
+		var parsed installArgs
+		if tt.m == uvx {
+			parsed = parseToolRun(uvx, tt.args)
+			parsed.ToolRun = true
+		} else {
+			start = 2
+			parsed = ParseSpecs(uv, tt.args[start:])
+		}
+		if _, err := expandInstall(context.Background(), tt.m, tt.args, start, parsed); err != nil {
+			t.Fatal(err)
+		}
+		if uvCalled != tt.wantUV || pipCalled == tt.wantUV {
+			t.Errorf("%s: uv %v, pip %v, want uv-only %v", tt.name, uvCalled, pipCalled, tt.wantUV)
+		}
+		// A tool run reads no project configuration; a named install reads
+		// the project's at its directory.
+		if wantDir := map[bool]string{true: "", false: "."}[tt.m == uvx]; askedDir != wantDir || askedFlags == nil && tt.m == uv {
+			t.Errorf("%s: configuration asked for dir %q with %v, want dir %q", tt.name, askedDir, askedFlags, wantDir)
+		}
+	}
+}
+
 // A relative UV_CACHE_DIR, or a relative cache-dir in uv's configuration,
 // is read against the directory uv runs in, and the resolver runs in
 // scratch, where there is no cache: it is told the cache by its absolute
