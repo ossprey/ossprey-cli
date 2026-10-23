@@ -1443,7 +1443,7 @@ func flagSet(flags ...string) map[string]bool {
 var valueFlags = map[string]map[string]bool{
 	"npm": flagSet("--registry", "--prefix", "-C", "--cache", "--userconfig",
 		"--globalconfig", "--tag", "--otp", "-w", "--workspace", "--omit", "--include",
-		"--before", "--install-strategy"),
+		"--min-release-age", "--min-release-age-exclude", "--before", "--install-strategy"),
 	// pnpm's own, deliberately not npm's: -w is --workspace-root here and takes
 	// no value, and --filter is accepted after the verb as well as before it.
 	"pnpm": flagSet("--filter", "-F", "--filter-prod", "--dir", "-C", "--registry",

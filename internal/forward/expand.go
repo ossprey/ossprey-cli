@@ -1060,7 +1060,9 @@ var npmPassFlags = flagSet("--legacy-peer-deps", "--strict-peer-deps", "--no-opt
 	// prefer-offline read the cache's metadata, which may be older than the
 	// registry's, and --cache names which cache that is. The negations
 	// travel too, so npm's last-wins reading holds in the dry run.
-	"--cache", "--offline", "--prefer-offline", "--no-offline", "--no-prefer-offline", "--prefer-online", "--no-prefer-online")
+	"--cache", "--offline", "--prefer-offline", "--no-offline", "--no-prefer-offline", "--prefer-online", "--no-prefer-online",
+	// A release-age policy picks an older eligible release, like --before.
+	"--min-release-age", "--min-release-age-exclude")
 
 func npmResolveFlags(m *Manager, rest []string) []string {
 	if m.Bin != "npm" {

@@ -387,6 +387,9 @@ func TestExpandInstall_ToolRunHasNoProjectContext(t *testing.T) {
 		{[]string{"exec", "--offline", "--prefer-offline", "--cache", "~/c", "cowsay@1.6.0"}, dir,
 			[]string{"--cache=" + absPath(expandHome("~/c")), "--offline", "--prefer-offline"}},
 		{[]string{"exec", "--prefer-online", "cowsay@1.6.0"}, dir, []string{"--prefer-online"}},
+		// A release-age policy picks an older eligible release, like --before.
+		{[]string{"exec", "--min-release-age=7", "--min-release-age-exclude", "left-pad", "cowsay@1.6.0"}, dir,
+			[]string{"--min-release-age=7", "--min-release-age-exclude=left-pad"}},
 		// Workspaces decide where configuration is read, never what the
 		// scratch dry run is told: `npm install --workspaces` there fails.
 		{[]string{"exec", "--workspaces", "--package=cowsay@1.6.0", "--", "cowsay"}, dir, nil},
@@ -1324,6 +1327,9 @@ func TestResolverFlags(t *testing.T) {
 		{"prefer-online",
 			npmResolveFlags(npm, []string{"install", "--prefer-online", "--no-prefer-online", "tool@1.0.0"}),
 			[]string{"--prefer-online", "--no-prefer-online"}},
+		{"min-release-age",
+			npmResolveFlags(npm, []string{"install", "--min-release-age", "7", "--min-release-age-exclude=left-pad", "tool@1.0.0"}),
+			[]string{"--min-release-age", "7", "--min-release-age-exclude=left-pad"}},
 	}
 	for _, tt := range tests {
 		if !reflect.DeepEqual(tt.got, tt.want) {

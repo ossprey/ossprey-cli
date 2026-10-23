@@ -723,6 +723,68 @@ func TestUVConfigShapesResolution(t *testing.T) {
 	}
 }
 
+// Against a real npm: a dry run with no project is isolated from a project
+// above its scratch directory, where TMPDIR may point. Without a manifest
+// of its own npm took the ancestor as the project and rewrote its
+// package.json and lockfile (verified).
+func TestResolveNpmInstallScratchIsIsolatedFromAProjectAbove(t *testing.T) {
+	if testing.Short() {
+		t.Skip("network")
+	}
+	if _, err := lookTool("npm"); err != nil {
+		t.Skip("no npm")
+	}
+	proj := t.TempDir()
+	manifest := []byte("{\"name\":\"proj\",\"workspaces\":[\"*\"],\"dependencies\":{}}\n")
+	os.WriteFile(filepath.Join(proj, "package.json"), manifest, 0o644)
+	os.MkdirAll(filepath.Join(proj, ".tmp"), 0o755)
+	t.Setenv("TMPDIR", filepath.Join(proj, ".tmp"))
+	t.Setenv("TMP", filepath.Join(proj, ".tmp"))
+	t.Setenv("TEMP", filepath.Join(proj, ".tmp"))
+	got, err := ResolveNpmInstall(context.Background(), "", "", []string{"is-odd@3.0.1"}, nil)
+	if err != nil {
+		t.Skipf("npm: %v", err)
+	}
+	if len(got) == 0 {
+		t.Error("nothing resolved")
+	}
+	if data, _ := os.ReadFile(filepath.Join(proj, "package.json")); string(data) != string(manifest) {
+		t.Errorf("the project's package.json was rewritten:\n%s", data)
+	}
+	if _, err := os.Stat(filepath.Join(proj, "package-lock.json")); err == nil {
+		t.Error("a lockfile was written into the project")
+	}
+}
+
+// Against a real uv: `uv cache dir` asked for a tool run answers the cache
+// the run uses, not one a project above the scratch directory names.
+func TestUVCacheDirIgnoresAProjectAboveScratch(t *testing.T) {
+	if _, ok := lookupUV(context.Background()); !ok {
+		t.Skip("no uv")
+	}
+	// An empty UV_CACHE_DIR is an error to uv (a --cache-dir with no
+	// value), so it is unset rather than blanked.
+	for _, v := range []string{"UV_CACHE_DIR", "UV_CONFIG_FILE"} {
+		t.Setenv(v, "x")
+		os.Unsetenv(v)
+	}
+	t.Setenv("XDG_CONFIG_DIRS", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	proj := t.TempDir()
+	os.WriteFile(filepath.Join(proj, "uv.toml"), []byte("cache-dir = \"projcache\"\n"), 0o644)
+	os.MkdirAll(filepath.Join(proj, ".tmp"), 0o755)
+	t.Setenv("TMPDIR", filepath.Join(proj, ".tmp"))
+	t.Setenv("TMP", filepath.Join(proj, ".tmp"))
+	t.Setenv("TEMP", filepath.Join(proj, ".tmp"))
+	got, err := UVCacheDir(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got, "projcache") {
+		t.Errorf("uv cache dir = %q, the project's cache, which uvx ignores", got)
+	}
+}
+
 // Against a real uv: a constraints file handed to the tool run's resolution
 // as a flag pins the release the run installs, from wherever the resolver
 // runs.

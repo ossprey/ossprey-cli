@@ -84,10 +84,19 @@ func ResolveNpmInstall(ctx context.Context, projectDir, configDir string, specs,
 		if err := stageNpmProject(projectDir, tmp, locked); err != nil {
 			return nil, err
 		}
-	} else if configDir != "" {
-		// No project, but npm still reads a project-level .npmrc: a scoped
-		// private registry applies to `npx @org/cli` too.
-		if err := stageNpmrc(configDir, tmp); err != nil {
+	} else {
+		if configDir != "" {
+			// No project, but npm still reads a project-level .npmrc: a
+			// scoped private registry applies to `npx @org/cli` too.
+			if err := stageNpmrc(configDir, tmp); err != nil {
+				return nil, err
+			}
+		}
+		// A manifest of its own, or npm takes the nearest ancestor with one
+		// as the project — scratch sits under one when TMPDIR points inside
+		// a project — and the dry run then rewrites that project's
+		// package.json and lockfile (verified against npm 11.19.1).
+		if err := os.WriteFile(filepath.Join(tmp, "package.json"), []byte("{\"name\":\"ossprey-scratch\",\"private\":true}\n"), 0o600); err != nil {
 			return nil, err
 		}
 	}
@@ -98,6 +107,10 @@ func ResolveNpmInstall(ctx context.Context, projectDir, configDir string, specs,
 		"--no-audit",
 		"--no-fund",
 		"--no-update-notifier",
+		// Nor may npm walk on past that manifest to an ancestor workspace
+		// root whose globs happen to name scratch; a copied root still
+		// locks its own members with this (verified).
+		"--workspaces=false",
 	}, flags...)
 	args = append(args, specs...)
 
@@ -149,6 +162,13 @@ func UVCacheDir(ctx context.Context, flags []string) (string, error) {
 		return "", err
 	}
 	defer os.RemoveAll(scratch)
+	// The configuration the tool run reads, named explicitly: a bare
+	// scratch directory does not stop uv discovering a project's uv.toml
+	// above it, which uvx ignores, and scratch sits under a project when
+	// TMPDIR points inside one.
+	if flags, err = uvToolRunConfig(flags, scratch); err != nil {
+		return "", err
+	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, uv, append([]string{"cache", "dir"}, flags...)...)
@@ -157,6 +177,10 @@ func UVCacheDir(ctx context.Context, flags []string) (string, error) {
 	cmd.WaitDelay = 5 * time.Second
 	out, err := cmd.Output()
 	if err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
+			return "", fmt.Errorf("uv cache dir: %w: %s", err, strings.TrimSpace(string(ee.Stderr)))
+		}
 		return "", fmt.Errorf("uv cache dir: %w", err)
 	}
 	return strings.TrimSpace(string(out)), nil
@@ -175,6 +199,13 @@ func UVToolDir(ctx context.Context, flags []string) (string, error) {
 		return "", err
 	}
 	defer os.RemoveAll(scratch)
+	// The configuration the tool run reads, named explicitly: a bare
+	// scratch directory does not stop uv discovering a project's uv.toml
+	// above it, which uvx ignores, and scratch sits under a project when
+	// TMPDIR points inside one.
+	if flags, err = uvToolRunConfig(flags, scratch); err != nil {
+		return "", err
+	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, uv, append([]string{"tool", "dir"}, flags...)...)
@@ -183,6 +214,10 @@ func UVToolDir(ctx context.Context, flags []string) (string, error) {
 	cmd.WaitDelay = 5 * time.Second
 	out, err := cmd.Output()
 	if err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
+			return "", fmt.Errorf("uv tool dir: %w: %s", err, strings.TrimSpace(string(ee.Stderr)))
+		}
 		return "", fmt.Errorf("uv tool dir: %w", err)
 	}
 	return strings.TrimSpace(string(out)), nil
