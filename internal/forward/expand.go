@@ -254,6 +254,10 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 			base := uvDir(append(uvGlobalArgs(m, args), lead...), uvValueFlags())
 			global, globalNeedsUV := uvGlobalFlags(m, args, base, true)
 			uvFlags := append(global, toolRunLeadingFlags(rest, base)...)
+			// --with-requirements files are installed into the same
+			// environment, so they resolve together with the packages: a
+			// release that satisfies each alone may not satisfy both.
+			tokens = slices.Concat(tokens, reqFileTokens(parsed.ReqFiles, base))
 			var tree []catalog.Resolved
 			var err error
 			if globalNeedsUV || needsUV(lead, toolRunValueFlags) {
@@ -739,11 +743,42 @@ func specTokens(m *Manager, parsed installArgs) []string {
 		}
 		for _, tok := range toks {
 			if m.Ecosystem == "pypi" && strings.Contains(tok, "@") {
-				out = append(out, reconstructToken(s))
+				out = append(out, pep508FromAt(tok, s))
 			} else {
 				out = append(out, tok)
 			}
 		}
+	}
+	return out
+}
+
+// pep508FromAt rewrites uv's and poetry's `name[extras]@version` shorthand
+// as the PEP 508 requirement a resolver reads, keeping the extras and any
+// marker: `httpx[cli]@0.28.1` is `httpx[cli]==0.28.1`. Only an exact pin
+// is a version (s.Version, as ParseSpec read it): `@latest` and a range
+// (`flask@^3.0`) are the bare requirement.
+func pep508FromAt(tok string, s check.Spec) string {
+	req, marker, hasMarker := strings.Cut(tok, ";")
+	req = strings.TrimSpace(req)
+	if i := strings.LastIndex(req, "@"); i >= 0 {
+		req = strings.TrimSpace(req[:i])
+		if s.Version != "" {
+			req += "==" + s.Version
+		}
+	}
+	if hasMarker {
+		return req + "; " + strings.TrimSpace(marker)
+	}
+	return req
+}
+
+// reqFileTokens are the requirements files of a tool run as the resolver
+// reads them: one "-r <path>" spec each, the path absolute against the
+// directory the run changes to.
+func reqFileTokens(files []string, base string) []string {
+	var out []string
+	for _, f := range files {
+		out = append(out, "-r "+absIn(base, f))
 	}
 	return out
 }
@@ -792,8 +827,9 @@ var npmPassFlags = flagSet("--legacy-peer-deps", "--strict-peer-deps", "--no-opt
 	"--omit", "--include", "--registry", "--before", "--tag", "--userconfig", "--globalconfig",
 	// The cache policy decides what npm resolves against: offline and
 	// prefer-offline read the cache's metadata, which may be older than the
-	// registry's, and --cache names which cache that is.
-	"--cache", "--offline", "--prefer-offline")
+	// registry's, and --cache names which cache that is. The negations
+	// travel too, so npm's last-wins reading holds in the dry run.
+	"--cache", "--offline", "--prefer-offline", "--no-offline", "--no-prefer-offline")
 
 func npmResolveFlags(m *Manager, rest []string) []string {
 	if m.Bin != "npm" {

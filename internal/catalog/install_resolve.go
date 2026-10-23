@@ -858,7 +858,15 @@ func resolveWithPip(ctx context.Context, python, dir string, specs, flags []stri
 	}
 	defer os.RemoveAll(tmp)
 	args := append([]string{"--only-binary=:all:"}, flags...)
-	args = append(args, specs...)
+	for _, spec := range specs {
+		// A requirements file travels as one "-r <path>" spec, a line uv's
+		// input reads as it is; pip takes it as two arguments.
+		if path, ok := strings.CutPrefix(spec, "-r "); ok {
+			args = append(args, "-r", path)
+			continue
+		}
+		args = append(args, spec)
+	}
 	if dir == "" {
 		dir = tmp
 	}

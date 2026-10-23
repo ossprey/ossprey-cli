@@ -646,6 +646,42 @@ func TestExpandInstall_UVOnlyFlagsAreResolvedByUVOnly(t *testing.T) {
 // The resolver gets the packages as the user wrote them — a range, extras, a
 // marker — since the parsed spec keeps only a name and an exact pin. uv's
 // and poetry's `name@version` is not PEP 508, so it is rewritten.
+// A tool run's --with-requirements files are installed into the same
+// environment as the packages, so they resolve together: the resolver gets
+// each file as a "-r" spec, the path absolute against the run's directory.
+func TestExpandInstall_ToolRunResolvesRequirementsFilesWithThePackages(t *testing.T) {
+	var gotSpecs []string
+	old, oldUV := resolvePythonFn, resolveWithUVFn
+	resolvePythonFn = func(_ context.Context, _ string, specs, _, _ []string) ([]catalog.Resolved, error) {
+		gotSpecs = specs
+		return nil, nil
+	}
+	resolveWithUVFn = func(_ context.Context, _ string, specs, _ []string) ([]catalog.Resolved, error) {
+		gotSpecs = specs
+		return nil, nil
+	}
+	t.Cleanup(func() { resolvePythonFn, resolveWithUVFn = old, oldUV })
+	uvx, _ := Lookup("uvx")
+	for _, tt := range []struct {
+		args []string
+		want []string
+	}{
+		{[]string{"--with-requirements", "extra.txt", "ruff"}, []string{"ruff", "-r " + absPath("extra.txt")}},
+		{[]string{"--directory", "sub", "--with-requirements", "extra.txt", "--with", "six", "ruff@0.6.0"},
+			[]string{"six", "ruff==0.6.0", "-r " + absPath("sub/extra.txt")}},
+	} {
+		gotSpecs = nil
+		parsed := parseToolRun(uvx, tt.args)
+		parsed.ToolRun = true
+		if _, err := expandInstall(context.Background(), uvx, tt.args, 0, parsed); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(gotSpecs, tt.want) {
+			t.Errorf("%v: specs = %v, want %v", tt.args, gotSpecs, tt.want)
+		}
+	}
+}
+
 // A release named twice with different extras is one spec, checked once,
 // but both spellings reach the resolver: each extra brings dependencies of
 // its own, and the last token alone would drop the first's.
@@ -673,6 +709,10 @@ func TestSpecTokens(t *testing.T) {
 		{"poetry", []string{"flask@^3.0", "requests@2.32.3", "httpx"},
 			[]string{"flask", "requests==2.32.3", "httpx"}},
 		{"uv", []string{"httpx@latest"}, []string{"httpx"}},
+		// The `@version` shorthand keeps its extras and marker: each extra
+		// brings dependencies of its own.
+		{"uv", []string{"httpx[cli]@0.28.1", "rich[jupyter]@latest", "six@1.17.0; python_version > '3'"},
+			[]string{"httpx[cli]==0.28.1", "rich[jupyter]", "six==1.17.0; python_version > '3'"}},
 	}
 	for _, tt := range tests {
 		m, _ := Lookup(tt.bin)
@@ -741,6 +781,9 @@ func TestResolverFlags(t *testing.T) {
 		{"npm reads its options before the verb too",
 			npmResolveFlags(npm, []string{"--userconfig", "./corp.npmrc", "--offline", "install", "--omit=dev", "tool@1.0.0"}),
 			[]string{"--userconfig", absPath("corp.npmrc"), "--offline", "--omit=dev"}},
+		{"npm keeps a negated cache policy, for its last-wins reading",
+			npmResolveFlags(npm, []string{"install", "--prefer-offline", "--no-prefer-offline", "--no-offline", "tool@1.0.0"}),
+			[]string{"--prefer-offline", "--no-prefer-offline", "--no-offline"}},
 	}
 	for _, tt := range tests {
 		if !reflect.DeepEqual(tt.got, tt.want) {
