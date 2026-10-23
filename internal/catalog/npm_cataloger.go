@@ -128,41 +128,107 @@ func runNpmResolve(ctx context.Context, npm, cache, packageJSON string, loc file
 
 type npmLockfile struct {
 	Packages map[string]struct {
+		// Name is set for an alias (`renamed@npm:left-pad`): the real
+		// package, where the key names the directory it is installed as.
+		Name     string `json:"name"`
 		Version  string `json:"version"`
 		Resolved string `json:"resolved"`
+		// Link marks a symlink to a local package (a workspace member or a
+		// file: dependency), whose Resolved is the path linked to.
+		Link bool `json:"link"`
+		// npm's dependency kinds: recorded in the lock whatever the omit
+		// policy, and left out of an install that omits them. DevOptional
+		// is reached both through a dev edge and an optional one, so only
+		// omitting both leaves it out.
+		Dev         bool `json:"dev"`
+		Optional    bool `json:"optional"`
+		DevOptional bool `json:"devOptional"`
+		Peer        bool `json:"peer"`
 	} `json:"packages"`
 }
 
 // parseNpmLock extracts resolved (name, version) pairs from an npm
-// lockfileVersion 2/3 document. Only entries with a registry tarball
-// ("resolved") are emitted — the root project and file:/link: deps have none
-// and are not fetchable from the registry.
+// lockfileVersion 2/3 document. The root project, links and the local
+// packages they point at (file:, workspaces) are left out, since they are
+// not fetched from a registry. An installed entry without a "resolved"
+// field is kept with no registry recorded: npm omits the field under
+// omit-lockfile-registry-resolved, and a package it installed from a
+// registry it did not name is one to check, not to drop.
 func parseNpmLock(data []byte, loc file.Location) ([]pkg.Package, error) {
+	return parseNpmLockAt(data, loc, "")
+}
+
+// parseNpmLockAt is parseNpmLock for a lock beside the tree it describes,
+// at root: an entry whose directory is not on disk is left out, since the
+// lock records what was resolved, omitted dependencies included, and only
+// what was installed can run. A root without node_modules at all is read
+// as the lock says, which can only check more.
+func parseNpmLockAt(data []byte, loc file.Location, root string) ([]pkg.Package, error) {
 	var lf npmLockfile
 	if err := json.Unmarshal(data, &lf); err != nil {
 		return nil, err
 	}
-	seen := make(map[string]struct{})
+	installed := func(string) bool { return true }
+	if root != "" {
+		if _, err := os.Stat(filepath.Join(root, "node_modules")); err == nil {
+			installed = func(key string) bool {
+				_, err := os.Stat(filepath.Join(root, filepath.FromSlash(key)))
+				return err == nil
+			}
+		}
+	}
+	seen := make(map[string]int)
 	var pkgs []pkg.Package
 	for key, entry := range lf.Packages {
-		if key == "" || entry.Version == "" || entry.Resolved == "" {
-			continue // root project / local (file:,link:) dep — not on the registry
+		if key == "" || entry.Version == "" || entry.Link || !installed(key) {
+			continue // root project, a link to a local package, or not on disk
 		}
-		name := npmNameFromLockKey(key)
+		if entry.Resolved == "" && !strings.Contains(key, "node_modules/") {
+			continue // a local package in the tree (a workspace member), not installed from a registry
+		}
+		name := entry.Name // an alias names the real package here
+		if name == "" {
+			name = npmNameFromLockKey(key)
+		}
 		if name == "" {
 			continue
 		}
 		dk := name + "@" + entry.Version
-		if _, ok := seen[dk]; ok {
+		copyKinds := DependencyKinds{Dev: entry.Dev, Optional: entry.Optional, DevOptional: entry.DevOptional, Peer: entry.Peer}
+		kind := registrySource{URL: entry.Resolved, Dev: entry.Dev, Optional: entry.Optional, DevOptional: entry.DevOptional, Peer: entry.Peer,
+			Copies: []DependencyKinds{copyKinds}}
+		if i, ok := seen[dk]; ok {
+			// The same release can sit at several paths (nested copies),
+			// each with its own kind. An install leaves the release out
+			// only if it leaves every copy out, so a kind survives the
+			// merge only when every copy carries it; map order must not
+			// decide which copy is read first. Nor may it decide the
+			// registry: copies fetched from different places record none,
+			// since no registry means checked and one copy fetched
+			// publicly is enough to need that.
+			have := pkgs[i].Metadata.(registrySource)
+			if have.URL != kind.URL {
+				have.URL = ""
+			}
+			have.Dev = have.Dev && kind.Dev
+			have.Optional = have.Optional && kind.Optional
+			have.DevOptional = have.DevOptional && kind.DevOptional
+			have.Peer = have.Peer && kind.Peer
+			// The AND alone loses which copy is left out under which policy
+			// (a dev-only copy beside an optional-only one is left out
+			// entirely under --omit=dev --omit=optional), so each copy's
+			// kinds are kept as well.
+			have.Copies = append(have.Copies, copyKinds)
+			pkgs[i].Metadata = have
 			continue
 		}
-		seen[dk] = struct{}{}
+		seen[dk] = len(pkgs)
 		pkgs = append(pkgs, pkg.Package{
 			Name:      name,
 			Version:   entry.Version,
 			Type:      pkg.NpmPkg,
 			Locations: file.NewLocationSet(loc),
-			Metadata:  registrySource{URL: entry.Resolved},
+			Metadata:  kind,
 		})
 	}
 	return pkgs, nil

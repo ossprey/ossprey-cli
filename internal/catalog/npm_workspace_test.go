@@ -241,3 +241,39 @@ func TestIsWorkspaceMemberStopsAtScanRoot(t *testing.T) {
 		t.Error("membership was claimed by a workspace root above the scan root")
 	}
 }
+
+// npm's config loader reads every ancestor up to and including the
+// filesystem root, so a workspace root at `/` (or a drive root) must be
+// visited from its members: a walk that stopped one short found nothing.
+func TestWalkUpVisitsTheFilesystemRoot(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "packages", "app")
+	var visited []string
+	walkUp(dir, func(a string) bool {
+		visited = append(visited, a)
+		return false
+	})
+	if len(visited) == 0 {
+		t.Fatal("walkUp visited nothing")
+	}
+	if first := filepath.Dir(dir); visited[0] != first {
+		t.Errorf("first ancestor = %q, want %q", visited[0], first)
+	}
+	if last := visited[len(visited)-1]; last != filepath.Dir(last) {
+		t.Errorf("last ancestor = %q, want the filesystem root", last)
+	}
+	// The visit stops where it says to.
+	var stopped []string
+	walkUp(dir, func(a string) bool {
+		stopped = append(stopped, a)
+		return true
+	})
+	if len(stopped) != 1 {
+		t.Errorf("walkUp kept going after a true visit: %v", stopped)
+	}
+	// The root has no ancestor.
+	root := visited[len(visited)-1]
+	walkUp(root, func(a string) bool {
+		t.Errorf("walkUp from the root visited %q", a)
+		return false
+	})
+}

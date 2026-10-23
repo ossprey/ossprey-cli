@@ -397,7 +397,23 @@ func markTrustedPackages(pkgs []Package, policy trust.Policy) {
 
 // registrySource is the metadata our own catalogers attach when the resolver
 // reported where a package came from and syft has no type for it.
-type registrySource struct{ URL string }
+type registrySource struct {
+	URL string
+	// npm's dependency kinds, which the lockfile records whatever the omit
+	// policy and an install may leave out: dev (--omit=dev), optional
+	// (--omit=optional), peer (--omit=peer), or devOptional, reached both
+	// ways and left out only when both are omitted.
+	Dev, Optional, DevOptional, Peer bool
+	// Copies are the kinds of each copy of the release in the lock, one
+	// entry per path, for an omit policy that must leave every copy out
+	// before it leaves the release out; the flags above are their AND.
+	Copies []DependencyKinds
+}
+
+// DependencyKinds are npm's dependency kinds of one copy of a release.
+type DependencyKinds struct {
+	Dev, Optional, DevOptional, Peer bool
+}
 
 // registryOf returns the source a lockfile recorded for p — the URL it is
 // fetched from — or "" when none was recorded.
