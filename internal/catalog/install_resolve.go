@@ -526,25 +526,62 @@ func NpmConfigGet(ctx context.Context, dir, key string, flags []string) (string,
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, npm, append([]string{"config", "get", key}, flags...)...)
+	// `npm config get cache` refuses a relative path as protected (verified
+	// against npm 11.19.1: one from .npmrc, the environment or --cache
+	// errors, an absolute one answers), while `npm config list -l` prints
+	// every key with the path resolved as the command resolves it.
+	args := []string{"config", "get", key}
+	if key == "cache" {
+		args = []string{"config", "list", "-l"}
+	}
+	cmd := exec.CommandContext(ctx, npm, append(args, flags...)...)
 	cmd.Dir = dir
 	cmd.Env = toolEnv()
 	cmd.WaitDelay = 5 * time.Second
 	out, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("npm config get %s: %w", key, err)
+		return "", fmt.Errorf("npm %s: %w", strings.Join(args, " "), err)
+	}
+	if key == "cache" {
+		return npmConfigListValue(string(out), key)
 	}
 	return strings.TrimSpace(string(out)), nil
 }
 
-// NpmConfigIncludes reports the dependency kinds (dev, optional, peer) npm's
-// effective configuration includes for a command run in dir with flags —
-// project, user and global .npmrc files and the environment, read by `npm
-// config get include` the way the install reads them. An --include anywhere
-// wins over an --omit on the command line, so a filter built from the
-// command line alone must ask here before dropping a kind.
-func NpmConfigIncludes(ctx context.Context, dir string, flags []string) ([]string, error) {
-	out, err := NpmConfigGet(ctx, dir, "include", flags)
+// npmConfigListValue reads one key out of `npm config list -l`, whose
+// lines are `key = <json value>`; a line starting with `;` is a comment (a
+// default an override replaced, or a section header).
+func npmConfigListValue(listing, key string) (string, error) {
+	for _, line := range strings.Split(listing, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, ";") {
+			continue
+		}
+		k, v, ok := strings.Cut(line, " = ")
+		if !ok || k != key {
+			continue
+		}
+		var value string
+		if err := json.Unmarshal([]byte(v), &value); err != nil {
+			return "", fmt.Errorf("npm config list: %s = %s: %w", key, v, err)
+		}
+		return value, nil
+	}
+	return "", nil
+}
+
+// NpmConfigOmits reports the dependency kinds (dev, optional, peer) npm's
+// effective omit policy leaves out of a command run in dir with flags, as
+// `npm config get omit` reports it: the command line's --omit and --include
+// (passed in flags), the environment (npm_config_omit) and the project,
+// user and global .npmrc files, with include winning over omit and the
+// optional boolean (optional=false) counted as an omit — npm applies all of
+// that itself (verified against npm 11.19.1: `.npmrc optional=false` answers
+// `optional`, and `--include=optional` beside `.npmrc omit=optional` answers
+// nothing). A filter built from the command line alone missed every omit
+// configured outside it and blocked runs on packages they never install.
+func NpmConfigOmits(ctx context.Context, dir string, flags []string) ([]string, error) {
+	out, err := NpmConfigGet(ctx, dir, "omit", flags)
 	if err != nil {
 		return nil, err
 	}
@@ -777,12 +814,15 @@ func resolveWithUV(ctx context.Context, uv, dir string, specs, flags []string) (
 // merged as uv merges them (field by field, the user's winning; arrays
 // joined, the user's entries first) — is
 // written into scratch without that table and named by --config-file. A
-// run with --no-config reads none, and configuration without a [pip]
-// table is left for uv to discover as it is; a file uv cannot parse is
-// left for uv to report, as the run would. A relative UV_CONFIG_FILE is
-// read against the directory uv runs in, which for the resolver is
-// scratch, so it is named by its absolute path whether or not it has the
-// table.
+// run with --no-config reads none; a file uv cannot parse is left for uv
+// to report, as the run would. A relative UV_CONFIG_FILE is read against
+// the directory uv runs in, which for the resolver is scratch, so it is
+// named by its absolute path whether or not it has the table. With no file
+// named, the discovered configuration is always written and named, even
+// when empty: a named file stops uv discovering a project's uv.toml or
+// pyproject.toml above the directory it runs in (verified), and scratch
+// may sit under a project when TMPDIR points inside one, where `uv pip
+// compile` would read configuration uvx ignores.
 func uvToolRunConfig(flags []string, scratch string) ([]string, error) {
 	path := ""
 	for i := 0; i < len(flags); i++ {
@@ -812,7 +852,8 @@ func uvToolRunConfig(flags []string, scratch string) ([]string, error) {
 		}
 	}
 	sources := []string{path}
-	if path == "" {
+	discovered := path == ""
+	if discovered {
 		sources = uvConfigSources()
 	}
 	merged := map[string]any{}
@@ -832,7 +873,9 @@ func uvToolRunConfig(flags []string, scratch string) ([]string, error) {
 		mergeTOML(merged, cfg)
 		found = true
 	}
-	if _, ok := merged["pip"]; !found || !ok {
+	if _, ok := merged["pip"]; !discovered && (!found || !ok) {
+		// A named file already stops project discovery; without the
+		// table it is read as it is.
 		if fromEnv {
 			return append(slices.Clone(flags), "--config-file", path), nil
 		}

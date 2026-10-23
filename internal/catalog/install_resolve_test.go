@@ -304,30 +304,39 @@ func TestParseNpmLockCarriesDependencyKinds(t *testing.T) {
 	}
 }
 
-// Against a real npm: the kinds npm's configuration includes, read as the
-// command would read them — the project's .npmrc from its directory, none
-// in global mode.
-func TestNpmConfigIncludes(t *testing.T) {
+// Against a real npm: the kinds npm's effective omit policy leaves out,
+// read as the command would read them — the project's .npmrc from its
+// directory (optional=false counted as an omit), none in global mode, and
+// an --include on the line winning over a configured omit.
+func TestNpmConfigOmits(t *testing.T) {
 	if _, err := lookTool("npm"); err != nil {
 		t.Skip("no npm")
 	}
 	ctx := context.Background()
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "package.json"), []byte("{}"), 0o644)
-	os.WriteFile(filepath.Join(dir, ".npmrc"), []byte("include[]=optional\ninclude[]=dev\n"), 0o644)
-	got, err := NpmConfigIncludes(ctx, dir, nil)
+	os.WriteFile(filepath.Join(dir, ".npmrc"), []byte("optional=false\nomit[]=dev\n"), 0o644)
+	got, err := NpmConfigOmits(ctx, dir, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(got, []string{"optional", "dev"}) {
-		t.Errorf("project includes = %v", got)
+	slices.Sort(got)
+	if !reflect.DeepEqual(got, []string{"dev", "optional"}) {
+		t.Errorf("project omits = %v", got)
 	}
-	got, err = NpmConfigIncludes(ctx, dir, []string{"-g"})
+	got, err = NpmConfigOmits(ctx, dir, []string{"--include=optional"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, []string{"dev"}) {
+		t.Errorf("--include=optional over the project's optional=false: omits = %v", got)
+	}
+	got, err = NpmConfigOmits(ctx, dir, []string{"-g"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != 0 {
-		t.Errorf("global mode read the project's includes: %v", got)
+		t.Errorf("global mode read the project's omits: %v", got)
 	}
 }
 
@@ -357,6 +366,38 @@ func TestNpmConfigGet(t *testing.T) {
 	if got == "" || filepath.Clean(got) == custom {
 		t.Errorf("global mode cache = %q, want npm's default", got)
 	}
+	// A relative cache, which `npm config get cache` refuses as protected,
+	// is answered resolved against the directory npm runs in: from an
+	// .npmrc and from the environment alike.
+	os.WriteFile(filepath.Join(dir, ".npmrc"), []byte("cache=./rel-cache\n"), 0o644)
+	got, err = NpmConfigGet(ctx, dir, "cache", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameFile(t, got, filepath.Join(dir, "rel-cache")) {
+		t.Errorf("relative project cache = %q, want %q", got, filepath.Join(dir, "rel-cache"))
+	}
+	t.Setenv("npm_config_cache", "./env-cache")
+	got, err = NpmConfigGet(ctx, dir, "cache", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sameFile(t, got, filepath.Join(dir, "env-cache")) {
+		t.Errorf("relative environment cache = %q, want %q", got, filepath.Join(dir, "env-cache"))
+	}
+}
+
+// sameFile compares two paths that need not exist, symlinks in their
+// existing ancestors resolved (macOS /var, Windows short names).
+func sameFile(t *testing.T, a, b string) bool {
+	t.Helper()
+	clean := func(p string) string {
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			return r
+		}
+		return filepath.Clean(p)
+	}
+	return clean(a) == clean(b)
 }
 
 // The npx cache key is libnpmexec's: known answers computed with node's
@@ -561,10 +602,29 @@ func TestUVToolRunConfig(t *testing.T) {
 			t.Errorf("merged copy keeps %s before %s (at %d, %d):\n%s", pair[0], pair[1], u, y, data)
 		}
 	}
-	// With no [pip] table anywhere, uv discovers the files itself.
+	// With no [pip] table anywhere the discovered files are still merged
+	// and named, and with none at all an empty file is: a named file stops
+	// uv discovering a project's configuration above scratch, which may sit
+	// under a project when TMPDIR points inside one.
 	os.WriteFile(filepath.Join(sys, "uv", "uv.toml"), []byte("python-preference = \"managed\"\n"), 0o644)
-	if got, err := uvToolRunConfig([]string{"--offline"}, scratch); err != nil || !reflect.DeepEqual(got, []string{"--offline"}) {
+	if got, err := uvToolRunConfig([]string{"--offline"}, scratch); err != nil || !reflect.DeepEqual(got, []string{"--offline", "--config-file", stripped}) {
 		t.Errorf("no [pip] anywhere: flags = %v, err = %v", got, err)
+	}
+	data, _ = os.ReadFile(stripped)
+	if s := string(data); !strings.Contains(s, "managed") || !strings.Contains(s, "usr.example") {
+		t.Errorf("merged copy without [pip]:\n%s", s)
+	}
+	os.Remove(filepath.Join(sys, "uv", "uv.toml"))
+	os.Remove(filepath.Join(usr, "uv", "uv.toml"))
+	inProject := filepath.Join(t.TempDir(), "proj", ".tmp", "scratch")
+	os.MkdirAll(inProject, 0o755)
+	os.WriteFile(filepath.Join(inProject, "..", "..", "uv.toml"), []byte("index-url = \"https://project.invalid/simple\"\n"), 0o644)
+	empty := filepath.Join(inProject, "uv.toml")
+	if got, err := uvToolRunConfig([]string{"--offline"}, inProject); err != nil || !reflect.DeepEqual(got, []string{"--offline", "--config-file", empty}) {
+		t.Errorf("no configuration at all, scratch under a project: flags = %v, err = %v", got, err)
+	}
+	if data, err := os.ReadFile(empty); err != nil || strings.TrimSpace(string(data)) != "" {
+		t.Errorf("empty named file: %q, %v", data, err)
 	}
 
 	// A relative UV_CONFIG_FILE is read against the directory uv runs in,

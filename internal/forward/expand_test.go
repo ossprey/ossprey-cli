@@ -429,7 +429,7 @@ func TestExpandInstall_ToolRunHasNoProjectContext(t *testing.T) {
 		{[]string{"exec", "-g", "cowsay@1.6.0"}, filepath.Join(home, "custom-cache"), filepath.Join(home, "custom-cache"),
 			true, []string{"-g"}, []string{"cowsay@1.6.0"}},
 	} {
-		cacheDir, cachePackages, asked, configAsked, configured = "", nil, false, nil, tt.configured
+		cacheDir, cachePackages, asked, configAsked, configured, gotFlags = "", nil, false, nil, tt.configured, nil
 		parsed := m.parseRun(tt.args)
 		parsed.ToolRun = true
 		if _, err := expandInstall(context.Background(), m, tt.args, 0, parsed); err != nil {
@@ -438,6 +438,11 @@ func TestExpandInstall_ToolRunHasNoProjectContext(t *testing.T) {
 		if runtime.GOOS != "windows" && cacheDir != tt.wantCache {
 			t.Errorf("%v: npx cache looked up in %q, want %q", tt.args, cacheDir, tt.wantCache)
 		}
+		// A cache npm's configuration names reaches the dry run, which runs
+		// elsewhere: a relative one would resolve differently there.
+		if tt.configured != "" && !slices.Contains(gotFlags, tt.configured) {
+			t.Errorf("%v: dry run flags = %v, want the configured cache %q among them", tt.args, gotFlags, tt.configured)
+		}
 		if !reflect.DeepEqual(cachePackages, tt.wantPackages) {
 			t.Errorf("%v: npx cache keyed by %v, want %v", tt.args, cachePackages, tt.wantPackages)
 		}
@@ -445,6 +450,8 @@ func TestExpandInstall_ToolRunHasNoProjectContext(t *testing.T) {
 			t.Errorf("%v: npm config get cache asked = %v with %v, want %v with %v", tt.args, asked, configAsked, tt.wantAsked, tt.wantFlags)
 		}
 	}
+
+	configured = ""
 
 	// A home path in an npm option is nopt's: `~/x` is the home directory.
 	args = []string{"exec", "--userconfig=~/u.npmrc", "--globalconfig", "~/g.npmrc", "cowsay@1.6.0"}
@@ -847,6 +854,109 @@ func TestExpandInstall_ToolRunNamesARelativeEnvCacheDir(t *testing.T) {
 	}
 }
 
+// When expansion failed, the tree is only what an earlier run left on disk,
+// which says nothing about what resolves today: the requested names are
+// resolved as well, a release already in the set is not repeated, and each
+// requested name counts once.
+func TestResolveNamed_UnresolvedSetResolvesTheNamesToo(t *testing.T) {
+	swapExpand(t, func(context.Context, *Manager, []string, int, installArgs) ([]catalog.Resolved, error) {
+		return []catalog.Resolved{{Name: "tool", Version: "1.0.0"}, {Name: "dep", Version: "0.1.0"}}, errors.New("npm: registry unreachable")
+	})
+	m, _ := Lookup("npx")
+	for _, tt := range []struct {
+		latest    string
+		wantSpecs []check.Spec
+	}{
+		{"2.0.0", []check.Spec{{Ecosystem: "npm", Name: "tool", Version: "1.0.0"}, {Ecosystem: "npm", Name: "dep", Version: "0.1.0"}, {Ecosystem: "npm", Name: "tool", Version: "2.0.0"}}},
+		{"1.0.0", []check.Spec{{Ecosystem: "npm", Name: "tool", Version: "1.0.0"}, {Ecosystem: "npm", Name: "dep", Version: "0.1.0"}}},
+	} {
+		parsed := m.parseRun([]string{"tool@latest"})
+		parsed.ToolRun = true
+		asked := 0
+		set := resolveNamed(context.Background(), m, Options{}, 0, parsed, func(context.Context, string, string, string) (string, error) {
+			asked++
+			return tt.latest, nil
+		})
+		if asked != 1 {
+			t.Errorf("latest %s: registry asked %d times, want once", tt.latest, asked)
+		}
+		if !reflect.DeepEqual(set.specs, tt.wantSpecs) {
+			t.Errorf("latest %s: specs = %+v, want %+v", tt.latest, set.specs, tt.wantSpecs)
+		}
+		if set.named != 1 || set.deps != 1 || set.expanded || set.unresolved == nil {
+			t.Errorf("latest %s: set = %+v", tt.latest, set)
+		}
+	}
+}
+
+// A relative npm_config_cache, or a relative cache= in an .npmrc, is
+// resolved where npm runs, and the dry run runs in scratch: it is told the
+// cache by its absolute path, as --cache, found once and shared with the
+// npx-cache lookup. A --cache on the line and an absolute variable need
+// nothing; a named install reads the variable the same way.
+func TestExpandInstall_NamesARelativeNpmCache(t *testing.T) {
+	var gotFlags []string
+	var cacheRead string
+	old, oldCached, oldGet, oldOmits := resolveNpmFn, npxCachedFn, npmConfigGetFn, npmConfigOmitsFn
+	resolveNpmFn = func(_ context.Context, _, _ string, _, flags []string) ([]catalog.Resolved, error) {
+		gotFlags = flags
+		return nil, nil
+	}
+	npxCachedFn = func(dir string, _ []string) ([]catalog.Resolved, error) {
+		cacheRead = dir
+		return nil, nil
+	}
+	npmConfigOmitsFn = func(context.Context, string, []string) ([]string, error) { return nil, nil }
+	answer := ""
+	npmConfigGetFn = func(context.Context, string, string, []string) (string, error) {
+		if answer == "" {
+			return "", errors.New("no npm")
+		}
+		return answer, nil
+	}
+	t.Cleanup(func() { resolveNpmFn, npxCachedFn, npmConfigGetFn, npmConfigOmitsFn = old, oldCached, oldGet, oldOmits })
+	npx, _ := Lookup("npx")
+	npm, _ := Lookup("npm")
+	fromNpm := filepath.Join(t.TempDir(), "from-npmrc")
+	for _, tt := range []struct {
+		m         *Manager
+		env       string
+		answer    string
+		args      []string
+		wantFlags []string
+		wantCache string
+	}{
+		{npx, "./c", "", []string{"cowsay"}, []string{"--cache", absPath("c")}, absPath("c")},
+		{npx, "./c", "", []string{"--cache", "mine", "cowsay"}, []string{"--cache=" + absPath("mine")}, absPath("mine")},
+		{npx, absPath("c"), "", []string{"cowsay"}, nil, absPath("c")},
+		{npx, "", fromNpm, []string{"cowsay"}, []string{"--cache", fromNpm}, fromNpm},
+		{npx, "", "", []string{"cowsay"}, nil, ""},
+		{npm, "./c", "", []string{"install", "cowsay"}, []string{"--cache", absPath("c")}, ""},
+		{npm, absPath("c"), "", []string{"install", "cowsay"}, nil, ""},
+	} {
+		t.Setenv("npm_config_cache", tt.env)
+		answer, gotFlags, cacheRead = tt.answer, nil, ""
+		start := 0
+		var parsed installArgs
+		if tt.m == npx {
+			parsed = npx.parseRun(tt.args)
+			parsed.ToolRun = true
+		} else {
+			start = 1
+			parsed = ParseSpecs(npm, tt.args[start:])
+		}
+		if _, err := expandInstall(context.Background(), tt.m, tt.args, start, parsed); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(gotFlags, tt.wantFlags) {
+			t.Errorf("%s npm_config_cache=%q %v: flags = %v, want %v", tt.m.Bin, tt.env, tt.args, gotFlags, tt.wantFlags)
+		}
+		if tt.wantCache != "" && cacheRead != tt.wantCache {
+			t.Errorf("%s npm_config_cache=%q %v: npx cache read from %q, want %q", tt.m.Bin, tt.env, tt.args, cacheRead, tt.wantCache)
+		}
+	}
+}
+
 // A failed dry run does not skip what is on disk: npm may reuse the npx
 // cache exactly when today's resolution fails, and uv runs an installed or
 // cached environment regardless, so those trees are returned beside the
@@ -861,7 +971,7 @@ func TestExpandInstall_ToolRunReadsTheCachesWhenTheDryRunFails(t *testing.T) {
 		return out
 	}
 	t.Run("npx", func(t *testing.T) {
-		old, oldCached, oldGet, oldInc := resolveNpmFn, npxCachedFn, npmConfigGetFn, npmConfigIncludesFn
+		old, oldCached, oldGet, oldInc := resolveNpmFn, npxCachedFn, npmConfigGetFn, npmConfigOmitsFn
 		resolveNpmFn = func(context.Context, string, string, []string, []string) ([]catalog.Resolved, error) {
 			return nil, errors.New("npm: registry unreachable")
 		}
@@ -869,12 +979,12 @@ func TestExpandInstall_ToolRunReadsTheCachesWhenTheDryRunFails(t *testing.T) {
 			return []catalog.Resolved{{Name: "cowsay", Version: "1.6.0"}, {Name: "get-stdin", Version: "8.0.0"}}, nil
 		}
 		npmConfigGetFn = func(context.Context, string, string, []string) (string, error) { return "", errors.New("no npm") }
-		npmConfigIncludesFn = func(context.Context, string, []string) ([]string, error) {
+		npmConfigOmitsFn = func(context.Context, string, []string) ([]string, error) {
 			t.Error("the omit policy was asked for with no fresh tree to prune")
 			return nil, nil
 		}
 		t.Cleanup(func() {
-			resolveNpmFn, npxCachedFn, npmConfigGetFn, npmConfigIncludesFn = old, oldCached, oldGet, oldInc
+			resolveNpmFn, npxCachedFn, npmConfigGetFn, npmConfigOmitsFn = old, oldCached, oldGet, oldInc
 		})
 		m, _ := Lookup("npx")
 		parsed := m.parseRun([]string{"--omit=dev", "cowsay"})
@@ -932,9 +1042,10 @@ func TestResolveNamed_UnresolvedSetKeepsAnEarlierRunsDependencies(t *testing.T) 
 	m, _ := Lookup("npx")
 	parsed := m.parseRun([]string{"cowsay"})
 	parsed.ToolRun = true
+	// The name is resolved as well (what the cache holds says nothing about
+	// what resolves today); the same release is not repeated.
 	set := resolveNamed(context.Background(), m, Options{}, 0, parsed, func(context.Context, string, string, string) (string, error) {
-		t.Error("the registry was asked for a package the cache reported")
-		return "", nil
+		return "1.6.0", nil
 	})
 	if set.named != 1 || set.deps != 1 || set.expanded || set.unresolved == nil || len(set.specs) != 2 {
 		t.Fatalf("set = %+v", set)
@@ -1433,7 +1544,7 @@ func TestSplitAttachedShorts(t *testing.T) {
 // not block such a run on a package it never installs. --include=optional
 // restores it.
 func TestExpandInstall_NpmOmitOptional(t *testing.T) {
-	old, oldInc, oldCached, oldGet := resolveNpmFn, npmConfigIncludesFn, npxCachedFn, npmConfigGetFn
+	old, oldOmits, oldCached, oldGet := resolveNpmFn, npmConfigOmitsFn, npxCachedFn, npmConfigGetFn
 	npxCachedFn = func(string, []string) ([]catalog.Resolved, error) { return nil, nil }
 	npmConfigGetFn = func(context.Context, string, string, []string) (string, error) { return "", errors.New("no npm") }
 	resolveNpmFn = func(context.Context, string, string, []string, []string) ([]catalog.Resolved, error) {
@@ -1441,19 +1552,19 @@ func TestExpandInstall_NpmOmitOptional(t *testing.T) {
 			{Name: "devonly", Version: "3.0.0", Dev: true}, {Name: "both", Version: "4.0.0", DevOptional: true},
 			{Name: "peer", Version: "5.0.0", Peer: true}}, nil
 	}
-	// npm's configuration includes nothing unless a case says otherwise;
-	// asked is how often npm had to be consulted.
-	var configured []string
-	var configErr error
+	// npm answers the omit policy for the dry run's own flags; asked is
+	// how often it was consulted and askedFlags what with.
+	var answer []string
+	var answerErr error
 	asked := 0
 	var askedFlags []string
-	npmConfigIncludesFn = func(_ context.Context, _ string, flags []string) ([]string, error) {
+	npmConfigOmitsFn = func(_ context.Context, _ string, flags []string) ([]string, error) {
 		asked++
 		askedFlags = flags
-		return configured, configErr
+		return answer, answerErr
 	}
 	t.Cleanup(func() {
-		resolveNpmFn, npmConfigIncludesFn, npxCachedFn, npmConfigGetFn = old, oldInc, oldCached, oldGet
+		resolveNpmFn, npmConfigOmitsFn, npxCachedFn, npmConfigGetFn = old, oldOmits, oldCached, oldGet
 	})
 	m, _ := Lookup("npm")
 
@@ -1464,99 +1575,57 @@ func TestExpandInstall_NpmOmitOptional(t *testing.T) {
 		}
 		return out
 	}
+	all := []string{"needed", "extra", "devonly", "both", "peer"}
 	for _, tt := range []struct {
-		args    []string
-		toolRun bool
-		want    []string
+		args      []string
+		toolRun   bool
+		answer    []string
+		answerErr error
+		want      []string
+		wantFlags []string
 	}{
-		{[]string{"exec", "cowsay@1.6.0"}, true, []string{"needed", "extra", "devonly", "both", "peer"}},
-		{[]string{"exec", "--omit=optional", "cowsay@1.6.0"}, true, []string{"needed", "devonly", "both", "peer"}},
-		{[]string{"exec", "--no-optional", "cowsay@1.6.0"}, true, []string{"needed", "devonly", "both", "peer"}},
-		{[]string{"exec", "--omit=optional", "--include=optional", "cowsay@1.6.0"}, true, []string{"needed", "extra", "devonly", "both", "peer"}},
-		// The boolean's last value wins, --optional counts as an include,
-		// and an explicit value is read as nopt reads it, negation included.
-		{[]string{"exec", "--no-optional", "--optional", "cowsay@1.6.0"}, true, []string{"needed", "extra", "devonly", "both", "peer"}},
-		{[]string{"exec", "--omit=optional", "--optional", "cowsay@1.6.0"}, true, []string{"needed", "extra", "devonly", "both", "peer"}},
-		{[]string{"exec", "--optional", "--no-optional", "cowsay@1.6.0"}, true, []string{"needed", "devonly", "both", "peer"}},
-		{[]string{"exec", "--optional=false", "cowsay@1.6.0"}, true, []string{"needed", "devonly", "both", "peer"}},
-		{[]string{"exec", "--no-optional=false", "cowsay@1.6.0"}, true, []string{"needed", "extra", "devonly", "both", "peer"}},
-		// A devOptional package is reached both ways: only omitting both
-		// leaves it out. Peers go with --omit=peer.
-		{[]string{"exec", "--omit=dev", "cowsay@1.6.0"}, true, []string{"needed", "extra", "both", "peer"}},
-		{[]string{"exec", "--omit=dev", "--omit=optional", "cowsay@1.6.0"}, true, []string{"needed", "peer"}},
-		{[]string{"exec", "--omit=peer", "cowsay@1.6.0"}, true, []string{"needed", "extra", "devonly", "both"}},
-		// A named install reads the whole command, options before the verb
-		// included: --include there still wins over --omit after it.
-		{[]string{"install", "--omit", "optional", "cowsay"}, false, []string{"needed", "devonly", "both", "peer"}},
-		{[]string{"install", "--omit=optional", "--optional", "cowsay"}, false, []string{"needed", "extra", "devonly", "both", "peer"}},
-		{[]string{"install", "--optional=false", "cowsay"}, false, []string{"needed", "devonly", "both", "peer"}},
-		{[]string{"install", "--no-optional=false", "--omit=optional", "cowsay"}, false, []string{"needed", "extra", "devonly", "both", "peer"}},
-		{[]string{"--include=optional", "install", "--omit=optional", "cowsay"}, false, []string{"needed", "extra", "devonly", "both", "peer"}},
-		{[]string{"install", "cowsay"}, false, []string{"needed", "extra", "devonly", "both", "peer"}},
+		// npm's answer prunes the fresh tree, whatever configured it: the
+		// line (which reaches npm as the dry run's flags), the environment
+		// or an .npmrc. A devOptional package is reached both ways and
+		// goes only when both are omitted; peers go with peer.
+		{[]string{"exec", "cowsay@1.6.0"}, true, nil, nil, all, nil},
+		{[]string{"exec", "--omit=optional", "cowsay@1.6.0"}, true, []string{"optional"}, nil, []string{"needed", "devonly", "both", "peer"}, []string{"--omit=optional"}},
+		{[]string{"exec", "--no-optional", "cowsay@1.6.0"}, true, []string{"optional"}, nil, []string{"needed", "devonly", "both", "peer"}, []string{"--no-optional"}},
+		{[]string{"exec", "--omit=optional", "--include=optional", "cowsay@1.6.0"}, true, nil, nil, all, []string{"--include=optional", "--omit=optional"}},
+		{[]string{"exec", "cowsay@1.6.0"}, true, []string{"optional"}, nil, []string{"needed", "devonly", "both", "peer"}, nil},
+		{[]string{"exec", "cowsay@1.6.0"}, true, []string{"dev"}, nil, []string{"needed", "extra", "both", "peer"}, nil},
+		{[]string{"exec", "cowsay@1.6.0"}, true, []string{"dev", "optional"}, nil, []string{"needed", "peer"}, nil},
+		{[]string{"exec", "cowsay@1.6.0"}, true, []string{"peer"}, nil, []string{"needed", "extra", "devonly", "both"}, nil},
+		// A named install asks with the same flags, location included.
+		{[]string{"install", "--omit", "optional", "cowsay"}, false, []string{"optional"}, nil, []string{"needed", "devonly", "both", "peer"}, []string{"--omit", "optional"}},
+		{[]string{"install", "cowsay"}, false, []string{"optional"}, nil, []string{"needed", "devonly", "both", "peer"}, nil},
+		{[]string{"install", "-g", "cowsay"}, false, nil, nil, all, []string{"-g"}},
+		// When npm cannot answer, nothing is dropped.
+		{[]string{"install", "--omit=optional", "cowsay"}, false, nil, errors.New("no npm"), all, []string{"--omit=optional"}},
 	} {
-		var parsed installArgs
+		answer, answerErr, asked, askedFlags = tt.answer, tt.answerErr, 0, nil
 		start := 0
+		var parsed installArgs
 		if tt.toolRun {
 			parsed = m.parseRun(tt.args)
 			parsed.ToolRun = true
 		} else {
-			start, _ = m.installAt(tt.args)
+			start = 1
 			parsed = ParseSpecs(m, tt.args[start:])
 		}
 		tree, err := expandInstall(context.Background(), m, tt.args, start, parsed)
 		if err != nil {
-			t.Fatalf("%v: %v", tt.args, err)
+			t.Fatal(err)
 		}
-		if got := names(tree); !reflect.DeepEqual(got, tt.want) {
-			t.Errorf("%v: tree = %v, want %v", tt.args, got, tt.want)
+		if !reflect.DeepEqual(names(tree), tt.want) {
+			t.Errorf("%v: tree = %v, want %v", tt.args, names(tree), tt.want)
 		}
-	}
-
-	// An include from npm's configuration wins over an --omit on the line,
-	// so npm is asked — only when the line omits something — and when it
-	// cannot answer nothing is dropped. The location flags make it read the
-	// same project configuration as the command.
-	run := func(args []string, toolRun bool) []string {
-		var parsed installArgs
-		start := 0
-		if toolRun {
-			parsed = m.parseRun(args)
-			parsed.ToolRun = true
-		} else {
-			start, _ = m.installAt(args)
-			parsed = ParseSpecs(m, args[start:])
+		if asked != 1 {
+			t.Errorf("%v: npm asked %d times, want once", tt.args, asked)
 		}
-		tree, err := expandInstall(context.Background(), m, args, start, parsed)
-		if err != nil {
-			t.Fatalf("%v: %v", args, err)
+		if len(askedFlags) != len(tt.wantFlags) || (len(tt.wantFlags) > 0 && !reflect.DeepEqual(askedFlags, tt.wantFlags)) {
+			t.Errorf("%v: npm asked with %v, want %v", tt.args, askedFlags, tt.wantFlags)
 		}
-		return names(tree)
-	}
-	asked = 0
-	run([]string{"exec", "cowsay@1.6.0"}, true)
-	run([]string{"install", "cowsay"}, false)
-	if asked != 0 {
-		t.Errorf("npm asked about includes %d times for commands that omit nothing", asked)
-	}
-	configured = []string{"optional", "dev"}
-	if got := run([]string{"exec", "--omit=optional", "cowsay@1.6.0"}, true); !reflect.DeepEqual(got, []string{"needed", "extra", "devonly", "both", "peer"}) {
-		t.Errorf("configured include=optional over --omit=optional: tree = %v", got)
-	}
-	if got := run([]string{"install", "--omit=dev", "--omit=peer", "cowsay"}, false); !reflect.DeepEqual(got, []string{"needed", "extra", "devonly", "both"}) {
-		t.Errorf("configured include=dev over --omit=dev, peer still omitted: tree = %v", got)
-	}
-	configured, configErr = nil, errors.New("no npm")
-	if got := run([]string{"exec", "--omit=optional", "cowsay@1.6.0"}, true); !reflect.DeepEqual(got, []string{"needed", "extra", "devonly", "both", "peer"}) {
-		t.Errorf("npm unavailable: tree = %v, want everything kept", got)
-	}
-	configErr = nil
-	run([]string{"exec", "-g", "--omit=optional", "cowsay@1.6.0"}, true)
-	if !slices.Contains(askedFlags, "-g") {
-		t.Errorf("global exec asked with flags %v, want -g", askedFlags)
-	}
-	run([]string{"--prefix", "../o", "install", "--omit=optional", "cowsay"}, false)
-	if !slices.Contains(askedFlags, absPath("../o")) {
-		t.Errorf("--prefix install asked with flags %v, want the prefix", askedFlags)
 	}
 }
 
@@ -1711,9 +1780,18 @@ func TestExpandInstall_ToolRunCoversTheUVCache(t *testing.T) {
 }
 
 func TestExpandInstall_ToolRunCoversTheNpxCache(t *testing.T) {
-	old, oldCached, oldGet, oldInc := resolveNpmFn, npxCachedFn, npmConfigGetFn, npmConfigIncludesFn
+	old, oldCached, oldGet, oldInc := resolveNpmFn, npxCachedFn, npmConfigGetFn, npmConfigOmitsFn
 	// npm's configuration includes nothing here, whatever the host's does.
-	npmConfigIncludesFn = func(context.Context, string, []string) ([]string, error) { return nil, nil }
+	// npm answers the omit policy as its own parse of the flags would.
+	npmConfigOmitsFn = func(_ context.Context, _ string, flags []string) ([]string, error) {
+		var kinds []string
+		for _, f := range flags {
+			if k, ok := strings.CutPrefix(f, "--omit="); ok {
+				kinds = append(kinds, k)
+			}
+		}
+		return kinds, nil
+	}
 	// Today's resolution fetches get-stdin from the internal registry, as a
 	// dev dependency; the cache holds the same release fetched publicly,
 	// and an older one.
@@ -1728,7 +1806,7 @@ func TestExpandInstall_ToolRunCoversTheNpxCache(t *testing.T) {
 	}
 	npmConfigGetFn = func(context.Context, string, string, []string) (string, error) { return "", errors.New("no npm") }
 	t.Cleanup(func() {
-		resolveNpmFn, npxCachedFn, npmConfigGetFn, npmConfigIncludesFn = old, oldCached, oldGet, oldInc
+		resolveNpmFn, npxCachedFn, npmConfigGetFn, npmConfigOmitsFn = old, oldCached, oldGet, oldInc
 	})
 
 	names := func(tree []catalog.Resolved) []string {

@@ -1112,9 +1112,6 @@ type installArgs struct {
 	// NpmWorkspacesOff is --workspaces=false, which stops npm's config
 	// discovery at the nearest package.json rather than a workspace root.
 	NpmWorkspacesOff bool
-	// NpmOmits are the dependency kinds npm's effective omit policy leaves
-	// out of the install (npmArgv.omits).
-	NpmOmits map[string]bool
 	// NpmCache is the --cache npm was given, if any, and NpxPackages the
 	// specs a tool run installs into the npx cache, as typed: together they
 	// locate the tree an earlier run of the same packages left there.

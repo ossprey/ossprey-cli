@@ -20,18 +20,18 @@ import (
 // Test seams: expandFn predicts what the named packages bring in; the two
 // resolvers below are what it asks.
 var (
-	expandFn            = expandInstall
-	resolveNpmFn        = catalog.ResolveNpmInstall
-	resolvePythonFn     = catalog.ResolvePythonInstall
-	resolveWithUVFn     = catalog.ResolvePythonInstallWithUV
-	npmConfigIncludesFn = catalog.NpmConfigIncludes
-	npmConfigGetFn      = catalog.NpmConfigGet
-	npxCachedFn         = catalog.NpxCachedTree
-	uvCacheDirFn        = catalog.UVCacheDir
-	uvConfigNeedsUVFn   = catalog.UVConfigShapesResolution
-	uvCachedFn          = catalog.UVCachedTree
-	uvToolDirFn         = catalog.UVToolDir
-	uvInstalledFn       = catalog.UVInstalledTree
+	expandFn          = expandInstall
+	resolveNpmFn      = catalog.ResolveNpmInstall
+	resolvePythonFn   = catalog.ResolvePythonInstall
+	resolveWithUVFn   = catalog.ResolvePythonInstallWithUV
+	npmConfigOmitsFn  = catalog.NpmConfigOmits
+	npmConfigGetFn    = catalog.NpmConfigGet
+	npxCachedFn       = catalog.NpxCachedTree
+	uvCacheDirFn      = catalog.UVCacheDir
+	uvConfigNeedsUVFn = catalog.UVConfigShapesResolution
+	uvCachedFn        = catalog.UVCachedTree
+	uvToolDirFn       = catalog.UVToolDir
+	uvInstalledFn     = catalog.UVInstalledTree
 )
 
 // A named install used to check exactly the packages typed. `npm install
@@ -95,6 +95,7 @@ func resolveNamed(ctx context.Context, m *Manager, opts Options, start int, pars
 	set.expanded, set.unresolved = err == nil, err
 
 	found := make([]bool, len(parsed.Specs))
+	trusted := make([]bool, len(parsed.Specs))
 	for _, r := range tree {
 		i := namedIndex(m.Ecosystem, parsed.Specs, r.Name)
 		if i < 0 && r.Locked {
@@ -107,7 +108,7 @@ func resolveNamed(ctx context.Context, m *Manager, opts Options, start int, pars
 		if opts.Trust.Trusts(m.Ecosystem, r.Name, regs) {
 			warn.Add(ctx, scan.TrustedEntry(m.Ecosystem, r.Name, r.Version))
 			if i >= 0 {
-				found[i] = true // trusted: not looked up publicly below either
+				found[i], trusted[i] = true, true // not looked up publicly below either
 			}
 			continue
 		}
@@ -122,15 +123,35 @@ func resolveNamed(ctx context.Context, m *Manager, opts Options, start int, pars
 		set.specs = append(set.specs, check.Spec{Ecosystem: m.Ecosystem, Name: r.Name, Version: r.Version})
 	}
 
+	// A name the tree answered for is not resolved again — unless the
+	// tree is only what an earlier run left on disk (err != nil), which
+	// says nothing about what resolves today: `npx tool@latest` with
+	// tool@1.0.0 cached may fetch 2.0.0, so the names are resolved as well,
+	// each counted once and a release already in the set not repeated.
+	// A trusted name is never looked up publicly.
 	var missing []check.Spec
 	for i, s := range parsed.Specs {
-		if !found[i] {
+		if !found[i] || (err != nil && !trusted[i]) {
 			missing = append(missing, s)
 		}
 	}
-	resolved := resolveSpecs(ctx, resolve, missing)
-	set.named += len(resolved)
-	set.specs = append(set.specs, resolved...)
+	have := map[check.Spec]bool{}
+	for _, s := range set.specs {
+		have[s] = true
+	}
+	for _, r := range resolveSpecs(ctx, resolve, missing) {
+		if have[r] {
+			continue
+		}
+		have[r] = true
+		if i := namedIndex(m.Ecosystem, parsed.Specs, r.Name); i < 0 || !found[i] {
+			set.named++
+			if i >= 0 {
+				found[i] = true
+			}
+		}
+		set.specs = append(set.specs, r)
+	}
 	return set
 }
 
@@ -216,14 +237,26 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 			if parsed.Userconfig != "" {
 				flags = append(flags, "--userconfig", absPath(parsed.Userconfig))
 			}
-			tree, err := resolveNpmFn(ctx, "", npmConfigDirFor(parsed.NpmGlobal, parsed.NpmPrefix, parsed.NpmWorkspacesOff), tokens, flags)
-			// The flags that make `npm config get` read what this command
+			// The flags that make `npm config` read what this command
 			// reads: its config files and location.
 			configFlags := slices.Concat(flags, npmLocationFlags(parsed.NpmGlobal, parsed.NpmPrefix))
-			if err == nil {
+			// The cache the run reads, found once for the dry run and the
+			// npx-cache lookup. A path npm resolves against the directory it
+			// runs in (a relative npm_config_cache, or a relative cache= in
+			// an .npmrc) is not the same from the dry run's scratch
+			// directory, so the dry run is told it absolutely.
+			var cache string
+			if m.Bin == "npm" || m.Bin == "npx" {
+				var moved bool
+				if cache, moved = npmCacheDir(ctx, parsed.NpmCache, configFlags); moved {
+					flags = append(flags, "--cache", cache)
+				}
+			}
+			tree, err := resolveNpmFn(ctx, "", npmConfigDirFor(parsed.NpmGlobal, parsed.NpmPrefix, parsed.NpmWorkspacesOff), tokens, flags)
+			if err == nil && len(tree) > 0 {
 				// The omit policy shapes a fresh install only: a reused npx
 				// installation is not pruned, so what it holds stays checked.
-				tree = npmOmit(tree, npmEffectiveOmits(ctx, parsed.NpmOmits, configFlags))
+				tree = npmOmit(tree, npmEffectiveOmits(ctx, configFlags))
 			}
 			if m.Bin == "npm" || m.Bin == "npx" {
 				// npm may reuse what an earlier run left in its npx cache,
@@ -231,23 +264,27 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 				// tree is on disk whether or not today's dry run succeeds,
 				// and a failed one may be exactly why npm reuses it, so it
 				// is read either way and returned beside the error.
-				tree = withNpxCached(ctx, tree, parsed, configFlags)
+				tree = withNpxCached(ctx, tree, parsed, cache)
 			}
 			return tree, err
 		}
 		// npm reads its options on either side of the verb (`npm --offline
 		// install x`), so the whole line is read, not rest.
 		flags := npmResolveFlags(m, args)
+		if m.Bin == "npm" {
+			// A relative npm_config_cache is resolved where npm runs, and
+			// the dry run runs in a copy of the project elsewhere.
+			flags = append(flags, npmEnvCacheFlag(flags)...)
+		}
 		tree, err := resolveNpmFn(ctx, npmProjectDir(m, args), npmConfigDir(m, args), tokens, flags)
-		if err != nil || m.Bin != "npm" {
+		if err != nil || m.Bin != "npm" || len(tree) == 0 {
 			return tree, err
 		}
-		// The omit policy comes from npm's own parse of the whole command,
-		// options before the verb included, with its last-wins and negation
-		// rules; the flag list above is only what the dry run is told.
+		// The omit policy is npm's own reading of the whole command and its
+		// configuration; the flag list above is only what the dry run is
+		// told, and npm reads the same flags to answer.
 		a := parseNpmArgv(args)
-		omits := npmEffectiveOmits(ctx, a.omits(), slices.Concat(flags, npmLocationFlags(a.global(), a.prefix())))
-		return npmOmit(tree, omits), nil
+		return npmOmit(tree, npmEffectiveOmits(ctx, slices.Concat(flags, npmLocationFlags(a.global(), a.prefix())))), nil
 	case "pypi":
 		// A short option's value may be attached (`-ihttps://…`); read it
 		// as the resolver will, from a copy, so args stays what the real
@@ -387,8 +424,8 @@ func pythonValueFlags(m *Manager) map[string]bool {
 // A release both report is one sighting with two provenances, merged so
 // that neither can hide the other (mergeSighting). An unreadable cache adds
 // nothing.
-func withNpxCached(ctx context.Context, tree []catalog.Resolved, parsed installArgs, configFlags []string) []catalog.Resolved {
-	cached, err := npxCachedFn(npmCacheDir(ctx, parsed.NpmCache, configFlags), parsed.NpxPackages)
+func withNpxCached(ctx context.Context, tree []catalog.Resolved, parsed installArgs, cache string) []catalog.Resolved {
+	cached, err := npxCachedFn(cache, parsed.NpxPackages)
 	if err != nil || len(cached) == 0 {
 		return tree
 	}
@@ -593,31 +630,56 @@ func mergeSighting(a, b catalog.Resolved) catalog.Resolved {
 // cache`, read with the command's own config-file and location flags, which
 // also yields npm's platform default), else that default worked out here
 // when npm cannot be asked.
-func npmCacheDir(ctx context.Context, flag string, configFlags []string) string {
+func npmCacheDir(ctx context.Context, flag string, configFlags []string) (dir string, moved bool) {
 	if flag != "" {
-		return absPath(flag)
+		return absPath(expandHome(flag)), false
 	}
 	for _, name := range []string{"npm_config_cache", "NPM_CONFIG_CACHE"} {
 		if v := os.Getenv(name); v != "" {
-			return absPath(expandHome(v))
+			v = expandHome(v)
+			return absPath(v), !filepath.IsAbs(v)
 		}
 	}
 	if v, err := npmConfigGetFn(ctx, ".", "cache", configFlags); err == nil && v != "" {
-		return absPath(expandHome(v))
+		// npm answers absolutely, resolved where it was asked; a relative
+		// cache= in an .npmrc would resolve elsewhere from scratch.
+		return absPath(expandHome(v)), true
 	}
 	if runtime.GOOS == "windows" {
 		if v := os.Getenv("LOCALAPPDATA"); v != "" {
-			return filepath.Join(v, "npm-cache")
+			return filepath.Join(v, "npm-cache"), false
 		}
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return ""
+		return "", false
 	}
 	if runtime.GOOS == "windows" {
-		return filepath.Join(home, "npm-cache")
+		return filepath.Join(home, "npm-cache"), false
 	}
-	return filepath.Join(home, ".npm")
+	return filepath.Join(home, ".npm"), false
+}
+
+// npmEnvCacheFlag names a relative npm_config_cache absolutely, as --cache,
+// for a dry run that runs elsewhere than the command: nopt resolves the
+// variable against the directory npm runs in (verified: `npm config list
+// -l` answers under the cwd). A --cache among flags already names it, and
+// an absolute path reads the same from anywhere.
+func npmEnvCacheFlag(flags []string) []string {
+	for _, f := range flags {
+		if f == "--cache" || strings.HasPrefix(f, "--cache=") {
+			return nil
+		}
+	}
+	for _, name := range []string{"npm_config_cache", "NPM_CONFIG_CACHE"} {
+		if v := os.Getenv(name); v != "" {
+			if v = expandHome(v); filepath.IsAbs(v) {
+				return nil
+			}
+			return []string{"--cache", absPath(v)}
+		}
+	}
+	return nil
 }
 
 // npmLocationFlags are the flags that make `npm config get` read the same
@@ -633,26 +695,20 @@ func npmLocationFlags(global bool, prefix string) []string {
 	return nil
 }
 
-// npmEffectiveOmits is the command line's omit policy less whatever npm's
-// configuration includes: an include in an .npmrc, the user or global
-// config or the environment wins over an --omit on the line, and the dry
-// run's lockfile cannot say, since it records omitted packages too. npm is
-// asked only when the line omits something, so the common run pays nothing;
-// when it cannot be asked, nothing is dropped, which can only check more.
-func npmEffectiveOmits(ctx context.Context, omits map[string]bool, flags []string) map[string]bool {
-	if len(omits) == 0 {
-		return nil
-	}
-	included, err := npmConfigIncludesFn(ctx, ".", flags)
+// npmEffectiveOmits is npm's own omit policy for the install: the kinds
+// `npm config get omit` reports for the dry run's flags and location, which
+// is the command line, the environment and every .npmrc read together,
+// include winning over omit and optional=false counted as an omit. One
+// subprocess, asked only for a fresh tree with something to prune; when
+// npm cannot answer nothing is dropped, which errs toward checking.
+func npmEffectiveOmits(ctx context.Context, flags []string) map[string]bool {
+	kinds, err := npmConfigOmitsFn(ctx, ".", flags)
 	if err != nil {
 		return nil
 	}
 	out := map[string]bool{}
-	for kind := range omits {
+	for _, kind := range kinds {
 		out[kind] = true
-	}
-	for _, kind := range included {
-		delete(out, kind)
 	}
 	return out
 }
