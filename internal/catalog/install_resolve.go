@@ -283,15 +283,21 @@ func venvPackages(env string) ([]Resolved, error) {
 		if err != nil {
 			return nil, err
 		}
+		// Core metadata field names are case-insensitive.
 		var name, version string
 		for _, line := range strings.Split(string(data), "\n") {
-			if line == "" {
+			if strings.TrimSpace(line) == "" {
 				break // end of headers
 			}
-			if v, ok := strings.CutPrefix(line, "Name:"); ok && name == "" {
-				name = strings.TrimSpace(v)
-			} else if v, ok := strings.CutPrefix(line, "Version:"); ok && version == "" {
-				version = strings.TrimSpace(v)
+			key, value, ok := strings.Cut(line, ":")
+			if !ok {
+				continue
+			}
+			switch {
+			case strings.EqualFold(key, "Name") && name == "":
+				name = strings.TrimSpace(value)
+			case strings.EqualFold(key, "Version") && version == "":
+				version = strings.TrimSpace(value)
 			}
 		}
 		if name == "" || version == "" {

@@ -570,10 +570,16 @@ func TestUVInstalledTree(t *testing.T) {
 	os.MkdirAll(site, 0o755)
 	os.WriteFile(filepath.Join(env, "pyvenv.cfg"), []byte("uv = 0.11\n"), 0o644)
 	os.WriteFile(filepath.Join(env, "uv-receipt.toml"), []byte("[tool]\n"), 0o644)
+	// Core metadata field names are case-insensitive: one distribution
+	// spells them in lowercase, the other in upper.
 	for name, version := range map[string]string{"Cow-Say": "6.0", "six": "1.15.0"} {
 		d := filepath.Join(site, strings.ReplaceAll(name, "-", "_")+"-"+version+".dist-info")
 		os.MkdirAll(d, 0o755)
-		os.WriteFile(filepath.Join(d, "METADATA"), []byte("Name: "+name+"\nVersion: "+version+"\n\n"), 0o644)
+		header := "name: " + name + "\nversion: " + version + "\n\n"
+		if name == "six" {
+			header = "Metadata-Version: 2.1\nNAME: " + name + "\nVERSION: " + version + "\n\n"
+		}
+		os.WriteFile(filepath.Join(d, "METADATA"), []byte(header), 0o644)
 	}
 	got, err := UVInstalledTree(tools, "Cow_Say")
 	if err != nil {
