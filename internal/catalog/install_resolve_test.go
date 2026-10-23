@@ -472,6 +472,7 @@ func TestPep440Equal(t *testing.T) {
 		{"1.0", "1.0.post0", false}, {"1.0.post1", "1.0-1", true}, {"1.0.rev1", "1.0.post1", true}, {"1.0preview1", "1.0rc1.post0", false},
 		{"1.0.dev0", "1.0dev", true}, {"1.0", "1.0.dev0", false},
 		{"2.0", "2.0+local", true}, {"2.0+local", "2.0+other", false}, {"2.0+a-b", "2.0+a.b", true}, {"2.0+local", "2.0", false},
+		{"1.0+build.01", "1.0+build.1", true}, {"1.0+build.1", "1.0+build.10", false}, {"1.0+abc01", "1.0+abc1", false},
 		{"1!1.0", "1.0", false}, {"0!1.0", "1.0", true}, {"V1.0", "1.0", true},
 		{"weird", "1.0", true}, {"1.0", "weird", true},
 	} {

@@ -721,7 +721,11 @@ func npmProjectDir(m *Manager, args []string) string {
 // npmResolveFlags are passed from an npm install to the resolving npm. pnpm
 // and yarn spell theirs differently, so nothing of theirs is passed.
 var npmPassFlags = flagSet("--legacy-peer-deps", "--strict-peer-deps", "--no-optional", "--optional",
-	"--omit", "--include", "--registry", "--before", "--tag", "--userconfig", "--globalconfig")
+	"--omit", "--include", "--registry", "--before", "--tag", "--userconfig", "--globalconfig",
+	// The cache policy decides what npm resolves against: offline and
+	// prefer-offline read the cache's metadata, which may be older than the
+	// registry's, and --cache names which cache that is.
+	"--cache", "--offline", "--prefer-offline")
 
 func npmResolveFlags(m *Manager, rest []string) []string {
 	if m.Bin != "npm" {
@@ -730,12 +734,12 @@ func npmResolveFlags(m *Manager, rest []string) []string {
 	return absUserconfig(pickFlags(rest, valueFlags[m.Bin], npmPassFlags, nil))
 }
 
-// absUserconfig makes npm's --userconfig and --globalconfig paths absolute:
-// npm resolves them against the directory the command ran in, a leading
-// `~/` against the home directory as nopt does, and the dry run runs in
-// another.
+// absUserconfig makes npm's --userconfig, --globalconfig and --cache paths
+// absolute: npm resolves them against the directory the command ran in, a
+// leading `~/` against the home directory as nopt does, and the dry run
+// runs in another.
 func absUserconfig(flags []string) []string {
-	paths := flagSet("--userconfig", "--globalconfig")
+	paths := flagSet("--userconfig", "--globalconfig", "--cache")
 	for i := 0; i < len(flags); i++ {
 		flag, inline, hasInline := splitFlagValue(flags[i])
 		if !paths[flag] {

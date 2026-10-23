@@ -73,7 +73,7 @@ type npmArgv struct {
 // dist-tag, and the global/prefix/location trio that decides which .npmrc
 // npm reads.
 var npmRunConfig = flagSet("legacy-peer-deps", "strict-peer-deps", "optional", "omit", "include",
-	"before", "tag", "globalconfig", "global", "prefix", "location", "cache")
+	"before", "tag", "globalconfig", "global", "prefix", "location", "cache", "offline", "prefer-offline")
 
 // npmPathConfig are the npmRunConfig keys nopt types as paths: a leading
 // `~/` is the home directory (nopt's validatePath), and the rest is read
@@ -98,7 +98,8 @@ func expandHome(v string) string {
 }
 
 // npmConfigKeys are npmRunConfig's keys in a fixed order, for output.
-var npmConfigKeys = []string{"before", "globalconfig", "include", "legacy-peer-deps", "omit", "optional", "strict-peer-deps", "tag"}
+var npmConfigKeys = []string{"before", "cache", "globalconfig", "include", "legacy-peer-deps", "offline", "omit", "optional",
+	"prefer-offline", "strict-peer-deps", "tag"}
 
 func (a *npmArgv) record(key, value string) {
 	if !npmRunConfig[key] {

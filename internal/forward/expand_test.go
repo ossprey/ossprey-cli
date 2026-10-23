@@ -382,6 +382,10 @@ func TestExpandInstall_ToolRunHasNoProjectContext(t *testing.T) {
 		{[]string{"--omit=dev", "exec", "--before=2024-01-01", "--tag", "beta", "--legacy-peer-deps", "cowsay@1.6.0", "--", "--before=x"},
 			dir, []string{"--before=2024-01-01", "--legacy-peer-deps", "--omit=dev", "--tag=beta"}},
 		{[]string{"exec", "--globalconfig", "corp.npmrc", "cowsay@1.6.0"}, dir, []string{"--globalconfig=" + absPath("corp.npmrc")}},
+		// The cache policy and the cache it reads decide what npm resolves
+		// against, so they reach the dry run, the path made absolute.
+		{[]string{"exec", "--offline", "--prefer-offline", "--cache", "~/c", "cowsay@1.6.0"}, dir,
+			[]string{"--cache=" + absPath(expandHome("~/c")), "--offline", "--prefer-offline"}},
 	} {
 		gotConfig, gotFlags = "unset", nil
 		parsed := m.parseRun(tt.args)
@@ -731,6 +735,9 @@ func TestResolverFlags(t *testing.T) {
 		{"npm makes --userconfig and --globalconfig absolute",
 			npmResolveFlags(npm, []string{"--userconfig", "u.npmrc", "--userconfig=./v.npmrc", "--globalconfig", "g.npmrc", "express"}),
 			[]string{"--userconfig", absPath("u.npmrc"), "--userconfig=" + absPath("v.npmrc"), "--globalconfig", absPath("g.npmrc")}},
+		{"npm keeps the cache policy and the cache, made absolute",
+			npmResolveFlags(npm, []string{"--offline", "--prefer-offline", "--cache", "c", "--cache=~/d", "express"}),
+			[]string{"--offline", "--prefer-offline", "--cache", absPath("c"), "--cache=" + absPath(expandHome("~/d"))}},
 	}
 	for _, tt := range tests {
 		if !reflect.DeepEqual(tt.got, tt.want) {

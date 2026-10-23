@@ -307,7 +307,22 @@ func pep440Key(v string) (key, local string, ok bool) {
 	if m[8] != "" {
 		b.WriteString(".dev" + number(m[9]))
 	}
-	return b.String(), strings.NewReplacer("-", ".", "_", ".").Replace(m[10]), true
+	return b.String(), localKey(m[10]), true
+}
+
+// localKey is a local version segment normalised: separators as ".", and
+// an all-digit part as its number ("build.01" is "build.1").
+func localKey(local string) string {
+	if local == "" {
+		return ""
+	}
+	parts := strings.Split(strings.NewReplacer("-", ".", "_", ".").Replace(local), ".")
+	for i, part := range parts {
+		if strings.Trim(part, "0123456789") == "" {
+			parts[i] = number(part)
+		}
+	}
+	return strings.Join(parts, ".")
 }
 
 func number(s string) string {

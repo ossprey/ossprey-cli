@@ -420,7 +420,7 @@ Module._load = function (request, parent, isMain) {
       // a Date (before) as the word, a path (prefix) relative to the cwd,
       // everything else as its string.
       config: Object.fromEntries(['legacy-peer-deps', 'strict-peer-deps', 'optional', 'omit', 'include',
-        'before', 'tag', 'globalconfig', 'global', 'prefix', 'location', 'cache'].filter(k => conf[k] !== undefined).map(k =>
+        'before', 'tag', 'globalconfig', 'global', 'prefix', 'location', 'cache', 'offline', 'prefer-offline'].filter(k => conf[k] !== undefined).map(k =>
           [k, [].concat(conf[k]).map(v => v instanceof Date ? 'date'
             : k === 'prefix' || k === 'globalconfig' || k === 'cache' ? require('path').relative(process.cwd(), String(v)) : String(v))])),
     }))
@@ -516,7 +516,7 @@ func TestNpmParsersMatchNpm(t *testing.T) {
 		{"--no-update-notifier", "cowsay", "moo"}, {"--no-audit", "--no-fund", "cowsay"},
 		{"--ignore-existing", "cowsay"}, {"-q", "cowsay"}, {"--quiet", "cowsay", "moo"},
 		{"--loglevel", "silent", "cowsay", "moo"}, {"--", "cowsay", "--yes"}, {"cowsay@1.5.0", "--help"},
-		{"@scope/pkg@1.0.0", "arg"}, {"-gy", "cowsay"}, {"--prefer-offline", "cowsay"},
+		{"@scope/pkg@1.0.0", "arg"}, {"-gy", "cowsay"}, {"--prefer-offline", "cowsay"}, {"--offline", "--cache", "c", "cowsay"}, {"--no-offline", "cowsay"},
 		{"--cache", "/tmp/c", "cowsay"}, {"--userconfig", "./x.npmrc", "cowsay", "moo"},
 		{"--shell", "bash", "cowsay"}, {"--color", "always", "cowsay"}, {"--browser", "firefox", "cowsay"},
 		{"--workspace", "a", "cowsay"}, {"-w", "a", "cowsay"}, {"--package", "cowsay", "--", "cowsay", "moo"},
