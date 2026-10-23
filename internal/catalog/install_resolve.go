@@ -1027,10 +1027,15 @@ func UVConfigShapesResolution(flags []string, dir string) bool {
 	}
 	if dir != "" {
 		// uv discovers the nearest uv.toml or pyproject.toml above dir,
-		// uv.toml winning beside a pyproject.toml.
+		// uv.toml winning beside a pyproject.toml. The project's file is
+		// merged over the user's and the system's, not read instead of
+		// them, so one that shapes nothing still leaves theirs to check.
 		for d := absDir(dir); ; d = filepath.Dir(d) {
 			if _, err := os.Stat(filepath.Join(d, "uv.toml")); err == nil {
-				return tomlShapesResolution(filepath.Join(d, "uv.toml"), "")
+				if tomlShapesResolution(filepath.Join(d, "uv.toml"), "") {
+					return true
+				}
+				break
 			}
 			if _, err := os.Stat(filepath.Join(d, "pyproject.toml")); err == nil {
 				if tomlShapesResolution(filepath.Join(d, "pyproject.toml"), "tool.uv") {

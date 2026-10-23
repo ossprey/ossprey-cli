@@ -834,6 +834,11 @@ func TestExpandInstall_ToolRunNamesRelativeEnvPaths(t *testing.T) {
 		{"UV_CONSTRAINT", absPath("c.txt"), []string{"ruff"}, nil},
 		{"UV_CONSTRAINT", "a.txt " + absPath("b.txt"), []string{"ruff"}, []string{"--constraints", absPath("a.txt"), "--constraints", absPath("b.txt")}},
 		{"UV_OVERRIDE", "o.txt", []string{"ruff"}, []string{"--overrides", absPath("o.txt")}},
+		// Any non-URL entry of a file-valued variable is a path, whatever
+		// its spelling.
+		{"UV_CONSTRAINT", "constraints", []string{"ruff"}, []string{"--constraints", absPath("constraints")}},
+		{"UV_CONSTRAINT", "constraints.lock", []string{"ruff"}, []string{"--constraints", absPath("constraints.lock")}},
+		{"UV_FIND_LINKS", "wheels", []string{"ruff"}, []string{"--find-links", absPath("wheels")}},
 		{"UV_BUILD_CONSTRAINT", "b.txt", []string{"ruff"}, []string{"--build-constraints", absPath("b.txt")}},
 		{"UV_FIND_LINKS", "https://w.example/simple ./wheels", []string{"ruff"}, []string{"--find-links", "https://w.example/simple", "--find-links", absPath("wheels")}},
 		{"UV_FIND_LINKS", "https://w.example/simple", []string{"ruff"}, nil},

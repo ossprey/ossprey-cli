@@ -721,6 +721,16 @@ func TestUVConfigShapesResolution(t *testing.T) {
 	if !UVConfigShapesResolution(nil, proj) {
 		t.Error("project uv.toml resolution: does not shape")
 	}
+	// A project file that shapes nothing stops discovery above it, not the
+	// user's and the system's, which uv merges underneath it.
+	write(filepath.Join(proj, "uv.toml"), "link-mode = \"copy\"\n")
+	if UVConfigShapesResolution(nil, proj) {
+		t.Error("project link-mode only: shapes")
+	}
+	write(filepath.Join(usr, "uv", "uv.toml"), "index-url = \"https://usr.example/simple\"\n")
+	if !UVConfigShapesResolution(nil, proj) {
+		t.Error("project link-mode only beside a user index-url: does not shape")
+	}
 }
 
 // Against a real npm: a dry run with no project is isolated from a project

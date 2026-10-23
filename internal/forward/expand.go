@@ -568,13 +568,19 @@ func uvEnvPathFlags(opts []string, base string) []string {
 		if value == "" {
 			continue
 		}
+		// Every entry of a file- or directory-valued variable is a path
+		// unless it is a URL (`constraints`, `constraints.lock` and
+		// `wheels` are paths); UV_PYTHON also takes a version or a name,
+		// so only a path-shaped value of it is one.
 		entries := strings.Fields(value)
+		isPath := func(e string) bool { return !strings.Contains(e, "://") }
 		if v.env == "UV_PYTHON" {
 			entries = []string{strings.TrimSpace(value)}
+			isPath = looksLikePath
 		}
 		moved := false
 		for _, e := range entries {
-			if looksLikePath(e) && !filepath.IsAbs(e) {
+			if isPath(e) && !filepath.IsAbs(e) {
 				moved = true
 			}
 		}
@@ -582,7 +588,7 @@ func uvEnvPathFlags(opts []string, base string) []string {
 			continue
 		}
 		for _, e := range entries {
-			if looksLikePath(e) {
+			if isPath(e) {
 				e = absIn(base, e)
 			}
 			out = append(out, v.flag, e)
@@ -591,13 +597,13 @@ func uvEnvPathFlags(opts []string, base string) []string {
 	return out
 }
 
-// looksLikePath says a variable's entry is a file path rather than a URL
-// or, for UV_PYTHON, an interpreter version or name.
+// looksLikePath says a UV_PYTHON value is an interpreter path rather than
+// a version or a name.
 func looksLikePath(e string) bool {
 	if strings.Contains(e, "://") {
 		return false
 	}
-	return strings.ContainsAny(e, `/\`) || strings.HasPrefix(e, ".") || strings.HasSuffix(e, ".txt") || strings.HasSuffix(e, ".in")
+	return strings.ContainsAny(e, `/\`) || strings.HasPrefix(e, ".")
 }
 
 // unionSightings adds to tree the releases in extra it does not name, and
