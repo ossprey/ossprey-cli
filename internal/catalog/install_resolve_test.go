@@ -496,6 +496,74 @@ func TestPep440Equal(t *testing.T) {
 	}
 }
 
+// A tool run's resolution reads uv's configuration as the run does: the
+// [pip] table, which `uv pip compile` would apply and uvx ignores, is
+// stripped from a copy of the file the run reads.
+func TestUVToolRunConfig(t *testing.T) {
+	scratch := t.TempDir()
+	withPip := filepath.Join(t.TempDir(), "custom.toml")
+	os.WriteFile(withPip, []byte("index-url = \"https://top.example/simple\"\n\n[pip]\nindex-url = \"https://pip.example/simple\"\n"), 0o644)
+	withoutPip := filepath.Join(t.TempDir(), "plain.toml")
+	os.WriteFile(withoutPip, []byte("index-url = \"https://top.example/simple\"\n"), 0o644)
+	t.Setenv("UV_CONFIG_FILE", filepath.Join(t.TempDir(), "absent.toml"))
+
+	got, err := uvToolRunConfig([]string{"--offline", "--config-file", withPip}, scratch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stripped := filepath.Join(scratch, "uv.toml")
+	if want := []string{"--offline", "--config-file", stripped}; !reflect.DeepEqual(got, want) {
+		t.Errorf("flags = %v, want %v", got, want)
+	}
+	data, _ := os.ReadFile(stripped)
+	if s := string(data); !strings.Contains(s, "top.example") || strings.Contains(s, "pip") {
+		t.Errorf("stripped copy:\n%s", s)
+	}
+	for _, flags := range [][]string{
+		{"--config-file=" + withoutPip},
+		{"--no-config", "--config-file", withPip},
+		{"--offline"},
+	} {
+		if got, err := uvToolRunConfig(flags, scratch); err != nil || !reflect.DeepEqual(got, flags) {
+			t.Errorf("%v: flags = %v, err = %v, want unchanged", flags, got, err)
+		}
+	}
+	// The user-level file is read when none is named.
+	t.Setenv("UV_CONFIG_FILE", withPip)
+	if got, err := uvToolRunConfig([]string{"--offline"}, scratch); err != nil || !reflect.DeepEqual(got, []string{"--offline", "--config-file", stripped}) {
+		t.Errorf("user-level config: flags = %v, err = %v", got, err)
+	}
+}
+
+// Against a real uv: a [pip] index that would break `uv pip compile` does
+// not reach a tool run's resolution, since uvx does not read it either.
+func TestResolvePythonInstallWithUVReadsConfigAsAToolRun(t *testing.T) {
+	if testing.Short() {
+		t.Skip("network")
+	}
+	if _, ok := lookupUV(context.Background()); !ok {
+		t.Skip("no uv")
+	}
+	custom := filepath.Join(t.TempDir(), "custom.toml")
+	os.WriteFile(custom, []byte("[pip]\nindex-url = \"https://pip.invalid/simple\"\n"), 0o644)
+	got, err := ResolvePythonInstallWithUV(context.Background(), "", []string{"cowsay==6.1"}, []string{"--config-file", custom})
+	if err != nil {
+		if strings.Contains(err.Error(), "pip.invalid") {
+			t.Fatalf("the [pip] index reached the tool run's resolution: %v", err)
+		}
+		t.Skipf("uv: %v", err)
+	}
+	found := false
+	for _, r := range got {
+		if canonicalPackageName(r.Name) == "cowsay" && r.Version == "6.1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("cowsay 6.1 not resolved: %v", got)
+	}
+}
+
 // uv's cached tool environments: two levels of hashed directories, each a
 // venv whose site-packages (lib/pythonX.Y on POSIX, Lib on Windows) name
 // the installed releases. Only an environment holding every wanted package

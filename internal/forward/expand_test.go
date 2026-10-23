@@ -988,6 +988,11 @@ func TestExpandInstall_UVGlobalOptionsAndInterpreterPaths(t *testing.T) {
 			"", []string{"--cache-dir", absPath("sub/c")}, true},
 		{"named install cache options", uv, []string{"pip", "install", "--no-cache", "--refresh-package", "ruff", "ruff"},
 			".", []string{"--no-cache", "--refresh-package", "ruff"}, true},
+		// --reinstall implies --refresh, which is what the resolver reads.
+		{"tool run reinstall is refresh", uvx, []string{"--reinstall", "--reinstall-package", "six", "ruff@0.6.0"},
+			"", []string{"--refresh", "--refresh-package", "six"}, true},
+		{"named install reinstall is refresh", uv, []string{"pip", "install", "--reinstall", "ruff"},
+			".", []string{"--refresh"}, true},
 		{"attached index on a named install", uv, []string{"pip", "install", "-ihttps://i.example", "ruff"},
 			".", []string{"-i", "https://i.example"}, false},
 		{"attached global cache dir is not a resolver flag", uv, []string{"--no-config", "pip", "install", "-qq", "ruff"},
@@ -1272,6 +1277,9 @@ func TestExpandInstall_ToolRunCoversTheUVCache(t *testing.T) {
 		{uvx, []string{"cowsay@latest"}, fromUV, fromUV, []string{}, map[string]string{"cowsay": ""}, cached, ""},
 		{uvx, []string{"--isolated", "cowsay"}, fromUV, fromUV, []string{}, map[string]string{"cowsay": ""}, cached, ""},
 		{uvx, []string{"--cache-dir", "c", "--with", "Rich", "cowsay", "-t", "hi"}, "", absPath("c"), nil, map[string]string{"cowsay": "", "rich": ""}, cached, ""},
+		// A --with requirement with a marker may not be installed at all,
+		// so a cached environment is not asked to hold it.
+		{uvx, []string{"--with", "rich; sys_platform == \"win32\"", "cowsay"}, fromUV, fromUV, []string{}, map[string]string{"cowsay": ""}, cached, ""},
 		{uv, []string{"--cache-dir=d", "tool", "run", "--index", "https://i.example", "cowsay"}, "", absPath("d"), nil, map[string]string{"cowsay": ""}, all, "cowsay"},
 		// A relative --cache-dir is relative to the directory the run
 		// changes to, as is a relative answer from uv.

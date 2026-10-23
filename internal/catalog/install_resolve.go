@@ -1,17 +1,20 @@
 package catalog
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha512"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/BurntSushi/toml"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -720,6 +723,12 @@ func resolveWithUV(ctx context.Context, uv, dir string, specs, flags []string) (
 	if err := os.WriteFile(req, []byte(strings.Join(specs, "\n")+"\n"), 0o600); err != nil {
 		return nil, err
 	}
+	if dir == "" {
+		// A tool run: read uv's configuration as the run does.
+		if flags, err = uvToolRunConfig(flags, tmp); err != nil {
+			return nil, err
+		}
+	}
 
 	args := append([]string{"pip", "compile",
 		"--no-header",
@@ -752,6 +761,92 @@ func resolveWithUV(ctx context.Context, uv, dir string, specs, flags []string) (
 		return nil, fmt.Errorf("uv: %w", err)
 	}
 	return resolvedFromPackages(parseUVOutput(stdout, file.Location{}), nil), nil
+}
+
+// uvToolRunConfig gives a tool run's resolution the configuration the run
+// reads. `uv pip compile` also applies the [pip] table of uv's
+// configuration, which uvx and `uv tool run` ignore (verified against uv
+// 0.11: with a top-level index-url and a [pip] index-url in one file, uvx
+// fetches from the former and `uv pip compile` from the latter), so the
+// file the run reads — --config-file, UV_CONFIG_FILE, else the user-level
+// uv.toml — is copied into scratch without that table and named by
+// --config-file. A run with --no-config reads none, and a file without a
+// [pip] table is read as it is; a file uv cannot parse is left for uv to
+// report, as the run would.
+func uvToolRunConfig(flags []string, scratch string) ([]string, error) {
+	path := ""
+	for i := 0; i < len(flags); i++ {
+		switch f := flags[i]; {
+		case f == "--no-config":
+			return flags, nil
+		case f == "--config-file" && i+1 < len(flags):
+			path = flags[i+1]
+			i++
+		case strings.HasPrefix(f, "--config-file="):
+			path = strings.TrimPrefix(f, "--config-file=")
+		}
+	}
+	if path == "" {
+		path = os.Getenv("UV_CONFIG_FILE")
+	}
+	if path == "" {
+		path = userUVConfig()
+	}
+	if path == "" {
+		return flags, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return flags, nil
+		}
+		return nil, err
+	}
+	var cfg map[string]any
+	if _, err := toml.Decode(string(data), &cfg); err != nil {
+		return flags, nil
+	}
+	if _, ok := cfg["pip"]; !ok {
+		return flags, nil
+	}
+	delete(cfg, "pip")
+	var buf bytes.Buffer
+	if err := toml.NewEncoder(&buf).Encode(cfg); err != nil {
+		return nil, err
+	}
+	stripped := filepath.Join(scratch, "uv.toml")
+	if err := os.WriteFile(stripped, buf.Bytes(), 0o600); err != nil {
+		return nil, err
+	}
+	var out []string
+	for i := 0; i < len(flags); i++ {
+		if f := flags[i]; f == "--config-file" {
+			i++
+		} else if !strings.HasPrefix(f, "--config-file=") {
+			out = append(out, f)
+		}
+	}
+	return append(out, "--config-file", stripped), nil
+}
+
+// userUVConfig is where uv looks for user-level configuration:
+// $XDG_CONFIG_HOME/uv/uv.toml (~/.config/uv/uv.toml) on POSIX,
+// %APPDATA%\uv\uv.toml on Windows.
+func userUVConfig() string {
+	if runtime.GOOS == "windows" {
+		if v := os.Getenv("APPDATA"); v != "" {
+			return filepath.Join(v, "uv", "uv.toml")
+		}
+		return ""
+	}
+	if v := os.Getenv("XDG_CONFIG_HOME"); v != "" {
+		return filepath.Join(v, "uv", "uv.toml")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".config", "uv", "uv.toml")
 }
 
 // resolveWithPip runs pip's dry run over the named requirements. Wheels only:

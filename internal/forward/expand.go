@@ -290,7 +290,12 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 // to the network. --directory and --project change where it runs instead;
 // see uvDir.
 var uvGlobalPass = flagSet("--config-file", "--no-config", "--offline", "--allow-insecure-host", "--project",
-	"--cache-dir", "-n", "--no-cache", "--refresh", "--refresh-package")
+	"--cache-dir", "-n", "--no-cache", "--refresh", "--refresh-package", "--reinstall", "--reinstall-package")
+
+// uvRenames are uv flags the resolver reads under another name: --reinstall
+// "implies --refresh" (uv's own words), and the refresh is what changes the
+// resolution.
+var uvRenames = map[string]string{"--reinstall": "--refresh", "--reinstall-package": "--refresh-package"}
 
 // toolRunNoPass are uvGlobalPass flags a tool run must not pass on: uvx
 // reads no project configuration, so handing --project to `uv pip compile`
@@ -374,8 +379,14 @@ func withUVCached(ctx context.Context, tree []catalog.Resolved, parsed installAr
 		}
 	}
 	if readsCache {
+		// A requirement with a marker is installed only where the marker
+		// holds, which the resolver decides; an environment is not asked
+		// to hold it.
 		want := map[string]string{}
 		for _, s := range parsed.Specs {
+			if slices.ContainsFunc(parsed.Tokens[s], func(tok string) bool { return strings.Contains(tok, ";") }) {
+				continue
+			}
 			want[canonicalPyPI(s.Name)] = s.Version
 		}
 		if cached, err := uvCachedFn(uvCacheDir(ctx, opts, base), want); err == nil {
@@ -600,7 +611,7 @@ func uvGlobalFlags(m *Manager, args []string, base string, toolRun bool) ([]stri
 	if toolRun {
 		allowed = without(uvGlobalPass, toolRunNoPass)
 	}
-	return absFlagValues(pickFlags(lead, valFlags, allowed, nil), pythonPathFlags, base),
+	return absFlagValues(pickFlags(lead, valFlags, allowed, uvRenames), pythonPathFlags, base),
 		needsUV(lead, valFlags)
 }
 
@@ -636,7 +647,7 @@ var uvValueFlags = func() map[string]bool {
 // resolver reads them the same way (`uvx --index-url … ruff`).
 func toolRunLeadingFlags(rest []string, base string) []string {
 	allowed := without(union(pythonCommonFlags, uvOnlyFlags), toolRunNoPass)
-	return absFlagValues(pickFlags(toolRunLead(rest), toolRunValueFlags, allowed, nil), pythonPathFlags, base)
+	return absFlagValues(pickFlags(toolRunLead(rest), toolRunValueFlags, allowed, uvRenames), pythonPathFlags, base)
 }
 
 // toolRunPipFlags are the same leading flags as pip's resolver reads them,
@@ -661,7 +672,7 @@ var uvOnlyResolution = flagSet("--index", "--extra-index-url", "--overrides", "-
 	"-p", "--python", "--python-platform", "--config-file", "--offline",
 	// The cache uv reads offline or prefers, and whether it reads or
 	// refreshes it, decide what it resolves against; pip has no such cache.
-	"--cache-dir", "-n", "--no-cache", "--refresh", "--refresh-package")
+	"--cache-dir", "-n", "--no-cache", "--refresh", "--refresh-package", "--reinstall", "--reinstall-package")
 
 // needsUV reports whether a uv command carries a flag only uv can honour
 // (uvOnlyResolution).
@@ -916,7 +927,7 @@ var uvOnlyFlags = flagSet("--index", "--default-index", "--prerelease", "--resol
 	"--exclude-newer", "--exclude-newer-package", "-p", "--python", "--python-platform",
 	"--allow-insecure-host", "--index-strategy", "--only-binary", "--no-binary",
 	"--constraints", "--overrides", "--no-config", "--config-file", "--offline", "--project",
-	"--cache-dir", "-n", "--no-cache", "--refresh", "--refresh-package")
+	"--cache-dir", "-n", "--no-cache", "--refresh", "--refresh-package", "--reinstall", "--reinstall-package")
 
 // pipOnlyFlags are pip's own, passed when pip resolves a pip command.
 var pipOnlyFlags = flagSet("--trusted-host", "--platform", "--implementation", "--abi",
@@ -927,7 +938,7 @@ var pipOnlyFlags = flagSet("--trusted-host", "--platform", "--implementation", "
 func uvResolveFlags(m *Manager, rest []string) []string {
 	switch m.Bin {
 	case "uv":
-		return pickFlags(rest, valueFlags[m.Bin], union(pythonCommonFlags, uvOnlyFlags), nil)
+		return pickFlags(rest, valueFlags[m.Bin], union(pythonCommonFlags, uvOnlyFlags), uvRenames)
 	case "pip", "pip3":
 		return pickFlags(rest, valueFlags[m.Bin], union(pythonCommonFlags, flagSet("--trusted-host")),
 			map[string]string{"--trusted-host": "--allow-insecure-host"})
