@@ -642,6 +642,20 @@ func TestExpandInstall_UVOnlyFlagsAreResolvedByUVOnly(t *testing.T) {
 // The resolver gets the packages as the user wrote them — a range, extras, a
 // marker — since the parsed spec keeps only a name and an exact pin. uv's
 // and poetry's `name@version` is not PEP 508, so it is rewritten.
+// A release named twice with different extras is one spec, checked once,
+// but both spellings reach the resolver: each extra brings dependencies of
+// its own, and the last token alone would drop the first's.
+func TestSpecTokens_KeepsEveryExtrasSpelling(t *testing.T) {
+	uvx, _ := Lookup("uvx")
+	parsed := parseToolRun(uvx, []string{"--from", "httpx[cli]==0.28.1", "--with", "httpx[http2]==0.28.1", "--with", "httpx[cli]==0.28.1", "httpx"})
+	if want := []check.Spec{{Ecosystem: "pypi", Name: "httpx", Version: "0.28.1"}}; !reflect.DeepEqual(parsed.Specs, want) {
+		t.Errorf("specs = %+v, want %+v", parsed.Specs, want)
+	}
+	if got, want := specTokens(uvx, parsed), []string{"httpx[cli]==0.28.1", "httpx[http2]==0.28.1"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("tokens = %v, want %v", got, want)
+	}
+}
+
 func TestSpecTokens(t *testing.T) {
 	tests := []struct {
 		bin  string

@@ -1083,8 +1083,11 @@ type installArgs struct {
 	// of fetching the package of that name.
 	LocalCommand string
 	// Tokens are the Specs as the command line spelled them, for a resolver
-	// that reads the manager's own syntax (a range, extras, a marker).
-	Tokens map[check.Spec]string
+	// that reads the manager's own syntax (a range, extras, a marker). A
+	// release named twice with different extras (`--from 'x[a]==1' --with
+	// 'x[b]==1'`) is one Spec with both spellings, since each extra brings
+	// dependencies of its own.
+	Tokens map[check.Spec][]string
 	// ToolRun marks a fetch-and-execute: the package goes into the tool's
 	// own cache, and everything after the command is the program's argv.
 	ToolRun bool
@@ -1208,11 +1211,15 @@ func (p *installArgs) addTarget(ecosystem, token string) {
 		p.NonPackages = append(p.NonPackages, token)
 		return
 	}
-	p.Specs = append(p.Specs, s)
 	if p.Tokens == nil {
-		p.Tokens = map[check.Spec]string{}
+		p.Tokens = map[check.Spec][]string{}
 	}
-	p.Tokens[s] = token
+	if _, seen := p.Tokens[s]; !seen {
+		p.Specs = append(p.Specs, s)
+	}
+	if !slices.Contains(p.Tokens[s], token) {
+		p.Tokens[s] = append(p.Tokens[s], token)
+	}
 }
 
 // parseToolRun classifies fetch-and-execute arguments (`uvx [opts] <cmd>

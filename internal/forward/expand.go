@@ -664,14 +664,17 @@ func toolRunLead(rest []string) []string {
 func specTokens(m *Manager, parsed installArgs) []string {
 	out := make([]string, 0, len(parsed.Specs))
 	for _, s := range parsed.Specs {
-		tok := parsed.Tokens[s]
-		switch {
-		case tok == "":
+		toks := parsed.Tokens[s]
+		if len(toks) == 0 {
 			out = append(out, reconstructToken(s))
-		case m.Ecosystem == "pypi" && strings.Contains(tok, "@"):
-			out = append(out, reconstructToken(s))
-		default:
-			out = append(out, tok)
+			continue
+		}
+		for _, tok := range toks {
+			if m.Ecosystem == "pypi" && strings.Contains(tok, "@") {
+				out = append(out, reconstructToken(s))
+			} else {
+				out = append(out, tok)
+			}
 		}
 	}
 	return out
