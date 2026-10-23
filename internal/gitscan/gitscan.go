@@ -33,7 +33,7 @@ import (
 
 // Test seams.
 var (
-	execFn                  = forward.Exec
+	execFn                  = forward.Handoff
 	checkFn                 = check.Run
 	gitOutFn                = gitOutput
 	githubAPIURL            = "https://api.github.com/"
