@@ -1295,9 +1295,17 @@ func TestResolverFlags(t *testing.T) {
 		got  []string
 		want []string
 	}{
+		// npm's options are rendered as nopt normalised them, from npm's own
+		// parse of the whole line.
 		{"npm keeps peer and omit flags, drops the rest",
 			npmResolveFlags(npm, []string{"--save-dev", "--legacy-peer-deps", "--omit", "dev", "--registry=https://r.example", "-w", "web", "express"}),
-			[]string{"--legacy-peer-deps", "--omit", "dev", "--registry=https://r.example"}},
+			[]string{"--legacy-peer-deps", "--omit=dev", "--registry", "https://r.example/"}},
+		{"npm reads nopt's negation parity",
+			npmResolveFlags(npm, []string{"install", "--no-no-optional", "tool"}),
+			[]string{"--optional"}},
+		{"npm keeps --no-optional",
+			npmResolveFlags(npm, []string{"install", "--no-optional", "tool"}),
+			[]string{"--no-optional"}},
 		{"pnpm passes nothing to npm",
 			npmResolveFlags(pnpm, []string{"--filter", "web", "--save-dev", "express"}), nil},
 		{"pip to pip keeps index and constraint flags",
@@ -1312,24 +1320,24 @@ func TestResolverFlags(t *testing.T) {
 		{"uv to pip renames the default index and constraints, drops what pip cannot honour",
 			pipResolveFlags(uv, []string{"--index", "https://i.example", "--extra-index-url", "https://e.example", "--default-index=https://d.example", "--resolution", "lowest", "--constraints", "c.txt", "--overrides=o.txt", "httpx"}),
 			[]string{"--index-url=https://d.example", "--constraint", "c.txt"}},
-		{"npm makes --userconfig and --globalconfig absolute",
+		{"npm makes --userconfig and --globalconfig absolute, the last --userconfig winning",
 			npmResolveFlags(npm, []string{"--userconfig", "u.npmrc", "--userconfig=./v.npmrc", "--globalconfig", "g.npmrc", "express"}),
-			[]string{"--userconfig", absPath("u.npmrc"), "--userconfig=" + absPath("v.npmrc"), "--globalconfig", absPath("g.npmrc")}},
-		{"npm keeps the cache policy and the cache, made absolute",
+			[]string{"--globalconfig=" + absPath("g.npmrc"), "--userconfig", absPath("v.npmrc")}},
+		{"npm keeps the cache policy and the cache, made absolute, the last --cache winning",
 			npmResolveFlags(npm, []string{"--offline", "--prefer-offline", "--cache", "c", "--cache=~/d", "express"}),
-			[]string{"--offline", "--prefer-offline", "--cache", absPath("c"), "--cache=" + absPath(expandHome("~/d"))}},
+			[]string{"--cache=" + absPath(expandHome("~/d")), "--offline", "--prefer-offline"}},
 		{"npm reads its options before the verb too",
 			npmResolveFlags(npm, []string{"--userconfig", "./corp.npmrc", "--offline", "install", "--omit=dev", "tool@1.0.0"}),
-			[]string{"--userconfig", absPath("corp.npmrc"), "--offline", "--omit=dev"}},
-		{"npm keeps a negated cache policy, for its last-wins reading",
+			[]string{"--offline", "--omit=dev", "--userconfig", absPath("corp.npmrc")}},
+		{"npm renders a negated cache policy as its last-wins reading",
 			npmResolveFlags(npm, []string{"install", "--prefer-offline", "--no-prefer-offline", "--no-offline", "tool@1.0.0"}),
-			[]string{"--prefer-offline", "--no-prefer-offline", "--no-offline"}},
+			[]string{"--no-offline", "--no-prefer-offline"}},
 		{"prefer-online",
 			npmResolveFlags(npm, []string{"install", "--prefer-online", "--no-prefer-online", "tool@1.0.0"}),
-			[]string{"--prefer-online", "--no-prefer-online"}},
+			[]string{"--no-prefer-online"}},
 		{"min-release-age",
 			npmResolveFlags(npm, []string{"install", "--min-release-age", "7", "--min-release-age-exclude=left-pad", "tool@1.0.0"}),
-			[]string{"--min-release-age", "7", "--min-release-age-exclude=left-pad"}},
+			[]string{"--min-release-age=7", "--min-release-age-exclude=left-pad"}},
 	}
 	for _, tt := range tests {
 		if !reflect.DeepEqual(tt.got, tt.want) {
@@ -1683,9 +1691,10 @@ func TestExpandInstall_NpmOmitOptional(t *testing.T) {
 	var answerErr error
 	asked := 0
 	var askedFlags []string
-	npmConfigOmitsFn = func(_ context.Context, _ string, flags []string) ([]string, error) {
+	askedDir := ""
+	npmConfigOmitsFn = func(_ context.Context, dir string, flags []string) ([]string, error) {
 		asked++
-		askedFlags = flags
+		askedFlags, askedDir = flags, dir
 		return answer, answerErr
 	}
 	t.Cleanup(func() {
@@ -1722,13 +1731,19 @@ func TestExpandInstall_NpmOmitOptional(t *testing.T) {
 		{[]string{"exec", "cowsay@1.6.0"}, true, []string{"dev", "optional"}, nil, []string{"needed", "peer"}, nil},
 		{[]string{"exec", "cowsay@1.6.0"}, true, []string{"peer"}, nil, []string{"needed", "extra", "devonly", "both"}, nil},
 		// A named install asks with the same flags, location included.
-		{[]string{"install", "--omit", "optional", "cowsay"}, false, []string{"optional"}, nil, []string{"needed", "devonly", "both", "peer"}, []string{"--omit", "optional"}},
+		{[]string{"install", "--omit", "optional", "cowsay"}, false, []string{"optional"}, nil, []string{"needed", "devonly", "both", "peer"}, []string{"--omit=optional"}},
 		{[]string{"install", "cowsay"}, false, []string{"optional"}, nil, []string{"needed", "devonly", "both", "peer"}, nil},
 		{[]string{"install", "-g", "cowsay"}, false, nil, nil, all, []string{"-g"}},
+		// The probe runs in the configuration's directory with the
+		// command's own selectors: --prefix names it, --workspaces=false
+		// keeps npm at it.
+		{[]string{"install", "--prefix", "../x", "cowsay"}, false, nil, nil, all, []string{"--prefix", absPath("../x")}},
+		{[]string{"exec", "--workspaces=false", "cowsay@1.6.0"}, true, nil, nil, all, []string{"--workspaces=false"}},
+		{[]string{"install", "--no-workspaces", "cowsay"}, false, nil, nil, all, []string{"--workspaces=false"}},
 		// When npm cannot answer, nothing is dropped.
 		{[]string{"install", "--omit=optional", "cowsay"}, false, nil, errors.New("no npm"), all, []string{"--omit=optional"}},
 	} {
-		answer, answerErr, asked, askedFlags = tt.answer, tt.answerErr, 0, nil
+		answer, answerErr, asked, askedFlags, askedDir = tt.answer, tt.answerErr, 0, nil, ""
 		start := 0
 		var parsed installArgs
 		if tt.toolRun {
@@ -1750,6 +1765,71 @@ func TestExpandInstall_NpmOmitOptional(t *testing.T) {
 		}
 		if len(askedFlags) != len(tt.wantFlags) || (len(tt.wantFlags) > 0 && !reflect.DeepEqual(askedFlags, tt.wantFlags)) {
 			t.Errorf("%v: npm asked with %v, want %v", tt.args, askedFlags, tt.wantFlags)
+		}
+		// The configuration's directory: the cwd in global mode (which
+		// reads no project file), --prefix, else npm's local prefix.
+		wantDir := npmLocalPrefix()
+		switch {
+		case slices.Contains(tt.args, "-g"):
+			wantDir = "."
+		case slices.Contains(tt.args, "--prefix"):
+			wantDir = absPath("../x")
+		}
+		if askedDir != wantDir {
+			t.Errorf("%v: npm asked in %q, want %q", tt.args, askedDir, wantDir)
+		}
+	}
+}
+
+// A relative npm_config_userconfig or _globalconfig is resolved where npm
+// runs; the dry run and the probes run elsewhere, so they are told the file
+// absolutely, as the flag, for a tool run and a named install alike. A flag
+// on the line and an absolute variable need nothing.
+func TestExpandInstall_NamesARelativeNpmConfigFile(t *testing.T) {
+	var gotFlags []string
+	old, oldCached, oldGet, oldOmits := resolveNpmFn, npxCachedFn, npmConfigGetFn, npmConfigOmitsFn
+	resolveNpmFn = func(_ context.Context, _, _ string, _, flags []string) ([]catalog.Resolved, error) {
+		gotFlags = flags
+		return nil, nil
+	}
+	npxCachedFn = func(string, []string) ([]catalog.Resolved, error) { return nil, nil }
+	npmConfigOmitsFn = func(context.Context, string, []string) ([]string, error) { return nil, nil }
+	npmConfigGetFn = func(context.Context, string, string, []string) (string, error) { return "", errors.New("no npm") }
+	t.Cleanup(func() { resolveNpmFn, npxCachedFn, npmConfigGetFn, npmConfigOmitsFn = old, oldCached, oldGet, oldOmits })
+	t.Setenv("npm_config_cache", "")
+	npx, _ := Lookup("npx")
+	npm, _ := Lookup("npm")
+	for _, tt := range []struct {
+		m         *Manager
+		env, val  string
+		args      []string
+		wantFlags []string
+	}{
+		{npx, "NPM_CONFIG_USERCONFIG", "corp.npmrc", []string{"cowsay"}, []string{"--userconfig", absPath("corp.npmrc")}},
+		{npx, "NPM_CONFIG_USERCONFIG", "corp.npmrc", []string{"--userconfig", "mine.npmrc", "cowsay"}, []string{"--userconfig", absPath("mine.npmrc")}},
+		{npx, "NPM_CONFIG_USERCONFIG", absPath("corp.npmrc"), []string{"cowsay"}, nil},
+		{npx, "npm_config_globalconfig", "g.npmrc", []string{"cowsay"}, []string{"--globalconfig", absPath("g.npmrc")}},
+		{npm, "NPM_CONFIG_USERCONFIG", "corp.npmrc", []string{"install", "cowsay"}, []string{"--userconfig", absPath("corp.npmrc")}},
+		{npm, "NPM_CONFIG_USERCONFIG", "corp.npmrc", []string{"install", "--userconfig=mine.npmrc", "cowsay"}, []string{"--userconfig", absPath("mine.npmrc")}},
+	} {
+		t.Setenv("NPM_CONFIG_USERCONFIG", "")
+		t.Setenv("npm_config_globalconfig", "")
+		t.Setenv(tt.env, tt.val)
+		gotFlags = nil
+		start := 0
+		var parsed installArgs
+		if tt.m == npx {
+			parsed = npx.parseRun(tt.args)
+			parsed.ToolRun = true
+		} else {
+			start = 1
+			parsed = ParseSpecs(npm, tt.args[start:])
+		}
+		if _, err := expandInstall(context.Background(), tt.m, tt.args, start, parsed); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(gotFlags, tt.wantFlags) {
+			t.Errorf("%s %s=%q %v: flags = %v, want %v", tt.m.Bin, tt.env, tt.val, tt.args, gotFlags, tt.wantFlags)
 		}
 	}
 }

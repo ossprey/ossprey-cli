@@ -102,6 +102,10 @@ func expandHome(v string) string {
 var npmConfigKeys = []string{"before", "cache", "globalconfig", "include", "legacy-peer-deps", "min-release-age", "min-release-age-exclude",
 	"offline", "omit", "optional", "prefer-offline", "prefer-online", "strict-peer-deps", "tag", "workspaces"}
 
+// npmArrayConfig are the recorded options nopt types as arrays, every
+// value kept; the rest keep their last value.
+var npmArrayConfig = flagSet("omit", "include", "min-release-age-exclude")
+
 // npmRecordOnly are recorded options the dry run is never told: workspaces
 // decides where npm reads its configuration, and `npm install --workspaces`
 // in a scratch directory with none fails with "No workspaces found!"
@@ -173,7 +177,12 @@ func (a npmArgv) resolveFlags() []string {
 		if npmRecordOnly[key] {
 			continue
 		}
-		for _, v := range a.Config[key] {
+		values := a.Config[key]
+		if !npmArrayConfig[key] && len(values) > 1 {
+			// nopt keeps the last value of a single-valued option.
+			values = values[len(values)-1:]
+		}
+		for _, v := range values {
 			switch {
 			case npmConfig[key].isBool() && v == "true":
 				out = append(out, "--"+key)

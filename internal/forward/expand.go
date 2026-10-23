@@ -237,9 +237,15 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 			if parsed.Userconfig != "" {
 				flags = append(flags, "--userconfig", absPath(parsed.Userconfig))
 			}
+			// A relative npm_config_userconfig or _globalconfig is resolved
+			// where npm runs; the dry run and the probes run elsewhere.
+			flags = append(flags, npmEnvConfigFlags(flags)...)
 			// The flags that make `npm config` read what this command
-			// reads: its config files and location.
-			configFlags := slices.Concat(flags, npmLocationFlags(parsed.NpmGlobal, parsed.NpmPrefix))
+			// reads: its config files and location, asked from the
+			// configuration's directory.
+			configDir := npmConfigDirFor(parsed.NpmGlobal, parsed.NpmPrefix, parsed.NpmWorkspacesOff)
+			configFlags := slices.Concat(flags, npmLocationFlags(parsed.NpmGlobal, parsed.NpmPrefix, parsed.NpmWorkspacesOff))
+			probeDir := npmProbeDir(configDir)
 			// The cache the run reads, found once for the dry run and the
 			// npx-cache lookup. A path npm resolves against the directory it
 			// runs in (a relative npm_config_cache, or a relative cache= in
@@ -248,15 +254,15 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 			var cache string
 			if m.Bin == "npm" || m.Bin == "npx" {
 				var moved bool
-				if cache, moved = npmCacheDir(ctx, parsed.NpmCache, configFlags); moved {
+				if cache, moved = npmCacheDir(ctx, parsed.NpmCache, probeDir, configFlags); moved {
 					flags = append(flags, "--cache", cache)
 				}
 			}
-			tree, err := resolveNpmFn(ctx, "", npmConfigDirFor(parsed.NpmGlobal, parsed.NpmPrefix, parsed.NpmWorkspacesOff), tokens, flags)
+			tree, err := resolveNpmFn(ctx, "", configDir, tokens, flags)
 			if err == nil && len(tree) > 0 {
 				// The omit policy shapes a fresh install only: a reused npx
 				// installation is not pruned, so what it holds stays checked.
-				tree = npmOmit(tree, npmEffectiveOmits(ctx, configFlags))
+				tree = npmOmit(tree, npmEffectiveOmits(ctx, probeDir, configFlags))
 			}
 			if m.Bin == "npm" || m.Bin == "npx" {
 				// npm may reuse what an earlier run left in its npx cache,
@@ -272,19 +278,23 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 		// install x`), so the whole line is read, not rest.
 		flags := npmResolveFlags(m, args)
 		if m.Bin == "npm" {
-			// A relative npm_config_cache is resolved where npm runs, and
-			// the dry run runs in a copy of the project elsewhere.
+			// A relative npm_config_cache, _userconfig or _globalconfig is
+			// resolved where npm runs, and the dry run runs in a copy of
+			// the project elsewhere.
 			flags = append(flags, npmEnvCacheFlag(flags)...)
+			flags = append(flags, npmEnvConfigFlags(flags)...)
 		}
-		tree, err := resolveNpmFn(ctx, npmProjectDir(m, args), npmConfigDir(m, args), tokens, flags)
+		configDir := npmConfigDir(m, args)
+		tree, err := resolveNpmFn(ctx, npmProjectDir(m, args), configDir, tokens, flags)
 		if err != nil || m.Bin != "npm" || len(tree) == 0 {
 			return tree, err
 		}
 		// The omit policy is npm's own reading of the whole command and its
 		// configuration; the flag list above is only what the dry run is
-		// told, and npm reads the same flags to answer.
+		// told, and npm reads the same flags to answer, from the
+		// configuration's directory.
 		a := parseNpmArgv(args)
-		return npmOmit(tree, npmEffectiveOmits(ctx, slices.Concat(flags, npmLocationFlags(a.global(), a.prefix())))), nil
+		return npmOmit(tree, npmEffectiveOmits(ctx, npmProbeDir(configDir), slices.Concat(flags, npmLocationFlags(a.global(), a.prefix(), a.workspacesOff())))), nil
 	case "pypi":
 		// A short option's value may be attached (`-ihttps://…`); read it
 		// as the resolver will, from a copy, so args stays what the real
@@ -726,7 +736,7 @@ func mergeSighting(a, b catalog.Resolved) catalog.Resolved {
 // cache`, read with the command's own config-file and location flags, which
 // also yields npm's platform default), else that default worked out here
 // when npm cannot be asked.
-func npmCacheDir(ctx context.Context, flag string, configFlags []string) (dir string, moved bool) {
+func npmCacheDir(ctx context.Context, flag, probeDir string, configFlags []string) (dir string, moved bool) {
 	if flag != "" {
 		return absPath(expandHome(flag)), false
 	}
@@ -736,7 +746,7 @@ func npmCacheDir(ctx context.Context, flag string, configFlags []string) (dir st
 			return absPath(v), !filepath.IsAbs(v)
 		}
 	}
-	if v, err := npmConfigGetFn(ctx, ".", "cache", configFlags); err == nil && v != "" {
+	if v, err := npmConfigGetFn(ctx, probeDir, "cache", configFlags); err == nil && v != "" {
 		// npm answers absolutely, resolved where it was asked; a relative
 		// cache= in an .npmrc would resolve elsewhere from scratch.
 		return absPath(expandHome(v)), true
@@ -754,6 +764,38 @@ func npmCacheDir(ctx context.Context, flag string, configFlags []string) (dir st
 		return filepath.Join(home, "npm-cache"), false
 	}
 	return filepath.Join(home, ".npm"), false
+}
+
+// npmEnvConfigFlags name a relative npm_config_userconfig or
+// npm_config_globalconfig absolutely, as the flag, for a dry run and the
+// probes that run elsewhere than the command: nopt resolves the variable
+// against the directory npm runs in (verified: `npm config list -l` answers
+// under the cwd), so from scratch the dry run would read another file, or
+// none, and resolve against the default registry. A flag among flags
+// already names the file, and an absolute path reads the same from
+// anywhere.
+func npmEnvConfigFlags(flags []string) []string {
+	var out []string
+	for _, c := range []struct {
+		flag string
+		envs []string
+	}{
+		{"--userconfig", []string{"npm_config_userconfig", "NPM_CONFIG_USERCONFIG"}},
+		{"--globalconfig", []string{"npm_config_globalconfig", "NPM_CONFIG_GLOBALCONFIG"}},
+	} {
+		if flagPresent(flags, c.flag) {
+			continue
+		}
+		for _, name := range c.envs {
+			if v := os.Getenv(name); v != "" {
+				if v = expandHome(v); !filepath.IsAbs(v) {
+					out = append(out, c.flag, absPath(v))
+				}
+				break
+			}
+		}
+	}
+	return out
 }
 
 // npmEnvCacheFlag names a relative npm_config_cache absolutely, as --cache,
@@ -778,17 +820,34 @@ func npmEnvCacheFlag(flags []string) []string {
 	return nil
 }
 
-// npmLocationFlags are the flags that make `npm config get` read the same
+// npmLocationFlags are the flags that make `npm config` read the same
 // project configuration as the command: global mode reads none, --prefix
-// names the project.
-func npmLocationFlags(global bool, prefix string) []string {
+// names the project, and --workspaces=false stops npm at the nearest
+// package.json rather than a workspace root. The probes also run in the
+// configuration's directory (npmConfigDir), not the cwd: from a workspace
+// member `npm config get` fails with ENOWORKSPACES, and from the root it
+// answers for the root, which is what the real command reads there.
+func npmLocationFlags(global bool, prefix string, workspacesOff bool) []string {
+	var out []string
 	switch {
 	case global:
-		return []string{"-g"}
+		out = []string{"-g"}
 	case prefix != "":
-		return []string{"--prefix", absPath(prefix)}
+		out = []string{"--prefix", absPath(prefix)}
 	}
-	return nil
+	if workspacesOff {
+		out = append(out, "--workspaces=false")
+	}
+	return out
+}
+
+// npmProbeDir is where a configuration probe runs: the configuration's
+// directory, or the cwd in global mode, which reads no project file.
+func npmProbeDir(configDir string) string {
+	if configDir == "" {
+		return "."
+	}
+	return configDir
 }
 
 // npmEffectiveOmits is npm's own omit policy for the install: the kinds
@@ -797,8 +856,8 @@ func npmLocationFlags(global bool, prefix string) []string {
 // include winning over omit and optional=false counted as an omit. One
 // subprocess, asked only for a fresh tree with something to prune; when
 // npm cannot answer nothing is dropped, which errs toward checking.
-func npmEffectiveOmits(ctx context.Context, flags []string) map[string]bool {
-	kinds, err := npmConfigOmitsFn(ctx, ".", flags)
+func npmEffectiveOmits(ctx context.Context, dir string, flags []string) map[string]bool {
+	kinds, err := npmConfigOmitsFn(ctx, dir, flags)
 	if err != nil {
 		return nil
 	}
@@ -1052,45 +1111,28 @@ func npmProjectDir(m *Manager, args []string) string {
 // resolved. Nothing else is passed: an unknown flag is at best ignored and
 // at worst fails the dry run, which only costs the fallback.
 
-// npmResolveFlags are passed from an npm install to the resolving npm. pnpm
-// and yarn spell theirs differently, so nothing of theirs is passed.
-var npmPassFlags = flagSet("--legacy-peer-deps", "--strict-peer-deps", "--no-optional", "--optional",
-	"--omit", "--include", "--registry", "--before", "--tag", "--userconfig", "--globalconfig",
-	// The cache policy decides what npm resolves against: offline and
-	// prefer-offline read the cache's metadata, which may be older than the
-	// registry's, and --cache names which cache that is. The negations
-	// travel too, so npm's last-wins reading holds in the dry run.
-	"--cache", "--offline", "--prefer-offline", "--no-offline", "--no-prefer-offline", "--prefer-online", "--no-prefer-online",
-	// A release-age policy picks an older eligible release, like --before.
-	"--min-release-age", "--min-release-age-exclude")
-
-func npmResolveFlags(m *Manager, rest []string) []string {
+// npmResolveFlags are the options an npm install hands the resolving npm:
+// npm's own parse of the whole line (`parseNpmArgv`, options before the
+// verb included), rendered as nopt normalised them, so `--no-no-optional`
+// reaches the dry run as `--optional` and the last of two --userconfig
+// values is the one passed — a filter by flag name dropped spellings nopt
+// reads and kept both values. The registry and --userconfig travel as they
+// do for a tool run, the path made absolute since the dry run runs
+// elsewhere. pnpm and yarn spell theirs differently, so nothing of theirs
+// is passed.
+func npmResolveFlags(m *Manager, args []string) []string {
 	if m.Bin != "npm" {
 		return nil
 	}
-	return absUserconfig(pickFlags(rest, valueFlags[m.Bin], npmPassFlags, nil))
-}
-
-// absUserconfig makes npm's --userconfig, --globalconfig and --cache paths
-// absolute: npm resolves them against the directory the command ran in, a
-// leading `~/` against the home directory as nopt does, and the dry run
-// runs in another.
-func absUserconfig(flags []string) []string {
-	paths := flagSet("--userconfig", "--globalconfig", "--cache")
-	for i := 0; i < len(flags); i++ {
-		flag, inline, hasInline := splitFlagValue(flags[i])
-		if !paths[flag] {
-			continue
-		}
-		switch {
-		case hasInline:
-			flags[i] = flag + "=" + expandHome(inline)
-		case i+1 < len(flags):
-			flags[i+1] = expandHome(flags[i+1])
-			i++
-		}
+	a := parseNpmArgv(args)
+	flags := a.resolveFlags()
+	if a.Registry != "" {
+		flags = append(flags, "--registry", a.Registry)
 	}
-	return absFlagValues(flags, paths, ".")
+	if a.Userconfig != "" {
+		flags = append(flags, "--userconfig", absPath(a.Userconfig))
+	}
+	return flags
 }
 
 // absFlagValues makes the values of the flags in paths absolute, in both
