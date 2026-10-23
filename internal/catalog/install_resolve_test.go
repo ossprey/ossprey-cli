@@ -558,6 +558,25 @@ func TestUVToolRunConfig(t *testing.T) {
 	if got, err := uvToolRunConfig([]string{"--offline"}, scratch); err != nil || !reflect.DeepEqual(got, []string{"--offline"}) {
 		t.Errorf("no [pip] anywhere: flags = %v, err = %v", got, err)
 	}
+
+	// A relative UV_CONFIG_FILE is read against the directory uv runs in,
+	// and the resolver runs in scratch: the file is named absolutely, with
+	// or without a [pip] table, and a missing one is left for uv to report.
+	here := t.TempDir()
+	t.Chdir(here)
+	os.WriteFile(filepath.Join(here, "rel.toml"), []byte("index-url = \"https://top.example/simple\"\n"), 0o644)
+	t.Setenv("UV_CONFIG_FILE", "rel.toml")
+	if got, err := uvToolRunConfig([]string{"--offline"}, scratch); err != nil || !reflect.DeepEqual(got, []string{"--offline", "--config-file", filepath.Join(here, "rel.toml")}) {
+		t.Errorf("relative UV_CONFIG_FILE: flags = %v, err = %v", got, err)
+	}
+	os.WriteFile(filepath.Join(here, "rel.toml"), []byte("[pip]\nindex-url = \"https://pip.example/simple\"\n"), 0o644)
+	if got, err := uvToolRunConfig([]string{"--offline"}, scratch); err != nil || !reflect.DeepEqual(got, []string{"--offline", "--config-file", stripped}) {
+		t.Errorf("relative UV_CONFIG_FILE with [pip]: flags = %v, err = %v", got, err)
+	}
+	t.Setenv("UV_CONFIG_FILE", "absent.toml")
+	if got, err := uvToolRunConfig([]string{"--offline"}, scratch); err != nil || !reflect.DeepEqual(got, []string{"--offline", "--config-file", filepath.Join(here, "absent.toml")}) {
+		t.Errorf("missing relative UV_CONFIG_FILE: flags = %v, err = %v", got, err)
+	}
 }
 
 // Against a real uv: a [pip] index that would break `uv pip compile` does

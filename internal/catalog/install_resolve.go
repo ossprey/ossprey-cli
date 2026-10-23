@@ -774,7 +774,10 @@ func resolveWithUV(ctx context.Context, uv, dir string, specs, flags []string) (
 // written into scratch without that table and named by --config-file. A
 // run with --no-config reads none, and configuration without a [pip]
 // table is left for uv to discover as it is; a file uv cannot parse is
-// left for uv to report, as the run would.
+// left for uv to report, as the run would. A relative UV_CONFIG_FILE is
+// read against the directory uv runs in, which for the resolver is
+// scratch, so it is named by its absolute path whether or not it has the
+// table.
 func uvToolRunConfig(flags []string, scratch string) ([]string, error) {
 	path := ""
 	for i := 0; i < len(flags); i++ {
@@ -788,8 +791,20 @@ func uvToolRunConfig(flags []string, scratch string) ([]string, error) {
 			path = strings.TrimPrefix(f, "--config-file=")
 		}
 	}
+	fromEnv := false
 	if path == "" {
 		path = os.Getenv("UV_CONFIG_FILE")
+		fromEnv = path != "" && !filepath.IsAbs(path)
+		if fromEnv {
+			// uv reads a relative UV_CONFIG_FILE against the directory it
+			// runs in, which for the resolver is scratch; name the file
+			// where this process reads it.
+			abs, err := filepath.Abs(path)
+			if err != nil {
+				return nil, err
+			}
+			path = abs
+		}
 	}
 	sources := []string{path}
 	if path == "" {
@@ -812,10 +827,10 @@ func uvToolRunConfig(flags []string, scratch string) ([]string, error) {
 		mergeTOML(merged, cfg)
 		found = true
 	}
-	if !found {
-		return flags, nil
-	}
-	if _, ok := merged["pip"]; !ok {
+	if _, ok := merged["pip"]; !found || !ok {
+		if fromEnv {
+			return append(slices.Clone(flags), "--config-file", path), nil
+		}
 		return flags, nil
 	}
 	delete(merged, "pip")

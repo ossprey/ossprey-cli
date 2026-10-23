@@ -259,6 +259,11 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 			// file by its absolute path.
 			envConfig := uvEnvConfigFlag(slices.Concat(uvGlobalArgs(m, args), lead), base)
 			uvFlags = append(uvFlags, envConfig...)
+			// So is a relative UV_CACHE_DIR: uv resolves it against the
+			// directory it runs in, and the resolver's scratch directory
+			// has no cache, so an offline run would resolve nothing.
+			envCache := uvEnvCacheFlag(slices.Concat(uvGlobalArgs(m, args), lead), base)
+			uvFlags = append(uvFlags, envCache...)
 			// --with-requirements files are installed into the same
 			// environment, so they resolve together with the packages: a
 			// release that satisfies each alone may not satisfy both.
@@ -275,7 +280,7 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 			}
 			// uv may reuse a tool environment it cached for an earlier run,
 			// dependencies and all, rather than what resolves today.
-			return withUVCached(ctx, tree, parsed, slices.Concat(uvGlobalArgs(m, args), lead, envConfig), base), nil
+			return withUVCached(ctx, tree, parsed, slices.Concat(uvGlobalArgs(m, args), lead, envConfig, envCache), base), nil
 		}
 		if hasFlag(rest, "--no-deps") {
 			return nil, nil
@@ -449,6 +454,27 @@ func uvEnvConfigFlag(opts []string, base string) []string {
 		return nil
 	}
 	return []string{"--config-file", absIn(base, v)}
+}
+
+// uvEnvCacheFlag names a relative UV_CACHE_DIR by its absolute path, as
+// --cache-dir, for the resolver that runs in a scratch directory: uv
+// resolves the variable against the directory it runs in (verified: `uv
+// cache dir` answers `c` wherever it is asked), which for the real run is
+// base and for the resolver is scratch, where there is no cache. The flag
+// is uv's own, so it reaches uv alone and does not make the run uv-only.
+// A --cache-dir on the line already names the cache, and an absolute path
+// reads the same from anywhere.
+func uvEnvCacheFlag(opts []string, base string) []string {
+	for _, a := range opts {
+		if flag, _, _ := splitFlagValue(a); flag == "--cache-dir" {
+			return nil
+		}
+	}
+	v := os.Getenv("UV_CACHE_DIR")
+	if v == "" || filepath.IsAbs(v) {
+		return nil
+	}
+	return []string{"--cache-dir", absIn(base, v)}
 }
 
 // uvToolDir is where uv keeps installed tools for this run: UV_TOOL_DIR,

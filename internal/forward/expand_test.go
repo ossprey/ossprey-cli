@@ -702,6 +702,56 @@ func TestExpandInstall_ToolRunNamesARelativeEnvConfigFile(t *testing.T) {
 	}
 }
 
+// A relative UV_CACHE_DIR is read against the directory uv runs in, and
+// the resolver runs in scratch, where there is no cache: it is told the
+// cache by its absolute path, as --cache-dir, which is uv's flag alone and
+// so leaves the pip fallback in place. A --cache-dir on the line and an
+// absolute variable need nothing.
+func TestExpandInstall_ToolRunNamesARelativeEnvCacheDir(t *testing.T) {
+	var gotUV []string
+	old, oldUV, oldDir, oldCached, oldToolDir, oldInstalled := resolvePythonFn, resolveWithUVFn, uvCacheDirFn, uvCachedFn, uvToolDirFn, uvInstalledFn
+	resolvePythonFn = func(_ context.Context, _ string, _, uvFlags, _ []string) ([]catalog.Resolved, error) {
+		gotUV = uvFlags
+		return nil, nil
+	}
+	resolveWithUVFn = func(_ context.Context, _ string, _, uvFlags []string) ([]catalog.Resolved, error) {
+		gotUV = uvFlags
+		return nil, nil
+	}
+	uvCacheDirFn = func(context.Context, []string) (string, error) { return "", errors.New("none") }
+	uvCachedFn = func(string, map[string]string) ([]catalog.Resolved, error) { return nil, nil }
+	uvToolDirFn = func(context.Context, []string) (string, error) { return "", errors.New("none") }
+	uvInstalledFn = func(string, string) ([]catalog.Resolved, error) { return nil, nil }
+	t.Cleanup(func() {
+		resolvePythonFn, resolveWithUVFn, uvCacheDirFn, uvCachedFn, uvToolDirFn, uvInstalledFn = old, oldUV, oldDir, oldCached, oldToolDir, oldInstalled
+	})
+	t.Setenv("UV_CONFIG_FILE", "")
+	uvx, _ := Lookup("uvx")
+	for _, tt := range []struct {
+		env    string
+		args   []string
+		wantUV []string
+	}{
+		{"c", []string{"ruff@0.6.0"}, []string{"--cache-dir", absPath("c")}},
+		{"c", []string{"--directory", "sub", "ruff@0.6.0"}, []string{"--cache-dir", absPath("sub/c")}},
+		{"c", []string{"--cache-dir", "mine", "ruff@0.6.0"}, []string{"--cache-dir", absPath("mine")}},
+		{"c", []string{"--cache-dir=mine", "ruff@0.6.0"}, []string{"--cache-dir=" + absPath("mine")}},
+		{absPath("c"), []string{"ruff@0.6.0"}, nil},
+		{"", []string{"ruff@0.6.0"}, nil},
+	} {
+		t.Setenv("UV_CACHE_DIR", tt.env)
+		gotUV = nil
+		parsed := parseToolRun(uvx, tt.args)
+		parsed.ToolRun = true
+		if _, err := expandInstall(context.Background(), uvx, tt.args, 0, parsed); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(gotUV, tt.wantUV) {
+			t.Errorf("UV_CACHE_DIR=%q %v: uv flags = %v, want %v", tt.env, tt.args, gotUV, tt.wantUV)
+		}
+	}
+}
+
 // A tool run's --with-requirements files are installed into the same
 // environment as the packages, so they resolve together: the resolver gets
 // each file as a "-r" spec, the path absolute against the run's directory.
