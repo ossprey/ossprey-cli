@@ -4,11 +4,11 @@ import (
 	"maps"
 	"net/url"
 	"path"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/anchore/syft/syft/pkg"
 )
@@ -22,6 +22,9 @@ var cratesIoIndex = map[string][2]string{
 // defaultPort is the port the WHATWG URL parser drops for each special scheme.
 var defaultPort = map[string]uint64{"ftp": 21, "http": 80, "https": 443, "ws": 80, "wss": 443}
 
+// trimC0 strips the leading and trailing C0 controls and spaces the WHATWG URL parser ignores.
+func trimC0(s string) string { return strings.TrimFunc(s, func(r rune) bool { return r <= ' ' }) }
+
 // crateURLCleaner applies the WHATWG URL parser's tab and newline removal and its reading of '\' as '/'.
 var crateURLCleaner = strings.NewReplacer("\t", "", "\n", "", "\r", "", `\`, "/")
 
@@ -32,7 +35,7 @@ func isCratesIo(source string) bool {
 	if !ok {
 		return false
 	}
-	scheme, rest, ok := strings.Cut(crateURLCleaner.Replace(raw), ":")
+	scheme, rest, ok := strings.Cut(crateURLCleaner.Replace(trimC0(raw)), ":")
 	if !ok {
 		return false
 	}
@@ -60,8 +63,11 @@ func isCratesIo(source string) bool {
 	if p, err = url.PathUnescape(p); err != nil {
 		return false
 	}
+	// Non-ASCII stays foreign before any case folding: IDNA sends a github.com homograph elsewhere, and ToLower maps 'İ' to 'i'.
+	if strings.ContainsFunc(host+p, func(r rune) bool { return r > unicode.MaxASCII }) {
+		return false
+	}
 	p = strings.TrimSuffix(path.Clean("/"+strings.ToLower(p)), ".git")
-	// A non-ASCII host stays foreign: IDNA maps a homograph of github.com to another domain.
 	return p == want[1] && strings.ToLower(host) == want[0]
 }
 
@@ -84,7 +90,7 @@ func cargoSourceQualifiers(p pkg.Package) (qualifiers map[string]string, why str
 		return nil, ""
 	}
 	kind, raw, _ := strings.Cut(source, "+")
-	u, err := url.Parse(raw)
+	u, err := url.Parse(trimC0(raw))
 	if err != nil || u.Host == "" {
 		return nil, unsendableSource
 	}
@@ -117,34 +123,4 @@ func qualifierKey(qualifiers map[string]string) string {
 		b.WriteString("?" + k + "=" + qualifiers[k])
 	}
 	return b.String()
-}
-
-// cargoOwns reports whether p's Cargo.toml sighting at loc means marked crate m: that workspace locks m, at p's pin if any, and not p from crates.io.
-func cargoOwns(pkgs []Package) func(m, p Package, loc string) bool {
-	locks := map[string]bool{}
-	for _, p := range pkgs {
-		for _, l := range p.sightings {
-			if l = filepath.ToSlash(l); path.Base(l) == "Cargo.lock" {
-				locks[path.Dir(l)] = true
-			}
-		}
-	}
-	// workspace is the directory of the nearest Cargo.lock at or above loc, "" when none.
-	workspace := func(loc string) string {
-		for d := path.Dir(filepath.ToSlash(loc)); ; d = path.Dir(d) {
-			if locks[d] {
-				return d
-			}
-			if d == path.Dir(d) {
-				return ""
-			}
-		}
-	}
-	return func(m, p Package, loc string) bool {
-		ws := workspace(loc)
-		inWorkspace := func(l string) bool { return workspace(l) == ws }
-		cratesIoLock := func(l string) bool { return path.Base(filepath.ToSlash(l)) == "Cargo.lock" && inWorkspace(l) }
-		return ws != "" && path.Base(filepath.ToSlash(loc)) == "Cargo.toml" && (p.Version == "" || p.Version == m.Version) &&
-			slices.ContainsFunc(m.sightings, inWorkspace) && !slices.ContainsFunc(p.sightings, cratesIoLock)
-	}
 }

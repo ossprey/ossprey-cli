@@ -32,8 +32,10 @@ npm workspace links, and yarn `workspace:`, `portal:`, `link:` and `file:`
 dependencies are left out, since none of them is published to a registry.
 A `Cargo.lock` crate that Cargo fetches from git or from a registry other than
 crates.io is sent marked with its source, as a `vcs_url` or `repository_url`
-purl qualifier with credentials removed (a registry by its host only), so the
-platform can tell it apart from the crates.io crate of that name. A crate whose
+purl qualifier with credentials removed (a registry by its origin only), so the
+platform can tell it apart from the crates.io crate of that name. A dependency
+that `[patch.crates-io]` redirects to git is sent both ways: the git crate from
+`Cargo.lock`, and the crates.io crate `Cargo.toml` declares. A crate whose
 source cannot be sent that way (not a git or registry URL, or too long) is
 skipped with a warning.
 
