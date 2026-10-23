@@ -443,7 +443,7 @@ Module._load = function (request, parent, isMain) {
       // a Date (before) as the word, a path (prefix) relative to the cwd,
       // everything else as its string.
       config: Object.fromEntries(['legacy-peer-deps', 'strict-peer-deps', 'optional', 'omit', 'include',
-        'before', 'tag', 'globalconfig', 'global', 'prefix', 'location', 'cache', 'offline', 'prefer-offline', 'prefer-online', 'workspaces', 'min-release-age', 'min-release-age-exclude'].filter(k => conf[k] !== undefined).map(k =>
+        'before', 'tag', 'globalconfig', 'global', 'prefix', 'location', 'cache', 'offline', 'prefer-offline', 'prefer-online', 'workspaces', 'min-release-age', 'min-release-age-exclude', 'production', 'only', 'dev', 'also'].filter(k => conf[k] !== undefined).map(k =>
           [k, [].concat(conf[k]).map(v => v instanceof Date ? 'date'
             : k === 'prefix' || k === 'globalconfig' || k === 'cache' ? require('path').relative(process.cwd(), String(v)) : String(v))])),
     }))
@@ -545,6 +545,8 @@ func TestNpmParsersMatchNpm(t *testing.T) {
 		{"--workspaces=false", "cowsay"}, {"--no-workspaces", "cowsay"},
 		{"--prefer-online", "cowsay"}, {"--no-prefer-online", "cowsay"},
 		{"--min-release-age=7", "cowsay"}, {"--min-release-age", "3", "--min-release-age-exclude", "cowsay", "--min-release-age-exclude=left-pad", "cowsay"},
+		// npm's older spellings of the omit policy.
+		{"--production", "cowsay"}, {"--production=false", "cowsay"}, {"--no-production", "cowsay"}, {"--only=prod", "cowsay"}, {"--also=dev", "cowsay"}, {"--dev", "cowsay"},
 		{"--cache", "/tmp/c", "cowsay"}, {"--userconfig", "./x.npmrc", "cowsay", "moo"},
 		{"--shell", "bash", "cowsay"}, {"--color", "always", "cowsay"}, {"--browser", "firefox", "cowsay"},
 		{"--workspace", "a", "cowsay"}, {"-w", "a", "cowsay"}, {"--package", "cowsay", "--", "cowsay", "moo"},

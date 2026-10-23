@@ -74,7 +74,11 @@ type npmArgv struct {
 // npm reads.
 var npmRunConfig = flagSet("legacy-peer-deps", "strict-peer-deps", "optional", "omit", "include",
 	"before", "tag", "globalconfig", "global", "prefix", "location", "cache", "offline", "prefer-offline", "prefer-online", "workspaces",
-	"min-release-age", "min-release-age-exclude")
+	"min-release-age", "min-release-age-exclude",
+	// npm's older spellings of the omit policy, which it still reads
+	// (verified: --production answers omit=dev, and --production=false
+	// overrides NODE_ENV=production and an --omit=dev on the line).
+	"production", "only", "dev", "also")
 
 // npmPathConfig are the npmRunConfig keys nopt types as paths: a leading
 // `~/` is the home directory (nopt's validatePath), and the rest is read
@@ -99,8 +103,8 @@ func expandHome(v string) string {
 }
 
 // npmConfigKeys are npmRunConfig's keys in a fixed order, for output.
-var npmConfigKeys = []string{"before", "cache", "globalconfig", "include", "legacy-peer-deps", "min-release-age", "min-release-age-exclude",
-	"offline", "omit", "optional", "prefer-offline", "prefer-online", "strict-peer-deps", "tag", "workspaces"}
+var npmConfigKeys = []string{"also", "before", "cache", "dev", "globalconfig", "include", "legacy-peer-deps", "min-release-age", "min-release-age-exclude",
+	"offline", "omit", "only", "optional", "prefer-offline", "prefer-online", "production", "strict-peer-deps", "tag", "workspaces"}
 
 // npmArrayConfig are the recorded options nopt types as arrays, every
 // value kept; the rest keep their last value.

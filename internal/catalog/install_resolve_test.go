@@ -350,6 +350,24 @@ func TestNpmConfigOmits(t *testing.T) {
 	if len(got) != 0 {
 		t.Errorf("global mode read the project's omits: %v", got)
 	}
+	// NODE_ENV=production omits dev; --production=false on the line puts
+	// it back, as the real install does.
+	os.Remove(filepath.Join(dir, ".npmrc"))
+	t.Setenv("NODE_ENV", "production")
+	got, err = NpmConfigOmits(ctx, dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, []string{"dev"}) {
+		t.Errorf("NODE_ENV=production: omits = %v, want [dev]", got)
+	}
+	got, err = NpmConfigOmits(ctx, dir, []string{"--no-production"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("NODE_ENV=production with --production=false: omits = %v, want none", got)
+	}
 }
 
 // `npm config get` answers for the command's own configuration: the

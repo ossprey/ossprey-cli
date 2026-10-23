@@ -1761,6 +1761,11 @@ func TestExpandInstall_NpmOmitOptional(t *testing.T) {
 		{[]string{"install", "--omit", "optional", "cowsay"}, false, []string{"optional"}, nil, []string{"needed", "devonly", "both", "peer", "aliased"}, []string{"--omit=optional"}},
 		{[]string{"install", "cowsay"}, false, []string{"optional"}, nil, []string{"needed", "devonly", "both", "peer", "aliased"}, nil},
 		{[]string{"install", "-g", "cowsay"}, false, nil, nil, all, nil},
+		// npm's older spellings of the omit policy reach the probe, so
+		// `--production=false` under NODE_ENV=production keeps dev
+		// dependencies in the check as npm keeps them in the install.
+		{[]string{"install", "--production=false", "cowsay"}, false, nil, nil, all, []string{"--no-production"}},
+		{[]string{"exec", "--production", "cowsay@1.6.0"}, true, []string{"dev"}, nil, []string{"needed", "extra", "both", "peer", "aliased"}, []string{"--production"}},
 		// The probe runs in the cwd with the command's own selectors:
 		// --prefix names the configuration (the command's, else the one it
 		// would discover), --workspaces=false keeps npm at it.
