@@ -155,15 +155,33 @@ type npmLockfile struct {
 // omit-lockfile-registry-resolved, and a package it installed from a
 // registry it did not name is one to check, not to drop.
 func parseNpmLock(data []byte, loc file.Location) ([]pkg.Package, error) {
+	return parseNpmLockAt(data, loc, "")
+}
+
+// parseNpmLockAt is parseNpmLock for a lock beside the tree it describes,
+// at root: an entry whose directory is not on disk is left out, since the
+// lock records what was resolved, omitted dependencies included, and only
+// what was installed can run. A root without node_modules at all is read
+// as the lock says, which can only check more.
+func parseNpmLockAt(data []byte, loc file.Location, root string) ([]pkg.Package, error) {
 	var lf npmLockfile
 	if err := json.Unmarshal(data, &lf); err != nil {
 		return nil, err
 	}
+	installed := func(string) bool { return true }
+	if root != "" {
+		if _, err := os.Stat(filepath.Join(root, "node_modules")); err == nil {
+			installed = func(key string) bool {
+				_, err := os.Stat(filepath.Join(root, filepath.FromSlash(key)))
+				return err == nil
+			}
+		}
+	}
 	seen := make(map[string]int)
 	var pkgs []pkg.Package
 	for key, entry := range lf.Packages {
-		if key == "" || entry.Version == "" || entry.Link {
-			continue // root project or a link to a local package
+		if key == "" || entry.Version == "" || entry.Link || !installed(key) {
+			continue // root project, a link to a local package, or not on disk
 		}
 		if entry.Resolved == "" && !strings.Contains(key, "node_modules/") {
 			continue // a local package in the tree (a workspace member), not installed from a registry

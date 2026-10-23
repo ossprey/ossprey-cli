@@ -159,6 +159,52 @@ func UVCacheDir(ctx context.Context, flags []string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// UVToolDir is where uv keeps installed tools (`uv tool dir`), which
+// honours UV_TOOL_DIR, a user-level uv.toml and the configuration flags
+// given; asked from a scratch directory for the reason UVCacheDir is.
+func UVToolDir(ctx context.Context, flags []string) (string, error) {
+	uv, err := lookTool("uv")
+	if err != nil {
+		return "", fmt.Errorf("%w (uv)", ErrNoResolver)
+	}
+	scratch, err := os.MkdirTemp("", "ossprey-uv-")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(scratch)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, uv, append([]string{"tool", "dir"}, flags...)...)
+	cmd.Dir = scratch
+	cmd.Env = toolEnv()
+	cmd.WaitDelay = 5 * time.Second
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("uv tool dir: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// UVInstalledTree is every package in the environment `uv tool install`
+// keeps for name under toolDir (<toolDir>/<name>, a venv), or nil when the
+// tool is not installed. `uvx <name>` runs that environment rather than
+// resolving anything when the name is bare: no version, no `@latest`, no
+// --with, no --isolated (verified against uv 0.11), so the releases that
+// run are the ones installed back then.
+func UVInstalledTree(toolDir, name string) ([]Resolved, error) {
+	if toolDir == "" || name == "" {
+		return nil, nil
+	}
+	for _, dir := range []string{canonicalPackageName(name), name} {
+		env := filepath.Join(toolDir, dir)
+		if _, err := os.Stat(filepath.Join(env, "pyvenv.cfg")); err != nil {
+			continue
+		}
+		return venvPackages(env)
+	}
+	return nil, nil
+}
+
 // UVCachedTree is every package installed in a tool environment uv has
 // cached under cacheDir that holds all of want (canonical PyPI name to the
 // exact version asked for, "" for any), or nil when none does. `uvx` and
@@ -437,14 +483,17 @@ func NpxCachedTree(npmCache string, packages []string) ([]Resolved, error) {
 	if npmCache == "" || len(packages) == 0 {
 		return nil, nil
 	}
-	lock, err := os.ReadFile(filepath.Join(npmCache, "_npx", NpxCacheKey(packages), "package-lock.json"))
+	dir := filepath.Join(npmCache, "_npx", NpxCacheKey(packages))
+	lock, err := os.ReadFile(filepath.Join(dir, "package-lock.json"))
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, err
 	}
-	pkgs, err := parseNpmLock(lock, file.Location{})
+	// Only what the earlier run installed can run again: the lock also
+	// records what its omit policy left out.
+	pkgs, err := parseNpmLockAt(lock, file.Location{}, dir)
 	if err != nil {
 		return nil, err
 	}

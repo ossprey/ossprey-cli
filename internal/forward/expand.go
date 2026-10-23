@@ -29,6 +29,8 @@ var (
 	npxCachedFn         = catalog.NpxCachedTree
 	uvCacheDirFn        = catalog.UVCacheDir
 	uvCachedFn          = catalog.UVCachedTree
+	uvToolDirFn         = catalog.UVToolDir
+	uvInstalledFn       = catalog.UVInstalledTree
 )
 
 // A named install used to check exactly the packages typed. `npm install
@@ -351,40 +353,89 @@ func withNpxCached(ctx context.Context, tree []catalog.Resolved, parsed installA
 	return tree
 }
 
-// withUVCached adds to a fresh resolution of a uv tool run whatever a cached
-// tool environment holding the named packages installed earlier: uv reuses
-// such an environment when it satisfies the request, with the dependencies
-// resolved back then, so the run may execute either tree. opts are uv's
-// options for the run, before and after the verb: a run that reads no cache
-// (--no-cache) or resolves afresh (--refresh, --reinstall) adds nothing, and
-// --cache-dir names the cache, relative to base, the directory the run
-// changes to. An unreadable cache adds nothing.
+// withUVCached adds to a fresh resolution of a uv tool run whatever uv may
+// run instead of it: a tool environment cached by an earlier run holding
+// the named packages, which uv reuses when it satisfies the request, and
+// the environment `uv tool install` keeps for a bare request
+// (parsed.InstalledTool), which uvx runs as installed. Either carries the
+// dependencies resolved back then. opts are uv's options for the run,
+// before and after the verb: a run that reads no cache (--no-cache) or
+// resolves afresh (--refresh, --reinstall) reuses no cached environment,
+// and --cache-dir names the cache, relative to base, the directory the
+// run changes to. An unreadable cache or tool directory adds nothing.
 func withUVCached(ctx context.Context, tree []catalog.Resolved, parsed installArgs, opts []string, base string) []catalog.Resolved {
+	readsCache := true
 	for _, a := range opts {
 		if a == "-n" || a == "--no-cache" || a == "--refresh" || a == "--reinstall" {
-			return tree
+			readsCache = false
 		}
 	}
-	want := map[string]string{}
-	for _, s := range parsed.Specs {
-		want[canonicalPyPI(s.Name)] = s.Version
+	if readsCache {
+		want := map[string]string{}
+		for _, s := range parsed.Specs {
+			want[canonicalPyPI(s.Name)] = s.Version
+		}
+		if cached, err := uvCachedFn(uvCacheDir(ctx, opts, base), want); err == nil {
+			tree = unionSightings(tree, cached)
+		}
 	}
-	cached, err := uvCachedFn(uvCacheDir(ctx, opts, base), want)
-	if err != nil || len(cached) == 0 {
+	// The cache flags govern the cache; an installed tool runs regardless.
+	if parsed.InstalledTool != "" {
+		if installed, err := uvInstalledFn(uvToolDir(ctx, opts, base), parsed.InstalledTool); err == nil {
+			tree = unionSightings(tree, installed)
+		}
+	}
+	return tree
+}
+
+// unionSightings adds to tree the releases in extra it does not name, and
+// merges those it does (mergeSighting). PyPI names match as PyPI matches
+// them, which is also fine for npm's, where the spelling is the name.
+func unionSightings(tree, extra []catalog.Resolved) []catalog.Resolved {
+	if len(extra) == 0 {
 		return tree
 	}
 	seen := map[string]int{}
 	for i, r := range tree {
 		seen[canonicalPyPI(r.Name)+"@"+r.Version] = i
 	}
-	for _, r := range cached {
+	for _, r := range extra {
 		if i, ok := seen[canonicalPyPI(r.Name)+"@"+r.Version]; ok {
 			tree[i] = mergeSighting(tree[i], r)
 			continue
 		}
+		seen[canonicalPyPI(r.Name)+"@"+r.Version] = len(tree)
 		tree = append(tree, r)
 	}
 	return tree
+}
+
+// uvToolDir is where uv keeps installed tools for this run: UV_TOOL_DIR,
+// else what uv says (`uv tool dir` with the run's configuration
+// selectors), else uv's platform default when it cannot be asked, a
+// relative answer resolved against base.
+func uvToolDir(ctx context.Context, opts []string, base string) string {
+	if v := os.Getenv("UV_TOOL_DIR"); v != "" {
+		return absIn(base, v)
+	}
+	selectors := absFlagValues(pickFlags(opts, uvValueFlags(), uvCacheSelectors, nil), pythonPathFlags, base)
+	if v, err := uvToolDirFn(ctx, selectors); err == nil && v != "" {
+		return absIn(base, v)
+	}
+	if runtime.GOOS == "windows" {
+		if v := os.Getenv("APPDATA"); v != "" {
+			return filepath.Join(v, "uv", "tools")
+		}
+		return ""
+	}
+	if v := os.Getenv("XDG_DATA_HOME"); v != "" {
+		return filepath.Join(v, "uv", "tools")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".local", "share", "uv", "tools")
 }
 
 // uvCacheDir is where uv keeps its cache for this run: --cache-dir among

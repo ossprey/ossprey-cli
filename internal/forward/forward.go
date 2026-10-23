@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -1091,6 +1092,10 @@ type installArgs struct {
 	// ToolRun marks a fetch-and-execute: the package goes into the tool's
 	// own cache, and everything after the command is the program's argv.
 	ToolRun bool
+	// InstalledTool is the package a uv tool run would take from `uv tool
+	// install`'s environment instead of resolving: the command (or --from)
+	// named bare, with no version, `@latest`, --with or --isolated.
+	InstalledTool string
 	// Registry is the registry an npm-side tool run names on its command line
 	// (`npx --registry …`), taken from npm's own parse of the argv so the
 	// program's arguments can never supply it.
@@ -1222,6 +1227,10 @@ func (p *installArgs) addTarget(ecosystem, token string) {
 	}
 }
 
+// bareName is a package named with nothing else: no version, extras,
+// marker or `@latest`.
+var bareName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
 // parseToolRun classifies fetch-and-execute arguments (`uvx [opts] <cmd>
 // [args...]`). Unlike an install, only the first positional is a package — the
 // command, which uv takes as the package name unless --from names one — and
@@ -1243,6 +1252,8 @@ func parseToolRun(m *Manager, args []string) installArgs {
 		// unpinned spec already resolves to.
 		out.addTarget(m.Ecosystem, strings.TrimSuffix(tok, "@latest"))
 	}
+	// An installed tool is run as installed only for a bare request.
+	tool, extras, isolated := "", false, false
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if a == "" {
@@ -1251,6 +1262,7 @@ func parseToolRun(m *Manager, args []string) installArgs {
 		if a == "--" {
 			if i+1 < len(args) && !sourceNamed {
 				addPkg(args[i+1])
+				tool = args[i+1]
 			}
 			break
 		}
@@ -1265,12 +1277,19 @@ func parseToolRun(m *Manager, args []string) installArgs {
 			case "--from":
 				sourceNamed = true
 				addPkg(value)
+				tool = value
 			case "-w", "--with":
+				extras = true
 				for _, p := range splitRequirements(value) {
 					addPkg(p)
 				}
 			case "--with-requirements":
+				extras = true
 				out.ReqFiles = append(out.ReqFiles, value)
+			case "--with-editable":
+				extras = true
+			case "--isolated":
+				isolated = true
 			}
 			continue
 		}
@@ -1278,8 +1297,12 @@ func parseToolRun(m *Manager, args []string) installArgs {
 		// rest of args belongs to the program.
 		if !sourceNamed {
 			addPkg(a)
+			tool = a
 		}
 		break
+	}
+	if bareName.MatchString(tool) && !extras && !isolated {
+		out.InstalledTool = tool
 	}
 	return out
 }

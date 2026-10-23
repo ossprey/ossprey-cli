@@ -72,7 +72,9 @@ npm may rerun what an earlier `npx` of the same package left in its cache
 rather than resolve afresh, so that cached tree is checked too, read from
 the cache npm's own configuration names. uv likewise reuses a tool
 environment it cached for an earlier `uvx` of the same package, so the
-packages installed in any cached environment holding it are checked too.
+packages installed in any cached environment holding it are checked too,
+and a bare `uvx <tool>` runs the environment `uv tool install` keeps for
+that tool, so that is checked as well.
 
 A bare command that the project already has in `node_modules/.bin` — `npx
 eslint .` in a project that depends on eslint — is run from there rather than

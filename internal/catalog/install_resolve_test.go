@@ -388,17 +388,31 @@ func TestNpxCachedTree(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, "package-lock.json"), []byte(`{"lockfileVersion":3,"packages":{
 		"": {"name":"x"},
 		"node_modules/cowsay": {"version":"1.6.0","resolved":"https://registry.npmjs.org/cowsay/-/cowsay-1.6.0.tgz"},
-		"node_modules/old": {"name":"get-stdin","version":"8.0.0","resolved":"https://registry.npmjs.org/get-stdin/-/get-stdin-8.0.0.tgz"}}}`), 0o644)
-	got, err := NpxCachedTree(cache, []string{"cowsay@1.6.0"})
-	if err != nil {
-		t.Fatal(err)
+		"node_modules/old": {"name":"get-stdin","version":"8.0.0","resolved":"https://registry.npmjs.org/get-stdin/-/get-stdin-8.0.0.tgz"},
+		"node_modules/skipped": {"version":"1.0.0","resolved":"https://registry.npmjs.org/skipped/-/skipped-1.0.0.tgz","optional":true}}}`), 0o644)
+	read := func() map[string]string {
+		t.Helper()
+		got, err := NpxCachedTree(cache, []string{"cowsay@1.6.0"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		names := map[string]string{}
+		for _, r := range got {
+			names[r.Name] = r.Version
+		}
+		return names
 	}
-	names := map[string]string{}
-	for _, r := range got {
-		names[r.Name] = r.Version
+	// Without a node_modules to check against, the lock is read as written.
+	if got := read(); !reflect.DeepEqual(got, map[string]string{"cowsay": "1.6.0", "get-stdin": "8.0.0", "skipped": "1.0.0"}) {
+		t.Errorf("cached tree = %v", got)
 	}
-	if !reflect.DeepEqual(names, map[string]string{"cowsay": "1.6.0", "get-stdin": "8.0.0"}) {
-		t.Errorf("cached tree = %v", names)
+	// With one, only what the earlier run put on disk can run: a release the
+	// lock records but its omit policy left out is not read.
+	for _, d := range []string{"cowsay", "old"} {
+		os.MkdirAll(filepath.Join(dir, "node_modules", d), 0o755)
+	}
+	if got := read(); !reflect.DeepEqual(got, map[string]string{"cowsay": "1.6.0", "get-stdin": "8.0.0"}) {
+		t.Errorf("installed cached tree = %v", got)
 	}
 	if got, _ := NpxCachedTree(cache, []string{"cowsay@1.5.0"}); got != nil {
 		t.Errorf("another request found the tree: %v", got)
@@ -544,6 +558,75 @@ func TestUVCachedTree(t *testing.T) {
 	}
 	if got, err := UVCachedTree(filepath.Join(cache, "missing"), map[string]string{"cowsay": ""}); err != nil || got != nil {
 		t.Errorf("no cache: %v, %v", got, err)
+	}
+}
+
+// `uv tool install` keeps a venv per tool under the tool directory, found
+// by the tool's canonical name; a tool not installed there is nil.
+func TestUVInstalledTree(t *testing.T) {
+	tools := t.TempDir()
+	env := filepath.Join(tools, "cow-say")
+	site := filepath.Join(env, "lib", "python3.13", "site-packages")
+	os.MkdirAll(site, 0o755)
+	os.WriteFile(filepath.Join(env, "pyvenv.cfg"), []byte("uv = 0.11\n"), 0o644)
+	os.WriteFile(filepath.Join(env, "uv-receipt.toml"), []byte("[tool]\n"), 0o644)
+	for name, version := range map[string]string{"Cow-Say": "6.0", "six": "1.15.0"} {
+		d := filepath.Join(site, strings.ReplaceAll(name, "-", "_")+"-"+version+".dist-info")
+		os.MkdirAll(d, 0o755)
+		os.WriteFile(filepath.Join(d, "METADATA"), []byte("Name: "+name+"\nVersion: "+version+"\n\n"), 0o644)
+	}
+	got, err := UVInstalledTree(tools, "Cow_Say")
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]string{}
+	for _, r := range got {
+		names[canonicalPackageName(r.Name)] = r.Version
+	}
+	if want := map[string]string{"cow-say": "6.0", "six": "1.15.0"}; !reflect.DeepEqual(names, want) {
+		t.Errorf("installed tree = %v, want %v", names, want)
+	}
+	if got, err := UVInstalledTree(tools, "ruff"); err != nil || got != nil {
+		t.Errorf("tool not installed: %v, %v", got, err)
+	}
+	if got, err := UVInstalledTree(filepath.Join(tools, "missing"), "cowsay"); err != nil || got != nil {
+		t.Errorf("no tool dir: %v, %v", got, err)
+	}
+}
+
+// Against a real uv: an installed tool's environment is found under the
+// tool directory uv reports, by the tool's name.
+func TestUVInstalledTreeMatchesARealInstall(t *testing.T) {
+	if testing.Short() {
+		t.Skip("network")
+	}
+	uv, err := lookTool("uv")
+	if err != nil {
+		t.Skip("no uv")
+	}
+	tools := t.TempDir()
+	t.Setenv("UV_TOOL_DIR", tools)
+	t.Setenv("UV_TOOL_BIN_DIR", t.TempDir()) // the install links an executable; not into the host's bin
+	if got, err := UVToolDir(context.Background(), nil); err != nil || filepath.Clean(got) != tools {
+		t.Errorf("uv tool dir: %q, %v", got, err)
+	}
+	cmd := exec.Command(uv, "tool", "install", "--cache-dir", t.TempDir(), "cowsay==6.0")
+	cmd.Env = toolEnv()
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Skipf("uv tool install: %v: %s", err, out)
+	}
+	got, err := UVInstalledTree(tools, "cowsay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, r := range got {
+		if canonicalPackageName(r.Name) == "cowsay" && r.Version == "6.0" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the installed tool's environment was not found: %v", got)
 	}
 }
 
