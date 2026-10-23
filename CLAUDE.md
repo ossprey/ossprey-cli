@@ -311,9 +311,11 @@ range or wildcard is left to syft's guess, and shapes syft drops outright (a bar
 `>2.0`, an epoch `==1!2.0.0`) stay missing for the resolver-backed catalogers to
 cover.
 
-Output is deduped by `(type, name, version)`. `mergeVersionless` then collapses
+Output is deduped by `(type, name, version)` plus a Cargo source mark. `mergeVersionless` then collapses
 a package emitted both versionless (direct-deps fallback) and pinned (uv-resolved)
 into the pinned one. Vendored paths (`node_modules/`) are skipped (`isVendoredPath`). Lockfile entries for the project's own code are dropped: yarn by resolution protocol (`workspace:`/`portal:`/`link:`/`file:`), npm when `resolved` is a scheme-less relative path (a workspace link). Otherwise the project's own name went to the API and was looked up on public npm.
+
+A `Cargo.lock` crate from git or a non-crates.io registry is **sent, marked**, never as a bare crates.io purl, which would check crates.io's crate of that name (`cargoSourceQualifiers`, OSS-2484): `vcs_url=git+<url>@<commit>` or `repository_url=<origin>/`. Three rules. crates.io is recognised the way Cargo reads the lock, not by string (`isCratesIo`): Cargo parses the source as a WHATWG URL and compares its `CanonicalUrl`, so `GITHUB.COM`, `:443`, `./`, a percent-escaped host, `http://`, backslashes, a trailing `/` or `.git` all still mean crates.io (each checked with a real `cargo metadata --locked`). Marking one of those takes a crates.io crate out of crates.io checking, so the match folds what Cargo does, while a lookalike host, a non-ASCII host or another GitHub repo stays foreign: IDNA maps a homograph of github.com to some other domain, so treating it as crates.io would check crates.io's crate in place of the code Cargo actually fetches. Userinfo, query and fragment are never copied, and a registry keeps only its origin because some registries put an access token in the path. A marked crate is never version-resolved, and dedup keeps it apart from a crates.io crate of the same name and version. A versionless `Cargo.toml` sighting folds into a marked lock entry only when the manifest is in that lock's workspace, meaning that lock is the nearest one at or above it (`mergeVersionless`). That keeps the `[patch.crates-io]` case: the git crate's sighting folds in instead of sending the name to crates.io for a latest lookup. From any other project it stays an ordinary crates.io dependency, because a scan-wide fold hid a lockless library's crates.io crate behind another project's git crate of that name.
 
 **Package sinks are excluded from the syft index itself** (`packageSinks`,
 `newDirectorySource`). Filtering `node_modules` packages after cataloguing was
@@ -448,7 +450,8 @@ packages, and now report the rest.
 
 `SBOM` is the rich internal model. `MiniBOM` (`minibom.go`) is the compressed
 wire format sent to the API — each component becomes `{purl, source, env, location}`
-with `purl = pkg:<type>/<name>@<version>`. The Go model mirrors the Python
+with `purl = pkg:<type>/<name>@<version>`, plus a `vcs_url`/`repository_url`
+qualifier for a git or private-registry crate (OSS-2484). The Go model mirrors the Python
 `ossbom` library referenced in comments; keep them in sync when the API contract
 changes.
 

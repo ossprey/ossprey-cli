@@ -30,6 +30,12 @@ installed tree, with no lockfile or manifest, catalogues nothing from it.
 Lockfile entries for your own code are not components: the root project,
 npm workspace links, and yarn `workspace:`, `portal:`, `link:` and `file:`
 dependencies are left out, since none of them is published to a registry.
+A `Cargo.lock` crate that Cargo fetches from git or from a registry other than
+crates.io is sent marked with its source, as a `vcs_url` or `repository_url`
+purl qualifier with credentials removed (a registry by its host only), so the
+platform can tell it apart from the crates.io crate of that name. A crate whose
+source cannot be sent that way (not a git or registry URL, or too long) is
+skipped with a warning.
 
 When a dependency's version can't be determined — an unpinned range in a
 manifest (`click = "^8"`, or a bare `requests` in a requirements file) with no

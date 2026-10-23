@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -44,6 +45,8 @@ type Package struct {
 	// internal/trust). It is not version-resolved against the public registry
 	// and callers leave it out of the SBOM.
 	Trusted bool
+	// Qualifiers are purl qualifiers marking a git or private-registry crate.
+	Qualifiers map[string]string
 }
 
 // Options tunes a Catalog run.
@@ -265,7 +268,12 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 				warn.Add(ctx, cargoDropEntry(cargoDropReason(p.Name), p.Name))
 				continue
 			}
-			key := dedupKey(t, p.Name, version)
+			qualifiers, why := cargoSourceQualifiers(p)
+			if why != "" {
+				warn.Add(ctx, cargoDropEntry(why, p.Name))
+				continue
+			}
+			key := dedupKey(t, p.Name, version) + qualifierKey(qualifiers)
 			if i, ok := seen[key]; ok {
 				// Every sighting's source counts toward trust, not just the
 				// first: one lockfile fetching it from the public index is
@@ -281,6 +289,7 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 				Source:     []string{c.Name()},
 				Locations:  locations(p),
 				Registries: mergeUnique(nil, []string{registryOf(p)}),
+				Qualifiers: qualifiers,
 			})
 		}
 	}
@@ -326,6 +335,10 @@ func resolveVersionless(ctx context.Context, pkgs []Package, opts Options) {
 		// A trusted package is by definition one the public registry may not
 		// have, and it is not going to be checked anyway.
 		if pkgs[i].Version != "" || pkgs[i].Local || pkgs[i].Trusted {
+			continue
+		}
+		// A git or private-registry crate's latest on crates.io is another crate's.
+		if len(pkgs[i].Qualifiers) > 0 {
 			continue
 		}
 		// Skip anything registry.ResolveLatest cannot answer for.
@@ -439,11 +452,38 @@ func mergeVersionless(pkgs []Package) []Package {
 		return p.Type + "@" + normalizeName(p.Name)
 	}
 
+	// A source-marked crate takes sightings only from manifests in the workspace that locks it.
+	workspace := cargoWorkspaces(pkgs)
+	owns := func(m Package, loc string) bool {
+		ws := workspace(loc)
+		return ws != "" && slices.ContainsFunc(m.Locations, func(l string) bool { return workspace(l) == ws })
+	}
+
 	hasVersioned := map[string]bool{}
+	marked := map[string][]Package{}
 	for _, p := range pkgs {
-		if p.Version != "" {
+		switch {
+		case p.Version == "":
+		case len(p.Qualifiers) > 0:
+			marked[gkey(p)] = append(marked[gkey(p)], p)
+		default:
 			hasVersioned[gkey(p)] = true
 		}
+	}
+	folds := func(p Package) bool {
+		// A source-marked sighting is never folded into another crate's release.
+		if p.Version != "" || len(p.Qualifiers) > 0 {
+			return false
+		}
+		if hasVersioned[gkey(p)] {
+			return true
+		}
+		for _, l := range p.Locations {
+			if !slices.ContainsFunc(marked[gkey(p)], func(m Package) bool { return owns(m, l) }) {
+				return false
+			}
+		}
+		return len(p.Locations) > 0
 	}
 
 	// Keep versioned entries and versionless ones with no versioned sibling;
@@ -451,7 +491,7 @@ func mergeVersionless(pkgs []Package) []Package {
 	var out []Package
 	groupIdx := map[string][]int{}
 	for _, p := range pkgs {
-		if p.Version == "" && hasVersioned[gkey(p)] {
+		if folds(p) {
 			continue // folded below
 		}
 		if p.Version != "" {
@@ -461,8 +501,11 @@ func mergeVersionless(pkgs []Package) []Package {
 	}
 
 	for _, p := range pkgs {
-		if p.Version == "" && hasVersioned[gkey(p)] {
+		if folds(p) {
 			for _, i := range groupIdx[gkey(p)] {
+				if len(out[i].Qualifiers) > 0 && !slices.ContainsFunc(p.Locations, func(l string) bool { return owns(out[i], l) }) {
+					continue
+				}
 				out[i].Source = mergeUnique(out[i].Source, p.Source)
 				out[i].Locations = mergeUnique(out[i].Locations, p.Locations)
 				out[i].Registries = mergeUnique(out[i].Registries, p.Registries)
