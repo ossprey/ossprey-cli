@@ -738,6 +738,9 @@ func TestResolverFlags(t *testing.T) {
 		{"npm keeps the cache policy and the cache, made absolute",
 			npmResolveFlags(npm, []string{"--offline", "--prefer-offline", "--cache", "c", "--cache=~/d", "express"}),
 			[]string{"--offline", "--prefer-offline", "--cache", absPath("c"), "--cache=" + absPath(expandHome("~/d"))}},
+		{"npm reads its options before the verb too",
+			npmResolveFlags(npm, []string{"--userconfig", "./corp.npmrc", "--offline", "install", "--omit=dev", "tool@1.0.0"}),
+			[]string{"--userconfig", absPath("corp.npmrc"), "--offline", "--omit=dev"}},
 	}
 	for _, tt := range tests {
 		if !reflect.DeepEqual(tt.got, tt.want) {
@@ -973,6 +976,18 @@ func TestExpandInstall_UVGlobalOptionsAndInterpreterPaths(t *testing.T) {
 			"", []string{"-p", "3.12"}, true},
 		{"attached option after the command is the program's", uvx, []string{"ruff", "-ihttps://evil.example"},
 			"", nil, false},
+		// The cache a run reads, and whether it reads or refreshes it, decide
+		// what uv resolves against offline or from stale metadata, so they
+		// reach the resolver, the path against the run's directory, and only
+		// uv can honour them.
+		{"cache options before tool run", uv, []string{"--cache-dir", "c", "--refresh", "tool", "run", "ruff@0.6.0"},
+			"", []string{"--cache-dir", absPath("c"), "--refresh"}, true},
+		{"tool run cache options", uvx, []string{"--offline", "--cache-dir", "c", "-n", "ruff@0.6.0"},
+			"", []string{"--offline", "--cache-dir", absPath("c"), "-n"}, true},
+		{"tool run cache dir under --directory", uvx, []string{"--directory", "sub", "--cache-dir", "c", "ruff@0.6.0"},
+			"", []string{"--cache-dir", absPath("sub/c")}, true},
+		{"named install cache options", uv, []string{"pip", "install", "--no-cache", "--refresh-package", "ruff", "ruff"},
+			".", []string{"--no-cache", "--refresh-package", "ruff"}, true},
 		{"attached index on a named install", uv, []string{"pip", "install", "-ihttps://i.example", "ruff"},
 			".", []string{"-i", "https://i.example"}, false},
 		{"attached global cache dir is not a resolver flag", uv, []string{"--no-config", "pip", "install", "-qq", "ruff"},
@@ -1311,7 +1326,9 @@ func TestExpandInstall_ToolRunCoversTheUVCache(t *testing.T) {
 }
 
 func TestExpandInstall_ToolRunCoversTheNpxCache(t *testing.T) {
-	old, oldCached, oldGet := resolveNpmFn, npxCachedFn, npmConfigGetFn
+	old, oldCached, oldGet, oldInc := resolveNpmFn, npxCachedFn, npmConfigGetFn, npmConfigIncludesFn
+	// npm's configuration includes nothing here, whatever the host's does.
+	npmConfigIncludesFn = func(context.Context, string, []string) ([]string, error) { return nil, nil }
 	// Today's resolution fetches get-stdin from the internal registry, as a
 	// dev dependency; the cache holds the same release fetched publicly,
 	// and an older one.
@@ -1325,7 +1342,9 @@ func TestExpandInstall_ToolRunCoversTheNpxCache(t *testing.T) {
 			{Name: "get-stdin", Version: "7.0.0", Registry: "https://registry.npmjs.org/get-stdin/-/get-stdin-7.0.0.tgz"}}, nil
 	}
 	npmConfigGetFn = func(context.Context, string, string, []string) (string, error) { return "", errors.New("no npm") }
-	t.Cleanup(func() { resolveNpmFn, npxCachedFn, npmConfigGetFn = old, oldCached, oldGet })
+	t.Cleanup(func() {
+		resolveNpmFn, npxCachedFn, npmConfigGetFn, npmConfigIncludesFn = old, oldCached, oldGet, oldInc
+	})
 
 	names := func(tree []catalog.Resolved) []string {
 		var out []string

@@ -224,7 +224,9 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 			}
 			return tree, nil
 		}
-		flags := npmResolveFlags(m, rest)
+		// npm reads its options on either side of the verb (`npm --offline
+		// install x`), so the whole line is read, not rest.
+		flags := npmResolveFlags(m, args)
 		tree, err := resolveNpmFn(ctx, npmProjectDir(m, args), npmConfigDir(m, args), tokens, flags)
 		if err != nil || m.Bin != "npm" {
 			return tree, err
@@ -287,7 +289,8 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 // what a resolve finds: which configuration it reads, and whether it may go
 // to the network. --directory and --project change where it runs instead;
 // see uvDir.
-var uvGlobalPass = flagSet("--config-file", "--no-config", "--offline", "--allow-insecure-host", "--project")
+var uvGlobalPass = flagSet("--config-file", "--no-config", "--offline", "--allow-insecure-host", "--project",
+	"--cache-dir", "-n", "--no-cache", "--refresh", "--refresh-package")
 
 // toolRunNoPass are uvGlobalPass flags a tool run must not pass on: uvx
 // reads no project configuration, so handing --project to `uv pip compile`
@@ -655,7 +658,10 @@ func toolRunPipFlags(rest []string, base string) []string {
 // them is resolved by uv alone, or not at all.
 var uvOnlyResolution = flagSet("--index", "--extra-index-url", "--overrides", "--resolution",
 	"--prerelease", "--exclude-newer", "--exclude-newer-package", "--index-strategy",
-	"-p", "--python", "--python-platform", "--config-file", "--offline")
+	"-p", "--python", "--python-platform", "--config-file", "--offline",
+	// The cache uv reads offline or prefers, and whether it reads or
+	// refreshes it, decide what it resolves against; pip has no such cache.
+	"--cache-dir", "-n", "--no-cache", "--refresh", "--refresh-package")
 
 // needsUV reports whether a uv command carries a flag only uv can honour
 // (uvOnlyResolution).
@@ -682,7 +688,7 @@ var pipFallbackRenames = map[string]string{"--default-index": "--index-url", "--
 // absFlagValues leaves alone; -p/--python is a path only when it looks like
 // one (`.venv/bin/python`), else a version or a name (`3.12`, `pypy`).
 var pythonPathFlags = flagSet("-c", "--constraint", "--constraints", "--overrides",
-	"-f", "--find-links", "--config-file", "-p", "--python", "--project")
+	"-f", "--find-links", "--config-file", "-p", "--python", "--project", "--cache-dir")
 
 var pathLikeOnlyFlags = flagSet("-p", "--python")
 
@@ -909,7 +915,8 @@ var pythonCommonFlags = flagSet("--pre", "--no-index", "-i", "--index-url", "--e
 var uvOnlyFlags = flagSet("--index", "--default-index", "--prerelease", "--resolution",
 	"--exclude-newer", "--exclude-newer-package", "-p", "--python", "--python-platform",
 	"--allow-insecure-host", "--index-strategy", "--only-binary", "--no-binary",
-	"--constraints", "--overrides", "--no-config", "--config-file", "--offline", "--project")
+	"--constraints", "--overrides", "--no-config", "--config-file", "--offline", "--project",
+	"--cache-dir", "-n", "--no-cache", "--refresh", "--refresh-package")
 
 // pipOnlyFlags are pip's own, passed when pip resolves a pip command.
 var pipOnlyFlags = flagSet("--trusted-host", "--platform", "--implementation", "--abi",
