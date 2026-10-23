@@ -13,9 +13,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/anchore/syft/syft/pkg"
-
+	"github.com/BurntSushi/toml"
 	"github.com/anchore/syft/syft/file"
+	"github.com/anchore/syft/syft/pkg"
 )
 
 // The staged copy of a project resolves from registries alone: dependencies
@@ -643,6 +643,40 @@ func TestUVToolRunConfig(t *testing.T) {
 	data, _ = os.ReadFile(stripped)
 	if s := string(data); !strings.Contains(s, "managed") || !strings.Contains(s, "usr.example") {
 		t.Errorf("merged copy without [pip]:\n%s", s)
+	}
+	// A relative local path among a file's index or find-links settings is
+	// resolved by uv against that file's directory, so the copy in scratch
+	// carries it absolutely; a URL is left alone, and each file's paths are
+	// anchored to its own directory before the merge.
+	os.WriteFile(filepath.Join(sys, "uv", "uv.toml"), []byte("extra-index-url = [\"./sysextra\"]\n"), 0o644)
+	os.WriteFile(filepath.Join(usr, "uv", "uv.toml"), []byte("index-url = \"./primary\"\nfind-links = [\"./wheels\", \"https://w.example/\"]\nextra-index-url = [\"../extra\"]\n\n[[index]]\nname = \"local\"\nurl = \"idx\"\n\n[[index]]\nname = \"remote\"\nurl = \"https://idx.example/simple\"\n"), 0o644)
+	if _, err := uvToolRunConfig([]string{"--offline"}, scratch); err != nil {
+		t.Fatal(err)
+	}
+	var anchored struct {
+		IndexURL      string   `toml:"index-url"`
+		FindLinks     []string `toml:"find-links"`
+		ExtraIndexURL []string `toml:"extra-index-url"`
+		Index         []struct {
+			Name string `toml:"name"`
+			URL  string `toml:"url"`
+		} `toml:"index"`
+	}
+	if _, err := toml.DecodeFile(stripped, &anchored); err != nil {
+		t.Fatal(err)
+	}
+	usrDir, sysDir := filepath.Join(usr, "uv"), filepath.Join(sys, "uv")
+	if want := filepath.Join(usrDir, "primary"); anchored.IndexURL != want {
+		t.Errorf("index-url = %q, want %q", anchored.IndexURL, want)
+	}
+	if want := []string{filepath.Join(usrDir, "wheels"), "https://w.example/"}; !reflect.DeepEqual(anchored.FindLinks, want) {
+		t.Errorf("find-links = %v, want %v", anchored.FindLinks, want)
+	}
+	if want := []string{filepath.Join(usr, "extra"), filepath.Join(sysDir, "sysextra")}; !reflect.DeepEqual(anchored.ExtraIndexURL, want) {
+		t.Errorf("extra-index-url = %v, want %v", anchored.ExtraIndexURL, want)
+	}
+	if len(anchored.Index) != 2 || anchored.Index[0].URL != filepath.Join(usrDir, "idx") || anchored.Index[1].URL != "https://idx.example/simple" {
+		t.Errorf("index = %+v", anchored.Index)
 	}
 	os.Remove(filepath.Join(sys, "uv", "uv.toml"))
 	os.Remove(filepath.Join(usr, "uv", "uv.toml"))

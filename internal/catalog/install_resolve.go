@@ -910,6 +910,7 @@ func uvToolRunConfig(flags []string, scratch string) ([]string, error) {
 		if _, err := toml.Decode(string(data), &cfg); err != nil {
 			return flags, nil
 		}
+		anchorUVConfigPaths(cfg, filepath.Dir(source))
 		mergeTOML(merged, cfg)
 		found = true
 	}
@@ -939,6 +940,54 @@ func uvToolRunConfig(flags []string, scratch string) ([]string, error) {
 		}
 	}
 	return append(out, "--config-file", stripped), nil
+}
+
+// anchorUVConfigPaths makes absolute every relative local path among the
+// index and find-links settings of one configuration file, against the
+// directory of that file: uv resolves them there (verified: `find-links =
+// ["./wheels"]` in a user-level uv.toml reads <config dir>/wheels from any
+// directory and under --directory, and a named file's against its own), so
+// the copy written to scratch would otherwise point the dry run at
+// directories under scratch and resolve from the registry what the run
+// takes from the local wheels. A URL is left as it is. cache-dir is not
+// among them: uv resolves that one against the directory it runs in, and
+// the tool run hands the resolver --cache-dir absolutely already.
+func anchorUVConfigPaths(cfg map[string]any, dir string) {
+	anchor := func(v any) any {
+		s, ok := v.(string)
+		if !ok || s == "" || strings.Contains(s, "://") || filepath.IsAbs(s) {
+			return v
+		}
+		return filepath.Join(dir, s)
+	}
+	for _, k := range []string{"index-url", "default-index"} {
+		if v, ok := cfg[k]; ok {
+			cfg[k] = anchor(v)
+		}
+	}
+	for _, k := range []string{"extra-index-url", "find-links"} {
+		if list, ok := cfg[k].([]any); ok {
+			for i := range list {
+				list[i] = anchor(list[i])
+			}
+		}
+	}
+	switch idx := cfg["index"].(type) {
+	case []map[string]any:
+		for _, t := range idx {
+			if v, ok := t["url"]; ok {
+				t["url"] = anchor(v)
+			}
+		}
+	case []any:
+		for _, e := range idx {
+			if t, ok := e.(map[string]any); ok {
+				if v, ok := t["url"]; ok {
+					t["url"] = anchor(v)
+				}
+			}
+		}
+	}
 }
 
 // mergeTOML lays over onto base as uv combines configuration: table by
