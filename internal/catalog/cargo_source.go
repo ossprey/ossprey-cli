@@ -3,17 +3,60 @@ package catalog
 import (
 	"maps"
 	"net/url"
+	"path"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/anchore/syft/syft/pkg"
 )
 
-// cratesIoSources are the spellings Cargo's SourceId::is_crates_io accepts; a default dependency locks as the first.
-var cratesIoSources = map[string]bool{
-	"registry+https://github.com/rust-lang/crates.io-index": true,
-	"sparse+https://index.crates.io/":                       true,
+// cratesIoIndex is crates.io's index host and path for each Cargo.lock source kind.
+var cratesIoIndex = map[string][2]string{
+	"registry": {"github.com", "/rust-lang/crates.io-index"},
+	"sparse":   {"index.crates.io", "/"},
+}
+
+// crateURLCleaner applies the WHATWG URL parser's tab and newline removal and its reading of '\' as '/'.
+var crateURLCleaner = strings.NewReplacer("\t", "", "\n", "", "\r", "", `\`, "/")
+
+// isCratesIo folds at least what Cargo's url crate and CanonicalUrl fold before comparing a source with crates.io.
+func isCratesIo(source string) bool {
+	kind, raw, _ := strings.Cut(source, "+")
+	want, ok := cratesIoIndex[kind]
+	if !ok {
+		return false
+	}
+	_, rest, ok := strings.Cut(crateURLCleaner.Replace(raw), ":")
+	if !ok {
+		return false
+	}
+	rest = strings.TrimLeft(rest, "/")
+	authority, p := rest, ""
+	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
+		authority, p = rest[:i], rest[i:]
+	}
+	if i := strings.IndexAny(p, "?#"); i >= 0 {
+		p = p[:i]
+	}
+	// Userinfo, port, query and fragment cannot move the index off crates.io's host.
+	host, _, _ := strings.Cut(authority[strings.LastIndex(authority, "@")+1:], ":")
+	host, err := url.PathUnescape(host)
+	if err != nil {
+		return false
+	}
+	if p, err = url.PathUnescape(p); err != nil {
+		return false
+	}
+	p = strings.TrimSuffix(path.Clean("/"+strings.ToLower(p)), ".git")
+	// Cargo maps a non-ASCII registry+ host through IDNA, so it may be github.com; a sparse+ host is opaque to it.
+	return p == want[1] && (strings.ToLower(host) == want[0] || kind == "registry" && !isASCII(host))
+}
+
+func isASCII(s string) bool {
+	return strings.IndexFunc(s, func(r rune) bool { return r >= utf8.RuneSelf }) < 0
 }
 
 // gitCommit is the locked commit Cargo writes after '#' in a git source.
@@ -31,7 +74,7 @@ func cargoSourceQualifiers(p pkg.Package) (qualifiers map[string]string, why str
 		return nil, ""
 	}
 	source := strings.TrimSpace(m.Source)
-	if source == "" || cratesIoSources[source] {
+	if source == "" || isCratesIo(source) {
 		return nil, ""
 	}
 	kind, raw, _ := strings.Cut(source, "+")
@@ -68,4 +111,26 @@ func qualifierKey(qualifiers map[string]string) string {
 		b.WriteString("?" + k + "=" + qualifiers[k])
 	}
 	return b.String()
+}
+
+// cargoWorkspaces maps a location to the directory of the nearest Cargo.lock at or above it, "" when none.
+func cargoWorkspaces(pkgs []Package) func(loc string) string {
+	locks := map[string]bool{}
+	for _, p := range pkgs {
+		for _, l := range p.Locations {
+			if l = filepath.ToSlash(l); path.Base(l) == "Cargo.lock" {
+				locks[path.Dir(l)] = true
+			}
+		}
+	}
+	return func(loc string) string {
+		for d := path.Dir(filepath.ToSlash(loc)); ; d = path.Dir(d) {
+			if locks[d] {
+				return d
+			}
+			if d == path.Dir(d) {
+				return ""
+			}
+		}
+	}
 }

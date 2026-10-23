@@ -56,15 +56,20 @@ func (s *SBOM) ToMiniBOM() MiniBOM {
 
 // Purl is pkg:<type>/<name>@<version>, plus any qualifiers in key order.
 func (c Component) Purl() string {
-	purl := "pkg:" + c.Type + "/" + c.Name + "@" + c.Version
+	return "pkg:" + c.Type + "/" + c.Name + "@" + c.Version + c.qualifierString()
+}
+
+// qualifierString is the purl's "?k=v&..." part, empty when there are none.
+func (c Component) qualifierString() string {
+	var b strings.Builder
 	sep := "?"
 	for _, k := range slices.Sorted(maps.Keys(c.Qualifiers)) {
 		if v := c.Qualifiers[k]; v != "" {
-			purl += sep + k + "=" + escapeQualifier(v)
+			b.WriteString(sep + k + "=" + escapeQualifier(v))
 			sep = "&"
 		}
 	}
-	return purl
+	return b.String()
 }
 
 // escapeQualifier percent-encodes all but alphanumerics, ".-_~" and ":", as ECMA-427 5.4 requires.

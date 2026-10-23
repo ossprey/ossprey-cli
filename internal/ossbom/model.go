@@ -147,7 +147,7 @@ func mergeUnique(a, b []string) []string {
 	return out
 }
 
-// Sort components by (name, version), then purl, for v1's deterministic output.
+// Sort components by (name, version) — matches v1 deterministic output.
 func (s *SBOM) Sort() {
 	sort.Slice(s.Components, func(i, j int) bool {
 		if s.Components[i].Name != s.Components[j].Name {
@@ -156,7 +156,7 @@ func (s *SBOM) Sort() {
 		if s.Components[i].Version != s.Components[j].Version {
 			return s.Components[i].Version < s.Components[j].Version
 		}
-		return s.Components[i].Purl() < s.Components[j].Purl()
+		return s.Components[i].qualifierString() < s.Components[j].qualifierString()
 	})
 }
 

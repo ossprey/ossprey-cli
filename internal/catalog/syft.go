@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -451,22 +452,38 @@ func mergeVersionless(pkgs []Package) []Package {
 		return p.Type + "@" + normalizeName(p.Name)
 	}
 
-	// A foreign crate folds only into its own source, never into a crates.io release.
-	fkey := func(p Package) string { return gkey(p) + qualifierKey(p.Qualifiers) }
-	versionedKeys := func(p Package) []string {
-		if len(p.Qualifiers) == 0 {
-			return []string{gkey(p)}
-		}
-		return []string{gkey(p), fkey(p)}
+	// A source-marked crate takes sightings only from manifests in the workspace that locks it.
+	workspace := cargoWorkspaces(pkgs)
+	owns := func(m Package, loc string) bool {
+		ws := workspace(loc)
+		return ws != "" && slices.ContainsFunc(m.Locations, func(l string) bool { return workspace(l) == ws })
 	}
 
 	hasVersioned := map[string]bool{}
+	marked := map[string][]Package{}
 	for _, p := range pkgs {
-		if p.Version != "" {
-			for _, k := range versionedKeys(p) {
-				hasVersioned[k] = true
+		switch {
+		case p.Version == "":
+		case len(p.Qualifiers) > 0:
+			marked[gkey(p)] = append(marked[gkey(p)], p)
+		default:
+			hasVersioned[gkey(p)] = true
+		}
+	}
+	folds := func(p Package) bool {
+		// A source-marked sighting is never folded into another crate's release.
+		if p.Version != "" || len(p.Qualifiers) > 0 {
+			return false
+		}
+		if hasVersioned[gkey(p)] {
+			return true
+		}
+		for _, l := range p.Locations {
+			if !slices.ContainsFunc(marked[gkey(p)], func(m Package) bool { return owns(m, l) }) {
+				return false
 			}
 		}
+		return len(p.Locations) > 0
 	}
 
 	// Keep versioned entries and versionless ones with no versioned sibling;
@@ -474,20 +491,21 @@ func mergeVersionless(pkgs []Package) []Package {
 	var out []Package
 	groupIdx := map[string][]int{}
 	for _, p := range pkgs {
-		if p.Version == "" && hasVersioned[fkey(p)] {
+		if folds(p) {
 			continue // folded below
 		}
 		if p.Version != "" {
-			for _, k := range versionedKeys(p) {
-				groupIdx[k] = append(groupIdx[k], len(out))
-			}
+			groupIdx[gkey(p)] = append(groupIdx[gkey(p)], len(out))
 		}
 		out = append(out, p)
 	}
 
 	for _, p := range pkgs {
-		if p.Version == "" && hasVersioned[fkey(p)] {
-			for _, i := range groupIdx[fkey(p)] {
+		if folds(p) {
+			for _, i := range groupIdx[gkey(p)] {
+				if len(out[i].Qualifiers) > 0 && !slices.ContainsFunc(p.Locations, func(l string) bool { return owns(out[i], l) }) {
+					continue
+				}
 				out[i].Source = mergeUnique(out[i].Source, p.Source)
 				out[i].Locations = mergeUnique(out[i].Locations, p.Locations)
 				out[i].Registries = mergeUnique(out[i].Registries, p.Registries)

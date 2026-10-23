@@ -90,14 +90,14 @@ const (
 
 // A git or private-registry crate is not the crates.io crate of that name, so
 // it goes out marked with its source rather than as a bare crates.io purl
-// (OSS-2484). crates.io itself, in both spellings Cargo writes, is unchanged.
+// (OSS-2484). crates.io itself, in any spelling Cargo resolves to it, is unchanged.
 func TestRunMarksCargoLockCratesFromOtherSources(t *testing.T) {
 	noCI(t)
 	asked := stubCratesIo(t)
 	// forked-crate is a [patch] of a crates.io dependency: the manifest's
 	// versionless sighting must fold into the git crate, not be looked up.
 	dir := writeCargoProject(t, `[package]
-name = "my-app"
+name = "acme-root-app"
 version = "0.1.0"
 
 [dependencies]
@@ -109,7 +109,7 @@ forked-crate = { git = "https://git.example.com/acme/forked-crate", branch = "ma
 `, `version = 4
 
 [[package]]
-name = "my-app"
+name = "acme-root-app"
 version = "0.1.0"
 
 [[package]]
@@ -157,6 +157,51 @@ checksum = "ffff"
 name = "twin-crate"
 version = "1.0.0"
 source = "git+ssh://git@git.example.com/acme/twin-crate.git#`+twinCommit+`"
+
+[[package]]
+name = "upper-host-crate"
+version = "1.0.0"
+source = "registry+https://GITHUB.COM/rust-lang/crates.io-index"
+
+[[package]]
+name = "port-host-crate"
+version = "1.0.0"
+source = "registry+https://github.com:443/rust-lang/crates.io-index"
+
+[[package]]
+name = "dot-path-crate"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/./crates.io-index"
+
+[[package]]
+name = "canonical-path-crate"
+version = "1.0.0"
+source = "registry+http://github.com/Rust-Lang/crates.io-index.git/"
+
+[[package]]
+name = "escaped-host-crate"
+version = "1.0.0"
+source = "registry+https://git%48ub.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "wide-host-crate"
+version = "1.0.0"
+source = "registry+https://ｇｉｔｈｕｂ.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "backslash-crate"
+version = "1.0.0"
+source = "registry+https:\\\\github.com\\rust-lang\\crates.io-index"
+
+[[package]]
+name = "sparse-dot-crate"
+version = "1.0.0"
+source = "sparse+https://index.crates.io/./"
+
+[[package]]
+name = "fork-index-crate"
+version = "1.0.0"
+source = "registry+https://github.com/acme/crates.io-index"
 `)
 
 	sbom, err := Run(warn.NewContext(context.Background(), true), Options{Path: dir, NoExec: true})
@@ -173,6 +218,16 @@ source = "git+ssh://git@git.example.com/acme/twin-crate.git#`+twinCommit+`"
 		"pkg:cargo/internal-crate@3.0.0?repository_url=https:%2F%2Fcrates.corp.example%2F",
 		"pkg:cargo/sparse-internal-crate@4.0.0?repository_url=https:%2F%2Fcrates.example.net%2F",
 		"pkg:cargo/lookalike-crate@1.0.0?repository_url=https:%2F%2Fgithub.com.evil.example%2F",
+		"pkg:cargo/fork-index-crate@1.0.0?repository_url=https:%2F%2Fgithub.com%2F",
+		// Spellings real Cargo resolves to crates.io once its URL parser and CanonicalUrl have folded them.
+		"pkg:cargo/upper-host-crate@1.0.0",
+		"pkg:cargo/port-host-crate@1.0.0",
+		"pkg:cargo/dot-path-crate@1.0.0",
+		"pkg:cargo/canonical-path-crate@1.0.0",
+		"pkg:cargo/escaped-host-crate@1.0.0",
+		"pkg:cargo/wide-host-crate@1.0.0",
+		"pkg:cargo/backslash-crate@1.0.0",
+		"pkg:cargo/sparse-dot-crate@1.0.0",
 	})
 	if got := asked(); len(got) != 0 {
 		t.Errorf("crates.io was asked about %v; every crate here is versioned", got)
@@ -222,8 +277,7 @@ source = "git+ssh://git@git.example.com/acme/twin-crate.git#`+twinCommit+`"
 	}
 }
 
-// A lockfile entry with no version is never looked up on crates.io, and never
-// folded into a crates.io release of the same name, when its source is foreign.
+// A versionless foreign lock entry (hand-edited: Cargo rejects one) is never looked up or folded into a crates.io release.
 func TestRunNeverPinsAForeignCrateToCratesIo(t *testing.T) {
 	noCI(t)
 	asked := stubCratesIo(t)
@@ -256,6 +310,61 @@ source = "registry+https://crates.corp.example/git/index"
 	})
 	if got := asked(); len(got) != 0 {
 		t.Errorf("crates.io was asked about %v; a foreign crate's latest there is another crate", got)
+	}
+}
+
+// A lockless project's crates.io dependency is not folded into another workspace's git crate of that name.
+func TestRunKeepsAnotherWorkspacesCratesIoDep(t *testing.T) {
+	noCI(t)
+	asked := stubCratesIo(t)
+	dir := t.TempDir()
+	for name, body := range map[string]string{
+		"a/Cargo.toml": `[package]
+name = "acme-a-app"
+version = "0.1.0"
+
+[dependencies]
+fold-crate = { git = "https://git.example.com/acme/fold-crate" }
+`,
+		"a/Cargo.lock": `version = 4
+
+[[package]]
+name = "acme-a-app"
+version = "0.1.0"
+
+[[package]]
+name = "fold-crate"
+version = "2.0.0"
+source = "git+https://git.example.com/acme/fold-crate#` + forkedCommit + `"
+`,
+		"b/Cargo.toml": `[package]
+name = "acme-b-lib"
+version = "0.1.0"
+
+[dependencies]
+fold-crate = "1"
+`,
+	} {
+		p := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	sbom, err := Run(warn.NewContext(context.Background(), true), Options{Path: dir, NoExec: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertPurls(t, wirePurls(sbom), []string{
+		"pkg:cargo/fold-crate@2.0.0?vcs_url=git%2Bhttps:%2F%2Fgit.example.com%2Facme%2Ffold-crate%40" + forkedCommit,
+		"pkg:cargo/fold-crate@9.9.9",
+	})
+	if got := asked(); !slices.Equal(got, []string{"fold-crate"}) {
+		t.Errorf("crates.io was asked about %v; b's fold-crate is a crates.io dependency", got)
 	}
 }
 
