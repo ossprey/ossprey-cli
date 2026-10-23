@@ -133,6 +133,9 @@ type npmLockfile struct {
 		Name     string `json:"name"`
 		Version  string `json:"version"`
 		Resolved string `json:"resolved"`
+		// Link marks a symlink to a local package (a workspace member or a
+		// file: dependency), whose Resolved is the path linked to.
+		Link bool `json:"link"`
 		// npm's dependency kinds: recorded in the lock whatever the omit
 		// policy, and left out of an install that omits them. DevOptional
 		// is reached both through a dev edge and an optional one, so only
@@ -145,9 +148,12 @@ type npmLockfile struct {
 }
 
 // parseNpmLock extracts resolved (name, version) pairs from an npm
-// lockfileVersion 2/3 document. Only entries with a registry tarball
-// ("resolved") are emitted — the root project and file:/link: deps have none
-// and are not fetchable from the registry.
+// lockfileVersion 2/3 document. The root project, links and the local
+// packages they point at (file:, workspaces) are left out, since they are
+// not fetched from a registry. An installed entry without a "resolved"
+// field is kept with no registry recorded: npm omits the field under
+// omit-lockfile-registry-resolved, and a package it installed from a
+// registry it did not name is one to check, not to drop.
 func parseNpmLock(data []byte, loc file.Location) ([]pkg.Package, error) {
 	var lf npmLockfile
 	if err := json.Unmarshal(data, &lf); err != nil {
@@ -156,8 +162,11 @@ func parseNpmLock(data []byte, loc file.Location) ([]pkg.Package, error) {
 	seen := make(map[string]int)
 	var pkgs []pkg.Package
 	for key, entry := range lf.Packages {
-		if key == "" || entry.Version == "" || entry.Resolved == "" {
-			continue // root project / local (file:,link:) dep — not on the registry
+		if key == "" || entry.Version == "" || entry.Link {
+			continue // root project or a link to a local package
+		}
+		if entry.Resolved == "" && !strings.Contains(key, "node_modules/") {
+			continue // a local package in the tree (a workspace member), not installed from a registry
 		}
 		name := entry.Name // an alias names the real package here
 		if name == "" {

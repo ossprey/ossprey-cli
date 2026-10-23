@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -214,16 +215,20 @@ func UVCachedTree(cacheDir string, want map[string]string) ([]Resolved, error) {
 // from the METADATA of each dist-info in its site-packages (lib/pythonX.Y
 // on POSIX, Lib on Windows).
 func venvPackages(env string) ([]Resolved, error) {
+	// The patterns are relative to the environment, so a bracket or star
+	// in the cache path is a path character, not a wildcard.
 	var files []string
 	for _, pattern := range []string{
-		filepath.Join(env, "lib", "python*", "site-packages", "*.dist-info", "METADATA"),
-		filepath.Join(env, "Lib", "site-packages", "*.dist-info", "METADATA"),
+		"lib/python*/site-packages/*.dist-info/METADATA",
+		"Lib/site-packages/*.dist-info/METADATA",
 	} {
-		matches, err := filepath.Glob(pattern)
+		matches, err := fs.Glob(os.DirFS(env), pattern)
 		if err != nil {
 			return nil, err
 		}
-		files = append(files, matches...)
+		for _, m := range matches {
+			files = append(files, filepath.Join(env, filepath.FromSlash(m)))
+		}
 	}
 	var out []Resolved
 	seen := map[string]bool{}
@@ -254,13 +259,89 @@ func venvPackages(env string) ([]Resolved, error) {
 	return out, nil
 }
 
+// pep440Version is PEP 440's public version syntax, each segment in its
+// own group: epoch, release, pre-release letter and number, post-release
+// (its word and number, or the bare "-N" form), dev-release word and
+// number, local.
+var pep440Version = regexp.MustCompile(`^v?(?:(\d+)!)?(\d+(?:\.\d+)*)` +
+	`(?:[-_.]?(a|b|c|rc|alpha|beta|pre|preview)[-_.]?(\d*))?` +
+	`(?:(?:[-_.]?(post|rev|r)[-_.]?(\d*))|(?:-(\d+)))?` +
+	`(?:[-_.]?(dev)[-_.]?(\d*))?` +
+	`(?:\+([a-z0-9]+(?:[-_.][a-z0-9]+)*))?$`)
+
+// pep440Key is a version in PEP 440's normalised form, so that spellings
+// the specification calls equal compare equal as strings: "6.1.0" and
+// "6.1", "1.0-alpha1" and "1.0a1", "1.0.post1" and "1.0-1". The local
+// segment is returned apart, since "==" without one matches any. ok is
+// false for a version the specification does not describe.
+func pep440Key(v string) (key, local string, ok bool) {
+	m := pep440Version.FindStringSubmatch(strings.ToLower(strings.TrimSpace(v)))
+	if m == nil {
+		return "", "", false
+	}
+	release := strings.Split(m[2], ".")
+	for len(release) > 1 && strings.Trim(release[len(release)-1], "0") == "" {
+		release = release[:len(release)-1]
+	}
+	for i, seg := range release {
+		release[i] = number(seg)
+	}
+	var b strings.Builder
+	if m[1] != "" && number(m[1]) != "0" {
+		b.WriteString(number(m[1]) + "!")
+	}
+	b.WriteString(strings.Join(release, "."))
+	if m[3] != "" {
+		letter := map[string]string{"alpha": "a", "beta": "b", "c": "rc", "pre": "rc", "preview": "rc"}[m[3]]
+		if letter == "" {
+			letter = m[3]
+		}
+		b.WriteString(letter + number(m[4]))
+	}
+	switch {
+	case m[5] != "":
+		b.WriteString(".post" + number(m[6]))
+	case m[7] != "":
+		b.WriteString(".post" + number(m[7]))
+	}
+	if m[8] != "" {
+		b.WriteString(".dev" + number(m[9]))
+	}
+	return b.String(), strings.NewReplacer("-", ".", "_", ".").Replace(m[10]), true
+}
+
+func number(s string) string {
+	s = strings.TrimLeft(s, "0")
+	if s == "" {
+		return "0"
+	}
+	return s
+}
+
+// pep440Equal reports whether a candidate version satisfies "==want" as PEP
+// 440 reads it: equal in normalised form, with the candidate's local
+// segment ignored unless want names one. A version the specification does
+// not describe counts as equal, so an environment is read rather than
+// skipped on a spelling this does not understand.
+func pep440Equal(want, have string) bool {
+	wk, wl, ok := pep440Key(want)
+	if !ok {
+		return true
+	}
+	hk, hl, ok := pep440Key(have)
+	if !ok {
+		return true
+	}
+	return wk == hk && (wl == "" || wl == hl)
+}
+
 // holdsAll reports whether pkgs has every package in want, at the exact
-// version where one is given.
+// version where one is given, as PEP 440 compares versions.
 func holdsAll(pkgs []Resolved, want map[string]string) bool {
 	for name, version := range want {
 		found := false
 		for _, r := range pkgs {
-			if canonicalPackageName(r.Name) == name && (version == "" || r.Version == version) {
+			if canonicalPackageName(r.Name) == name && (version == "" || pep440Equal(version, r.Version)) {
 				found = true
 				break
 			}

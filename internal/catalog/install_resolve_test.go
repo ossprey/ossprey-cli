@@ -265,7 +265,10 @@ func TestParseNpmLockCarriesDependencyKinds(t *testing.T) {
 		"node_modules/a/node_modules/twice": {"version":"5.0.0","resolved":"https://registry.npmjs.org/twice/-/twice-5.0.0.tgz"},
 		"node_modules/b/node_modules/twice": {"version":"5.0.0","resolved":"https://registry.npmjs.org/twice/-/twice-5.0.0.tgz","optional":true},
 		"node_modules/mixed": {"version":"1.0.0","resolved":"https://npm.acme.internal/mixed/-/mixed-1.0.0.tgz"},
-		"node_modules/c/node_modules/mixed-alias": {"name":"mixed","version":"1.0.0","resolved":"https://registry.npmjs.org/mixed/-/mixed-1.0.0.tgz"}}}`)
+		"node_modules/c/node_modules/mixed-alias": {"name":"mixed","version":"1.0.0","resolved":"https://registry.npmjs.org/mixed/-/mixed-1.0.0.tgz"},
+		"node_modules/unresolved": {"version":"7.0.0"},
+		"node_modules/member": {"resolved":"packages/member","link":true},
+		"packages/member": {"version":"0.0.1"}}}`)
 	type kinds struct {
 		Registry                         string
 		Dev, Optional, DevOptional, Peer bool
@@ -280,6 +283,10 @@ func TestParseNpmLockCarriesDependencyKinds(t *testing.T) {
 		// Copies fetched from different registries record none: one public
 		// copy is enough to need a check, whichever copy is read first.
 		"mixed": {},
+		// An installed package whose lock omits "resolved" (npm's
+		// omit-lockfile-registry-resolved) is kept with no registry; a link
+		// and the local package it points at are not.
+		"unresolved": {},
 	}
 	// Map iteration order varies per run; the merge must not depend on it.
 	for range 20 {
@@ -452,12 +459,35 @@ func TestNpxCachedTreeMatchesARealRun(t *testing.T) {
 	}
 }
 
+// "==" compares versions as PEP 440 normalises them, not as strings; a
+// spelling the specification does not describe is retained rather than
+// skipped.
+func TestPep440Equal(t *testing.T) {
+	for _, tt := range []struct {
+		want, have string
+		equal      bool
+	}{
+		{"6.1.0", "6.1", true}, {"6.1", "6.1.0.0", true}, {"01.2", "1.2", true}, {"1.0", "1.1", false},
+		{"1.0a1", "1.0-alpha1", true}, {"1.0rc1", "1.0c1", true}, {"1.0preview1", "1.0rc1", true}, {"1.0a", "1.0a0", true},
+		{"1.0", "1.0.post0", false}, {"1.0.post1", "1.0-1", true}, {"1.0.rev1", "1.0.post1", true}, {"1.0preview1", "1.0rc1.post0", false},
+		{"1.0.dev0", "1.0dev", true}, {"1.0", "1.0.dev0", false},
+		{"2.0", "2.0+local", true}, {"2.0+local", "2.0+other", false}, {"2.0+a-b", "2.0+a.b", true}, {"2.0+local", "2.0", false},
+		{"1!1.0", "1.0", false}, {"0!1.0", "1.0", true}, {"V1.0", "1.0", true},
+		{"weird", "1.0", true}, {"1.0", "weird", true},
+	} {
+		if got := pep440Equal(tt.want, tt.have); got != tt.equal {
+			t.Errorf("pep440Equal(%q, %q) = %v, want %v", tt.want, tt.have, got, tt.equal)
+		}
+	}
+}
+
 // uv's cached tool environments: two levels of hashed directories, each a
 // venv whose site-packages (lib/pythonX.Y on POSIX, Lib on Windows) name
 // the installed releases. Only an environment holding every wanted package
 // at the pinned version counts, and names match as PyPI matches them.
 func TestUVCachedTree(t *testing.T) {
-	cache := t.TempDir()
+	// Brackets in the cache path are path characters, not a glob class.
+	cache := filepath.Join(t.TempDir(), "uv[1]")
 	venv := func(path string, pkgs map[string]string, windows bool) {
 		site := filepath.Join(path, "lib", "python3.13", "site-packages")
 		if windows {
@@ -502,6 +532,14 @@ func TestUVCachedTree(t *testing.T) {
 	}
 	if got, err := UVCachedTree(cache, map[string]string{"cowsay": "5.0"}); err != nil || got != nil {
 		t.Errorf("unheld version: %v, %v", got, err)
+	}
+	// A pin is matched as PEP 440 reads it: ==6.1.0 is the 6.1 installed.
+	got, err = UVCachedTree(cache, map[string]string{"cowsay": "6.1.0"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"cowsay@6.1", "rich@13.0.0", "six@1.16.0", "six@1.17.0"}; !reflect.DeepEqual(names(got), want) {
+		t.Errorf("cowsay==6.1.0: %v, want %v", names(got), want)
 	}
 	if got, err := UVCachedTree(filepath.Join(cache, "missing"), map[string]string{"cowsay": ""}); err != nil || got != nil {
 		t.Errorf("no cache: %v, %v", got, err)
