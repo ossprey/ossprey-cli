@@ -73,7 +73,7 @@ type npmArgv struct {
 // dist-tag, and the global/prefix/location trio that decides which .npmrc
 // npm reads.
 var npmRunConfig = flagSet("legacy-peer-deps", "strict-peer-deps", "optional", "omit", "include",
-	"before", "tag", "globalconfig", "global", "prefix", "location", "cache", "offline", "prefer-offline", "workspaces")
+	"before", "tag", "globalconfig", "global", "prefix", "location", "cache", "offline", "prefer-offline", "prefer-online", "workspaces")
 
 // npmPathConfig are the npmRunConfig keys nopt types as paths: a leading
 // `~/` is the home directory (nopt's validatePath), and the rest is read
@@ -99,7 +99,13 @@ func expandHome(v string) string {
 
 // npmConfigKeys are npmRunConfig's keys in a fixed order, for output.
 var npmConfigKeys = []string{"before", "cache", "globalconfig", "include", "legacy-peer-deps", "offline", "omit", "optional",
-	"prefer-offline", "strict-peer-deps", "tag", "workspaces"}
+	"prefer-offline", "prefer-online", "strict-peer-deps", "tag", "workspaces"}
+
+// npmRecordOnly are recorded options the dry run is never told: workspaces
+// decides where npm reads its configuration, and `npm install --workspaces`
+// in a scratch directory with none fails with "No workspaces found!"
+// (verified against npm 11.19.1).
+var npmRecordOnly = flagSet("workspaces")
 
 func (a *npmArgv) record(key, value string) {
 	if !npmRunConfig[key] {
@@ -190,6 +196,9 @@ func (a npmArgv) omits() map[string]bool {
 func (a npmArgv) resolveFlags() []string {
 	var out []string
 	for _, key := range npmConfigKeys {
+		if npmRecordOnly[key] {
+			continue
+		}
 		for _, v := range a.Config[key] {
 			switch {
 			case npmConfig[key].isBool() && v == "true":
@@ -575,8 +584,11 @@ func bunxRun(args []string) installArgs {
 			continue
 		}
 		if pkgSet {
-			// The positional is only the binary; --package is what is fetched.
-			out.addTarget("npm", strings.TrimSuffix(pkg, "@latest"))
+			// The positional is only the binary; --package is what is
+			// fetched, kept as typed (`tool@latest` included) for the
+			// resolver, which must see the tag a configured one would
+			// otherwise replace.
+			out.addTarget("npm", pkg)
 			return out
 		}
 		out.addCommand(a)

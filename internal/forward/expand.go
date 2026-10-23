@@ -747,6 +747,8 @@ var uvOnlyResolution = flagSet("--index", "--extra-index-url", "--overrides", "-
 	// (--only-binary=:all:), so it would pick the newest release with a
 	// wheel where uv builds the newest of all.
 	"--no-binary", "--no-binary-package",
+	// The PyTorch index uv picks for the backend; pip has no such switch.
+	"--torch-backend",
 	// The cache uv reads offline or prefers, and whether it reads or
 	// refreshes it, decide what it resolves against; pip has no such cache.
 	"--cache-dir", "-n", "--no-cache", "--refresh", "--refresh-package", "--reinstall", "--reinstall-package")
@@ -902,7 +904,7 @@ var npmPassFlags = flagSet("--legacy-peer-deps", "--strict-peer-deps", "--no-opt
 	// prefer-offline read the cache's metadata, which may be older than the
 	// registry's, and --cache names which cache that is. The negations
 	// travel too, so npm's last-wins reading holds in the dry run.
-	"--cache", "--offline", "--prefer-offline", "--no-offline", "--no-prefer-offline")
+	"--cache", "--offline", "--prefer-offline", "--no-offline", "--no-prefer-offline", "--prefer-online", "--no-prefer-online")
 
 func npmResolveFlags(m *Manager, rest []string) []string {
 	if m.Bin != "npm" {
@@ -1056,7 +1058,7 @@ var pythonCommonFlags = flagSet("--pre", "--no-index", "-i", "--index-url", "--e
 // uvOnlyFlags are uv's own, passed when uv resolves a uv command.
 var uvOnlyFlags = flagSet("--index", "--default-index", "--prerelease", "--resolution",
 	"--exclude-newer", "--exclude-newer-package", "-p", "--python", "--python-platform",
-	"--allow-insecure-host", "--index-strategy", "--only-binary", "--no-binary", "--no-binary-package",
+	"--allow-insecure-host", "--index-strategy", "--only-binary", "--no-binary", "--no-binary-package", "--torch-backend",
 	"--constraints", "--overrides", "--no-config", "--config-file", "--offline", "--project",
 	"--cache-dir", "-n", "--no-cache", "--refresh", "--refresh-package", "--reinstall", "--reinstall-package")
 

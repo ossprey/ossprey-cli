@@ -386,6 +386,10 @@ func TestExpandInstall_ToolRunHasNoProjectContext(t *testing.T) {
 		// against, so they reach the dry run, the path made absolute.
 		{[]string{"exec", "--offline", "--prefer-offline", "--cache", "~/c", "cowsay@1.6.0"}, dir,
 			[]string{"--cache=" + absPath(expandHome("~/c")), "--offline", "--prefer-offline"}},
+		{[]string{"exec", "--prefer-online", "cowsay@1.6.0"}, dir, []string{"--prefer-online"}},
+		// Workspaces decide where configuration is read, never what the
+		// scratch dry run is told: `npm install --workspaces` there fails.
+		{[]string{"exec", "--workspaces", "--package=cowsay@1.6.0", "--", "cowsay"}, dir, nil},
 	} {
 		gotConfig, gotFlags = "unset", nil
 		parsed := m.parseRun(tt.args)
@@ -605,6 +609,8 @@ func TestExpandInstall_UVOnlyFlagsAreResolvedByUVOnly(t *testing.T) {
 		// Building from source is what pip's dry run is told never to do.
 		{"uvx --no-binary", uvx, []string{"--no-binary", "ruff"}, []string{"--no-binary"}},
 		{"uvx --no-binary-package", uvx, []string{"--no-binary-package", "ruff", "ruff"}, []string{"--no-binary-package", "ruff"}},
+		{"uvx --torch-backend", uvx, []string{"--torch-backend", "cpu", "--with", "torch", "jupyter"}, []string{"--torch-backend", "cpu"}},
+		{"uv pip install --torch-backend", uv, []string{"pip", "install", "--torch-backend=cu128", "torch"}, []string{"--torch-backend=cu128"}},
 		{"uv pip install --exclude-newer", uv, []string{"pip", "install", "--exclude-newer", "2024-01-01", "ruff"},
 			[]string{"--exclude-newer", "2024-01-01"}},
 	}
@@ -1021,6 +1027,9 @@ func TestResolverFlags(t *testing.T) {
 		{"npm keeps a negated cache policy, for its last-wins reading",
 			npmResolveFlags(npm, []string{"install", "--prefer-offline", "--no-prefer-offline", "--no-offline", "tool@1.0.0"}),
 			[]string{"--prefer-offline", "--no-prefer-offline", "--no-offline"}},
+		{"prefer-online",
+			npmResolveFlags(npm, []string{"install", "--prefer-online", "--no-prefer-online", "tool@1.0.0"}),
+			[]string{"--prefer-online", "--no-prefer-online"}},
 	}
 	for _, tt := range tests {
 		if !reflect.DeepEqual(tt.got, tt.want) {

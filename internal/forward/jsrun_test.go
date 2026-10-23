@@ -39,6 +39,7 @@ func TestNpxRun(t *testing.T) {
 		// --package names what is fetched; the positional is only its binary.
 		{[]string{"-p", "cowsay@1.5.0", "cowsay", "hi"}, []check.Spec{npmSpec("cowsay", "1.5.0")}, ""},
 		{[]string{"--package=a@1.0.0", "-p", "b@2.0.0", "run-it"}, []check.Spec{npmSpec("a", "1.0.0"), npmSpec("b", "2.0.0")}, ""},
+		{[]string{"--package", "cowsay@latest", "cowsay"}, []check.Spec{npmSpec("cowsay", "")}, ""},
 		// Value options must not leave their value standing in for the command.
 		{[]string{"--registry", "https://registry.npmjs.org", "cowsay"}, []check.Spec{npmSpec("cowsay", "")}, "cowsay"},
 		{[]string{"--cache", "/tmp/c", "--loglevel", "silent", "cowsay"}, []check.Spec{npmSpec("cowsay", "")}, "cowsay"},
@@ -94,6 +95,8 @@ func TestBunxRun_AliasKeepsTheTag(t *testing.T) {
 		{[]string{"tsc@latest", "--noEmit"}, []string{"typescript@latest"}},
 		{[]string{"claude@2.0.0"}, []string{"@anthropic-ai/claude-code@2.0.0"}},
 		{[]string{"tsc"}, []string{"typescript"}},
+		// An explicit --package is kept as typed too.
+		{[]string{"--package", "cowsay@latest", "cowsay"}, []string{"cowsay@latest"}},
 	} {
 		parsed := bunx.parseRun(tt.args)
 		if got := specTokens(bunx, parsed); !reflect.DeepEqual(got, tt.want) {
@@ -440,7 +443,7 @@ Module._load = function (request, parent, isMain) {
       // a Date (before) as the word, a path (prefix) relative to the cwd,
       // everything else as its string.
       config: Object.fromEntries(['legacy-peer-deps', 'strict-peer-deps', 'optional', 'omit', 'include',
-        'before', 'tag', 'globalconfig', 'global', 'prefix', 'location', 'cache', 'offline', 'prefer-offline', 'workspaces'].filter(k => conf[k] !== undefined).map(k =>
+        'before', 'tag', 'globalconfig', 'global', 'prefix', 'location', 'cache', 'offline', 'prefer-offline', 'prefer-online', 'workspaces'].filter(k => conf[k] !== undefined).map(k =>
           [k, [].concat(conf[k]).map(v => v instanceof Date ? 'date'
             : k === 'prefix' || k === 'globalconfig' || k === 'cache' ? require('path').relative(process.cwd(), String(v)) : String(v))])),
     }))
@@ -540,6 +543,7 @@ func TestNpmParsersMatchNpm(t *testing.T) {
 		// nopt toggles the negation per prefix.
 		{"--no-no-optional", "cowsay"}, {"--no-no-no-optional", "cowsay"}, {"--no-no-optional=false", "cowsay"},
 		{"--workspaces=false", "cowsay"}, {"--no-workspaces", "cowsay"},
+		{"--prefer-online", "cowsay"}, {"--no-prefer-online", "cowsay"},
 		{"--cache", "/tmp/c", "cowsay"}, {"--userconfig", "./x.npmrc", "cowsay", "moo"},
 		{"--shell", "bash", "cowsay"}, {"--color", "always", "cowsay"}, {"--browser", "firefox", "cowsay"},
 		{"--workspace", "a", "cowsay"}, {"-w", "a", "cowsay"}, {"--package", "cowsay", "--", "cowsay", "moo"},
