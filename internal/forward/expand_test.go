@@ -838,7 +838,8 @@ func TestExpandInstall_ToolRunNamesRelativeEnvPaths(t *testing.T) {
 	t.Cleanup(func() {
 		resolvePythonFn, resolveWithUVFn, uvConfigNeedsUVFn, uvCacheDirFn, uvCachedFn, uvToolDirFn, uvInstalledFn = old, oldUV, oldNeeds, oldDir, oldCached, oldToolDir, oldInstalled
 	})
-	for _, v := range []string{"UV_CACHE_DIR", "UV_CONFIG_FILE", "UV_CONSTRAINT", "UV_OVERRIDE", "UV_BUILD_CONSTRAINT", "UV_FIND_LINKS", "UV_PYTHON", "UV_NO_CACHE"} {
+	for _, v := range []string{"UV_CACHE_DIR", "UV_CONFIG_FILE", "UV_CONSTRAINT", "UV_OVERRIDE", "UV_BUILD_CONSTRAINT", "UV_FIND_LINKS", "UV_PYTHON", "UV_NO_CACHE",
+		"UV_INDEX", "UV_DEFAULT_INDEX", "UV_INDEX_URL", "UV_EXTRA_INDEX_URL"} {
 		t.Setenv(v, "")
 	}
 	uvx, _ := Lookup("uvx")
@@ -864,6 +865,14 @@ func TestExpandInstall_ToolRunNamesRelativeEnvPaths(t *testing.T) {
 		// of the path.
 		{"UV_FIND_LINKS", "https://w.example/simple,./wheels, w2", []string{"ruff"}, []string{"--find-links", "https://w.example/simple", "--find-links", absPath("wheels"), "--find-links", absPath("w2")}},
 		{"UV_FIND_LINKS", "my wheels", []string{"ruff"}, []string{"--find-links", absPath("my wheels")}},
+		// An index location is read where the command starts, before
+		// --directory moves it; a `name=location` keeps its name.
+		{"UV_FIND_LINKS", "./wheels", []string{"--directory", "sub", "ruff"}, []string{"--find-links", absPath("wheels")}},
+		{"UV_INDEX_URL", "./idx", []string{"--directory", "sub", "ruff"}, []string{"--index-url", absPath("idx")}},
+		{"UV_DEFAULT_INDEX", "simple", []string{"ruff"}, []string{"--default-index", absPath("simple")}},
+		{"UV_EXTRA_INDEX_URL", "./e1 https://e.example/simple", []string{"ruff"}, []string{"--extra-index-url", absPath("e1"), "--extra-index-url", "https://e.example/simple"}},
+		{"UV_INDEX", "local=./idx remote=https://r.example/simple", []string{"ruff"}, []string{"--index", "local=" + absPath("idx"), "--index", "remote=https://r.example/simple"}},
+		{"UV_INDEX", "https://r.example/simple", []string{"ruff"}, nil},
 		{"UV_CONSTRAINT", "c1.txt,c2.txt", []string{"ruff"}, []string{"--constraints", absPath("c1.txt,c2.txt")}},
 		{"UV_FIND_LINKS", "https://w.example/simple", []string{"ruff"}, nil},
 		{"UV_PYTHON", ".venv/bin/python", []string{"ruff"}, []string{"--python", absPath(".venv/bin/python")}},
@@ -1636,6 +1645,15 @@ func TestExpandInstall_UVGlobalOptionsAndInterpreterPaths(t *testing.T) {
 			"", []string{"--constraints", absPath("sub/c.txt")}, false},
 		{"global --directory before tool run", uv, []string{"--directory", "sub", "--config-file", "u.toml", "tool", "run", "-c", "c.txt", "ruff"},
 			"", []string{"--config-file", absPath("sub/u.toml"), "-c", absPath("sub/c.txt")}, true},
+		// An index location is read where the command starts, at parse
+		// time, before --directory moves it: ./idx beside sub, where c.txt
+		// is sub/c.txt (verified). A URL and a `name=` prefix are kept.
+		{"index paths under --directory", uvx, []string{"--directory", "sub", "--index", "local=./idx", "--extra-index-url", "./extra", "-f", "wheels", "-c", "c.txt", "ruff"},
+			"", []string{"--index", "local=" + absPath("idx"), "--extra-index-url", absPath("extra"), "-f", absPath("wheels"), "-c", absPath("sub/c.txt")}, true},
+		{"default index path", uvx, []string{"--default-index", "./simple", "--index", "remote=https://r.example/simple", "ruff"},
+			"", []string{"--default-index", absPath("simple"), "--index", "remote=https://r.example/simple"}, true},
+		{"named install index path under --directory", uv, []string{"--directory", "sub", "pip", "install", "--index-url", "./idx", "ruff"},
+			absPath("sub"), []string{"--index-url", absPath("idx")}, false},
 		// --project names a project, not a directory: a tool run reads no
 		// project configuration so it is dropped, a named install passes it.
 		{"tool run drops --project", uvx, []string{"--project", "p", "-c", "c.txt", "ruff"},

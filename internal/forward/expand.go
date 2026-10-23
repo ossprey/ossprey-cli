@@ -379,6 +379,8 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 			dir = uvDir(args, uvValueFlags())
 		}
 		global, globalNeedsUV := uvGlobalFlags(m, args, dir, false)
+		// --project is read where the run runs; an index path where it
+		// starts, which for a `--directory` run is not the same place.
 		uvFlags := append(global, absFlagValues(uvResolveFlags(m, rest), flagSet("--project"), dir)...)
 		if m.Bin == "uv" {
 			// Configuration UV_CONFIG_FILE names is uv's alone: pip would
@@ -389,7 +391,7 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 				return resolveWithUVFn(ctx, dir, tokens, uvFlags)
 			}
 		}
-		return resolvePythonFn(ctx, dir, tokens, uvFlags, pipResolveFlags(m, rest))
+		return resolvePythonFn(ctx, dir, tokens, uvFlags, absFlagValues(pipResolveFlags(m, rest), nil, dir))
 	}
 	return nil, nil
 }
@@ -532,16 +534,25 @@ var uvEnvPathVars = []struct {
 	env, flag string
 	aliases   []string
 	// sep is what uv splits the variable's entries on: whitespace for the
-	// requirements-file variables, a comma for UV_FIND_LINKS (verified
-	// with --show-settings on uv 0.11: `./w1,./w2` is two entries and
-	// `./w1 ./w2` one path).
+	// requirements-file and index variables, a comma for UV_FIND_LINKS
+	// (verified with --show-settings on uv 0.11: `./w1,./w2` is two
+	// entries and `./w1 ./w2` one path).
 	sep string
+	// index marks a location variable: read against the directory the
+	// command starts in, before --directory (verified: UV_FIND_LINKS and
+	// UV_INDEX_URL under `--directory sub` read beside sub, UV_CONSTRAINT
+	// under it), a URL left alone and `name=location` keeping its name.
+	index bool
 }{
-	{"UV_CONSTRAINT", "--constraints", []string{"-c", "--constraint"}, ""},
-	{"UV_OVERRIDE", "--overrides", []string{"--override"}, ""},
-	{"UV_BUILD_CONSTRAINT", "--build-constraints", []string{"-b", "--build-constraint"}, ""},
-	{"UV_FIND_LINKS", "--find-links", []string{"-f"}, ","},
-	{"UV_PYTHON", "--python", []string{"-p"}, ""},
+	{"UV_CONSTRAINT", "--constraints", []string{"-c", "--constraint"}, "", false},
+	{"UV_OVERRIDE", "--overrides", []string{"--override"}, "", false},
+	{"UV_BUILD_CONSTRAINT", "--build-constraints", []string{"-b", "--build-constraint"}, "", false},
+	{"UV_FIND_LINKS", "--find-links", []string{"-f"}, ",", true},
+	{"UV_INDEX", "--index", nil, "", true},
+	{"UV_DEFAULT_INDEX", "--default-index", nil, "", true},
+	{"UV_INDEX_URL", "--index-url", []string{"-i"}, "", true},
+	{"UV_EXTRA_INDEX_URL", "--extra-index-url", nil, "", true},
+	{"UV_PYTHON", "--python", []string{"-p"}, "", false},
 }
 
 // flagPresent reports whether any of the flags is among opts, as a token
@@ -591,13 +602,17 @@ func uvEnvPathFlags(opts []string, base string) []string {
 			}
 		}
 		isPath := func(e string) bool { return !strings.Contains(e, "://") }
+		anchor := func(e string) string { return absIn(base, e) }
+		if v.index {
+			anchor = absIndexLocation
+		}
 		if v.env == "UV_PYTHON" {
 			entries = []string{strings.TrimSpace(value)}
 			isPath = looksLikePath
 		}
 		moved := false
 		for _, e := range entries {
-			if isPath(e) && !filepath.IsAbs(e) {
+			if isPath(e) && anchor(e) != e {
 				moved = true
 			}
 		}
@@ -606,7 +621,7 @@ func uvEnvPathFlags(opts []string, base string) []string {
 		}
 		for _, e := range entries {
 			if isPath(e) {
-				e = absIn(base, e)
+				e = anchor(e)
 			}
 			out = append(out, v.flag, e)
 		}
@@ -1046,7 +1061,16 @@ var pipFallbackRenames = map[string]string{"--default-index": "--index-url", "--
 // absFlagValues leaves alone; -p/--python is a path only when it looks like
 // one (`.venv/bin/python`), else a version or a name (`3.12`, `pypy`).
 var pythonPathFlags = flagSet("-c", "--constraint", "--constraints", "--overrides",
-	"-f", "--find-links", "--config-file", "-p", "--python", "--project", "--cache-dir")
+	"--config-file", "-p", "--python", "--project", "--cache-dir")
+
+// pythonIndexFlags take an index location: a URL, or a local directory,
+// which uv reads against the directory the command starts in — at parse
+// time, before --directory moves it (verified: `uvx --directory sub
+// --find-links ./wheels` and `--index local=./idx` read ./wheels and ./idx
+// beside sub, where `-c c.txt` reads sub/c.txt) — and which the resolver,
+// running in scratch, must be handed absolutely. A URL is left alone, and
+// uv's `name=location` spelling of --index keeps its name.
+var pythonIndexFlags = flagSet("--index", "--default-index", "-i", "--index-url", "--extra-index-url", "-f", "--find-links")
 
 var pathLikeOnlyFlags = flagSet("-p", "--python")
 
@@ -1195,10 +1219,13 @@ func npmResolveFlags(m *Manager, args []string) []string {
 func absFlagValues(flags []string, paths map[string]bool, base string) []string {
 	for i := 0; i < len(flags); i++ {
 		flag, inline, hasInline := splitFlagValue(flags[i])
-		if !paths[flag] {
+		if !paths[flag] && !pythonIndexFlags[flag] {
 			continue
 		}
 		abs := func(v string) string {
+			if pythonIndexFlags[flag] {
+				return absIndexLocation(v)
+			}
 			if strings.Contains(v, "://") || (pathLikeOnlyFlags[flag] && !strings.ContainsAny(v, `/\`)) {
 				return v
 			}
@@ -1214,6 +1241,22 @@ func absFlagValues(flags []string, paths map[string]bool, base string) []string 
 	}
 	return flags
 }
+
+// absIndexLocation is an index or find-links location as uv reads it from
+// where the command starts: a URL as it is, a local directory made
+// absolute, and `name=location` (uv's --index spelling) with its name kept.
+func absIndexLocation(v string) string {
+	name, location := "", v
+	if i := strings.IndexByte(v, '='); i > 0 && indexName.MatchString(v[:i]) {
+		name, location = v[:i+1], v[i+1:]
+	}
+	if location == "" || strings.Contains(location, "://") {
+		return v
+	}
+	return name + absPath(location)
+}
+
+var indexName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
 // absIn is v as an absolute path, relative paths taken from base.
 func absIn(base, v string) string {
