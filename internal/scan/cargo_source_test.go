@@ -219,13 +219,14 @@ source = "registry+https://github.com/acme/crates.io-index"
 		"pkg:cargo/sparse-internal-crate@4.0.0?repository_url=https:%2F%2Fcrates.example.net%2F",
 		"pkg:cargo/lookalike-crate@1.0.0?repository_url=https:%2F%2Fgithub.com.evil.example%2F",
 		"pkg:cargo/fork-index-crate@1.0.0?repository_url=https:%2F%2Fgithub.com%2F",
+		// A non-ASCII host stays foreign, even one IDNA would fold to github.com.
+		"pkg:cargo/wide-host-crate@1.0.0?repository_url=https:%2F%2F%25EF%25BD%2587%25EF%25BD%2589%25EF%25BD%2594%25EF%25BD%2588%25EF%25BD%2595%25EF%25BD%2582.com%2F",
 		// Spellings real Cargo resolves to crates.io once its URL parser and CanonicalUrl have folded them.
 		"pkg:cargo/upper-host-crate@1.0.0",
 		"pkg:cargo/port-host-crate@1.0.0",
 		"pkg:cargo/dot-path-crate@1.0.0",
 		"pkg:cargo/canonical-path-crate@1.0.0",
 		"pkg:cargo/escaped-host-crate@1.0.0",
-		"pkg:cargo/wide-host-crate@1.0.0",
 		"pkg:cargo/backslash-crate@1.0.0",
 		"pkg:cargo/sparse-dot-crate@1.0.0",
 	})

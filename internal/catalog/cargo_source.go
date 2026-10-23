@@ -8,7 +8,6 @@ import (
 	"regexp"
 	"slices"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/anchore/syft/syft/pkg"
 )
@@ -51,12 +50,8 @@ func isCratesIo(source string) bool {
 		return false
 	}
 	p = strings.TrimSuffix(path.Clean("/"+strings.ToLower(p)), ".git")
-	// Cargo maps a non-ASCII registry+ host through IDNA, so it may be github.com; a sparse+ host is opaque to it.
-	return p == want[1] && (strings.ToLower(host) == want[0] || kind == "registry" && !isASCII(host))
-}
-
-func isASCII(s string) bool {
-	return strings.IndexFunc(s, func(r rune) bool { return r >= utf8.RuneSelf }) < 0
+	// A non-ASCII host stays foreign: IDNA maps a homograph of github.com to another domain.
+	return p == want[1] && strings.ToLower(host) == want[0]
 }
 
 // gitCommit is the locked commit Cargo writes after '#' in a git source.
