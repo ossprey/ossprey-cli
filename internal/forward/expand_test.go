@@ -1170,9 +1170,13 @@ func TestExpandInstall_ToolRunCoversTheUVCache(t *testing.T) {
 	}
 	// uv answers with a relative path, as it does for a relative cache-dir
 	// in a config file; selectorsAsked records the flags it was asked with.
+	// The absolute answers are real ones, since a rooted path is not
+	// absolute on Windows.
+	fromUV := filepath.Join(t.TempDir(), "from-uv")
+	cfgDir := filepath.Join(t.TempDir(), "cfg")
 	var selectorsAsked []string
 	dirAsked := false
-	uvAnswer := "/from/uv"
+	uvAnswer := fromUV
 	uvCacheDirFn = func(_ context.Context, flags []string) (string, error) {
 		dirAsked, selectorsAsked = true, flags
 		return uvAnswer, nil
@@ -1198,7 +1202,7 @@ func TestExpandInstall_ToolRunCoversTheUVCache(t *testing.T) {
 		wantWant      map[string]string
 		wantTree      []string
 	}{
-		{uvx, []string{"cowsay@6.1", "-t", "hi"}, "/from/uv", absPath("/from/uv"), []string{}, map[string]string{"cowsay": "6.1"},
+		{uvx, []string{"cowsay@6.1", "-t", "hi"}, fromUV, fromUV, []string{}, map[string]string{"cowsay": "6.1"},
 			[]string{"cowsay@6.1", "six@1.17.0", "six@1.16.0"}},
 		{uvx, []string{"--cache-dir", "c", "--with", "Rich", "cowsay", "-t", "hi"}, "", absPath("c"), nil, map[string]string{"cowsay": "", "rich": ""},
 			[]string{"cowsay@6.1", "six@1.17.0", "six@1.16.0"}},
@@ -1211,9 +1215,9 @@ func TestExpandInstall_ToolRunCoversTheUVCache(t *testing.T) {
 		{uv, []string{"--directory", "sub", "tool", "run", "cowsay"}, "rel", absPath("sub/rel"), []string{}, map[string]string{"cowsay": ""},
 			[]string{"cowsay@6.1", "six@1.17.0", "six@1.16.0"}},
 		// The configuration selectors reach uv, the file made absolute.
-		{uvx, []string{"--config-file", "custom.toml", "cowsay"}, "/cfg", absPath("/cfg"), []string{"--config-file", absPath("custom.toml")}, map[string]string{"cowsay": ""},
+		{uvx, []string{"--config-file", "custom.toml", "cowsay"}, cfgDir, cfgDir, []string{"--config-file", absPath("custom.toml")}, map[string]string{"cowsay": ""},
 			[]string{"cowsay@6.1", "six@1.17.0", "six@1.16.0"}},
-		{uv, []string{"--no-config", "--directory", "sub", "tool", "run", "--config-file", "c.toml", "cowsay"}, "/cfg", absPath("/cfg"),
+		{uv, []string{"--no-config", "--directory", "sub", "tool", "run", "--config-file", "c.toml", "cowsay"}, cfgDir, cfgDir,
 			[]string{"--no-config", "--config-file", absPath("sub/c.toml")}, map[string]string{"cowsay": ""},
 			[]string{"cowsay@6.1", "six@1.17.0", "six@1.16.0"}},
 		{uvx, []string{"--no-cache", "cowsay"}, "", "", nil, nil, []string{"cowsay@6.1", "six@1.17.0"}},
