@@ -254,13 +254,18 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 			base := uvDir(append(uvGlobalArgs(m, args), lead...), uvValueFlags())
 			global, globalNeedsUV := uvGlobalFlags(m, args, base, true)
 			uvFlags := append(global, toolRunLeadingFlags(rest, base)...)
+			// A relative UV_CONFIG_FILE is read where the run runs; the
+			// resolver and the probes run elsewhere, so they are told the
+			// file by its absolute path.
+			envConfig := uvEnvConfigFlag(slices.Concat(uvGlobalArgs(m, args), lead), base)
+			uvFlags = append(uvFlags, envConfig...)
 			// --with-requirements files are installed into the same
 			// environment, so they resolve together with the packages: a
 			// release that satisfies each alone may not satisfy both.
 			tokens = slices.Concat(tokens, reqFileTokens(parsed.ReqFiles, base))
 			var tree []catalog.Resolved
 			var err error
-			if globalNeedsUV || needsUV(lead, toolRunValueFlags) {
+			if globalNeedsUV || needsUV(lead, toolRunValueFlags) || len(envConfig) > 0 {
 				tree, err = resolveWithUVFn(ctx, "", tokens, uvFlags)
 			} else {
 				tree, err = resolvePythonFn(ctx, "", tokens, uvFlags, toolRunPipFlags(rest, base))
@@ -270,7 +275,7 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 			}
 			// uv may reuse a tool environment it cached for an earlier run,
 			// dependencies and all, rather than what resolves today.
-			return withUVCached(ctx, tree, parsed, slices.Concat(uvGlobalArgs(m, args), lead), base), nil
+			return withUVCached(ctx, tree, parsed, slices.Concat(uvGlobalArgs(m, args), lead, envConfig), base), nil
 		}
 		if hasFlag(rest, "--no-deps") {
 			return nil, nil
@@ -426,6 +431,24 @@ func unionSightings(tree, extra []catalog.Resolved) []catalog.Resolved {
 		tree = append(tree, r)
 	}
 	return tree
+}
+
+// uvEnvConfigFlag names a relative UV_CONFIG_FILE by its absolute path, as
+// a --config-file flag, for a run that names no configuration itself: uv
+// reads the variable relative to the directory the run runs in, and the
+// resolver and the cache and tool-directory probes run elsewhere. An
+// absolute value needs nothing, since every subprocess inherits it.
+func uvEnvConfigFlag(opts []string, base string) []string {
+	for _, a := range opts {
+		if a == "--no-config" || a == "--config-file" || strings.HasPrefix(a, "--config-file=") {
+			return nil
+		}
+	}
+	v := os.Getenv("UV_CONFIG_FILE")
+	if v == "" || filepath.IsAbs(v) {
+		return nil
+	}
+	return []string{"--config-file", absIn(base, v)}
 }
 
 // uvToolDir is where uv keeps installed tools for this run: UV_TOOL_DIR,

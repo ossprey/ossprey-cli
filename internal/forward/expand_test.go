@@ -646,6 +646,62 @@ func TestExpandInstall_UVOnlyFlagsAreResolvedByUVOnly(t *testing.T) {
 // The resolver gets the packages as the user wrote them — a range, extras, a
 // marker — since the parsed spec keeps only a name and an exact pin. uv's
 // and poetry's `name@version` is not PEP 508, so it is rewritten.
+// A relative UV_CONFIG_FILE is read where the run runs, so the resolver
+// (which then must be uv) and the cache probe are told the file by its
+// absolute path; an absolute one, or a run naming its own configuration,
+// needs nothing.
+func TestExpandInstall_ToolRunNamesARelativeEnvConfigFile(t *testing.T) {
+	var gotUV, gotSelectors []string
+	pipCalled := false
+	old, oldUV, oldDir, oldCached, oldToolDir, oldInstalled := resolvePythonFn, resolveWithUVFn, uvCacheDirFn, uvCachedFn, uvToolDirFn, uvInstalledFn
+	resolvePythonFn = func(_ context.Context, _ string, _, uvFlags, _ []string) ([]catalog.Resolved, error) {
+		pipCalled, gotUV = true, uvFlags
+		return nil, nil
+	}
+	resolveWithUVFn = func(_ context.Context, _ string, _, uvFlags []string) ([]catalog.Resolved, error) {
+		gotUV = uvFlags
+		return nil, nil
+	}
+	uvCacheDirFn = func(_ context.Context, flags []string) (string, error) {
+		gotSelectors = flags
+		return "", errors.New("none")
+	}
+	uvCachedFn = func(string, map[string]string) ([]catalog.Resolved, error) { return nil, nil }
+	uvToolDirFn = func(context.Context, []string) (string, error) { return "", errors.New("none") }
+	uvInstalledFn = func(string, string) ([]catalog.Resolved, error) { return nil, nil }
+	t.Cleanup(func() {
+		resolvePythonFn, resolveWithUVFn, uvCacheDirFn, uvCachedFn, uvToolDirFn, uvInstalledFn = old, oldUV, oldDir, oldCached, oldToolDir, oldInstalled
+	})
+	t.Setenv("UV_CACHE_DIR", "")
+	uvx, _ := Lookup("uvx")
+	for _, tt := range []struct {
+		env           string
+		args          []string
+		wantUV        []string
+		wantSelectors []string
+		wantPip       bool
+	}{
+		{"custom.toml", []string{"--directory", "sub", "ruff@0.6.0"}, []string{"--config-file", absPath("sub/custom.toml")}, []string{"--config-file", absPath("sub/custom.toml")}, false},
+		{"custom.toml", []string{"--config-file", "mine.toml", "ruff@0.6.0"}, []string{"--config-file", absPath("mine.toml")}, []string{"--config-file", absPath("mine.toml")}, false},
+		{"custom.toml", []string{"--no-config", "ruff@0.6.0"}, []string{"--no-config"}, []string{"--no-config"}, true},
+		{absPath("custom.toml"), []string{"ruff@0.6.0"}, nil, nil, true},
+	} {
+		t.Setenv("UV_CONFIG_FILE", tt.env)
+		gotUV, gotSelectors, pipCalled = nil, nil, false
+		parsed := parseToolRun(uvx, tt.args)
+		parsed.ToolRun = true
+		if _, err := expandInstall(context.Background(), uvx, tt.args, 0, parsed); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(gotUV, tt.wantUV) || pipCalled != tt.wantPip {
+			t.Errorf("%s %v: uv flags = %v (pip %v), want %v (pip %v)", tt.env, tt.args, gotUV, pipCalled, tt.wantUV, tt.wantPip)
+		}
+		if len(gotSelectors) != len(tt.wantSelectors) || (len(tt.wantSelectors) > 0 && !reflect.DeepEqual(gotSelectors, tt.wantSelectors)) {
+			t.Errorf("%s %v: cache probe selectors = %v, want %v", tt.env, tt.args, gotSelectors, tt.wantSelectors)
+		}
+	}
+}
+
 // A tool run's --with-requirements files are installed into the same
 // environment as the packages, so they resolve together: the resolver gets
 // each file as a "-r" spec, the path absolute against the run's directory.

@@ -528,10 +528,35 @@ func TestUVToolRunConfig(t *testing.T) {
 			t.Errorf("%v: flags = %v, err = %v, want unchanged", flags, got, err)
 		}
 	}
-	// The user-level file is read when none is named.
+	// The file UV_CONFIG_FILE names is read when none is named on the line.
 	t.Setenv("UV_CONFIG_FILE", withPip)
 	if got, err := uvToolRunConfig([]string{"--offline"}, scratch); err != nil || !reflect.DeepEqual(got, []string{"--offline", "--config-file", stripped}) {
-		t.Errorf("user-level config: flags = %v, err = %v", got, err)
+		t.Errorf("UV_CONFIG_FILE: flags = %v, err = %v", got, err)
+	}
+
+	// Discovered configuration is the user-level file over the system-level
+	// one, merged as uv merges them: the user's value wins where both set
+	// one, the rest is kept, and the [pip] table of either is dropped.
+	t.Setenv("UV_CONFIG_FILE", "")
+	sys, usr := t.TempDir(), t.TempDir()
+	t.Setenv("XDG_CONFIG_DIRS", sys)
+	t.Setenv("XDG_CONFIG_HOME", usr)
+	os.MkdirAll(filepath.Join(sys, "uv"), 0o755)
+	os.MkdirAll(filepath.Join(usr, "uv"), 0o755)
+	os.WriteFile(filepath.Join(sys, "uv", "uv.toml"), []byte("index-url = \"https://sys.example/simple\"\npython-preference = \"managed\"\n\n[pip]\nindex-url = \"https://syspip.example/simple\"\n"), 0o644)
+	os.WriteFile(filepath.Join(usr, "uv", "uv.toml"), []byte("index-url = \"https://usr.example/simple\"\n"), 0o644)
+	got, err = uvToolRunConfig([]string{"--offline"}, scratch)
+	if err != nil || !reflect.DeepEqual(got, []string{"--offline", "--config-file", stripped}) {
+		t.Fatalf("discovered config: flags = %v, err = %v", got, err)
+	}
+	data, _ = os.ReadFile(stripped)
+	if s := string(data); !strings.Contains(s, "usr.example") || !strings.Contains(s, "managed") || strings.Contains(s, "sys.example") || strings.Contains(s, "pip") {
+		t.Errorf("merged copy:\n%s", s)
+	}
+	// With no [pip] table anywhere, uv discovers the files itself.
+	os.WriteFile(filepath.Join(sys, "uv", "uv.toml"), []byte("python-preference = \"managed\"\n"), 0o644)
+	if got, err := uvToolRunConfig([]string{"--offline"}, scratch); err != nil || !reflect.DeepEqual(got, []string{"--offline"}) {
+		t.Errorf("no [pip] anywhere: flags = %v, err = %v", got, err)
 	}
 }
 

@@ -768,11 +768,13 @@ func resolveWithUV(ctx context.Context, uv, dir string, specs, flags []string) (
 // configuration, which uvx and `uv tool run` ignore (verified against uv
 // 0.11: with a top-level index-url and a [pip] index-url in one file, uvx
 // fetches from the former and `uv pip compile` from the latter), so the
-// file the run reads — --config-file, UV_CONFIG_FILE, else the user-level
-// uv.toml — is copied into scratch without that table and named by
-// --config-file. A run with --no-config reads none, and a file without a
-// [pip] table is read as it is; a file uv cannot parse is left for uv to
-// report, as the run would.
+// configuration the run reads — the file named by --config-file or
+// UV_CONFIG_FILE, else the user-level uv.toml over the system-level one,
+// merged as uv merges them (field by field, the user's winning) — is
+// written into scratch without that table and named by --config-file. A
+// run with --no-config reads none, and configuration without a [pip]
+// table is left for uv to discover as it is; a file uv cannot parse is
+// left for uv to report, as the run would.
 func uvToolRunConfig(flags []string, scratch string) ([]string, error) {
 	path := ""
 	for i := 0; i < len(flags); i++ {
@@ -789,29 +791,36 @@ func uvToolRunConfig(flags []string, scratch string) ([]string, error) {
 	if path == "" {
 		path = os.Getenv("UV_CONFIG_FILE")
 	}
+	sources := []string{path}
 	if path == "" {
-		path = userUVConfig()
+		sources = uvConfigSources()
 	}
-	if path == "" {
-		return flags, nil
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
+	merged := map[string]any{}
+	found := false
+	for _, source := range sources {
+		data, err := os.ReadFile(source)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			return nil, err
+		}
+		var cfg map[string]any
+		if _, err := toml.Decode(string(data), &cfg); err != nil {
 			return flags, nil
 		}
-		return nil, err
+		mergeTOML(merged, cfg)
+		found = true
 	}
-	var cfg map[string]any
-	if _, err := toml.Decode(string(data), &cfg); err != nil {
+	if !found {
 		return flags, nil
 	}
-	if _, ok := cfg["pip"]; !ok {
+	if _, ok := merged["pip"]; !ok {
 		return flags, nil
 	}
-	delete(cfg, "pip")
+	delete(merged, "pip")
 	var buf bytes.Buffer
-	if err := toml.NewEncoder(&buf).Encode(cfg); err != nil {
+	if err := toml.NewEncoder(&buf).Encode(merged); err != nil {
 		return nil, err
 	}
 	stripped := filepath.Join(scratch, "uv.toml")
@@ -829,24 +838,61 @@ func uvToolRunConfig(flags []string, scratch string) ([]string, error) {
 	return append(out, "--config-file", stripped), nil
 }
 
-// userUVConfig is where uv looks for user-level configuration:
-// $XDG_CONFIG_HOME/uv/uv.toml (~/.config/uv/uv.toml) on POSIX,
-// %APPDATA%\uv\uv.toml on Windows.
-func userUVConfig() string {
-	if runtime.GOOS == "windows" {
-		if v := os.Getenv("APPDATA"); v != "" {
-			return filepath.Join(v, "uv", "uv.toml")
+// mergeTOML lays over onto base as uv combines configuration: table by
+// table, a value from over winning where both set one.
+func mergeTOML(base, over map[string]any) {
+	for k, v := range over {
+		if ov, ok := v.(map[string]any); ok {
+			if bv, ok := base[k].(map[string]any); ok {
+				mergeTOML(bv, ov)
+				continue
+			}
 		}
-		return ""
+		base[k] = v
+	}
+}
+
+// uvConfigSources are the configuration files uv discovers for a tool run,
+// lowest precedence first: the system-level uv.toml (/etc/uv/uv.toml, or
+// the first under $XDG_CONFIG_DIRS; %PROGRAMDATA%\uv\uv.toml on Windows),
+// then the user-level one ($XDG_CONFIG_HOME/uv/uv.toml, ~/.config/uv/uv.toml;
+// %APPDATA%\uv\uv.toml on Windows). The XDG variables are read on every
+// platform, which only matters where someone set them.
+func uvConfigSources() []string {
+	var system, user string
+	if dirs := os.Getenv("XDG_CONFIG_DIRS"); dirs != "" {
+		for _, d := range strings.Split(dirs, string(os.PathListSeparator)) {
+			if d == "" {
+				continue
+			}
+			system = filepath.Join(d, "uv", "uv.toml")
+			if _, err := os.Stat(system); err == nil {
+				break
+			}
+		}
+	} else if runtime.GOOS == "windows" {
+		if v := os.Getenv("PROGRAMDATA"); v != "" {
+			system = filepath.Join(v, "uv", "uv.toml")
+		}
+	} else {
+		system = filepath.Join("/etc", "uv", "uv.toml")
 	}
 	if v := os.Getenv("XDG_CONFIG_HOME"); v != "" {
-		return filepath.Join(v, "uv", "uv.toml")
+		user = filepath.Join(v, "uv", "uv.toml")
+	} else if runtime.GOOS == "windows" {
+		if v := os.Getenv("APPDATA"); v != "" {
+			user = filepath.Join(v, "uv", "uv.toml")
+		}
+	} else if home, err := os.UserHomeDir(); err == nil {
+		user = filepath.Join(home, ".config", "uv", "uv.toml")
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ""
+	var out []string
+	for _, p := range []string{system, user} {
+		if p != "" {
+			out = append(out, p)
+		}
 	}
-	return filepath.Join(home, ".config", "uv", "uv.toml")
+	return out
 }
 
 // resolveWithPip runs pip's dry run over the named requirements. Wheels only:
