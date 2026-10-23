@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/anchore/syft/syft/pkg"
@@ -18,6 +19,9 @@ var cratesIoIndex = map[string][2]string{
 	"sparse":   {"index.crates.io", "/"},
 }
 
+// defaultPort is the port the WHATWG URL parser drops for each special scheme.
+var defaultPort = map[string]uint64{"ftp": 21, "http": 80, "https": 443, "ws": 80, "wss": 443}
+
 // crateURLCleaner applies the WHATWG URL parser's tab and newline removal and its reading of '\' as '/'.
 var crateURLCleaner = strings.NewReplacer("\t", "", "\n", "", "\r", "", `\`, "/")
 
@@ -28,7 +32,7 @@ func isCratesIo(source string) bool {
 	if !ok {
 		return false
 	}
-	_, rest, ok := strings.Cut(crateURLCleaner.Replace(raw), ":")
+	scheme, rest, ok := strings.Cut(crateURLCleaner.Replace(raw), ":")
 	if !ok {
 		return false
 	}
@@ -40,8 +44,15 @@ func isCratesIo(source string) bool {
 	if i := strings.IndexAny(p, "?#"); i >= 0 {
 		p = p[:i]
 	}
-	// Userinfo, port, query and fragment cannot move the index off crates.io's host.
-	host, _, _ := strings.Cut(authority[strings.LastIndex(authority, "@")+1:], ":")
+	// Userinfo, query and fragment cannot move the index off crates.io's host.
+	host, port, _ := strings.Cut(authority[strings.LastIndex(authority, "@")+1:], ":")
+	if port != "" {
+		// Cargo keeps any other port, and CanonicalUrl re-parses a github.com index as https.
+		n, err := strconv.ParseUint(port, 10, 16)
+		if err != nil || n != defaultPort[strings.ToLower(scheme)] && (kind != "registry" || n != 443) {
+			return false
+		}
+	}
 	host, err := url.PathUnescape(host)
 	if err != nil {
 		return false
@@ -108,17 +119,18 @@ func qualifierKey(qualifiers map[string]string) string {
 	return b.String()
 }
 
-// cargoWorkspaces maps a location to the directory of the nearest Cargo.lock at or above it, "" when none.
-func cargoWorkspaces(pkgs []Package) func(loc string) string {
+// cargoOwns reports whether p's Cargo.toml sighting at loc means marked crate m: that workspace locks m, at p's pin if any, and not p from crates.io.
+func cargoOwns(pkgs []Package) func(m, p Package, loc string) bool {
 	locks := map[string]bool{}
 	for _, p := range pkgs {
-		for _, l := range p.Locations {
+		for _, l := range p.sightings {
 			if l = filepath.ToSlash(l); path.Base(l) == "Cargo.lock" {
 				locks[path.Dir(l)] = true
 			}
 		}
 	}
-	return func(loc string) string {
+	// workspace is the directory of the nearest Cargo.lock at or above loc, "" when none.
+	workspace := func(loc string) string {
 		for d := path.Dir(filepath.ToSlash(loc)); ; d = path.Dir(d) {
 			if locks[d] {
 				return d
@@ -127,5 +139,12 @@ func cargoWorkspaces(pkgs []Package) func(loc string) string {
 				return ""
 			}
 		}
+	}
+	return func(m, p Package, loc string) bool {
+		ws := workspace(loc)
+		inWorkspace := func(l string) bool { return workspace(l) == ws }
+		cratesIoLock := func(l string) bool { return path.Base(filepath.ToSlash(l)) == "Cargo.lock" && inWorkspace(l) }
+		return ws != "" && path.Base(filepath.ToSlash(loc)) == "Cargo.toml" && (p.Version == "" || p.Version == m.Version) &&
+			slices.ContainsFunc(m.sightings, inWorkspace) && !slices.ContainsFunc(p.sightings, cratesIoLock)
 	}
 }

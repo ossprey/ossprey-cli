@@ -47,6 +47,8 @@ type Package struct {
 	Trusted bool
 	// Qualifiers are purl qualifiers marking a git or private-registry crate.
 	Qualifiers map[string]string
+	// sightings are every location dedup merged into this package, for Cargo workspace ownership.
+	sightings []string
 }
 
 // Options tunes a Catalog run.
@@ -279,6 +281,7 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 				// first: one lockfile fetching it from the public index is
 				// enough to need a check.
 				out[i].Registries = mergeUnique(out[i].Registries, []string{registryOf(p)})
+				out[i].sightings = mergeUnique(out[i].sightings, locations(p))
 				continue
 			}
 			seen[key] = len(out)
@@ -290,6 +293,7 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 				Locations:  locations(p),
 				Registries: mergeUnique(nil, []string{registryOf(p)}),
 				Qualifiers: qualifiers,
+				sightings:  locations(p),
 			})
 		}
 	}
@@ -452,13 +456,6 @@ func mergeVersionless(pkgs []Package) []Package {
 		return p.Type + "@" + normalizeName(p.Name)
 	}
 
-	// A source-marked crate takes sightings only from manifests in the workspace that locks it.
-	workspace := cargoWorkspaces(pkgs)
-	owns := func(m Package, loc string) bool {
-		ws := workspace(loc)
-		return ws != "" && slices.ContainsFunc(m.Locations, func(l string) bool { return workspace(l) == ws })
-	}
-
 	hasVersioned := map[string]bool{}
 	marked := map[string][]Package{}
 	for _, p := range pkgs {
@@ -471,19 +468,12 @@ func mergeVersionless(pkgs []Package) []Package {
 		}
 	}
 	folds := func(p Package) bool {
-		// A source-marked sighting is never folded into another crate's release.
-		if p.Version != "" || len(p.Qualifiers) > 0 {
-			return false
-		}
-		if hasVersioned[gkey(p)] {
-			return true
-		}
-		for _, l := range p.Locations {
-			if !slices.ContainsFunc(marked[gkey(p)], func(m Package) bool { return owns(m, l) }) {
-				return false
-			}
-		}
-		return len(p.Locations) > 0
+		return p.Version == "" && len(p.Qualifiers) == 0 && hasVersioned[gkey(p)]
+	}
+
+	owns := cargoOwns(pkgs)
+	owned := func(m, p Package) []string {
+		return slices.DeleteFunc(slices.Clone(p.sightings), func(l string) bool { return !owns(m, p, l) })
 	}
 
 	// Keep versioned entries and versionless ones with no versioned sibling;
@@ -494,6 +484,18 @@ func mergeVersionless(pkgs []Package) []Package {
 		if folds(p) {
 			continue // folded below
 		}
+		if len(p.Qualifiers) == 0 && len(marked[gkey(p)]) > 0 {
+			// The sightings a marked crate owns fold into it below; any others stay this package.
+			rest := slices.DeleteFunc(slices.Clone(p.sightings), func(l string) bool {
+				return slices.ContainsFunc(marked[gkey(p)], func(m Package) bool { return owns(m, p, l) })
+			})
+			if len(rest) < len(p.sightings) {
+				if len(rest) == 0 {
+					continue
+				}
+				p.Locations, p.sightings = rest, rest
+			}
+		}
 		if p.Version != "" {
 			groupIdx[gkey(p)] = append(groupIdx[gkey(p)], len(out))
 		}
@@ -501,15 +503,21 @@ func mergeVersionless(pkgs []Package) []Package {
 	}
 
 	for _, p := range pkgs {
-		if folds(p) {
-			for _, i := range groupIdx[gkey(p)] {
-				if len(out[i].Qualifiers) > 0 && !slices.ContainsFunc(p.Locations, func(l string) bool { return owns(out[i], l) }) {
+		if len(p.Qualifiers) > 0 {
+			continue
+		}
+		for _, i := range groupIdx[gkey(p)] {
+			locs := p.Locations
+			if len(out[i].Qualifiers) > 0 {
+				if locs = owned(out[i], p); len(locs) == 0 {
 					continue
 				}
-				out[i].Source = mergeUnique(out[i].Source, p.Source)
-				out[i].Locations = mergeUnique(out[i].Locations, p.Locations)
-				out[i].Registries = mergeUnique(out[i].Registries, p.Registries)
+			} else if !folds(p) {
+				continue
 			}
+			out[i].Source = mergeUnique(out[i].Source, p.Source)
+			out[i].Locations = mergeUnique(out[i].Locations, locs)
+			out[i].Registries = mergeUnique(out[i].Registries, p.Registries)
 		}
 	}
 	return out

@@ -36,7 +36,8 @@ func (c *CargoTomlCataloger) Catalog(ctx context.Context, resolver file.Resolver
 	parse := func(path string, loc file.Location) ([]pkg.Package, error) {
 		return parseCargoTomlFile(ctx, path, loc, c.root)
 	}
-	out, err := catalogByGlob(ctx, resolver, c.root, "**/Cargo.toml", "cargotoml", parse)
+	// Every manifest's sighting is kept: mergeVersionless folds each by its own workspace.
+	out, err := catalogEachByGlob(ctx, resolver, c.root, "**/Cargo.toml", "cargotoml", parse)
 	return out, nil, err
 }
 

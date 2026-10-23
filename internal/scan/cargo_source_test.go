@@ -433,3 +433,148 @@ source = "git+https://broken-user:br0ken-s3cret@git.example.com:notaport/acme/br
 		}
 	}
 }
+
+// Cargo drops only the scheme's default port, so crates.io's host on another port is another source.
+func TestRunMarksCratesIoHostOnANonDefaultPort(t *testing.T) {
+	noCI(t)
+	stubCratesIo(t)
+	dir := writeCargoProject(t, "", `version = 4
+
+[[package]]
+name = "default-port-crate"
+version = "1.0.0"
+source = "registry+https://github.com:443/rust-lang/crates.io-index"
+
+[[package]]
+name = "git-port-crate"
+version = "1.0.0"
+source = "registry+https://github.com:8443/rust-lang/crates.io-index"
+
+[[package]]
+name = "sparse-port-crate"
+version = "1.0.0"
+source = "sparse+https://index.crates.io:8443/"
+`)
+
+	sbom, err := Run(warn.NewContext(context.Background(), true), Options{Path: dir, NoExec: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertPurls(t, wirePurls(sbom), []string{
+		"pkg:cargo/default-port-crate@1.0.0",
+		"pkg:cargo/git-port-crate@1.0.0?repository_url=https:%2F%2Fgithub.com:8443%2F",
+		"pkg:cargo/sparse-port-crate@1.0.0?repository_url=https:%2F%2Findex.crates.io:8443%2F",
+	})
+}
+
+// A lockless project's range dep keeps its own sighting when another workspace declares the same range and patches it to git.
+func TestRunKeepsAnotherWorkspacesCratesIoRangeDep(t *testing.T) {
+	noCI(t)
+	asked := stubCratesIo(t)
+	dir := t.TempDir()
+	for name, body := range map[string]string{
+		"a/Cargo.toml": `[package]
+name = "acme-a-app"
+version = "0.1.0"
+
+[dependencies]
+fold-crate = "2"
+
+[patch.crates-io]
+fold-crate = { git = "https://git.example.com/acme/fold-crate" }
+`,
+		"a/Cargo.lock": `version = 4
+
+[[package]]
+name = "acme-a-app"
+version = "0.1.0"
+
+[[package]]
+name = "fold-crate"
+version = "2.0.0"
+source = "git+https://git.example.com/acme/fold-crate#` + forkedCommit + `"
+`,
+		"b/Cargo.toml": `[package]
+name = "acme-b-lib"
+version = "0.1.0"
+
+[dependencies]
+fold-crate = "1"
+`,
+	} {
+		p := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	sbom, err := Run(warn.NewContext(context.Background(), true), Options{Path: dir, NoExec: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertPurls(t, wirePurls(sbom), []string{
+		"pkg:cargo/fold-crate@2.0.0?vcs_url=git%2Bhttps:%2F%2Fgit.example.com%2Facme%2Ffold-crate%40" + forkedCommit,
+		"pkg:cargo/fold-crate@9.9.9",
+	})
+	if got := asked(); !slices.Equal(got, []string{"fold-crate"}) {
+		t.Errorf("crates.io was asked about %v; b's fold-crate is a crates.io dependency", got)
+	}
+}
+
+// An exact Cargo.toml pin of a [patch]ed crate is the git crate the lock marks, not a crates.io release.
+func TestRunFoldsAnExactPinIntoItsMarkedLockEntry(t *testing.T) {
+	noCI(t)
+	asked := stubCratesIo(t)
+	dir := writeCargoProject(t, `[package]
+name = "acme-root-app"
+version = "0.1.0"
+
+[dependencies]
+forked-crate = "=2.0.0"
+twin-crate = "=1.0.0"
+
+[patch.crates-io]
+forked-crate = { git = "https://git.example.com/acme/forked-crate", branch = "main" }
+`, `version = 4
+
+[[package]]
+name = "acme-root-app"
+version = "0.1.0"
+
+[[package]]
+name = "forked-crate"
+version = "2.0.0"
+source = "git+https://git.example.com/acme/forked-crate?branch=main#`+forkedCommit+`"
+
+[[package]]
+name = "twin-crate"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ffff"
+
+[[package]]
+name = "twin-crate"
+version = "1.0.0"
+source = "git+ssh://git@git.example.com/acme/twin-crate.git#`+twinCommit+`"
+`)
+
+	sbom, err := Run(warn.NewContext(context.Background(), true), Options{Path: dir, NoExec: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertPurls(t, wirePurls(sbom), []string{
+		"pkg:cargo/forked-crate@2.0.0?vcs_url=git%2Bhttps:%2F%2Fgit.example.com%2Facme%2Fforked-crate%40" + forkedCommit,
+		// Both twins come from Cargo.lock, so the crates.io one stays.
+		"pkg:cargo/twin-crate@1.0.0",
+		"pkg:cargo/twin-crate@1.0.0?vcs_url=git%2Bssh:%2F%2Fgit.example.com%2Facme%2Ftwin-crate.git%40" + twinCommit,
+	})
+	if got := asked(); len(got) != 0 {
+		t.Errorf("crates.io was asked about %v; every crate here is versioned", got)
+	}
+}

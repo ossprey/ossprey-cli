@@ -57,6 +57,22 @@ func hostPath(root, realPath string) string {
 // resolver's root, dedup'd by (name, version). Shared by every ossprey-*
 // cataloger — they differ only by glob + parse.
 func catalogByGlob(ctx context.Context, resolver file.Resolver, root, glob, label string, parse fileParser) ([]pkg.Package, error) {
+	pkgs, err := catalogEachByGlob(ctx, resolver, root, glob, label, parse)
+	seen := make(map[string]struct{})
+	var out []pkg.Package
+	for _, p := range pkgs {
+		key := p.Name + "@" + p.Version
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, p)
+	}
+	return out, err
+}
+
+// catalogEachByGlob is catalogByGlob without the dedup, keeping every file's sighting.
+func catalogEachByGlob(ctx context.Context, resolver file.Resolver, root, glob, label string, parse fileParser) ([]pkg.Package, error) {
 	locs, err := resolver.FilesByGlob(glob)
 	if err != nil {
 		return nil, fmt.Errorf("%s cataloger: glob: %w", label, err)
@@ -105,17 +121,9 @@ func catalogByGlob(ctx context.Context, resolver file.Resolver, root, glob, labe
 	_ = g.Wait() // workers never return non-nil; Wait is just the barrier
 
 	sort.Slice(results, func(a, b int) bool { return results[a].idx < results[b].idx })
-	seen := make(map[string]struct{})
 	var out []pkg.Package
 	for _, r := range results {
-		for _, p := range r.pkgs {
-			key := p.Name + "@" + p.Version
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
-			out = append(out, p)
-		}
+		out = append(out, r.pkgs...)
 	}
 	return out, nil
 }
