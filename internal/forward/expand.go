@@ -416,10 +416,14 @@ func withUVCached(ctx context.Context, tree []catalog.Resolved, parsed installAr
 	if uvReadsCache(opts) && cache != "" {
 		// A requirement with a marker is installed only where the marker
 		// holds, which the resolver decides; an environment is not asked
-		// to hold it.
+		// to hold it — unless the same package is also requested without
+		// one (`--with 'rich; sys_platform == "win32"' --with rich`), in
+		// which case it is installed regardless.
 		want := map[string]string{}
 		for _, s := range parsed.Specs {
-			if slices.ContainsFunc(parsed.Tokens[s], func(tok string) bool { return strings.Contains(tok, ";") }) {
+			toks := parsed.Tokens[s]
+			conditional := func(tok string) bool { return strings.Contains(tok, ";") }
+			if len(toks) > 0 && !slices.ContainsFunc(toks, func(tok string) bool { return !conditional(tok) }) {
 				continue
 			}
 			want[canonicalPyPI(s.Name)] = s.Version

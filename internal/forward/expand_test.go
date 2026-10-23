@@ -1582,6 +1582,8 @@ func TestExpandInstall_ToolRunCoversTheUVCache(t *testing.T) {
 		// A --with requirement with a marker may not be installed at all,
 		// so a cached environment is not asked to hold it.
 		{uvx, []string{"--with", "rich; sys_platform == \"win32\"", "cowsay"}, fromUV, fromUV, []string{}, map[string]string{"cowsay": ""}, cached, ""},
+		// Unless it is also requested unconditionally.
+		{uvx, []string{"--with", "rich; sys_platform == \"win32\"", "--with", "rich", "cowsay"}, fromUV, fromUV, []string{}, map[string]string{"cowsay": "", "rich": ""}, cached, ""},
 		{uv, []string{"--cache-dir=d", "tool", "run", "--index", "https://i.example", "cowsay"}, "", absPath("d"), nil, map[string]string{"cowsay": ""}, all, "cowsay"},
 		// A relative --cache-dir is relative to the directory the run
 		// changes to, as is a relative answer from uv.

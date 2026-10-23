@@ -642,6 +642,15 @@ func TestUVCachedTree(t *testing.T) {
 	venv(filepath.Join(envs, "k3", "e3"), map[string]string{"cowsay": "6.0", "six": "1.15.0"}, false)
 	venv(filepath.Join(envs, "k4", "e4"), map[string]string{"ruff": "0.6.0"}, false)
 	os.MkdirAll(filepath.Join(envs, "k5", "notavenv"), 0o755)
+	// A damaged environment (sorted first) hides only itself: its METADATA
+	// is a directory, which cannot be read. One with a single unreadable
+	// dist-info beside a readable one still reports the readable one.
+	venv(filepath.Join(envs, "k0", "e0"), map[string]string{"cowsay": "6.1"}, false)
+	os.RemoveAll(filepath.Join(envs, "k0", "e0", "lib", "python3.13", "site-packages", "cowsay-6.1.dist-info", "METADATA"))
+	os.MkdirAll(filepath.Join(envs, "k0", "e0", "lib", "python3.13", "site-packages", "cowsay-6.1.dist-info", "METADATA"), 0o755)
+	venv(filepath.Join(envs, "k6", "e6"), map[string]string{"cowsay": "6.1", "broken": "1.0"}, false)
+	os.RemoveAll(filepath.Join(envs, "k6", "e6", "lib", "python3.13", "site-packages", "broken-1.0.dist-info", "METADATA"))
+	os.MkdirAll(filepath.Join(envs, "k6", "e6", "lib", "python3.13", "site-packages", "broken-1.0.dist-info", "METADATA"), 0o755)
 
 	names := func(rs []Resolved) []string {
 		var out []string

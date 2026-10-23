@@ -242,9 +242,11 @@ func UVCachedTree(cacheDir string, want map[string]string) ([]Resolved, error) {
 			if _, err := os.Stat(filepath.Join(env, "pyvenv.cfg")); err != nil {
 				continue
 			}
+			// A damaged environment hides only itself: the one uv reuses
+			// may be the next.
 			pkgs, err := venvPackages(env)
 			if err != nil {
-				return nil, err
+				continue
 			}
 			if !holdsAll(pkgs, want) {
 				continue
@@ -282,9 +284,11 @@ func venvPackages(env string) ([]Resolved, error) {
 	var out []Resolved
 	seen := map[string]bool{}
 	for _, f := range files {
+		// One unreadable dist-info does not hide the rest of the
+		// environment, which may still be what runs.
 		data, err := os.ReadFile(f)
 		if err != nil {
-			return nil, err
+			continue
 		}
 		// Core metadata field names are case-insensitive.
 		var name, version string
