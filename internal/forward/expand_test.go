@@ -1168,7 +1168,16 @@ func TestExpandInstall_ToolRunCoversTheUVCache(t *testing.T) {
 		asked++
 		return []catalog.Resolved{{Name: "cowsay", Version: "6.1"}, {Name: "six", Version: "1.16.0"}}, nil
 	}
-	uvCacheDirFn = func(context.Context, []string) (string, error) { return "/from/uv", nil }
+	// uv answers with a relative path, as it does for a relative cache-dir
+	// in a config file; selectorsAsked records the flags it was asked with.
+	var selectorsAsked []string
+	dirAsked := false
+	uvAnswer := "/from/uv"
+	uvCacheDirFn = func(_ context.Context, flags []string) (string, error) {
+		dirAsked, selectorsAsked = true, flags
+		return uvAnswer, nil
+	}
+	t.Setenv("UV_CACHE_DIR", "")
 	t.Cleanup(func() { resolvePythonFn, resolveWithUVFn, uvCachedFn, uvCacheDirFn = old, oldUV, oldCached, oldDir })
 
 	names := func(tree []catalog.Resolved) []string {
@@ -1181,23 +1190,37 @@ func TestExpandInstall_ToolRunCoversTheUVCache(t *testing.T) {
 	uvx, _ := Lookup("uvx")
 	uv, _ := Lookup("uv")
 	for _, tt := range []struct {
-		m         *Manager
-		args      []string
-		wantCache string
-		wantWant  map[string]string
-		wantTree  []string
+		m             *Manager
+		args          []string
+		uvAnswer      string
+		wantCache     string
+		wantSelectors []string
+		wantWant      map[string]string
+		wantTree      []string
 	}{
-		{uvx, []string{"cowsay@6.1", "-t", "hi"}, absPath("/from/uv"), map[string]string{"cowsay": "6.1"},
+		{uvx, []string{"cowsay@6.1", "-t", "hi"}, "/from/uv", absPath("/from/uv"), []string{}, map[string]string{"cowsay": "6.1"},
 			[]string{"cowsay@6.1", "six@1.17.0", "six@1.16.0"}},
-		{uvx, []string{"--cache-dir", "c", "--with", "Rich", "cowsay", "-t", "hi"}, absPath("c"), map[string]string{"cowsay": "", "rich": ""},
+		{uvx, []string{"--cache-dir", "c", "--with", "Rich", "cowsay", "-t", "hi"}, "", absPath("c"), nil, map[string]string{"cowsay": "", "rich": ""},
 			[]string{"cowsay@6.1", "six@1.17.0", "six@1.16.0"}},
-		{uv, []string{"--cache-dir=d", "tool", "run", "--index", "https://i.example", "cowsay"}, absPath("d"), map[string]string{"cowsay": ""},
+		{uv, []string{"--cache-dir=d", "tool", "run", "--index", "https://i.example", "cowsay"}, "", absPath("d"), nil, map[string]string{"cowsay": ""},
 			[]string{"cowsay@6.1", "six@1.17.0", "six@1.16.0"}},
-		{uvx, []string{"--no-cache", "cowsay"}, "", nil, []string{"cowsay@6.1", "six@1.17.0"}},
-		{uvx, []string{"--refresh", "cowsay"}, "", nil, []string{"cowsay@6.1", "six@1.17.0"}},
-		{uv, []string{"-n", "tool", "run", "cowsay"}, "", nil, []string{"cowsay@6.1", "six@1.17.0"}},
+		// A relative --cache-dir is relative to the directory the run
+		// changes to, as is a relative answer from uv.
+		{uvx, []string{"--directory", "sub", "--cache-dir", "c", "cowsay"}, "", absPath("sub/c"), nil, map[string]string{"cowsay": ""},
+			[]string{"cowsay@6.1", "six@1.17.0", "six@1.16.0"}},
+		{uv, []string{"--directory", "sub", "tool", "run", "cowsay"}, "rel", absPath("sub/rel"), []string{}, map[string]string{"cowsay": ""},
+			[]string{"cowsay@6.1", "six@1.17.0", "six@1.16.0"}},
+		// The configuration selectors reach uv, the file made absolute.
+		{uvx, []string{"--config-file", "custom.toml", "cowsay"}, "/cfg", absPath("/cfg"), []string{"--config-file", absPath("custom.toml")}, map[string]string{"cowsay": ""},
+			[]string{"cowsay@6.1", "six@1.17.0", "six@1.16.0"}},
+		{uv, []string{"--no-config", "--directory", "sub", "tool", "run", "--config-file", "c.toml", "cowsay"}, "/cfg", absPath("/cfg"),
+			[]string{"--no-config", "--config-file", absPath("sub/c.toml")}, map[string]string{"cowsay": ""},
+			[]string{"cowsay@6.1", "six@1.17.0", "six@1.16.0"}},
+		{uvx, []string{"--no-cache", "cowsay"}, "", "", nil, nil, []string{"cowsay@6.1", "six@1.17.0"}},
+		{uvx, []string{"--refresh", "cowsay"}, "", "", nil, nil, []string{"cowsay@6.1", "six@1.17.0"}},
+		{uv, []string{"-n", "tool", "run", "cowsay"}, "", "", nil, nil, []string{"cowsay@6.1", "six@1.17.0"}},
 	} {
-		cacheDir, cacheWant, asked = "", nil, 0
+		cacheDir, cacheWant, asked, dirAsked, selectorsAsked, uvAnswer = "", nil, 0, false, nil, tt.uvAnswer
 		start := 0
 		if tt.m == uv {
 			var ok bool
@@ -1216,6 +1239,9 @@ func TestExpandInstall_ToolRunCoversTheUVCache(t *testing.T) {
 		}
 		if (asked == 0) != (tt.wantWant == nil) || cacheDir != tt.wantCache || !reflect.DeepEqual(cacheWant, tt.wantWant) {
 			t.Errorf("%s %v: cache read %d times from %q for %v, want %q for %v", tt.m.Bin, tt.args, asked, cacheDir, cacheWant, tt.wantCache, tt.wantWant)
+		}
+		if dirAsked != (tt.wantSelectors != nil) || len(selectorsAsked) != len(tt.wantSelectors) || (len(tt.wantSelectors) > 0 && !reflect.DeepEqual(selectorsAsked, tt.wantSelectors)) {
+			t.Errorf("%s %v: uv cache dir asked = %v with %v, want %v with %v", tt.m.Bin, tt.args, dirAsked, selectorsAsked, tt.wantSelectors != nil, tt.wantSelectors)
 		}
 	}
 

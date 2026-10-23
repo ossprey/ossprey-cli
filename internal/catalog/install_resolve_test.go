@@ -519,8 +519,26 @@ func TestUVCachedTreeMatchesARealRun(t *testing.T) {
 		t.Skip("no uv")
 	}
 	cache := t.TempDir()
+	// uv rejects an empty UV_CACHE_DIR outright, so the variable is unset
+	// rather than blanked; t.Setenv restores whatever the host had.
+	t.Setenv("UV_CACHE_DIR", "unset-below")
+	os.Unsetenv("UV_CACHE_DIR")
 	if got, err := UVCacheDir(context.Background(), []string{"--cache-dir", cache}); err != nil || filepath.Clean(got) != cache {
 		t.Errorf("uv cache dir --cache-dir: %q, %v", got, err)
+	}
+	// A cache-dir in an explicitly named configuration file is where the
+	// run reuses from; one in the working directory's uv.toml is not, since
+	// a tool run reads no project configuration.
+	custom := filepath.Join(t.TempDir(), "custom.toml")
+	os.WriteFile(custom, []byte("cache-dir = \""+filepath.ToSlash(filepath.Join(cache, "custom"))+"\"\n"), 0o644)
+	if got, err := UVCacheDir(context.Background(), []string{"--config-file", custom}); err != nil || filepath.Clean(got) != filepath.Join(cache, "custom") {
+		t.Errorf("uv cache dir --config-file: %q, %v", got, err)
+	}
+	project := t.TempDir()
+	os.WriteFile(filepath.Join(project, "uv.toml"), []byte("cache-dir = \"./project-cache\"\n"), 0o644)
+	t.Chdir(project)
+	if got, err := UVCacheDir(context.Background(), nil); err != nil || strings.Contains(got, "project-cache") {
+		t.Errorf("uv cache dir read the working directory's uv.toml: %q, %v", got, err)
 	}
 	cmd := exec.Command(uv, "tool", "run", "--cache-dir", cache, "--from", "cowsay==6.1", "cowsay", "-t", "hi")
 	cmd.Env = toolEnv()

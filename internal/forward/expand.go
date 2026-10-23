@@ -262,7 +262,7 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 			}
 			// uv may reuse a tool environment it cached for an earlier run,
 			// dependencies and all, rather than what resolves today.
-			return withUVCached(ctx, tree, parsed, slices.Concat(uvGlobalArgs(m, args), lead)), nil
+			return withUVCached(ctx, tree, parsed, slices.Concat(uvGlobalArgs(m, args), lead), base), nil
 		}
 		if hasFlag(rest, "--no-deps") {
 			return nil, nil
@@ -357,8 +357,9 @@ func withNpxCached(ctx context.Context, tree []catalog.Resolved, parsed installA
 // resolved back then, so the run may execute either tree. opts are uv's
 // options for the run, before and after the verb: a run that reads no cache
 // (--no-cache) or resolves afresh (--refresh, --reinstall) adds nothing, and
-// --cache-dir names the cache. An unreadable cache adds nothing.
-func withUVCached(ctx context.Context, tree []catalog.Resolved, parsed installArgs, opts []string) []catalog.Resolved {
+// --cache-dir names the cache, relative to base, the directory the run
+// changes to. An unreadable cache adds nothing.
+func withUVCached(ctx context.Context, tree []catalog.Resolved, parsed installArgs, opts []string, base string) []catalog.Resolved {
 	for _, a := range opts {
 		if a == "-n" || a == "--no-cache" || a == "--refresh" || a == "--reinstall" {
 			return tree
@@ -368,7 +369,7 @@ func withUVCached(ctx context.Context, tree []catalog.Resolved, parsed installAr
 	for _, s := range parsed.Specs {
 		want[canonicalPyPI(s.Name)] = s.Version
 	}
-	cached, err := uvCachedFn(uvCacheDir(ctx, opts), want)
+	cached, err := uvCachedFn(uvCacheDir(ctx, opts, base), want)
 	if err != nil || len(cached) == 0 {
 		return tree
 	}
@@ -387,35 +388,45 @@ func withUVCached(ctx context.Context, tree []catalog.Resolved, parsed installAr
 }
 
 // uvCacheDir is where uv keeps its cache for this run: --cache-dir among
-// opts, else what uv says (`uv cache dir`, which honours UV_CACHE_DIR and
-// its own configuration), else that variable, else uv's platform default
-// when uv cannot be asked.
-func uvCacheDir(ctx context.Context, opts []string) string {
+// opts, else UV_CACHE_DIR, else what uv says (`uv cache dir` with the run's
+// own configuration selectors, --config-file and --no-config, since a
+// cache-dir in an explicitly named file is where uv reuses from), else uv's
+// platform default when it cannot be asked. Every relative answer is
+// uv's, resolved against base, the directory the run changes to: for
+// `uvx --directory sub --cache-dir c` uv uses sub/c (verified, as is a
+// relative cache-dir in a config file, which uv resolves against the
+// directory it runs in, not the file's).
+func uvCacheDir(ctx context.Context, opts []string, base string) string {
 	for i, a := range opts {
 		if flag, value, inline := splitFlagValue(a); flag == "--cache-dir" {
 			if inline {
-				return absPath(value)
+				return absIn(base, value)
 			}
 			if i+1 < len(opts) {
-				return absPath(opts[i+1])
+				return absIn(base, opts[i+1])
 			}
 		}
 	}
-	if v, err := uvCacheDirFn(ctx, nil); err == nil && v != "" {
-		return absPath(v)
-	}
 	if v := os.Getenv("UV_CACHE_DIR"); v != "" {
-		return absPath(v)
+		return absIn(base, v)
 	}
-	base, err := os.UserCacheDir()
+	selectors := absFlagValues(pickFlags(opts, uvValueFlags(), uvCacheSelectors, nil), pythonPathFlags, base)
+	if v, err := uvCacheDirFn(ctx, selectors); err == nil && v != "" {
+		return absIn(base, v)
+	}
+	dir, err := os.UserCacheDir()
 	if err != nil {
 		return ""
 	}
 	if runtime.GOOS == "windows" {
-		return filepath.Join(base, "uv", "cache")
+		return filepath.Join(dir, "uv", "cache")
 	}
-	return filepath.Join(base, "uv")
+	return filepath.Join(dir, "uv")
 }
+
+// uvCacheSelectors are the uv options that change which configuration
+// names the cache, and so travel to `uv cache dir`.
+var uvCacheSelectors = flagSet("--config-file", "--no-config")
 
 // mergeSighting folds two reports of the same release into one that is
 // checked unless both would be left alone: a dependency kind survives only

@@ -127,17 +127,28 @@ func ResolveNpmInstall(ctx context.Context, projectDir, configDir string, specs,
 	return resolvedFromPackages(pkgs, locked), nil
 }
 
-// UVCacheDir is where uv keeps its cache (`uv cache dir`), which honours
-// UV_CACHE_DIR and a user-level uv.toml. flags are uv's own global options
-// that move it (--cache-dir).
+// UVCacheDir is where uv keeps its cache for a tool run (`uv cache dir`),
+// which honours UV_CACHE_DIR, a user-level uv.toml and the configuration
+// flags given (--config-file, --no-config). It is asked from a scratch
+// directory because a tool run reads no project configuration, while `uv
+// cache dir` in a project whose uv.toml names a cache-dir would answer for
+// the project (verified: uvx ignores that file, `uv cache dir` reports it).
+// The answer may be relative, as uv printed it; the caller resolves it
+// against the directory the run changes to.
 func UVCacheDir(ctx context.Context, flags []string) (string, error) {
 	uv, err := lookTool("uv")
 	if err != nil {
 		return "", fmt.Errorf("%w (uv)", ErrNoResolver)
 	}
+	scratch, err := os.MkdirTemp("", "ossprey-uv-")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(scratch)
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, uv, append([]string{"cache", "dir"}, flags...)...)
+	cmd.Dir = scratch
 	cmd.Env = toolEnv()
 	cmd.WaitDelay = 5 * time.Second
 	out, err := cmd.Output()
