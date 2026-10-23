@@ -573,6 +573,12 @@ func TestNpmParsersMatchNpm(t *testing.T) {
 		{"--cache", "~/c", "cowsay"}, {"--cache=./c", "cowsay", "moo"},
 		// A negated path option is invalid to npm, which keeps its default.
 		{"--no-cache", "cowsay"}, {"--no-prefix", "cowsay"}, {"--no-globalconfig", "cowsay", "moo"}, {"--cache=false", "cowsay"},
+		// A later negation drops an earlier value with it, as nopt's last
+		// value wins and the invalid boolean is then dropped.
+		{"--cache", "custom", "--no-cache", "cowsay"}, {"--no-cache", "--cache", "custom", "cowsay"},
+		{"--prefix", "p", "--no-prefix", "cowsay"}, {"--globalconfig", "g.npmrc", "--no-globalconfig", "cowsay"},
+		{"--userconfig", "./x.npmrc", "--no-userconfig", "cowsay"}, {"--registry", "https://a.example", "--no-registry", "cowsay"},
+		{"--tag", "beta", "--no-tag", "cowsay"}, {"--omit", "dev", "--no-omit", "cowsay"},
 	}
 	for _, args := range npx {
 		want, got := norm(oracle("npx-cli.js", args)), norm(parseNpmArgv(npxArgv(args)))

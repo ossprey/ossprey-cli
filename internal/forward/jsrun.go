@@ -401,13 +401,27 @@ func parseNpmArgv(in []string) npmArgv {
 			case kind == npmBoolOrAlways && la == "always":
 				i++
 			}
-			// A negated path option (`--no-cache`, `--no-prefix`) is a
-			// boolean nopt drops as invalid for the type ("invalid config
-			// cache=false … Must be valid filesystem path"), so npm keeps
-			// its default; recording the word rendered a cache named
-			// `false`. A literal `--cache=false` is the path `false`, which
-			// npm does use, and takes the value branch below.
-			if !npmPathConfig[key] {
+			// A negated path or url option (`--no-cache`, `--no-prefix`,
+			// `--no-userconfig`, `--no-registry`) is a boolean nopt drops
+			// as invalid for the type ("invalid config cache=false … Must
+			// be valid filesystem path"), so npm keeps its default — and
+			// since nopt's last value wins before it validates, an earlier
+			// `--cache custom` goes with it (verified against npm 11.19.1).
+			// Recording the word rendered a cache named `false`; keeping
+			// the earlier value sent the dry run to a cache the run never
+			// reads. A literal `--cache=false` is the path `false`, which
+			// npm does use, and takes the value branch below. An array
+			// option drops only the invalid entry and keeps the rest
+			// (`--omit dev --no-omit` is still omit=dev).
+			switch {
+			case npmPathConfig[key]:
+				delete(out.Config, key)
+			case key == "userconfig":
+				out.Userconfig = ""
+			case key == "registry":
+				out.Registry = ""
+			case npmArrayConfig[key]:
+			default:
 				out.record(key, value)
 			}
 			continue
