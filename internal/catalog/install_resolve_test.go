@@ -723,6 +723,36 @@ func TestUVConfigShapesResolution(t *testing.T) {
 	}
 }
 
+// Against a real uv: a constraints file handed to the tool run's resolution
+// as a flag pins the release the run installs, from wherever the resolver
+// runs.
+func TestResolvePythonInstallWithUVHonoursConstraints(t *testing.T) {
+	if testing.Short() {
+		t.Skip("network")
+	}
+	if _, ok := lookupUV(context.Background()); !ok {
+		t.Skip("no uv")
+	}
+	constraints := filepath.Join(t.TempDir(), "c.txt")
+	os.WriteFile(constraints, []byte("six==1.16.0\n"), 0o644)
+	got, err := ResolvePythonInstallWithUV(context.Background(), "", []string{"six"}, []string{"--constraints", constraints})
+	if err != nil {
+		t.Skipf("uv: %v", err)
+	}
+	found := false
+	for _, r := range got {
+		if canonicalPackageName(r.Name) == "six" {
+			found = true
+			if r.Version != "1.16.0" {
+				t.Errorf("six resolved to %s, want the constrained 1.16.0", r.Version)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("six missing from %v", got)
+	}
+}
+
 // Against a real uv: a [pip] index that would break `uv pip compile` does
 // not reach a tool run's resolution, since uvx does not read it either.
 func TestResolvePythonInstallWithUVReadsConfigAsAToolRun(t *testing.T) {

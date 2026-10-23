@@ -310,6 +310,10 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 			envConfig := uvEnvConfigFlag(opts, base)
 			uvFlags = append(uvFlags, envConfig...)
 			opts = append(opts, envConfig...)
+			// So are the files uv's path-valued variables name (UV_CONSTRAINT,
+			// UV_OVERRIDE, …): relative to where the run runs, which in
+			// scratch would be the resolver's own requirements file.
+			uvFlags = append(uvFlags, uvEnvPathFlags(opts, base)...)
 			// The cache the run reads, found once for the resolver and the
 			// cached-environment lookup. A path uv reads against the
 			// directory it runs in (a relative UV_CACHE_DIR, or a relative
@@ -491,7 +495,99 @@ func uvReadsCache(opts []string) bool {
 			return false
 		}
 	}
+	// UV_NO_CACHE is --no-cache from the environment (verified: uv reports
+	// no_cache with it set); the installed-tool lookup is not governed by
+	// it, and stays with the caller.
+	return !envTrue("UV_NO_CACHE")
+}
+
+// envTrue reads a boolean variable as clap does: set to anything but an
+// explicit false.
+func envTrue(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "", "0", "false", "no", "off":
+		return false
+	}
 	return true
+}
+
+// uvEnvPathVars are uv's variables naming files, with the flag each is
+// equivalent to (from `uv tool run --help`): space-separated lists of
+// paths, read against the directory uv runs in.
+var uvEnvPathVars = []struct {
+	env, flag string
+	aliases   []string
+}{
+	{"UV_CONSTRAINT", "--constraints", []string{"-c", "--constraint"}},
+	{"UV_OVERRIDE", "--overrides", []string{"--override"}},
+	{"UV_BUILD_CONSTRAINT", "--build-constraints", []string{"-b", "--build-constraint"}},
+	{"UV_FIND_LINKS", "--find-links", []string{"-f"}},
+	{"UV_PYTHON", "--python", []string{"-p"}},
+}
+
+// flagPresent reports whether any of the flags is among opts, as a token
+// or with an attached value (`--constraints=c.txt`).
+func flagPresent(opts []string, flags ...string) bool {
+	for _, a := range opts {
+		for _, f := range flags {
+			if a == f || strings.HasPrefix(a, f+"=") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// uvEnvPathFlags names the files uv's path-valued variables name by their
+// absolute paths, as the equivalent flags, for a resolver that runs in a
+// scratch directory: uv reads a relative value against the directory it
+// runs in (verified: uvx and `uv pip compile` both honour UV_CONSTRAINT,
+// and `--directory sub` reads sub/c.txt), and in scratch
+// UV_CONSTRAINT=requirements.txt would name the resolver's own input. A
+// flag on the line already replaces the variable, as the flag does for
+// uv, and a variable whose every entry is absolute or a URL reads the
+// same from anywhere. Each entry becomes one flag, since the flag replaces
+// the whole variable.
+func uvEnvPathFlags(opts []string, base string) []string {
+	var out []string
+	for _, v := range uvEnvPathVars {
+		if flagPresent(opts, append([]string{v.flag}, v.aliases...)...) {
+			continue
+		}
+		value := os.Getenv(v.env)
+		if value == "" {
+			continue
+		}
+		entries := strings.Fields(value)
+		if v.env == "UV_PYTHON" {
+			entries = []string{strings.TrimSpace(value)}
+		}
+		moved := false
+		for _, e := range entries {
+			if looksLikePath(e) && !filepath.IsAbs(e) {
+				moved = true
+			}
+		}
+		if !moved {
+			continue
+		}
+		for _, e := range entries {
+			if looksLikePath(e) {
+				e = absIn(base, e)
+			}
+			out = append(out, v.flag, e)
+		}
+	}
+	return out
+}
+
+// looksLikePath says a variable's entry is a file path rather than a URL
+// or, for UV_PYTHON, an interpreter version or name.
+func looksLikePath(e string) bool {
+	if strings.Contains(e, "://") {
+		return false
+	}
+	return strings.ContainsAny(e, `/\`) || strings.HasPrefix(e, ".") || strings.HasSuffix(e, ".txt") || strings.HasSuffix(e, ".in")
 }
 
 // unionSightings adds to tree the releases in extra it does not name, and

@@ -789,6 +789,125 @@ func TestExpandInstall_ConfiguredIndexesAreResolvedByUVOnly(t *testing.T) {
 	}
 }
 
+// uv's path-valued variables (UV_CONSTRAINT, UV_OVERRIDE, …) are read
+// against the directory uv runs in, and a tool run's resolver runs in
+// scratch, where UV_CONSTRAINT=requirements.txt would name the resolver's
+// own input: a relative entry is handed over as the equivalent flag,
+// absolute against the run's directory, one flag per entry. A flag on the
+// line already replaces the variable; an absolute path or a URL reads the
+// same from anywhere.
+func TestExpandInstall_ToolRunNamesRelativeEnvPaths(t *testing.T) {
+	var gotUV []string
+	old, oldUV, oldNeeds, oldDir, oldCached, oldToolDir, oldInstalled := resolvePythonFn, resolveWithUVFn, uvConfigNeedsUVFn, uvCacheDirFn, uvCachedFn, uvToolDirFn, uvInstalledFn
+	resolvePythonFn = func(_ context.Context, _ string, _, uvFlags, _ []string) ([]catalog.Resolved, error) {
+		gotUV = uvFlags
+		return nil, nil
+	}
+	resolveWithUVFn = func(_ context.Context, _ string, _, uvFlags []string) ([]catalog.Resolved, error) {
+		gotUV = uvFlags
+		return nil, nil
+	}
+	uvConfigNeedsUVFn = func([]string, string) bool { return false }
+	uvCacheDirFn = func(context.Context, []string) (string, error) { return "", errors.New("none") }
+	uvCachedFn = func(string, map[string]string) ([]catalog.Resolved, error) { return nil, nil }
+	uvToolDirFn = func(context.Context, []string) (string, error) { return "", errors.New("none") }
+	uvInstalledFn = func(string, string) ([]catalog.Resolved, error) { return nil, nil }
+	t.Cleanup(func() {
+		resolvePythonFn, resolveWithUVFn, uvConfigNeedsUVFn, uvCacheDirFn, uvCachedFn, uvToolDirFn, uvInstalledFn = old, oldUV, oldNeeds, oldDir, oldCached, oldToolDir, oldInstalled
+	})
+	for _, v := range []string{"UV_CACHE_DIR", "UV_CONFIG_FILE", "UV_CONSTRAINT", "UV_OVERRIDE", "UV_BUILD_CONSTRAINT", "UV_FIND_LINKS", "UV_PYTHON", "UV_NO_CACHE"} {
+		t.Setenv(v, "")
+	}
+	uvx, _ := Lookup("uvx")
+	for _, tt := range []struct {
+		env, value string
+		args       []string
+		wantUV     []string
+	}{
+		{"UV_CONSTRAINT", "c.txt", []string{"ruff"}, []string{"--constraints", absPath("c.txt")}},
+		{"UV_CONSTRAINT", "c.txt", []string{"--directory", "sub", "ruff"}, []string{"--constraints", absPath("sub/c.txt")}},
+		{"UV_CONSTRAINT", "c.txt", []string{"--constraints", "mine.txt", "ruff"}, []string{"--constraints", absPath("mine.txt")}},
+		{"UV_CONSTRAINT", "c.txt", []string{"-c", "mine.txt", "ruff"}, []string{"-c", absPath("mine.txt")}},
+		{"UV_CONSTRAINT", absPath("c.txt"), []string{"ruff"}, nil},
+		{"UV_CONSTRAINT", "a.txt " + absPath("b.txt"), []string{"ruff"}, []string{"--constraints", absPath("a.txt"), "--constraints", absPath("b.txt")}},
+		{"UV_OVERRIDE", "o.txt", []string{"ruff"}, []string{"--overrides", absPath("o.txt")}},
+		{"UV_BUILD_CONSTRAINT", "b.txt", []string{"ruff"}, []string{"--build-constraints", absPath("b.txt")}},
+		{"UV_FIND_LINKS", "https://w.example/simple ./wheels", []string{"ruff"}, []string{"--find-links", "https://w.example/simple", "--find-links", absPath("wheels")}},
+		{"UV_FIND_LINKS", "https://w.example/simple", []string{"ruff"}, nil},
+		{"UV_PYTHON", ".venv/bin/python", []string{"ruff"}, []string{"--python", absPath(".venv/bin/python")}},
+		{"UV_PYTHON", "3.12", []string{"ruff"}, nil},
+	} {
+		t.Setenv(tt.env, tt.value)
+		gotUV = nil
+		parsed := parseToolRun(uvx, tt.args)
+		parsed.ToolRun = true
+		if _, err := expandInstall(context.Background(), uvx, tt.args, 0, parsed); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(gotUV, tt.wantUV) {
+			t.Errorf("%s=%q %v: uv flags = %v, want %v", tt.env, tt.value, tt.args, gotUV, tt.wantUV)
+		}
+		t.Setenv(tt.env, "")
+	}
+}
+
+// UV_NO_CACHE is --no-cache from the environment: the persistent cache is
+// neither probed nor read, while an installed tool, which the setting does
+// not govern, is still read.
+func TestExpandInstall_UVNoCacheEnvSkipsTheCache(t *testing.T) {
+	old, oldUV, oldNeeds, oldDir, oldCached, oldToolDir, oldInstalled := resolvePythonFn, resolveWithUVFn, uvConfigNeedsUVFn, uvCacheDirFn, uvCachedFn, uvToolDirFn, uvInstalledFn
+	fresh := func(context.Context, string, []string, []string) ([]catalog.Resolved, error) {
+		return []catalog.Resolved{{Name: "cowsay", Version: "6.1"}}, nil
+	}
+	resolvePythonFn = func(ctx context.Context, dir string, specs, uvFlags, _ []string) ([]catalog.Resolved, error) {
+		return fresh(ctx, dir, specs, uvFlags)
+	}
+	resolveWithUVFn = fresh
+	uvConfigNeedsUVFn = func([]string, string) bool { return false }
+	probed, cacheRead := false, false
+	uvCacheDirFn = func(context.Context, []string) (string, error) {
+		probed = true
+		return filepath.Join(t.TempDir(), "c"), nil
+	}
+	uvCachedFn = func(string, map[string]string) ([]catalog.Resolved, error) {
+		cacheRead = true
+		return []catalog.Resolved{{Name: "cowsay", Version: "6.1"}, {Name: "six", Version: "1.16.0"}}, nil
+	}
+	uvToolDirFn = func(context.Context, []string) (string, error) { return filepath.Join(t.TempDir(), "tools"), nil }
+	uvInstalledFn = func(string, string) ([]catalog.Resolved, error) {
+		return []catalog.Resolved{{Name: "cowsay", Version: "6.0"}}, nil
+	}
+	t.Cleanup(func() {
+		resolvePythonFn, resolveWithUVFn, uvConfigNeedsUVFn, uvCacheDirFn, uvCachedFn, uvToolDirFn, uvInstalledFn = old, oldUV, oldNeeds, oldDir, oldCached, oldToolDir, oldInstalled
+	})
+	t.Setenv("UV_CACHE_DIR", "")
+	t.Setenv("UV_TOOL_DIR", "")
+	t.Setenv("UV_CONFIG_FILE", "")
+	uvx, _ := Lookup("uvx")
+	for _, tt := range []struct {
+		noCache   string
+		wantRead  bool
+		wantNames int
+	}{
+		{"1", false, 2},
+		{"true", false, 2},
+		{"0", true, 3},
+		{"", true, 3},
+	} {
+		t.Setenv("UV_NO_CACHE", tt.noCache)
+		probed, cacheRead = false, false
+		parsed := parseToolRun(uvx, []string{"cowsay"})
+		parsed.ToolRun = true
+		tree, err := expandInstall(context.Background(), uvx, []string{"cowsay"}, 0, parsed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if probed != tt.wantRead || cacheRead != tt.wantRead || len(tree) != tt.wantNames {
+			t.Errorf("UV_NO_CACHE=%q: probed %v, read %v, %d packages; want read %v, %d packages", tt.noCache, probed, cacheRead, len(tree), tt.wantRead, tt.wantNames)
+		}
+	}
+}
+
 // A relative UV_CACHE_DIR, or a relative cache-dir in uv's configuration,
 // is read against the directory uv runs in, and the resolver runs in
 // scratch, where there is no cache: it is told the cache by its absolute
