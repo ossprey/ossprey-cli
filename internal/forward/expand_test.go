@@ -425,10 +425,10 @@ func TestExpandInstall_ToolRunHasNoProjectContext(t *testing.T) {
 		wantFlags    []string
 		wantPackages []string
 	}{
-		{[]string{"exec", "cowsay@1.6.0", "--", "moo"}, "", filepath.Join(home, ".npm"), true, nil, []string{"cowsay@1.6.0"}},
+		{[]string{"exec", "cowsay@1.6.0", "--", "moo"}, "", filepath.Join(home, ".npm"), true, []string{"--prefix", dir}, []string{"cowsay@1.6.0"}},
 		{[]string{"exec", "--cache", "~/c", "--package=cowsay@1.6.0", "--package", "left-pad", "--", "cowsay"}, "", filepath.Join(home, "c"), false, nil, []string{"cowsay@1.6.0", "left-pad"}},
 		{[]string{"exec", "--userconfig", "~/u.npmrc", "cowsay@1.6.0"}, filepath.Join(home, "custom-cache"), filepath.Join(home, "custom-cache"),
-			true, []string{"--userconfig", filepath.Join(home, "u.npmrc")}, []string{"cowsay@1.6.0"}},
+			true, []string{"--userconfig", filepath.Join(home, "u.npmrc"), "--prefix", dir}, []string{"cowsay@1.6.0"}},
 		{[]string{"exec", "-g", "cowsay@1.6.0"}, filepath.Join(home, "custom-cache"), filepath.Join(home, "custom-cache"),
 			true, []string{"-g"}, []string{"cowsay@1.6.0"}},
 	} {
@@ -1013,6 +1013,25 @@ func TestResolveNamed_UnresolvedSetResolvesTheNamesToo(t *testing.T) {
 		if set.named != 1 || set.deps != 1 || set.expanded || set.unresolved == nil {
 			t.Errorf("latest %s: set = %+v", tt.latest, set)
 		}
+	}
+	// A cached copy fetched from a trusted registry covers that copy, not
+	// today's request: the name is still resolved.
+	swapExpand(t, func(context.Context, *Manager, []string, int, installArgs) ([]catalog.Resolved, error) {
+		return []catalog.Resolved{{Name: "tool", Version: "1.0.0", Registry: "https://npm.acme.internal/tool/-/tool-1.0.0.tgz"}}, errors.New("npm: registry unreachable")
+	})
+	parsed := m.parseRun([]string{"tool@latest"})
+	parsed.ToolRun = true
+	asked := 0
+	set := resolveNamed(warn.NewContext(context.Background(), false), m, Options{Trust: trust.Policy{Registries: []string{"https://npm.acme.internal/"}}}, 0, parsed,
+		func(context.Context, string, string, string) (string, error) {
+			asked++
+			return "2.0.0", nil
+		})
+	if asked != 1 {
+		t.Errorf("trusted cached copy: registry asked %d times, want once", asked)
+	}
+	if want := []check.Spec{{Ecosystem: "npm", Name: "tool", Version: "2.0.0"}}; !reflect.DeepEqual(set.specs, want) {
+		t.Errorf("trusted cached copy: specs = %+v, want %+v", set.specs, want)
 	}
 }
 
@@ -1688,7 +1707,10 @@ func TestExpandInstall_NpmOmitOptional(t *testing.T) {
 	resolveNpmFn = func(context.Context, string, string, []string, []string) ([]catalog.Resolved, error) {
 		return []catalog.Resolved{{Name: "needed", Version: "1.0.0"}, {Name: "extra", Version: "2.0.0", Optional: true},
 			{Name: "devonly", Version: "3.0.0", Dev: true}, {Name: "both", Version: "4.0.0", DevOptional: true},
-			{Name: "peer", Version: "5.0.0", Peer: true}}, nil
+			{Name: "peer", Version: "5.0.0", Peer: true},
+			// Two copies of one release, a dev-only and an optional-only one
+			// (aliases): left out only when both kinds are omitted.
+			{Name: "aliased", Version: "6.0.0", Copies: []catalog.DependencyKinds{{Dev: true}, {Optional: true}}}}, nil
 	}
 	// npm answers the omit policy for the dry run's own flags; asked is
 	// how often it was consulted and askedFlags what with.
@@ -1714,7 +1736,7 @@ func TestExpandInstall_NpmOmitOptional(t *testing.T) {
 		}
 		return out
 	}
-	all := []string{"needed", "extra", "devonly", "both", "peer"}
+	all := []string{"needed", "extra", "devonly", "both", "peer", "aliased"}
 	for _, tt := range []struct {
 		args      []string
 		toolRun   bool
@@ -1728,23 +1750,23 @@ func TestExpandInstall_NpmOmitOptional(t *testing.T) {
 		// or an .npmrc. A devOptional package is reached both ways and
 		// goes only when both are omitted; peers go with peer.
 		{[]string{"exec", "cowsay@1.6.0"}, true, nil, nil, all, nil},
-		{[]string{"exec", "--omit=optional", "cowsay@1.6.0"}, true, []string{"optional"}, nil, []string{"needed", "devonly", "both", "peer"}, []string{"--omit=optional"}},
-		{[]string{"exec", "--no-optional", "cowsay@1.6.0"}, true, []string{"optional"}, nil, []string{"needed", "devonly", "both", "peer"}, []string{"--no-optional"}},
+		{[]string{"exec", "--omit=optional", "cowsay@1.6.0"}, true, []string{"optional"}, nil, []string{"needed", "devonly", "both", "peer", "aliased"}, []string{"--omit=optional"}},
+		{[]string{"exec", "--no-optional", "cowsay@1.6.0"}, true, []string{"optional"}, nil, []string{"needed", "devonly", "both", "peer", "aliased"}, []string{"--no-optional"}},
 		{[]string{"exec", "--omit=optional", "--include=optional", "cowsay@1.6.0"}, true, nil, nil, all, []string{"--include=optional", "--omit=optional"}},
-		{[]string{"exec", "cowsay@1.6.0"}, true, []string{"optional"}, nil, []string{"needed", "devonly", "both", "peer"}, nil},
-		{[]string{"exec", "cowsay@1.6.0"}, true, []string{"dev"}, nil, []string{"needed", "extra", "both", "peer"}, nil},
+		{[]string{"exec", "cowsay@1.6.0"}, true, []string{"optional"}, nil, []string{"needed", "devonly", "both", "peer", "aliased"}, nil},
+		{[]string{"exec", "cowsay@1.6.0"}, true, []string{"dev"}, nil, []string{"needed", "extra", "both", "peer", "aliased"}, nil},
 		{[]string{"exec", "cowsay@1.6.0"}, true, []string{"dev", "optional"}, nil, []string{"needed", "peer"}, nil},
-		{[]string{"exec", "cowsay@1.6.0"}, true, []string{"peer"}, nil, []string{"needed", "extra", "devonly", "both"}, nil},
+		{[]string{"exec", "cowsay@1.6.0"}, true, []string{"peer"}, nil, []string{"needed", "extra", "devonly", "both", "aliased"}, nil},
 		// A named install asks with the same flags, location included.
-		{[]string{"install", "--omit", "optional", "cowsay"}, false, []string{"optional"}, nil, []string{"needed", "devonly", "both", "peer"}, []string{"--omit=optional"}},
-		{[]string{"install", "cowsay"}, false, []string{"optional"}, nil, []string{"needed", "devonly", "both", "peer"}, nil},
-		{[]string{"install", "-g", "cowsay"}, false, nil, nil, all, []string{"-g"}},
-		// The probe runs in the configuration's directory with the
-		// command's own selectors: --prefix names it, --workspaces=false
-		// keeps npm at it.
-		{[]string{"install", "--prefix", "../x", "cowsay"}, false, nil, nil, all, []string{"--prefix", absPath("../x")}},
-		{[]string{"exec", "--workspaces=false", "cowsay@1.6.0"}, true, nil, nil, all, []string{"--workspaces=false"}},
-		{[]string{"install", "--no-workspaces", "cowsay"}, false, nil, nil, all, []string{"--workspaces=false"}},
+		{[]string{"install", "--omit", "optional", "cowsay"}, false, []string{"optional"}, nil, []string{"needed", "devonly", "both", "peer", "aliased"}, []string{"--omit=optional"}},
+		{[]string{"install", "cowsay"}, false, []string{"optional"}, nil, []string{"needed", "devonly", "both", "peer", "aliased"}, nil},
+		{[]string{"install", "-g", "cowsay"}, false, nil, nil, all, nil},
+		// The probe runs in the cwd with the command's own selectors:
+		// --prefix names the configuration (the command's, else the one it
+		// would discover), --workspaces=false keeps npm at it.
+		{[]string{"install", "--prefix", "../x", "cowsay"}, false, nil, nil, all, nil},
+		{[]string{"exec", "--workspaces=false", "cowsay@1.6.0"}, true, nil, nil, all, nil},
+		{[]string{"install", "--no-workspaces", "cowsay"}, false, nil, nil, all, nil},
 		// When npm cannot answer, nothing is dropped.
 		{[]string{"install", "--omit=optional", "cowsay"}, false, nil, errors.New("no npm"), all, []string{"--omit=optional"}},
 	} {
@@ -1768,20 +1790,21 @@ func TestExpandInstall_NpmOmitOptional(t *testing.T) {
 		if asked != 1 {
 			t.Errorf("%v: npm asked %d times, want once", tt.args, asked)
 		}
-		if len(askedFlags) != len(tt.wantFlags) || (len(tt.wantFlags) > 0 && !reflect.DeepEqual(askedFlags, tt.wantFlags)) {
-			t.Errorf("%v: npm asked with %v, want %v", tt.args, askedFlags, tt.wantFlags)
-		}
-		// The configuration's directory: the cwd in global mode (which
-		// reads no project file), --prefix, else npm's local prefix.
-		wantDir := npmLocalPrefix()
+		location := []string{"--prefix", npmLocalPrefix()}
 		switch {
 		case slices.Contains(tt.args, "-g"):
-			wantDir = "."
+			location = []string{"-g"}
 		case slices.Contains(tt.args, "--prefix"):
-			wantDir = absPath("../x")
+			location = []string{"--prefix", absPath("../x")}
 		}
-		if askedDir != wantDir {
-			t.Errorf("%v: npm asked in %q, want %q", tt.args, askedDir, wantDir)
+		if slices.Contains(tt.args, "--workspaces=false") || slices.Contains(tt.args, "--no-workspaces") {
+			location = append(location, "--workspaces=false")
+		}
+		if want := slices.Concat(tt.wantFlags, location); !reflect.DeepEqual(askedFlags, want) {
+			t.Errorf("%v: npm asked with %v, want %v", tt.args, askedFlags, want)
+		}
+		if askedDir != "." {
+			t.Errorf("%v: npm asked in %q, want the cwd", tt.args, askedDir)
 		}
 	}
 }

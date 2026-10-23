@@ -95,7 +95,6 @@ func resolveNamed(ctx context.Context, m *Manager, opts Options, start int, pars
 	set.expanded, set.unresolved = err == nil, err
 
 	found := make([]bool, len(parsed.Specs))
-	trusted := make([]bool, len(parsed.Specs))
 	for _, r := range tree {
 		i := namedIndex(m.Ecosystem, parsed.Specs, r.Name)
 		if i < 0 && r.Locked {
@@ -108,7 +107,7 @@ func resolveNamed(ctx context.Context, m *Manager, opts Options, start int, pars
 		if opts.Trust.Trusts(m.Ecosystem, r.Name, regs) {
 			warn.Add(ctx, scan.TrustedEntry(m.Ecosystem, r.Name, r.Version))
 			if i >= 0 {
-				found[i], trusted[i] = true, true // not looked up publicly below either
+				found[i] = true // not looked up publicly below either
 			}
 			continue
 		}
@@ -127,11 +126,13 @@ func resolveNamed(ctx context.Context, m *Manager, opts Options, start int, pars
 	// tree is only what an earlier run left on disk (err != nil), which
 	// says nothing about what resolves today: `npx tool@latest` with
 	// tool@1.0.0 cached may fetch 2.0.0, so the names are resolved as well,
-	// each counted once and a release already in the set not repeated.
-	// A trusted name is never looked up publicly.
+	// each counted once and a release already in the set not repeated. A
+	// cached copy's trusted provenance covers that copy, not today's
+	// request, so it does not stand in for the lookup either; a name
+	// trusted by scope never reached this point (dropTrusted).
 	var missing []check.Spec
 	for i, s := range parsed.Specs {
-		if !found[i] || (err != nil && !trusted[i]) {
+		if !found[i] || err != nil {
 			missing = append(missing, s)
 		}
 	}
@@ -244,8 +245,7 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 			// reads: its config files and location, asked from the
 			// configuration's directory.
 			configDir := npmConfigDirFor(parsed.NpmGlobal, parsed.NpmPrefix, parsed.NpmWorkspacesOff)
-			configFlags := slices.Concat(flags, npmLocationFlags(parsed.NpmGlobal, parsed.NpmPrefix, parsed.NpmWorkspacesOff))
-			probeDir := npmProbeDir(configDir)
+			configFlags := slices.Concat(flags, npmLocationFlags(parsed.NpmGlobal, parsed.NpmPrefix, parsed.NpmWorkspacesOff, configDir))
 			// The cache the run reads, found once for the dry run and the
 			// npx-cache lookup. A path npm resolves against the directory it
 			// runs in (a relative npm_config_cache, or a relative cache= in
@@ -254,7 +254,7 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 			var cache string
 			if m.Bin == "npm" || m.Bin == "npx" {
 				var moved bool
-				if cache, moved = npmCacheDir(ctx, parsed.NpmCache, probeDir, configFlags); moved {
+				if cache, moved = npmCacheDir(ctx, parsed.NpmCache, configFlags); moved {
 					flags = append(flags, "--cache", cache)
 				}
 			}
@@ -262,7 +262,7 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 			if err == nil && len(tree) > 0 {
 				// The omit policy shapes a fresh install only: a reused npx
 				// installation is not pruned, so what it holds stays checked.
-				tree = npmOmit(tree, npmEffectiveOmits(ctx, probeDir, configFlags))
+				tree = npmOmit(tree, npmEffectiveOmits(ctx, configFlags))
 			}
 			if m.Bin == "npm" || m.Bin == "npx" {
 				// npm may reuse what an earlier run left in its npx cache,
@@ -294,7 +294,7 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 		// told, and npm reads the same flags to answer, from the
 		// configuration's directory.
 		a := parseNpmArgv(args)
-		return npmOmit(tree, npmEffectiveOmits(ctx, npmProbeDir(configDir), slices.Concat(flags, npmLocationFlags(a.global(), a.prefix(), a.workspacesOff())))), nil
+		return npmOmit(tree, npmEffectiveOmits(ctx, slices.Concat(flags, npmLocationFlags(a.global(), a.prefix(), a.workspacesOff(), configDir)))), nil
 	case "pypi":
 		// A short option's value may be attached (`-ihttps://…`); read it
 		// as the resolver will, from a copy, so args stays what the real
@@ -734,6 +734,7 @@ func mergeSighting(a, b catalog.Resolved) catalog.Resolved {
 	a.Optional = a.Optional && b.Optional
 	a.DevOptional = a.DevOptional && b.DevOptional
 	a.Peer = a.Peer && b.Peer
+	a.Copies = append(append([]catalog.DependencyKinds(nil), a.Copies...), b.Copies...)
 	return a
 }
 
@@ -742,7 +743,7 @@ func mergeSighting(a, b catalog.Resolved) catalog.Resolved {
 // cache`, read with the command's own config-file and location flags, which
 // also yields npm's platform default), else that default worked out here
 // when npm cannot be asked.
-func npmCacheDir(ctx context.Context, flag, probeDir string, configFlags []string) (dir string, moved bool) {
+func npmCacheDir(ctx context.Context, flag string, configFlags []string) (dir string, moved bool) {
 	if flag != "" {
 		return absPath(expandHome(flag)), false
 	}
@@ -752,7 +753,7 @@ func npmCacheDir(ctx context.Context, flag, probeDir string, configFlags []strin
 			return absPath(v), !filepath.IsAbs(v)
 		}
 	}
-	if v, err := npmConfigGetFn(ctx, probeDir, "cache", configFlags); err == nil && v != "" {
+	if v, err := npmConfigGetFn(ctx, ".", "cache", configFlags); err == nil && v != "" {
 		// npm answers absolutely, resolved where it was asked; a relative
 		// cache= in an .npmrc would resolve elsewhere from scratch.
 		return absPath(expandHome(v)), true
@@ -827,33 +828,29 @@ func npmEnvCacheFlag(flags []string) []string {
 }
 
 // npmLocationFlags are the flags that make `npm config` read the same
-// project configuration as the command: global mode reads none, --prefix
-// names the project, and --workspaces=false stops npm at the nearest
-// package.json rather than a workspace root. The probes also run in the
-// configuration's directory (npmConfigDir), not the cwd: from a workspace
-// member `npm config get` fails with ENOWORKSPACES, and from the root it
-// answers for the root, which is what the real command reads there.
-func npmLocationFlags(global bool, prefix string, workspacesOff bool) []string {
+// project configuration as the command, from the command's own directory:
+// global mode reads none; --prefix names the project — the command's, else
+// the configuration directory the command would discover (configDir),
+// since named explicitly npm neither walks for it nor, from a workspace
+// member, fails with ENOWORKSPACES (verified) — and --workspaces=false
+// stops npm at the nearest package.json rather than a workspace root. The
+// probes stay in the cwd because a relative path in the configuration
+// (`cache=./cache`) is resolved against it, not the file's directory
+// (verified: from a subdirectory npm answers sub/cache).
+func npmLocationFlags(global bool, prefix string, workspacesOff bool, configDir string) []string {
 	var out []string
 	switch {
 	case global:
 		out = []string{"-g"}
 	case prefix != "":
 		out = []string{"--prefix", absPath(prefix)}
+	case configDir != "":
+		out = []string{"--prefix", absPath(configDir)}
 	}
 	if workspacesOff {
 		out = append(out, "--workspaces=false")
 	}
 	return out
-}
-
-// npmProbeDir is where a configuration probe runs: the configuration's
-// directory, or the cwd in global mode, which reads no project file.
-func npmProbeDir(configDir string) string {
-	if configDir == "" {
-		return "."
-	}
-	return configDir
 }
 
 // npmEffectiveOmits is npm's own omit policy for the install: the kinds
@@ -862,8 +859,8 @@ func npmProbeDir(configDir string) string {
 // include winning over omit and optional=false counted as an omit. One
 // subprocess, asked only for a fresh tree with something to prune; when
 // npm cannot answer nothing is dropped, which errs toward checking.
-func npmEffectiveOmits(ctx context.Context, dir string, flags []string) map[string]bool {
-	kinds, err := npmConfigOmitsFn(ctx, dir, flags)
+func npmEffectiveOmits(ctx context.Context, flags []string) map[string]bool {
+	kinds, err := npmConfigOmitsFn(ctx, ".", flags)
 	if err != nil {
 		return nil
 	}
@@ -885,14 +882,33 @@ func npmOmit(tree []catalog.Resolved, omits map[string]bool) []catalog.Resolved 
 	}
 	kept := tree[:0:0]
 	for _, r := range tree {
-		switch {
-		case r.Dev && omits["dev"], r.Optional && omits["optional"], r.Peer && omits["peer"],
-			r.DevOptional && omits["dev"] && omits["optional"]:
+		if npmOmitted(r, omits) {
 			continue
 		}
 		kept = append(kept, r)
 	}
 	return kept
+}
+
+// npmOmitted says the install leaves the release out: every copy of it is
+// of a kind the policy omits. The copies are judged one by one (a dev-only
+// copy beside an optional-only one goes under --omit=dev --omit=optional,
+// which their ANDed kinds could not say); a release without them is judged
+// by its flags.
+func npmOmitted(r catalog.Resolved, omits map[string]bool) bool {
+	omitted := func(k catalog.DependencyKinds) bool {
+		return k.Dev && omits["dev"] || k.Optional && omits["optional"] || k.Peer && omits["peer"] ||
+			k.DevOptional && omits["dev"] && omits["optional"]
+	}
+	if len(r.Copies) == 0 {
+		return omitted(catalog.DependencyKinds{Dev: r.Dev, Optional: r.Optional, DevOptional: r.DevOptional, Peer: r.Peer})
+	}
+	for _, k := range r.Copies {
+		if !omitted(k) {
+			return false
+		}
+	}
+	return true
 }
 
 // uvGlobalFlags are the uvGlobalPass flags given before a uv command's

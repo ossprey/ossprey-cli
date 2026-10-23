@@ -41,8 +41,12 @@ type Resolved struct {
 	// policy: an install with --omit=dev leaves a Dev package out,
 	// --omit=optional an Optional one, --omit=peer a Peer one, and a
 	// DevOptional one — reached both ways — only when both are omitted. A
-	// release found at several paths carries a kind only if every copy does.
+	// release found at several paths carries a kind only if every copy does;
+	// Copies keeps each copy's own kinds, since an install leaves the
+	// release out only when it leaves every copy out, which the AND alone
+	// cannot say for copies of different kinds.
 	Dev, Optional, DevOptional, Peer bool
+	Copies                           []DependencyKinds
 }
 
 // ErrNoResolver reports that no tool on the host can predict the install.
@@ -732,6 +736,7 @@ func resolvedFromPackages(pkgs []pkg.Package, locked map[string]bool) []Resolved
 			Optional:    rs.Optional,
 			DevOptional: rs.DevOptional,
 			Peer:        rs.Peer,
+			Copies:      rs.Copies,
 		})
 	}
 	return out

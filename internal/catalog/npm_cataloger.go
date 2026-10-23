@@ -194,7 +194,9 @@ func parseNpmLockAt(data []byte, loc file.Location, root string) ([]pkg.Package,
 			continue
 		}
 		dk := name + "@" + entry.Version
-		kind := registrySource{URL: entry.Resolved, Dev: entry.Dev, Optional: entry.Optional, DevOptional: entry.DevOptional, Peer: entry.Peer}
+		copyKinds := DependencyKinds{Dev: entry.Dev, Optional: entry.Optional, DevOptional: entry.DevOptional, Peer: entry.Peer}
+		kind := registrySource{URL: entry.Resolved, Dev: entry.Dev, Optional: entry.Optional, DevOptional: entry.DevOptional, Peer: entry.Peer,
+			Copies: []DependencyKinds{copyKinds}}
 		if i, ok := seen[dk]; ok {
 			// The same release can sit at several paths (nested copies),
 			// each with its own kind. An install leaves the release out
@@ -212,6 +214,11 @@ func parseNpmLockAt(data []byte, loc file.Location, root string) ([]pkg.Package,
 			have.Optional = have.Optional && kind.Optional
 			have.DevOptional = have.DevOptional && kind.DevOptional
 			have.Peer = have.Peer && kind.Peer
+			// The AND alone loses which copy is left out under which policy
+			// (a dev-only copy beside an optional-only one is left out
+			// entirely under --omit=dev --omit=optional), so each copy's
+			// kinds are kept as well.
+			have.Copies = append(have.Copies, copyKinds)
 			pkgs[i].Metadata = have
 			continue
 		}

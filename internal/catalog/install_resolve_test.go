@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -288,6 +289,8 @@ func TestParseNpmLockCarriesDependencyKinds(t *testing.T) {
 		// and the local package it points at are not.
 		"unresolved": {},
 	}
+	// Each copy's own kinds are kept beside the AND: the plain copy of
+	// "twice" and its two optional copies.
 	// Map iteration order varies per run; the merge must not depend on it.
 	for range 20 {
 		pkgs, err := parseNpmLock(lock, file.Location{})
@@ -295,11 +298,20 @@ func TestParseNpmLockCarriesDependencyKinds(t *testing.T) {
 			t.Fatal(err)
 		}
 		got := map[string]kinds{}
+		copies := map[string][]DependencyKinds{}
 		for _, r := range resolvedFromPackages(pkgs, nil) {
 			got[r.Name] = kinds{r.Registry, r.Dev, r.Optional, r.DevOptional, r.Peer}
+			copies[r.Name] = r.Copies
 		}
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("kinds = %v, want %v", got, want)
+		}
+		twice := copies["twice"]
+		slices.SortFunc(twice, func(a, b DependencyKinds) int {
+			return strings.Compare(fmt.Sprint(a), fmt.Sprint(b))
+		})
+		if want := []DependencyKinds{{}, {Optional: true}, {Optional: true}}; !reflect.DeepEqual(twice, want) {
+			t.Fatalf("copies of twice = %v, want %v", twice, want)
 		}
 	}
 }
