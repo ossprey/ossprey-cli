@@ -168,7 +168,11 @@ always checked). A bare install applies both rules, from the lockfile.
   When the dry run fails — no resolver, offline, a build-only package, the
   `OSSPREY_RESOLVE_TIMEOUT` (default 2m) — only the named packages are checked,
   one line says so (`could not resolve the dependencies of foo (…); checking
-  the named packages only`), and the install proceeds. The forwarder never
+  the named packages only`), and the install proceeds. A tool run still
+  checks what an earlier run left on disk (npm's npx cache, uv's cached or
+  installed tool environments), since that is what the tool may run when
+  today's resolution fails, and the line then says `checking the named
+  packages and N dependencies from an earlier run`. The forwarder never
   blocks an install because it could not predict it. With `OSSPREY_VERBOSE=1`
   the clean verdict reports the coverage: `no malware found in 65 packages (1
   requested + 64 dependencies)`, or `(1 requested; dependencies not resolved)`.

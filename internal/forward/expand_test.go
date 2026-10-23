@@ -576,6 +576,11 @@ func TestExpandInstall_UVOnlyFlagsAreResolvedByUVOnly(t *testing.T) {
 		return nil, catalog.ErrNeedsUV
 	}
 	t.Cleanup(func() { resolvePythonFn, resolveWithUVFn = old, oldUV })
+	// The host's own uv cache and installed tools are read even when the
+	// resolution fails; here they must hold nothing.
+	t.Setenv("UV_CACHE_DIR", t.TempDir())
+	t.Setenv("UV_TOOL_DIR", t.TempDir())
+	t.Setenv("UV_CONFIG_FILE", "")
 
 	uvx, _ := Lookup("uvx")
 	uv, _ := Lookup("uv")
@@ -766,6 +771,112 @@ func TestExpandInstall_ToolRunNamesARelativeEnvCacheDir(t *testing.T) {
 		if !reflect.DeepEqual(gotUV, tt.wantUV) {
 			t.Errorf("UV_CACHE_DIR=%q %v: uv flags = %v, want %v", tt.env, tt.args, gotUV, tt.wantUV)
 		}
+	}
+}
+
+// A failed dry run does not skip what is on disk: npm may reuse the npx
+// cache exactly when today's resolution fails, and uv runs an installed or
+// cached environment regardless, so those trees are returned beside the
+// error and checked. The omit policy, which shapes a fresh install, is not
+// asked for.
+func TestExpandInstall_ToolRunReadsTheCachesWhenTheDryRunFails(t *testing.T) {
+	names := func(tree []catalog.Resolved) []string {
+		var out []string
+		for _, r := range tree {
+			out = append(out, r.Name+"@"+r.Version)
+		}
+		return out
+	}
+	t.Run("npx", func(t *testing.T) {
+		old, oldCached, oldGet, oldInc := resolveNpmFn, npxCachedFn, npmConfigGetFn, npmConfigIncludesFn
+		resolveNpmFn = func(context.Context, string, string, []string, []string) ([]catalog.Resolved, error) {
+			return nil, errors.New("npm: registry unreachable")
+		}
+		npxCachedFn = func(string, []string) ([]catalog.Resolved, error) {
+			return []catalog.Resolved{{Name: "cowsay", Version: "1.6.0"}, {Name: "get-stdin", Version: "8.0.0"}}, nil
+		}
+		npmConfigGetFn = func(context.Context, string, string, []string) (string, error) { return "", errors.New("no npm") }
+		npmConfigIncludesFn = func(context.Context, string, []string) ([]string, error) {
+			t.Error("the omit policy was asked for with no fresh tree to prune")
+			return nil, nil
+		}
+		t.Cleanup(func() {
+			resolveNpmFn, npxCachedFn, npmConfigGetFn, npmConfigIncludesFn = old, oldCached, oldGet, oldInc
+		})
+		m, _ := Lookup("npx")
+		parsed := m.parseRun([]string{"--omit=dev", "cowsay"})
+		parsed.ToolRun = true
+		tree, err := expandInstall(context.Background(), m, []string{"--omit=dev", "cowsay"}, 0, parsed)
+		if err == nil || !strings.Contains(err.Error(), "unreachable") {
+			t.Fatalf("err = %v, want the dry run's", err)
+		}
+		if want := []string{"cowsay@1.6.0", "get-stdin@8.0.0"}; !reflect.DeepEqual(names(tree), want) {
+			t.Errorf("tree = %v, want the cached %v", names(tree), want)
+		}
+	})
+	t.Run("uvx", func(t *testing.T) {
+		old, oldUV, oldDir, oldCached, oldToolDir, oldInstalled := resolvePythonFn, resolveWithUVFn, uvCacheDirFn, uvCachedFn, uvToolDirFn, uvInstalledFn
+		resolvePythonFn = func(context.Context, string, []string, []string, []string) ([]catalog.Resolved, error) {
+			return nil, errors.New("uv: index unreachable")
+		}
+		resolveWithUVFn = func(context.Context, string, []string, []string) ([]catalog.Resolved, error) {
+			return nil, errors.New("uv: index unreachable")
+		}
+		uvCacheDirFn = func(context.Context, []string) (string, error) { return filepath.Join(t.TempDir(), "cache"), nil }
+		uvCachedFn = func(string, map[string]string) ([]catalog.Resolved, error) {
+			return []catalog.Resolved{{Name: "cowsay", Version: "6.1"}, {Name: "six", Version: "1.16.0"}}, nil
+		}
+		uvToolDirFn = func(context.Context, []string) (string, error) { return filepath.Join(t.TempDir(), "tools"), nil }
+		uvInstalledFn = func(string, string) ([]catalog.Resolved, error) {
+			return []catalog.Resolved{{Name: "cowsay", Version: "6.0"}, {Name: "six", Version: "1.15.0"}}, nil
+		}
+		t.Cleanup(func() {
+			resolvePythonFn, resolveWithUVFn, uvCacheDirFn, uvCachedFn, uvToolDirFn, uvInstalledFn = old, oldUV, oldDir, oldCached, oldToolDir, oldInstalled
+		})
+		t.Setenv("UV_CACHE_DIR", "")
+		t.Setenv("UV_TOOL_DIR", "")
+		t.Setenv("UV_CONFIG_FILE", "")
+		uvx, _ := Lookup("uvx")
+		parsed := parseToolRun(uvx, []string{"cowsay"})
+		parsed.ToolRun = true
+		tree, err := expandInstall(context.Background(), uvx, []string{"cowsay"}, 0, parsed)
+		if err == nil || !strings.Contains(err.Error(), "unreachable") {
+			t.Fatalf("err = %v, want the resolver's", err)
+		}
+		if want := []string{"cowsay@6.1", "six@1.16.0", "cowsay@6.0", "six@1.15.0"}; !reflect.DeepEqual(names(tree), want) {
+			t.Errorf("tree = %v, want the cached and installed %v", names(tree), want)
+		}
+	})
+}
+
+// What an earlier run's tree contributed to an unresolved set is counted
+// and claimed: the fallback line names the dependencies it still checked,
+// and the verbose coverage says where they came from.
+func TestResolveNamed_UnresolvedSetKeepsAnEarlierRunsDependencies(t *testing.T) {
+	swapExpand(t, func(context.Context, *Manager, []string, int, installArgs) ([]catalog.Resolved, error) {
+		return []catalog.Resolved{{Name: "cowsay", Version: "1.6.0"}, {Name: "get-stdin", Version: "8.0.0"}}, errors.New("npm: registry unreachable")
+	})
+	m, _ := Lookup("npx")
+	parsed := m.parseRun([]string{"cowsay"})
+	parsed.ToolRun = true
+	set := resolveNamed(context.Background(), m, Options{}, 0, parsed, func(context.Context, string, string, string) (string, error) {
+		t.Error("the registry was asked for a package the cache reported")
+		return "", nil
+	})
+	if set.named != 1 || set.deps != 1 || set.expanded || set.unresolved == nil || len(set.specs) != 2 {
+		t.Fatalf("set = %+v", set)
+	}
+	if got, want := set.coverage(), " (1 requested + 1 dependencies from an earlier run; dependencies not resolved)"; got != want {
+		t.Errorf("coverage = %q, want %q", got, want)
+	}
+	var buf bytes.Buffer
+	oldOut := errOut
+	errOut = &buf
+	t.Cleanup(func() { errOut = oldOut })
+	reportUnexpanded(warn.NewContext(context.Background(), false), parsed.Specs, set.unresolved, set.deps)
+	want := "ossprey: warning: could not resolve the dependencies of cowsay (npm: registry unreachable); checking the named packages and 1 dependencies from an earlier run\n"
+	if buf.String() != want {
+		t.Errorf("got %q, want %q", buf.String(), want)
 	}
 }
 

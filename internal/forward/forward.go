@@ -1039,7 +1039,7 @@ func resolveWithProgress(ctx context.Context, m *Manager, opts Options, start in
 // resolved, and nothing for one whose tree was.
 func reportUnresolved(ctx context.Context, specs []check.Spec, set checkSet) {
 	if set.unresolved != nil {
-		reportUnexpanded(ctx, specs, set.unresolved)
+		reportUnexpanded(ctx, specs, set.unresolved, set.deps)
 	}
 }
 

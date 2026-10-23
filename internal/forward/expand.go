@@ -68,6 +68,8 @@ func (c checkSet) coverage() string {
 		return ""
 	case c.expanded:
 		return fmt.Sprintf(" (%d requested + %d dependencies)", c.named, c.deps)
+	case c.deps > 0:
+		return fmt.Sprintf(" (%d requested + %d dependencies from an earlier run; dependencies not resolved)", c.named, c.deps)
 	default:
 		return fmt.Sprintf(" (%d requested; dependencies not resolved)", c.named)
 	}
@@ -134,15 +136,21 @@ func resolveNamed(ctx context.Context, m *Manager, opts Options, start int, pars
 // reportUnexpanded says, in one line even when quiet, that the install's
 // dependencies were not resolved. Fail open, out loud: a clean verdict on
 // the names alone must not read as a verdict on the install. The resolver's
-// own output goes behind the verbose gutter, as a cataloger's does.
+// own output goes behind the verbose gutter, as a cataloger's does. deps
+// is what an earlier run's tree on disk still contributed (a tool run's
+// cache or installed environment), which the line then claims and no more.
 //
 // Callers print it only once the terminal is theirs: after the progress
 // animation has stopped, and in passive mode after the manager has exited,
 // never from beside either.
-func reportUnexpanded(ctx context.Context, specs []check.Spec, err error) {
+func reportUnexpanded(ctx context.Context, specs []check.Spec, err error, deps int) {
 	headline, detail := catalog.ResolveFailure(err)
-	line := fmt.Sprintf("could not resolve the dependencies of %s (%s); checking the named packages only",
-		joinNames(specs), headline)
+	covered := "the named packages only"
+	if deps > 0 {
+		covered = fmt.Sprintf("the named packages and %d dependencies from an earlier run", deps)
+	}
+	line := fmt.Sprintf("could not resolve the dependencies of %s (%s); checking %s",
+		joinNames(specs), headline, covered)
 	if env.Verbose() && len(detail) > 0 {
 		warn.Add(ctx, warn.Entry{Class: "resolve-install", One: line, Many: "%d installs' dependencies could not be resolved",
 			Item: line, Detail: detail, DetailLabel: "resolver"})
@@ -208,21 +216,23 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 				flags = append(flags, "--userconfig", absPath(parsed.Userconfig))
 			}
 			tree, err := resolveNpmFn(ctx, "", npmConfigDirFor(parsed.NpmGlobal, parsed.NpmPrefix), tokens, flags)
-			if err != nil {
-				return tree, err
-			}
 			// The flags that make `npm config get` read what this command
 			// reads: its config files and location.
 			configFlags := slices.Concat(flags, npmLocationFlags(parsed.NpmGlobal, parsed.NpmPrefix))
-			// The omit policy shapes a fresh install only: a reused npx
-			// installation is not pruned, so what it holds stays checked.
-			tree = npmOmit(tree, npmEffectiveOmits(ctx, parsed.NpmOmits, configFlags))
+			if err == nil {
+				// The omit policy shapes a fresh install only: a reused npx
+				// installation is not pruned, so what it holds stays checked.
+				tree = npmOmit(tree, npmEffectiveOmits(ctx, parsed.NpmOmits, configFlags))
+			}
 			if m.Bin == "npm" || m.Bin == "npx" {
 				// npm may reuse what an earlier run left in its npx cache,
-				// dependencies and all, rather than what resolves today.
+				// dependencies and all, rather than what resolves today. That
+				// tree is on disk whether or not today's dry run succeeds,
+				// and a failed one may be exactly why npm reuses it, so it
+				// is read either way and returned beside the error.
 				tree = withNpxCached(ctx, tree, parsed, configFlags)
 			}
-			return tree, nil
+			return tree, err
 		}
 		// npm reads its options on either side of the verb (`npm --offline
 		// install x`), so the whole line is read, not rest.
@@ -286,12 +296,12 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 			} else {
 				tree, err = resolvePythonFn(ctx, "", tokens, uvFlags, toolRunPipFlags(rest, base))
 			}
-			if err != nil {
-				return tree, err
-			}
 			// uv may reuse a tool environment it cached for an earlier run,
-			// dependencies and all, rather than what resolves today.
-			return withUVCached(ctx, tree, parsed, opts, base, cache), nil
+			// dependencies and all, rather than what resolves today; and a
+			// bare request runs the installed tool without resolving at
+			// all. Both are on disk whether or not today's resolution
+			// succeeds, so they are read either way, beside the error.
+			return withUVCached(ctx, tree, parsed, opts, base, cache), err
 		}
 		if hasFlag(rest, "--no-deps") {
 			return nil, nil
