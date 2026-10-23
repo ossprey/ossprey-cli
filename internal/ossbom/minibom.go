@@ -1,6 +1,12 @@
 package ossbom
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"maps"
+	"net/url"
+	"slices"
+	"strings"
+)
 
 // MiniBOM = OSSBOM compressed for API submission. Each component swapped for
 // `{purl, source, env, location}`. Top-level fields unchanged.
@@ -39,7 +45,7 @@ func (s *SBOM) ToMiniBOM() MiniBOM {
 	}
 	for _, c := range s.Components {
 		out.Components = append(out.Components, MiniComponent{
-			Purl:     componentPurl(c),
+			Purl:     c.Purl(),
 			Source:   c.Source,
 			Env:      c.Env,
 			Location: c.Location,
@@ -48,8 +54,22 @@ func (s *SBOM) ToMiniBOM() MiniBOM {
 	return out
 }
 
-func componentPurl(c Component) string {
-	return "pkg:" + c.Type + "/" + c.Name + "@" + c.Version
+// Purl is pkg:<type>/<name>@<version>, plus any qualifiers in key order.
+func (c Component) Purl() string {
+	purl := "pkg:" + c.Type + "/" + c.Name + "@" + c.Version
+	sep := "?"
+	for _, k := range slices.Sorted(maps.Keys(c.Qualifiers)) {
+		if v := c.Qualifiers[k]; v != "" {
+			purl += sep + k + "=" + escapeQualifier(v)
+			sep = "&"
+		}
+	}
+	return purl
+}
+
+// escapeQualifier percent-encodes all but alphanumerics, ".-_~" and ":", as ECMA-427 5.4 requires.
+func escapeQualifier(v string) string {
+	return strings.NewReplacer("%3A", ":", "+", "%20").Replace(url.QueryEscape(v))
 }
 
 // ApplyAPIResponse copies vulnerabilities and findings from a MiniBOM-shaped

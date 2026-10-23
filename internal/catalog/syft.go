@@ -44,6 +44,8 @@ type Package struct {
 	// internal/trust). It is not version-resolved against the public registry
 	// and callers leave it out of the SBOM.
 	Trusted bool
+	// Qualifiers are purl qualifiers marking a git or private-registry crate.
+	Qualifiers map[string]string
 }
 
 // Options tunes a Catalog run.
@@ -265,7 +267,12 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 				warn.Add(ctx, cargoDropEntry(cargoDropReason(p.Name), p.Name))
 				continue
 			}
-			key := dedupKey(t, p.Name, version)
+			qualifiers, why := cargoSourceQualifiers(p)
+			if why != "" {
+				warn.Add(ctx, cargoDropEntry(why, p.Name))
+				continue
+			}
+			key := dedupKey(t, p.Name, version) + qualifierKey(qualifiers)
 			if i, ok := seen[key]; ok {
 				// Every sighting's source counts toward trust, not just the
 				// first: one lockfile fetching it from the public index is
@@ -281,6 +288,7 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 				Source:     []string{c.Name()},
 				Locations:  locations(p),
 				Registries: mergeUnique(nil, []string{registryOf(p)}),
+				Qualifiers: qualifiers,
 			})
 		}
 	}
@@ -326,6 +334,10 @@ func resolveVersionless(ctx context.Context, pkgs []Package, opts Options) {
 		// A trusted package is by definition one the public registry may not
 		// have, and it is not going to be checked anyway.
 		if pkgs[i].Version != "" || pkgs[i].Local || pkgs[i].Trusted {
+			continue
+		}
+		// A git or private-registry crate's latest on crates.io is another crate's.
+		if len(pkgs[i].Qualifiers) > 0 {
 			continue
 		}
 		// Skip anything registry.ResolveLatest cannot answer for.
@@ -439,10 +451,21 @@ func mergeVersionless(pkgs []Package) []Package {
 		return p.Type + "@" + normalizeName(p.Name)
 	}
 
+	// A foreign crate folds only into its own source, never into a crates.io release.
+	fkey := func(p Package) string { return gkey(p) + qualifierKey(p.Qualifiers) }
+	versionedKeys := func(p Package) []string {
+		if len(p.Qualifiers) == 0 {
+			return []string{gkey(p)}
+		}
+		return []string{gkey(p), fkey(p)}
+	}
+
 	hasVersioned := map[string]bool{}
 	for _, p := range pkgs {
 		if p.Version != "" {
-			hasVersioned[gkey(p)] = true
+			for _, k := range versionedKeys(p) {
+				hasVersioned[k] = true
+			}
 		}
 	}
 
@@ -451,18 +474,20 @@ func mergeVersionless(pkgs []Package) []Package {
 	var out []Package
 	groupIdx := map[string][]int{}
 	for _, p := range pkgs {
-		if p.Version == "" && hasVersioned[gkey(p)] {
+		if p.Version == "" && hasVersioned[fkey(p)] {
 			continue // folded below
 		}
 		if p.Version != "" {
-			groupIdx[gkey(p)] = append(groupIdx[gkey(p)], len(out))
+			for _, k := range versionedKeys(p) {
+				groupIdx[k] = append(groupIdx[k], len(out))
+			}
 		}
 		out = append(out, p)
 	}
 
 	for _, p := range pkgs {
-		if p.Version == "" && hasVersioned[gkey(p)] {
-			for _, i := range groupIdx[gkey(p)] {
+		if p.Version == "" && hasVersioned[fkey(p)] {
+			for _, i := range groupIdx[fkey(p)] {
 				out[i].Source = mergeUnique(out[i].Source, p.Source)
 				out[i].Locations = mergeUnique(out[i].Locations, p.Locations)
 				out[i].Registries = mergeUnique(out[i].Registries, p.Registries)

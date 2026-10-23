@@ -98,11 +98,12 @@ func Run(ctx context.Context, opts Options) (*ossbom.SBOM, error) {
 			continue
 		}
 		c := ossbom.Component{
-			Name:     p.Name,
-			Version:  p.Version,
-			Type:     p.Type,
-			Source:   p.Source,
-			Location: p.Locations,
+			Name:       p.Name,
+			Version:    p.Version,
+			Type:       p.Type,
+			Source:     p.Source,
+			Location:   p.Locations,
+			Qualifiers: p.Qualifiers,
 		}
 		// Flag locally-defined packages (uv path/workspace sources, poetry path
 		// deps) so the platform can filter them before scanning (OSS-1389). The
@@ -139,11 +140,9 @@ func InjectTestVulnerability(sbom *ossbom.SBOM) error {
 	if len(sbom.Components) == 0 {
 		return ErrNoComponents
 	}
-	c := sbom.Components[0]
-	purl := fmt.Sprintf("pkg:%s/%s@%s", c.Type, c.Name, c.Version)
 	sbom.AddVulnerability(ossbom.NewMalwareVulnerability(
 		"TEST-2024-0001",
-		purl,
+		sbom.Components[0].Purl(),
 		"This is a test vulnerability added in dry-run-malicious mode",
 	))
 	return nil
@@ -195,9 +194,10 @@ func MalwareReports(sbom *ossbom.SBOM, floor severity.Level) (MalwareSummary, bo
 //
 // The real parser does the work: it percent-decodes (an npm scope is spelled
 // "%40scope" per the spec) and drops qualifiers and subpaths, which a
-// hand-rolled split would leave glued to the version. Our own componentPurl
-// emits neither, but the purls here come back from the API, so parsing what
-// the spec allows rather than what we happen to send is the safer side.
+// hand-rolled split would leave glued to the version. Our own purls carry
+// qualifiers only for foreign crates, but the purls here come back from the
+// API, so parsing what the spec allows rather than what we happen to send is
+// the safer side.
 func parsePurl(purl string) (ecosystem, name, version string) {
 	if p, err := packageurl.FromString(purl); err == nil && p.Name != "" {
 		name = p.Name

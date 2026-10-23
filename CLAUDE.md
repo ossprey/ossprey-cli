@@ -315,6 +315,8 @@ Output is deduped by `(type, name, version)`. `mergeVersionless` then collapses
 a package emitted both versionless (direct-deps fallback) and pinned (uv-resolved)
 into the pinned one. Vendored paths (`node_modules/`) are skipped (`isVendoredPath`). Lockfile entries for the project's own code are dropped: yarn by resolution protocol (`workspace:`/`portal:`/`link:`/`file:`), npm when `resolved` is a scheme-less relative path (a workspace link). Otherwise the project's own name went to the API and was looked up on public npm.
 
+A `Cargo.lock` crate from git or a non-crates.io registry is **sent, marked**, never as a bare crates.io purl, which would check crates.io's crate of that name (`cargoSourceQualifiers`, OSS-2484): `vcs_url=git+<url>@<commit>` or `repository_url=<origin>/`. Three rules. crates.io is an exact allowlist of the two strings Cargo's `SourceId::is_crates_io` accepts, so a lookalike host is foreign rather than trusted. Userinfo, query and fragment are never copied, and a registry keeps only its origin because some registries put an access token in the path. A marked crate is never version-resolved, dedup keeps it apart from a crates.io crate of the same name and version, and its versionless sightings fold only into the same source (`mergeVersionless`), so it is never pinned to a crates.io release. The reverse fold is kept on purpose: a `[patch.crates-io]` git crate's versionless `Cargo.toml` sighting folds into the marked lock entry instead of sending the name to crates.io for a latest lookup.
+
 **Package sinks are excluded from the syft index itself** (`packageSinks`,
 `newDirectorySource`). Filtering `node_modules` packages after cataloguing was
 not enough: syft's directory resolver opens every file it indexes, and a
@@ -448,7 +450,8 @@ packages, and now report the rest.
 
 `SBOM` is the rich internal model. `MiniBOM` (`minibom.go`) is the compressed
 wire format sent to the API — each component becomes `{purl, source, env, location}`
-with `purl = pkg:<type>/<name>@<version>`. The Go model mirrors the Python
+with `purl = pkg:<type>/<name>@<version>`, plus a `vcs_url`/`repository_url`
+qualifier for a git or private-registry crate (OSS-2484). The Go model mirrors the Python
 `ossbom` library referenced in comments; keep them in sync when the API contract
 changes.
 

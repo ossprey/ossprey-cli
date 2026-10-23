@@ -38,6 +38,8 @@ type Component struct {
 	Env      []string       `json:"env"`
 	Location []string       `json:"location"`
 	Metadata map[string]any `json:"metadata"`
+	// Qualifiers are purl qualifiers, as in the Python ossbom Component.
+	Qualifiers map[string]string `json:"qualifiers,omitempty"`
 }
 
 type Vulnerability struct {
@@ -112,10 +114,10 @@ func (c *Component) normalize() {
 	}
 }
 
-// AddComponent merges into the SBOM, deduping on PURL-ish key (type/name@version).
+// AddComponent merges into the SBOM, deduping on its purl.
 func (s *SBOM) AddComponent(c Component) {
 	c.normalize()
-	key := c.Type + "/" + c.Name + "@" + c.Version
+	key := c.Purl()
 	if idx, ok := s.dedupe[key]; ok {
 		s.Components[idx].Source = mergeUnique(s.Components[idx].Source, c.Source)
 		s.Components[idx].Location = mergeUnique(s.Components[idx].Location, c.Location)
@@ -145,13 +147,16 @@ func mergeUnique(a, b []string) []string {
 	return out
 }
 
-// Sort components by (name, version) — matches v1 deterministic output.
+// Sort components by (name, version), then purl, for v1's deterministic output.
 func (s *SBOM) Sort() {
 	sort.Slice(s.Components, func(i, j int) bool {
 		if s.Components[i].Name != s.Components[j].Name {
 			return s.Components[i].Name < s.Components[j].Name
 		}
-		return s.Components[i].Version < s.Components[j].Version
+		if s.Components[i].Version != s.Components[j].Version {
+			return s.Components[i].Version < s.Components[j].Version
+		}
+		return s.Components[i].Purl() < s.Components[j].Purl()
 	})
 }
 
