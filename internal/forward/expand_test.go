@@ -1684,8 +1684,22 @@ func TestSplitAttachedShorts(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
 	}
+	// An option's value is copied as it is, whatever it looks like, and so
+	// is everything after `--`.
+	got = splitAttachedShorts([]string{"--with", "-cnot-a-file", "-c", "-ialso-a-value", "-wrich", "--", "-ievil"}, toolRunValueFlags)
+	want = []string{"--with", "-cnot-a-file", "-c", "-ialso-a-value", "-w", "rich", "--", "-ievil"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	// pip takes the next token as --config-settings' value whatever it looks
+	// like, so this installs requests with one setting and nothing named foo.
+	pip, _ := Lookup("pip")
+	parsed := ParseSpecs(pip, []string{"--config-settings", "-Cfoo=bar", "requests"})
+	if want := []check.Spec{{Ecosystem: "pypi", Name: "requests"}}; !reflect.DeepEqual(parsed.Specs, want) {
+		t.Errorf("pip install --config-settings -Cfoo=bar requests: specs = %+v, want %+v", parsed.Specs, want)
+	}
 	uvx, _ := Lookup("uvx")
-	parsed := parseToolRun(uvx, []string{"-wrich", "ruff", "-wnot-a-package"})
+	parsed = parseToolRun(uvx, []string{"-wrich", "ruff", "-wnot-a-package"})
 	if want := []check.Spec{{Ecosystem: "pypi", Name: "rich"}, {Ecosystem: "pypi", Name: "ruff"}}; !reflect.DeepEqual(parsed.Specs, want) {
 		t.Errorf("uvx -wrich ruff: specs = %+v, want %+v", parsed.Specs, want)
 	}

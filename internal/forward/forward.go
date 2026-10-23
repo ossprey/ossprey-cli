@@ -1364,14 +1364,27 @@ func splitRequirements(value string) []string {
 // (`-cfile`, `-ihttps://…`, `-p3.12`), as clap and argparse both read it,
 // into the option and the value as two tokens, for every short option in
 // valFlags. A token that is not one of those is left alone, so a run of
-// boolean shorts (`-qq`) stays what it was. The result is a new slice; args
-// is untouched.
+// boolean shorts (`-qq`) stays what it was. So is the value of the option
+// before it: pip takes the next token as `--config-settings`' value whatever
+// it looks like, so in `--config-settings -Cfoo=bar requests` the second
+// token is a setting and not a `-C`; splitting it read `foo=bar` as a
+// package. Everything after `--` is positional and is copied as it is. The
+// result is a new slice; args is untouched.
 func splitAttachedShorts(args []string, valFlags map[string]bool) []string {
 	out := make([]string, 0, len(args))
-	for _, a := range args {
-		if len(a) > 2 && a[0] == '-' && a[1] != '-' && valFlags[a[:2]] {
+	value := false // the token before was an option still owed its value
+	for i, a := range args {
+		switch {
+		case value:
+			value = false
+		case a == "--":
+			return append(out, args[i:]...)
+		case len(a) > 2 && a[0] == '-' && a[1] != '-' && valFlags[a[:2]]:
 			out = append(out, a[:2], strings.TrimPrefix(a[2:], "="))
 			continue
+		case strings.HasPrefix(a, "-"):
+			flag, _, hasInline := splitFlagValue(a)
+			value = valFlags[flag] && !hasInline
 		}
 		out = append(out, a)
 	}
