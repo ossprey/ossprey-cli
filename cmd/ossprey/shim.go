@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"runtime"
 	"strings"
 
@@ -41,6 +42,7 @@ func newShimInstallCmd() *cobra.Command {
 		monitorID string
 		noPassive bool
 		git       bool
+		agents    []string
 	)
 
 	cmd := &cobra.Command{
@@ -68,7 +70,11 @@ upgrade never silently starts blocking a fleet that chose not to. Use
 --no-passive to go back to blocking on purpose.
 
 --git also shims git (opt-in): a clone or pull of a public GitHub repository
-checks the repository itself before git runs. Private repos pass through.`,
+checks the repository itself before git runs. Private repos pass through.
+
+Shell profiles only reach login and interactive shells. A coding agent's
+commands run in neither, so --agent claude also puts the shim directory on PATH
+through a Claude Code SessionStart hook in ~/.claude/settings.json.`,
 		Example: `  # Shim every package manager found on this machine
   ossprey shim install
 
@@ -85,7 +91,10 @@ checks the repository itself before git runs. Private repos pass through.`,
   ossprey shim install --watchdog
 
   # Passive monitoring with no credential on the machine at all
-  ossprey shim install --monitor ospi_...`,
+  ossprey shim install --monitor ospi_...
+
+  # Also cover the commands Claude Code runs
+  ossprey shim install --agent claude`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			mode := shim.ModeBlocking
 			switch {
@@ -104,6 +113,7 @@ checks the repository itself before git runs. Private repos pass through.`,
 				MonitorID:    monitorID,
 				ClearMode:    noPassive,
 				Git:          git,
+				Agents:       agents,
 			}
 			if printOnly {
 				return previewInstall(opts)
@@ -128,6 +138,7 @@ checks the repository itself before git runs. Private repos pass through.`,
 	cmd.Flags().BoolVar(&watchdog, "watchdog", false, "passive mode: submit scans with this machine's login and never block an install")
 	cmd.Flags().StringVar(&monitorID, "monitor", "", "passive mode: submit scans through a monitor's id, needing no login or API key")
 	cmd.Flags().BoolVar(&git, "git", false, "also shim git: check public GitHub repos on clone/pull (opt-in)")
+	cmd.Flags().StringSliceVar(&agents, "agent", nil, "also put the shims on PATH for this coding agent's commands (supported: "+strings.Join(shim.SupportedAgents(), ", ")+")")
 	cmd.Flags().BoolVar(&noPassive, "no-passive", false, "go back to blocking installs, dropping a watchdog or monitor mode already installed")
 	cmd.MarkFlagsMutuallyExclusive("watchdog", "monitor")
 	cmd.MarkFlagsMutuallyExclusive("no-passive", "watchdog")
@@ -161,6 +172,7 @@ func newShimUninstallCmd() *cobra.Command {
 			for _, p := range res.Profiles {
 				fmt.Println("Cleaned PATH entry from " + p)
 			}
+			printWarnings(res.Warnings)
 			if len(res.Profiles) > 0 || res.OnPath {
 				fmt.Println("\nOpen a new terminal for the change to take effect.")
 			}
@@ -230,6 +242,10 @@ func previewInstall(opts shim.Options) error {
 			fmt.Println("Would add the PATH entry to " + p)
 		}
 	}
+	for _, p := range res.Agents {
+		fmt.Println("Would add the agent PATH hook to " + p)
+	}
+	printWarnings(res.Warnings)
 	return nil
 }
 
@@ -237,6 +253,8 @@ func printInstallResult(res *shim.Result, noPath bool) {
 	if len(res.Done) == 0 {
 		fmt.Printf("No package managers to shim. Supported: %s\n", strings.Join(shim.DefaultManagers(), ", "))
 		fmt.Println("Install one, or re-run with --all to shim them ahead of time.")
+		printAgentHooks(res.Agents)
+		printWarnings(res.Warnings)
 		return
 	}
 
@@ -273,6 +291,8 @@ func printInstallResult(res *shim.Result, noPath bool) {
 		fmt.Println("Open a new terminal (or `hash -r`) to pick it up, then run `ossprey shim status`.")
 	}
 
+	printAgentHooks(res.Agents)
+	printWarnings(res.Warnings)
 	fmt.Printf("\nBypass a single command with %s=1, or undo with `ossprey shim uninstall`.\n", shim.BypassEnv)
 }
 
@@ -316,6 +336,11 @@ func printStatus(st *shim.Status) {
 	if !st.OnPath && st.Installed() {
 		fmt.Printf("\n%s is not on this shell's PATH. Open a new terminal, or run:\n", st.Dir)
 		fmt.Printf("  export PATH=\"%s:$PATH\"\n", st.Dir)
+		fmt.Println("Shell profiles only reach login and interactive shells, so `bash -c`,")
+		fmt.Println("scripts and coding agents inherit PATH from whatever started them.")
+		if st.ClaudeHook == "" && runtime.GOOS != "windows" {
+			fmt.Println("For Claude Code: ossprey shim install --agent claude")
+		}
 	}
 	if st.Bypass {
 		fmt.Printf("\n%s is set: every shim is passing installs through unchecked.\n", shim.BypassEnv)
@@ -330,8 +355,24 @@ func printStatus(st *shim.Status) {
 	if len(managed) > 0 {
 		fmt.Println("\nPATH entry written in: " + strings.Join(managed, ", "))
 	}
+	if st.ClaudeHook != "" {
+		fmt.Println("Claude Code PATH hook: " + st.ClaudeHook)
+	}
 	if runtime.GOOS != "windows" && len(managed) == 0 && st.Installed() {
 		fmt.Println("\nNo shell profile carries the PATH entry (installed with --no-path?).")
+	}
+}
+
+func printAgentHooks(paths []string) {
+	for _, p := range paths {
+		fmt.Println("\nAdded a SessionStart hook putting the shims on PATH for Claude Code's Bash commands in " + p)
+		fmt.Println("It applies from the next Claude Code session.")
+	}
+}
+
+func printWarnings(ws []string) {
+	for _, w := range ws {
+		fmt.Fprintln(os.Stderr, "warning: "+w)
 	}
 }
 
