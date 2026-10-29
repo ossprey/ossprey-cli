@@ -31,12 +31,15 @@ func TestNpxRun(t *testing.T) {
 		{[]string{"cowsay", "--package", "evil"}, []check.Spec{npmSpec("cowsay", "")}, "cowsay"},
 		{[]string{"-y", "cowsay", "moo"}, []check.Spec{npmSpec("cowsay", "")}, "cowsay"},
 		{[]string{"cowsay@1.5.0", "--help"}, []check.Spec{npmSpec("cowsay", "1.5.0")}, ""},
+		// An explicit tag is kept as typed: npm fetches it whatever --tag
+		// says, and never takes a tag spec from the local tree.
 		{[]string{"cowsay@latest"}, []check.Spec{npmSpec("cowsay", "")}, ""},
 		{[]string{"@scope/tool@2.0.0", "x"}, []check.Spec{npmSpec("@scope/tool", "2.0.0")}, ""},
 		{[]string{"--", "cowsay", "--yes"}, []check.Spec{npmSpec("cowsay", "")}, "cowsay"},
 		// --package names what is fetched; the positional is only its binary.
 		{[]string{"-p", "cowsay@1.5.0", "cowsay", "hi"}, []check.Spec{npmSpec("cowsay", "1.5.0")}, ""},
 		{[]string{"--package=a@1.0.0", "-p", "b@2.0.0", "run-it"}, []check.Spec{npmSpec("a", "1.0.0"), npmSpec("b", "2.0.0")}, ""},
+		{[]string{"--package", "cowsay@latest", "cowsay"}, []check.Spec{npmSpec("cowsay", "")}, ""},
 		// Value options must not leave their value standing in for the command.
 		{[]string{"--registry", "https://registry.npmjs.org", "cowsay"}, []check.Spec{npmSpec("cowsay", "")}, "cowsay"},
 		{[]string{"--cache", "/tmp/c", "--loglevel", "silent", "cowsay"}, []check.Spec{npmSpec("cowsay", "")}, "cowsay"},
@@ -76,6 +79,28 @@ func TestNpmExecRun(t *testing.T) {
 	for _, tc := range tests {
 		if got := npmExecRun(tc.args); !reflect.DeepEqual(got.Specs, tc.wantSpecs) {
 			t.Errorf("npmExecRun(%q) = %+v, want %+v", tc.args, got.Specs, tc.wantSpecs)
+		}
+	}
+}
+
+// A command bunx fetches under another package's name keeps its tag on the
+// token the resolver reads: `tsc@latest` is `typescript@latest`, not the
+// configured tag's TypeScript.
+func TestBunxRun_AliasKeepsTheTag(t *testing.T) {
+	bunx, _ := Lookup("bunx")
+	for _, tt := range []struct {
+		args []string
+		want []string
+	}{
+		{[]string{"tsc@latest", "--noEmit"}, []string{"typescript@latest"}},
+		{[]string{"claude@2.0.0"}, []string{"@anthropic-ai/claude-code@2.0.0"}},
+		{[]string{"tsc"}, []string{"typescript"}},
+		// An explicit --package is kept as typed too.
+		{[]string{"--package", "cowsay@latest", "cowsay"}, []string{"cowsay@latest"}},
+	} {
+		parsed := bunx.parseRun(tt.args)
+		if got := specTokens(bunx, parsed); !reflect.DeepEqual(got, tt.want) {
+			t.Errorf("%v: tokens = %v, want %v", tt.args, got, tt.want)
 		}
 	}
 }
@@ -410,6 +435,17 @@ Module._load = function (request, parent, isMain) {
       positionals: conf.argv.remain.slice(1),
       packages: pkg.map(String),
       call: conf.call !== undefined,
+      registry: conf.registry === undefined ? '' : String(conf.registry),
+      // nopt's path type resolves against the cwd; relative to it again so
+      // the port, which keeps the path as given, compares equal.
+      userconfig: conf.userconfig === undefined ? '' : require('path').relative(process.cwd(), String(conf.userconfig)),
+      // The options a tool run's dry run is given, as npm attributed them:
+      // a Date (before) as the word, a path (prefix) relative to the cwd,
+      // everything else as its string.
+      config: Object.fromEntries(['legacy-peer-deps', 'strict-peer-deps', 'optional', 'omit', 'include',
+        'before', 'tag', 'globalconfig', 'global', 'prefix', 'location', 'cache', 'offline', 'prefer-offline', 'prefer-online', 'workspaces', 'min-release-age', 'min-release-age-exclude', 'production', 'only', 'dev', 'also'].filter(k => conf[k] !== undefined).map(k =>
+          [k, [].concat(conf[k]).map(v => v instanceof Date ? 'date'
+            : k === 'prefix' || k === 'globalconfig' || k === 'cache' ? require('path').relative(process.cwd(), String(v)) : String(v))])),
     }))
   }
 }
@@ -424,10 +460,11 @@ func TestNpmParsersMatchNpm(t *testing.T) {
 	if err := os.WriteFile(preload, []byte(oraclePreload), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	oracleDir := t.TempDir()
 	oracle := func(cli string, args []string) npmArgv {
 		t.Helper()
 		cmd := exec.Command(node, append([]string{"-r", preload, filepath.Join(root, "bin", cli)}, args...)...)
-		cmd.Dir = t.TempDir()
+		cmd.Dir = oracleDir
 		out, err := cmd.Output()
 		if err != nil {
 			t.Fatalf("%s %q: %v", cli, args, err)
@@ -436,11 +473,15 @@ func TestNpmParsersMatchNpm(t *testing.T) {
 			Positionals []string
 			Packages    []string
 			Call        bool
+			Registry    string
+			Userconfig  string
+			Config      map[string][]string
 		}
 		if err := json.Unmarshal(out, &got); err != nil {
 			t.Fatalf("%s %q: %v (%s)", cli, args, err, out)
 		}
-		return npmArgv{Packages: got.Packages, Call: got.Call, Positionals: got.Positionals}
+		return npmArgv{Packages: got.Packages, Call: got.Call, Positionals: got.Positionals,
+			Registry: got.Registry, Userconfig: filepath.ToSlash(got.Userconfig), Config: got.Config}
 	}
 	norm := func(a npmArgv) npmArgv {
 		if len(a.Packages) == 0 {
@@ -448,6 +489,43 @@ func TestNpmParsersMatchNpm(t *testing.T) {
 		}
 		if len(a.Positionals) == 0 {
 			a.Positionals = nil
+		}
+		// A home path is absolute on both sides after nopt's expansion; the
+		// oracle reports it relative to its cwd, so the port's is too.
+		rel := func(v string) string {
+			if filepath.IsAbs(v) {
+				if r, err := filepath.Rel(oracleDir, v); err == nil {
+					v = r
+				}
+			}
+			return filepath.ToSlash(v)
+		}
+		a.Userconfig = rel(a.Userconfig)
+		if len(a.Config) == 0 {
+			a.Config = nil
+		}
+		// The port keeps a date as typed and a prefix as given; the oracle
+		// reports the word and the cwd-relative path. nopt keeps one value
+		// for a scalar, every value for an array (omit, include).
+		cfg := map[string][]string{}
+		for k, vs := range a.Config {
+			out := []string{}
+			for _, v := range vs {
+				switch k {
+				case "before":
+					v = "date"
+				case "prefix", "globalconfig", "cache":
+					v = rel(filepath.Clean(v))
+				}
+				out = append(out, v)
+			}
+			if k != "omit" && k != "include" {
+				out = out[len(out)-1:]
+			}
+			cfg[k] = out
+		}
+		if len(cfg) > 0 {
+			a.Config = cfg
 		}
 		return a
 	}
@@ -461,12 +539,46 @@ func TestNpmParsersMatchNpm(t *testing.T) {
 		{"--no-update-notifier", "cowsay", "moo"}, {"--no-audit", "--no-fund", "cowsay"},
 		{"--ignore-existing", "cowsay"}, {"-q", "cowsay"}, {"--quiet", "cowsay", "moo"},
 		{"--loglevel", "silent", "cowsay", "moo"}, {"--", "cowsay", "--yes"}, {"cowsay@1.5.0", "--help"},
-		{"@scope/pkg@1.0.0", "arg"}, {"-gy", "cowsay"}, {"--prefer-offline", "cowsay"},
+		{"@scope/pkg@1.0.0", "arg"}, {"-gy", "cowsay"}, {"--prefer-offline", "cowsay"}, {"--offline", "--cache", "c", "cowsay"}, {"--no-offline", "cowsay"},
+		// nopt toggles the negation per prefix.
+		{"--no-no-optional", "cowsay"}, {"--no-no-no-optional", "cowsay"}, {"--no-no-optional=false", "cowsay"},
+		{"--workspaces=false", "cowsay"}, {"--no-workspaces", "cowsay"},
+		{"--prefer-online", "cowsay"}, {"--no-prefer-online", "cowsay"},
+		{"--min-release-age=7", "cowsay"}, {"--min-release-age", "3", "--min-release-age-exclude", "cowsay", "--min-release-age-exclude=left-pad", "cowsay"},
+		// npm's older spellings of the omit policy.
+		{"--production", "cowsay"}, {"--production=false", "cowsay"}, {"--no-production", "cowsay"}, {"--only=prod", "cowsay"}, {"--also=dev", "cowsay"}, {"--dev", "cowsay"},
 		{"--cache", "/tmp/c", "cowsay"}, {"--userconfig", "./x.npmrc", "cowsay", "moo"},
 		{"--shell", "bash", "cowsay"}, {"--color", "always", "cowsay"}, {"--browser", "firefox", "cowsay"},
 		{"--workspace", "a", "cowsay"}, {"-w", "a", "cowsay"}, {"--package", "cowsay", "--", "cowsay", "moo"},
 		{"--pack=cowsay", "cowsay"}, {"--reg", "https://r.example", "cowsay"}, {"--unknown-thing", "cowsay", "moo"},
+		// nopt types registry as a url: an invalid value drops the option, and
+		// the last value is the one validated.
+		{"--registry", "nope", "cowsay"}, {"--registry", "https://a.example", "--registry", "nope", "cowsay"},
+		{"--registry", "https://a.example", "--registry", "https://b.example/", "cowsay"},
+		{"cowsay", "--registry", "https://after.example"},
+		{"--userconfig=./y.npmrc", "cowsay"}, {"--userconfig", "sub/../z.npmrc", "cowsay", "moo"},
 		{"--unknown=1", "cowsay"}, {"-d", "cowsay"}, {"--yes=true", "cowsay"}, {"--version"}, {},
+		// The resolution options and the .npmrc selectors npm reads for the
+		// run, with the program's own `--before` left to the program.
+		{"--before=2024-01-01", "cowsay", "--before=2020-01-01"}, {"-g", "cowsay"}, {"--global", "cowsay", "moo"},
+		{"--prefix", "../other", "cowsay"}, {"--prefix=sub/../o", "cowsay"}, {"--location=global", "cowsay"},
+		{"--location", "project", "cowsay"}, {"--omit", "dev", "--omit=optional", "--tag", "beta", "--legacy-peer-deps", "cowsay", "--tag", "x"},
+		{"--no-optional", "cowsay"}, {"--legacy-peer-deps=false", "cowsay"}, {"--strict-peer-deps", "--include=dev", "cowsay"},
+		{"--no-optional", "--optional", "cowsay"}, {"--optional", "--no-optional", "cowsay", "moo"},
+		{"--optional=false", "cowsay"}, {"--no-optional=false", "cowsay"}, {"--no-global=false", "cowsay"},
+		{"--tag", "next", "--tag=latest", "cowsay"},
+		{"--globalconfig", "./corp.npmrc", "cowsay"}, {"--globalconfig=sub/../g.npmrc", "cowsay", "moo"},
+		// nopt expands a leading ~/ in a path-typed option.
+		{"--userconfig", "~/u.npmrc", "cowsay"}, {"--globalconfig=~/g.npmrc", "cowsay"}, {"--prefix", "~/p", "cowsay"},
+		{"--cache", "~/c", "cowsay"}, {"--cache=./c", "cowsay", "moo"},
+		// A negated path option is invalid to npm, which keeps its default.
+		{"--no-cache", "cowsay"}, {"--no-prefix", "cowsay"}, {"--no-globalconfig", "cowsay", "moo"}, {"--cache=false", "cowsay"},
+		// A later negation drops an earlier value with it, as nopt's last
+		// value wins and the invalid boolean is then dropped.
+		{"--cache", "custom", "--no-cache", "cowsay"}, {"--no-cache", "--cache", "custom", "cowsay"},
+		{"--prefix", "p", "--no-prefix", "cowsay"}, {"--globalconfig", "g.npmrc", "--no-globalconfig", "cowsay"},
+		{"--userconfig", "./x.npmrc", "--no-userconfig", "cowsay"}, {"--registry", "https://a.example", "--no-registry", "cowsay"},
+		{"--tag", "beta", "--no-tag", "cowsay"}, {"--omit", "dev", "--no-omit", "cowsay"},
 	}
 	for _, args := range npx {
 		want, got := norm(oracle("npx-cli.js", args)), norm(parseNpmArgv(npxArgv(args)))
@@ -481,6 +593,7 @@ func TestNpmParsersMatchNpm(t *testing.T) {
 		{"exec", "cowsay", "--package", "left-pad"}, {"--yes", "exec", "cowsay"},
 		{"exec", "--pack=cowsay", "--", "cowsay"}, {"exec", "-c", "echo hi"},
 		{"exec", "--workspace", "web", "cowsay"}, {"exec", "-gy", "cowsay"}, {"exec", "--no-yes", "cowsay"},
+		{"exec", "--prefix", "../o", "cowsay"}, {"exec", "cowsay", "--before=2024-01-01"}, {"--omit=dev", "exec", "cowsay"},
 	}
 	for _, args := range npmExec {
 		want := norm(oracle("npm-cli.js", args))

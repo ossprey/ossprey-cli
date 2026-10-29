@@ -89,3 +89,50 @@ func TestNamedPipInstallChecksItsDependencies(t *testing.T) {
 		t.Errorf("requests' dependencies were not checked; purls submitted: %v", purls)
 	}
 }
+
+// A tool run is a named install into npx's own cache: `npx cowsay` fetches
+// cowsay and its dependencies, so they are checked too, and a malicious
+// dependency blocks the run.
+func TestNpxRunChecksTheFetchedPackagesDependencies(t *testing.T) {
+	npmBin(t)
+	api := newFakeAPI(t, "")
+	dir := t.TempDir()
+
+	res := runForwardVerbose(t, dir, api.URL, "npx", "--yes", "cowsay@1.6.0", "moo")
+	if res.exitCode != 0 {
+		t.Fatalf("exit %d\nstdout: %s\nstderr: %s", res.exitCode, res.stdout, res.stderr)
+	}
+	_, purls := api.stats()
+	if !slices.Contains(purls, "pkg:npm/cowsay@1.6.0") {
+		t.Errorf("cowsay was not checked; purls submitted: %v", purls)
+	}
+	deps := 0
+	for _, p := range purls {
+		if strings.HasPrefix(p, "pkg:npm/yargs@") || strings.HasPrefix(p, "pkg:npm/get-stdin@") {
+			deps++
+		}
+	}
+	if deps != 2 {
+		t.Errorf("cowsay's dependencies were not checked; purls submitted: %v", purls)
+	}
+	if !strings.Contains(res.stdout, "moo") {
+		t.Errorf("npx did not run cowsay:\n%s", res.stdout)
+	}
+}
+
+func TestNpxRunBlocksOnAMaliciousDependency(t *testing.T) {
+	npmBin(t)
+	api := newFakeAPI(t, "pkg:npm/get-stdin@8.0.0")
+	dir := t.TempDir()
+
+	res := runForward(t, dir, api.URL, "npx", "--yes", "cowsay@1.6.0", "moo")
+	if res.exitCode != 1 {
+		t.Fatalf("exit %d, want 1 (blocked)\nstderr: %s", res.exitCode, res.stderr)
+	}
+	if !strings.Contains(res.stderr, "get-stdin:8.0.0 contains malware") {
+		t.Errorf("block does not name the dependency:\n%s", res.stderr)
+	}
+	if strings.Contains(res.stdout, "moo") {
+		t.Error("blocked run still ran cowsay")
+	}
+}

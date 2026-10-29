@@ -14,7 +14,9 @@ import (
 
 func TestParseNpmLock(t *testing.T) {
 	// lockfileVersion 3 "packages" map: root project ("" key, no resolved),
-	// a scoped dep, a nested dep, and a file: dep (no resolved).
+	// a scoped dep, a nested dep, and a file: dep as npm records one (a
+	// link under node_modules pointing at the local package, which has no
+	// resolved of its own).
 	lock := []byte(`{
 		"name": "app",
 		"lockfileVersion": 3,
@@ -23,7 +25,8 @@ func TestParseNpmLock(t *testing.T) {
 			"node_modules/bootstrap": {"version": "3.4.7", "resolved": "https://registry.npmjs.org/bootstrap/-/bootstrap-3.4.7.tgz"},
 			"node_modules/@types/bun": {"version": "1.3.14", "resolved": "https://registry.npmjs.org/@types/bun/-/bun-1.3.14.tgz"},
 			"node_modules/a/node_modules/nested": {"version": "2.0.0", "resolved": "https://registry.npmjs.org/nested/-/nested-2.0.0.tgz"},
-			"node_modules/local-dep": {"version": "9.9.9"}
+			"node_modules/local-dep": {"resolved": "../local-dep", "link": true},
+			"../local-dep": {"version": "9.9.9"}
 		}
 	}`)
 
@@ -44,7 +47,7 @@ func TestParseNpmLock(t *testing.T) {
 		t.Error("root project should not be emitted")
 	}
 	if keys["local-dep@9.9.9"] {
-		t.Error("dep without a registry tarball should be dropped")
+		t.Error("a file: dep, linked from node_modules, should be dropped")
 	}
 	if len(got) != 3 {
 		t.Errorf("got %d packages, want 3: %v", len(got), keys)

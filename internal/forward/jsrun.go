@@ -1,6 +1,7 @@
 package forward
 
 import (
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -52,6 +53,155 @@ type npmArgv struct {
 	Call bool
 	// Positionals are the non-option tokens in order; the first is the command.
 	Positionals []string
+	// Registry is the --registry value npm will fetch from, when one is given
+	// (the last wins, as in nopt). It is read by npm, not by the program run,
+	// so the resolver must use it too.
+	Registry string
+	// Userconfig is the --userconfig path, cleaned but still relative to the
+	// directory the command ran in, as nopt's path type resolves it; a
+	// resolver running elsewhere must make it absolute first.
+	Userconfig string
+	// Config holds the other options npm attributes to itself that change
+	// what a run fetches or where npm reads its configuration (npmRunConfig),
+	// each value in order, booleans as "true"/"false". Nothing after the
+	// command's own `--` boundary is ever recorded here.
+	Config map[string][]string
+}
+
+// npmRunConfig names the npm options a tool run's dry run must be given to
+// resolve what npm will: the peer and omit rules, a release ceiling, the
+// dist-tag, and the global/prefix/location trio that decides which .npmrc
+// npm reads.
+var npmRunConfig = flagSet("legacy-peer-deps", "strict-peer-deps", "optional", "omit", "include",
+	"before", "tag", "globalconfig", "global", "prefix", "location", "cache", "offline", "prefer-offline", "prefer-online", "workspaces",
+	"min-release-age", "min-release-age-exclude",
+	// npm's older spellings of the omit policy, which it still reads
+	// (verified: --production answers omit=dev, and --production=false
+	// overrides NODE_ENV=production and an --omit=dev on the line).
+	"production", "only", "dev", "also")
+
+// npmPathConfig are the npmRunConfig keys nopt types as paths: a leading
+// `~/` is the home directory (nopt's validatePath), and the rest is read
+// relative to the command's directory.
+var npmPathConfig = flagSet("globalconfig", "prefix", "cache")
+
+// expandHome is nopt's home expansion for a path-typed option: `~/x` is
+// `<home>/x` (`~\x` as well on Windows); anything else is left as given.
+func expandHome(v string) string {
+	rest, ok := strings.CutPrefix(v, "~/")
+	if !ok && runtime.GOOS == "windows" {
+		rest, ok = strings.CutPrefix(v, `~\`)
+	}
+	if !ok {
+		return v
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return v
+	}
+	return filepath.Join(home, rest)
+}
+
+// npmConfigKeys are npmRunConfig's keys in a fixed order, for output.
+var npmConfigKeys = []string{"also", "before", "cache", "dev", "globalconfig", "include", "legacy-peer-deps", "min-release-age", "min-release-age-exclude",
+	"offline", "omit", "only", "optional", "prefer-offline", "prefer-online", "production", "strict-peer-deps", "tag", "workspaces"}
+
+// npmArrayConfig are the recorded options nopt types as arrays, every
+// value kept; the rest keep their last value.
+var npmArrayConfig = flagSet("omit", "include", "min-release-age-exclude")
+
+// npmRecordOnly are recorded options the dry run is never told: workspaces
+// decides where npm reads its configuration, and `npm install --workspaces`
+// in a scratch directory with none fails with "No workspaces found!"
+// (verified against npm 11.19.1).
+var npmRecordOnly = flagSet("workspaces")
+
+func (a *npmArgv) record(key, value string) {
+	if !npmRunConfig[key] {
+		return
+	}
+	if npmPathConfig[key] {
+		value = filepath.Clean(expandHome(value))
+	}
+	if a.Config == nil {
+		a.Config = map[string][]string{}
+	}
+	a.Config[key] = append(a.Config[key], value)
+}
+
+func (a npmArgv) last(key string) string {
+	if v := a.Config[key]; len(v) > 0 {
+		return v[len(v)-1]
+	}
+	return ""
+}
+
+// global reports whether npm runs in global mode, where it reads no project
+// .npmrc: `-g`/`--global` or `--location global`, the last value winning
+// for each as in nopt.
+func (a npmArgv) global() bool {
+	return a.last("global") == "true" || a.last("location") == "global"
+}
+
+// prefix is the --prefix npm was given, cleaned and still relative to the
+// command's directory, or "".
+func (a npmArgv) prefix() string {
+	return a.last("prefix")
+}
+
+// workspacesOff reports --workspaces=false (or --no-workspaces), which
+// keeps npm's config discovery at the nearest package.json.
+func (a npmArgv) workspacesOff() bool {
+	return a.last("workspaces") == "false"
+}
+
+// cache is the --cache npm was given, or "".
+func (a npmArgv) cache() string {
+	return a.last("cache")
+}
+
+// npxPackages are the specs libnpmexec installs for the run, as typed: the
+// --package values, else the command itself. They key the npx cache.
+func (a npmArgv) npxPackages() []string {
+	if len(a.Packages) > 0 {
+		return slices.Clone(a.Packages)
+	}
+	if a.Call || len(a.Positionals) == 0 {
+		return nil
+	}
+	return []string{a.Positionals[0]}
+}
+
+// resolveFlags renders the recorded resolution options back into flags for
+// the dry run, in a fixed key order; npm re-reads them with its own
+// last-wins and array rules, so every occurrence is kept.
+func (a npmArgv) resolveFlags() []string {
+	var out []string
+	for _, key := range npmConfigKeys {
+		if npmRecordOnly[key] {
+			continue
+		}
+		values := a.Config[key]
+		if !npmArrayConfig[key] && len(values) > 1 {
+			// nopt keeps the last value of a single-valued option.
+			values = values[len(values)-1:]
+		}
+		for _, v := range values {
+			switch {
+			case npmConfig[key].isBool() && v == "true":
+				out = append(out, "--"+key)
+			case npmConfig[key].isBool() && v == "false":
+				out = append(out, "--no-"+key)
+			case key == "globalconfig", key == "cache":
+				// A path, resolved against the command's directory as nopt
+				// does; the dry run runs in another.
+				out = append(out, "--"+key+"="+absPath(v))
+			default:
+				out = append(out, "--"+key+"="+v)
+			}
+		}
+	}
+	return out
 }
 
 // npmExecAt matches `npm exec` under any name npm takes for it (`x`, `exe`).
@@ -81,10 +231,12 @@ func npxRun(args []string) installArgs {
 }
 
 func (a npmArgv) target() installArgs {
-	var out installArgs
+	out := installArgs{Registry: a.Registry, Userconfig: a.Userconfig,
+		NpmFlags: a.resolveFlags(), NpmGlobal: a.global(), NpmPrefix: a.prefix(), NpmWorkspacesOff: a.workspacesOff(),
+		NpmCache: a.cache(), NpxPackages: a.npxPackages()}
 	if len(a.Packages) > 0 {
 		for _, p := range a.Packages {
-			out.addTarget("npm", strings.TrimSuffix(p, "@latest"))
+			out.addTarget("npm", p)
 		}
 		return out
 	}
@@ -99,10 +251,14 @@ func (a npmArgv) target() installArgs {
 
 // addCommand adds the command of a run with no --package, which is also the
 // package fetched. A bare name is recorded as LocalCommand, since npm and bun
-// run a project's own binary of that name instead of fetching one.
+// run a project's own binary of that name instead of fetching one. The token
+// is kept as typed: `tool@latest` names the tag explicitly, which npm fetches
+// (libnpmexec never takes a tag spec from the local tree) and which the dry
+// run must see, or a `--tag` on the line would resolve a release the run
+// does not use.
 func (p *installArgs) addCommand(token string) {
 	n := len(p.Specs)
-	p.addTarget("npm", strings.TrimSuffix(token, "@latest"))
+	p.addTarget("npm", token)
 	if len(p.Specs) > n && !strings.Contains(strings.TrimPrefix(token, "@"), "@") {
 		p.LocalCommand = token
 	}
@@ -209,9 +365,11 @@ func parseNpmArgv(in []string) npmArgv {
 			}
 		}
 		key := strings.TrimLeft(arg, "-")
-		negated := false
+		// nopt toggles the negation per `no-` prefix (`--no-no-optional` is
+		// optional on), and any prefix makes the option boolean.
+		hadPrefix, negated := false, false
 		for strings.HasPrefix(strings.ToLower(key), "no-") {
-			negated = true
+			hadPrefix, negated = true, !negated
 			key = key[3:]
 		}
 		if full := npmAbbrev(key); full != "" {
@@ -223,15 +381,48 @@ func parseNpmArgv(in []string) npmArgv {
 			la = args[i+1]
 		}
 
-		if negated || (known && kind.isBool()) || (!known && !hadEq) {
+		if hadPrefix || (known && kind.isBool()) || (!known && !hadEq) {
+			value := "true"
+			if negated {
+				value = "false"
+			}
 			switch {
 			case !hasLa:
 			case la == "true" || la == "false":
+				// nopt reads the word, then negates it for a --no- option:
+				// `--no-optional=false` is optional on.
+				value = la
+				if negated {
+					value = map[string]string{"true": "false", "false": "true"}[la]
+				}
 				i++
 			case kind == npmBoolOrString && !isShortOption(la):
 				i++
 			case kind == npmBoolOrAlways && la == "always":
 				i++
+			}
+			// A negated path or url option (`--no-cache`, `--no-prefix`,
+			// `--no-userconfig`, `--no-registry`) is a boolean nopt drops
+			// as invalid for the type ("invalid config cache=false … Must
+			// be valid filesystem path"), so npm keeps its default — and
+			// since nopt's last value wins before it validates, an earlier
+			// `--cache custom` goes with it (verified against npm 11.19.1).
+			// Recording the word rendered a cache named `false`; keeping
+			// the earlier value sent the dry run to a cache the run never
+			// reads. A literal `--cache=false` is the path `false`, which
+			// npm does use, and takes the value branch below. An array
+			// option drops only the invalid entry and keeps the rest
+			// (`--omit dev --no-omit` is still omit=dev).
+			switch {
+			case npmPathConfig[key]:
+				delete(out.Config, key)
+			case key == "userconfig":
+				out.Userconfig = ""
+			case key == "registry":
+				out.Registry = ""
+			case npmArrayConfig[key]:
+			default:
+				out.record(key, value)
 			}
 			continue
 		}
@@ -247,6 +438,12 @@ func parseNpmArgv(in []string) npmArgv {
 				out.Packages = append(out.Packages, la)
 			case "call":
 				out.Call = true
+			case "registry":
+				out.Registry = la // the last wins, and is the one validated below
+			case "userconfig":
+				out.Userconfig = filepath.Clean(expandHome(la))
+			default:
+				out.record(key, la)
 			}
 			i++
 			continue
@@ -254,6 +451,17 @@ func parseNpmArgv(in []string) npmArgv {
 		if key == "call" {
 			out.Call = true
 		}
+	}
+	// nopt types registry as a url and drops the option when its value is
+	// not one, so a run with `--registry nope` fetches from the default.
+	if u, err := url.Parse(out.Registry); err != nil || u.Scheme == "" || u.Host == "" {
+		out.Registry = ""
+	} else {
+		// nopt keeps the parsed URL's href, so a bare host gains its "/".
+		if u.Path == "" {
+			u.Path = "/"
+		}
+		out.Registry = u.String()
 	}
 	return out
 }
@@ -385,14 +593,25 @@ func bunxRun(args []string) installArgs {
 			continue
 		}
 		if pkgSet {
-			// The positional is only the binary; --package is what is fetched.
-			out.addTarget("npm", strings.TrimSuffix(pkg, "@latest"))
+			// The positional is only the binary; --package is what is
+			// fetched, kept as typed (`tool@latest` included) for the
+			// resolver, which must see the tag a configured one would
+			// otherwise replace.
+			out.addTarget("npm", pkg)
 			return out
 		}
 		out.addCommand(a)
 		if n := len(out.Specs); n > 0 {
 			if alias, ok := bunxAliases[out.Specs[n-1].Name]; ok {
+				// The token travels to the resolver as typed, so it is
+				// renamed too: `tsc@latest` is `typescript@latest`, tag kept.
+				s := out.Specs[n-1]
+				toks := out.Tokens[s]
+				delete(out.Tokens, s)
 				out.Specs[n-1].Name = alias
+				for _, tok := range toks {
+					out.Tokens[out.Specs[n-1]] = append(out.Tokens[out.Specs[n-1]], alias+strings.TrimPrefix(tok, s.Name))
+				}
 			}
 		}
 		return out
@@ -414,28 +633,13 @@ func projectHasBin(name string) bool {
 	if name == "" || strings.ContainsAny(name, `/\`) {
 		return false
 	}
-	dir, err := os.Getwd()
-	if err != nil {
-		return false
-	}
-	for {
-		_, pkgErr := os.Stat(filepath.Join(dir, "package.json"))
-		nm, nmErr := os.Stat(filepath.Join(dir, "node_modules"))
-		if pkgErr == nil || (nmErr == nil && nm.IsDir()) {
-			bin := filepath.Join(dir, "node_modules", ".bin", name)
-			for _, ext := range binExts() {
-				if fi, err := os.Stat(bin + ext); err == nil && !fi.IsDir() {
-					return true
-				}
-			}
-			return false
+	bin := filepath.Join(npmLocalPrefix(), "node_modules", ".bin", name)
+	for _, ext := range binExts() {
+		if fi, err := os.Stat(bin + ext); err == nil && !fi.IsDir() {
+			return true
 		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return false
-		}
-		dir = parent
 	}
+	return false
 }
 
 func binExts() []string {

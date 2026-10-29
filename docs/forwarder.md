@@ -64,6 +64,18 @@ is the command follows the tool's own parsing, so `npm exec cowsay --package
 left-pad` checks `left-pad` (npm reads options after the command too), and
 `bunx tsc` checks `typescript`, the package bunx actually fetches for it.
 
+In both cases the fetched package is checked together with the dependencies it
+brings in, resolved as for a named install (below) but with no project
+context: a tool run installs into the tool's own cache, never into the project
+beside it, so `npx cowsay moo` checks cowsay and everything cowsay depends on.
+npm may rerun what an earlier `npx` of the same package left in its cache
+rather than resolve afresh, so that cached tree is checked too, read from
+the cache npm's own configuration names. uv likewise reuses a tool
+environment it cached for an earlier `uvx` of the same package, so the
+packages installed in any cached environment holding it are checked too,
+and a bare `uvx <tool>` runs the environment `uv tool install` keeps for
+that tool, so that is checked as well.
+
 A bare command that the project already has in `node_modules/.bin` — `npx
 eslint .` in a project that depends on eslint — is run from there rather than
 fetched, so it is forwarded unchecked: checking the registry package called
@@ -140,14 +152,27 @@ always checked). A bare install applies both rules, from the lockfile.
   The flags that change what gets resolved are passed along (`--legacy-peer-deps`,
   `--omit`, `--registry`, `--tag` for npm; `--index-url`/`-i`,
   `--extra-index-url`, `--find-links`, `--constraint`, `--pre` and friends for
-  pip and uv). Index configuration in `.npmrc`, `pip.conf` or `uv.toml` and the
-  environment applies as it would to the real install.
+  pip and uv; for `npx` and `npm exec`, every such option npm itself reads,
+  wherever it sits on the line, and nothing from the program's own arguments;
+  for uv, its global options before the verb as well). Index configuration in
+  `.npmrc`, `pip.conf` or `uv.toml` and the environment applies as it would to
+  the real command: the dry run reads the `.npmrc` npm itself reads (the
+  project's, from any subdirectory, or the `--prefix`; none for a global
+  install), and a `uvx` run is resolved with no project configuration, as uvx
+  itself runs. A uv or uvx command with a flag pip cannot honour
+  (`--index`, `--extra-index-url`, `--overrides`, `--resolution` and the like)
+  is resolved by uv only: on a machine without uv such a command is not
+  predicted and the named packages are checked, with the warning below.
 
   The named package itself is then checked at the release the resolver picked.
   When the dry run fails — no resolver, offline, a build-only package, the
   `OSSPREY_RESOLVE_TIMEOUT` (default 2m) — only the named packages are checked,
   one line says so (`could not resolve the dependencies of foo (…); checking
-  the named packages only`), and the install proceeds. The forwarder never
+  the named packages only`), and the install proceeds. A tool run still
+  checks what an earlier run left on disk (npm's npx cache, uv's cached or
+  installed tool environments), since that is what the tool may run when
+  today's resolution fails, and the line then says `checking the named
+  packages and N dependencies from an earlier run`. The forwarder never
   blocks an install because it could not predict it. With `OSSPREY_VERBOSE=1`
   the clean verdict reports the coverage: `no malware found in 65 packages (1
   requested + 64 dependencies)`, or `(1 requested; dependencies not resolved)`.

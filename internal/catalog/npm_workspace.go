@@ -26,6 +26,51 @@ func isWorkspaceMember(dir, root string) bool {
 	}
 }
 
+// NpmWorkspaceRoot is the ancestor of dir that npm's config loader takes as
+// the local prefix when dir is a declared workspace member: the nearest
+// one whose package.json workspaces name dir (mapWorkspaces reads only
+// package.json, so pnpm-workspace.yaml does not count here). "" when none
+// does. Ancestors without a package.json are passed over, as npm passes
+// them, and the filesystem root is an ancestor like any other: npm's walk
+// reads it too, so a project at `/` (or a drive root) is found from its
+// members.
+func NpmWorkspaceRoot(dir string) string {
+	dir = filepath.Clean(dir)
+	root := ""
+	walkUp(dir, func(a string) bool {
+		data, err := os.ReadFile(filepath.Join(a, "package.json"))
+		if err != nil {
+			return false
+		}
+		globs := parsePackageJSONWorkspaces(data)
+		if len(globs) == 0 {
+			return false
+		}
+		rel, err := filepath.Rel(a, dir)
+		if err == nil && matchesWorkspaceGlobs(globs, filepath.ToSlash(rel)) {
+			root = a
+			return true
+		}
+		return false
+	})
+	return root
+}
+
+// walkUp calls visit on each ancestor of dir, nearest first and the
+// filesystem root last, until visit returns true. A loop ending at the root
+// without visiting it skipped the one ancestor npm reads from every
+// directory on the machine.
+func walkUp(dir string, visit func(ancestor string) bool) {
+	if dir == filepath.Dir(dir) {
+		return // the root has no ancestor
+	}
+	for a := filepath.Dir(dir); ; a = filepath.Dir(a) {
+		if visit(a) || a == filepath.Dir(a) {
+			return
+		}
+	}
+}
+
 // declaresMember reports whether ancestor's workspace globs cover dir.
 func declaresMember(ancestor, dir string) bool {
 	globs := workspaceGlobs(ancestor)

@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -522,6 +523,7 @@ func Run(ctx context.Context, opts Options) error {
 		} else {
 			parsed = parseToolRun(m, opts.Args[start:])
 		}
+		parsed.ToolRun = true
 		if parsed.LocalCommand != "" && localBinFn(parsed.LocalCommand) {
 			// npx and bunx run the project's own binary and fetch nothing.
 			// Checking the registry package of that name would check
@@ -574,14 +576,14 @@ func Run(ctx context.Context, opts Options) error {
 				dir, cleanup := reqFilesDir(parsed.ReqFiles)
 				defer cleanup()
 				req.Dir = dir
-				set = resolveNamed(ctx, m, opts, start, parsed, resolve, !toolRun)
+				set = resolveNamed(ctx, m, opts, start, parsed, resolve)
 				req.Specs = set.specs
 				return scanProjectFn(ctx, req)
 			}, func() { reportUnresolved(ctx, parsed.Specs, set) })
 		}
 		note("ossprey: scanning %s and %s before `%s %s`\n", strings.Join(parsed.ReqFiles, ", "),
 			countPackages(len(parsed.Specs)), m.Bin, strings.Join(opts.Args, " "))
-		set := resolveWithProgress(ctx, m, opts, start, parsed, resolve, !toolRun)
+		set := resolveWithProgress(ctx, m, opts, start, parsed, resolve)
 		req.Specs = set.specs
 		stop := progress.Start(progressTo(), "ossprey: scan in progress")
 		dir, cleanup := reqFilesDir(parsed.ReqFiles)
@@ -605,7 +607,7 @@ func Run(ctx context.Context, opts Options) error {
 			// install rather than ahead of it.
 			var set checkSet
 			return passiveAlongside(ctx, m, opts, len(parsed.Specs), func(ctx context.Context) (*ossbom.SBOM, error) {
-				set = resolveNamed(ctx, m, opts, start, parsed, resolve, !toolRun)
+				set = resolveNamed(ctx, m, opts, start, parsed, resolve)
 				if len(set.specs) == 0 {
 					return nil, errNothingToCheck
 				}
@@ -618,7 +620,7 @@ func Run(ctx context.Context, opts Options) error {
 				})
 			}, func() { reportUnresolved(ctx, parsed.Specs, set) })
 		}
-		set := resolveWithProgress(ctx, m, opts, start, parsed, resolve, !toolRun)
+		set := resolveWithProgress(ctx, m, opts, start, parsed, resolve)
 		if len(set.specs) == 0 {
 			note("ossprey: nothing left to check after version resolution; forwarding\n")
 			return forwardTo()
@@ -1023,14 +1025,11 @@ func passiveAlongside(ctx context.Context, m *Manager, opts Options, n int, work
 // resolveWithProgress is resolveNamed for a gating install: the resolution is
 // the first visible wait, announced before there is a count to report, and
 // its failure is reported only after that animation has stopped, never on
-// top of it. A tool run resolves no tree, so nothing is announced.
+// top of it.
 func resolveWithProgress(ctx context.Context, m *Manager, opts Options, start int, parsed installArgs,
-	resolve func(context.Context, string, string, string) (string, error), expand bool) checkSet {
-	stop := func() {}
-	if expand {
-		stop = progress.Start(progressTo(), "ossprey: resolving dependencies")
-	}
-	set := resolveNamed(ctx, m, opts, start, parsed, resolve, expand)
+	resolve func(context.Context, string, string, string) (string, error)) checkSet {
+	stop := progress.Start(progressTo(), "ossprey: resolving dependencies")
+	set := resolveNamed(ctx, m, opts, start, parsed, resolve)
 	stop()
 	reportUnresolved(ctx, parsed.Specs, set)
 	return set
@@ -1040,7 +1039,7 @@ func resolveWithProgress(ctx context.Context, m *Manager, opts Options, start in
 // resolved, and nothing for one whose tree was.
 func reportUnresolved(ctx context.Context, specs []check.Spec, set checkSet) {
 	if set.unresolved != nil {
-		reportUnexpanded(ctx, specs, set.unresolved)
+		reportUnexpanded(ctx, specs, set.unresolved, set.deps)
 	}
 }
 
@@ -1085,8 +1084,39 @@ type installArgs struct {
 	// of fetching the package of that name.
 	LocalCommand string
 	// Tokens are the Specs as the command line spelled them, for a resolver
-	// that reads the manager's own syntax (a range, extras, a marker).
-	Tokens map[check.Spec]string
+	// that reads the manager's own syntax (a range, extras, a marker). A
+	// release named twice with different extras (`--from 'x[a]==1' --with
+	// 'x[b]==1'`) is one Spec with both spellings, since each extra brings
+	// dependencies of its own.
+	Tokens map[check.Spec][]string
+	// ToolRun marks a fetch-and-execute: the package goes into the tool's
+	// own cache, and everything after the command is the program's argv.
+	ToolRun bool
+	// InstalledTool is the package a uv tool run would take from `uv tool
+	// install`'s environment instead of resolving: the command (or --from)
+	// named bare, with no version, `@latest`, --with or --isolated.
+	InstalledTool string
+	// Registry is the registry an npm-side tool run names on its command line
+	// (`npx --registry …`), taken from npm's own parse of the argv so the
+	// program's arguments can never supply it.
+	Registry string
+	// Userconfig is the --userconfig npm reads, from the same parse.
+	Userconfig string
+	// NpmFlags are the other resolution options npm attributes to itself in
+	// a tool run (`--before`, `--tag`, `--omit`, the peer rules), rendered
+	// for the dry run; NpmGlobal and NpmPrefix are its global mode and
+	// --prefix, which decide the .npmrc npm reads.
+	NpmFlags  []string
+	NpmGlobal bool
+	NpmPrefix string
+	// NpmWorkspacesOff is --workspaces=false, which stops npm's config
+	// discovery at the nearest package.json rather than a workspace root.
+	NpmWorkspacesOff bool
+	// NpmCache is the --cache npm was given, if any, and NpxPackages the
+	// specs a tool run installs into the npx cache, as typed: together they
+	// locate the tree an earlier run of the same packages left there.
+	NpmCache    string
+	NpxPackages []string
 }
 
 // ParseSpecs classifies install arguments. A real-world multi-package install
@@ -1106,6 +1136,9 @@ func ParseSpecs(m *Manager, args []string) installArgs {
 // positional argument is a requirements file (`uv pip sync req.txt`).
 func parseInstallArgs(m *Manager, args []string, positionalReqFiles bool) installArgs {
 	valFlags := valueFlags[m.Bin]
+	if m.Ecosystem == "pypi" {
+		args = splitAttachedShorts(args, pythonOptionFlags(m), clapEquals(m))
+	}
 	reqFlags := requirementFileFlags[m.Bin]
 	pkgFlags := packageValueFlags[m.Bin]
 	srcFlags := sourceFlags[m.Bin]
@@ -1183,12 +1216,20 @@ func (p *installArgs) addTarget(ecosystem, token string) {
 		p.NonPackages = append(p.NonPackages, token)
 		return
 	}
-	p.Specs = append(p.Specs, s)
 	if p.Tokens == nil {
-		p.Tokens = map[check.Spec]string{}
+		p.Tokens = map[check.Spec][]string{}
 	}
-	p.Tokens[s] = token
+	if _, seen := p.Tokens[s]; !seen {
+		p.Specs = append(p.Specs, s)
+	}
+	if !slices.Contains(p.Tokens[s], token) {
+		p.Tokens[s] = append(p.Tokens[s], token)
+	}
 }
+
+// bareName is a package named with nothing else: no version, extras,
+// marker or `@latest`.
+var bareName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
 // parseToolRun classifies fetch-and-execute arguments (`uvx [opts] <cmd>
 // [args...]`). Unlike an install, only the first positional is a package — the
@@ -1203,6 +1244,7 @@ func (p *installArgs) addTarget(ecosystem, token string) {
 // swallows the command the same way. toolRunValueFlags is therefore taken
 // verbatim from `uv tool run --help`, not guessed.
 func parseToolRun(m *Manager, args []string) installArgs {
+	args = splitAttachedShorts(args, toolRunValueFlags, true)
 	var out installArgs
 	sourceNamed := false
 	addPkg := func(tok string) {
@@ -1210,6 +1252,8 @@ func parseToolRun(m *Manager, args []string) installArgs {
 		// unpinned spec already resolves to.
 		out.addTarget(m.Ecosystem, strings.TrimSuffix(tok, "@latest"))
 	}
+	// An installed tool is run as installed only for a bare request.
+	tool, extras, isolated := "", false, false
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if a == "" {
@@ -1218,6 +1262,7 @@ func parseToolRun(m *Manager, args []string) installArgs {
 		if a == "--" {
 			if i+1 < len(args) && !sourceNamed {
 				addPkg(args[i+1])
+				tool = args[i+1]
 			}
 			break
 		}
@@ -1232,12 +1277,19 @@ func parseToolRun(m *Manager, args []string) installArgs {
 			case "--from":
 				sourceNamed = true
 				addPkg(value)
+				tool = value
 			case "-w", "--with":
+				extras = true
 				for _, p := range splitRequirements(value) {
 					addPkg(p)
 				}
 			case "--with-requirements":
+				extras = true
 				out.ReqFiles = append(out.ReqFiles, value)
+			case "--with-editable":
+				extras = true
+			case "--isolated":
+				isolated = true
 			}
 			continue
 		}
@@ -1245,8 +1297,12 @@ func parseToolRun(m *Manager, args []string) installArgs {
 		// rest of args belongs to the program.
 		if !sourceNamed {
 			addPkg(a)
+			tool = a
 		}
 		break
+	}
+	if bareName.MatchString(tool) && !extras && !isolated {
+		out.InstalledTool = tool
 	}
 	return out
 }
@@ -1300,6 +1356,52 @@ func splitRequirements(value string) []string {
 		out = append(out, trimmed)
 	}
 	return out
+}
+
+// splitAttachedShorts rewrites a short option with its value attached
+// (`-cfile`, `-ihttps://…`, `-p3.12`), as clap and optparse both read it,
+// into the option and the value as two tokens, for every short option in
+// valFlags — which must list every value-taking option the parser knows,
+// requirements-file and package flags included, since a token owed to the
+// option before it is copied as it is: pip takes the next token as the value
+// of `--config-settings` or `-r` whatever it looks like, so in
+// `--config-settings -Cfoo=bar requests` the second token is a setting and
+// in `-r -constraints.txt` a file, and splitting either read a package that
+// is not being installed. A token that is not a listed short is left alone,
+// so a run of boolean shorts (`-qq`) stays what it was, and so is everything
+// after `--`. The `=` of `-c=file` is dropped only where the parser drops it
+// (stripEquals: clap does, so uv reads `file`; optparse does not, so pip
+// reads the file named `=file`). The result is a new slice; args is
+// untouched.
+func splitAttachedShorts(args []string, valFlags map[string]bool, stripEquals bool) []string {
+	out := make([]string, 0, len(args))
+	value := false // the token before was an option still owed its value
+	for i, a := range args {
+		switch {
+		case value:
+			value = false
+		case a == "--":
+			return append(out, args[i:]...)
+		case len(a) > 2 && a[0] == '-' && a[1] != '-' && valFlags[a[:2]]:
+			v := a[2:]
+			if stripEquals {
+				v = strings.TrimPrefix(v, "=")
+			}
+			out = append(out, a[:2], v)
+			continue
+		case strings.HasPrefix(a, "-"):
+			flag, _, hasInline := splitFlagValue(a)
+			value = valFlags[flag] && !hasInline
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+// clapEquals reports whether m's parser drops the `=` of an attached short
+// value (`-c=file`): uv's clap does, pip's optparse keeps it in the value.
+func clapEquals(m *Manager) bool {
+	return m.Bin == "uv" || m.Bin == "uvx"
 }
 
 // splitFlagValue splits "--flag=value" into ("--flag", "value", true). A flag
@@ -1369,7 +1471,7 @@ func flagSet(flags ...string) map[string]bool {
 var valueFlags = map[string]map[string]bool{
 	"npm": flagSet("--registry", "--prefix", "-C", "--cache", "--userconfig",
 		"--globalconfig", "--tag", "--otp", "-w", "--workspace", "--omit", "--include",
-		"--before", "--install-strategy"),
+		"--min-release-age", "--min-release-age-exclude", "--before", "--install-strategy"),
 	// pnpm's own, deliberately not npm's: -w is --workspace-root here and takes
 	// no value, and --filter is accepted after the verb as well as before it.
 	"pnpm": flagSet("--filter", "-F", "--filter-prod", "--dir", "-C", "--registry",
