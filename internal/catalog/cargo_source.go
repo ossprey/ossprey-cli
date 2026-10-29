@@ -61,6 +61,10 @@ func isCratesIo(source string) (is, maybe bool) {
 	if err != nil {
 		return false, false
 	}
+	// Cargo's parser keeps an escaped slash in the path, so the index it names is another one.
+	if strings.Contains(strings.ToLower(p), "%2f") {
+		return false, false
+	}
 	if p, err = url.PathUnescape(p); err != nil {
 		return false, false
 	}

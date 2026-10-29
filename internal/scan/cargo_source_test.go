@@ -855,3 +855,31 @@ source = "git+https://git.example.com/acme%2Ffork.git#`+forkedCommit+`"
 		"pkg:cargo/escaped-crate@1.0.0?vcs_url=git%2Bhttps:%2F%2Fgit.example.com%2Facme%252Ffork.git%40" + forkedCommit,
 	})
 }
+
+// An escaped slash stays one segment to Cargo, so an index path that only spells crates.io's once decoded is another index.
+func TestRunMarksAnIndexPathWithAnEscapedSlash(t *testing.T) {
+	noCI(t)
+	stubCratesIo(t)
+	dir := writeCargoProject(t, "", `version = 4
+
+[[package]]
+name = "escaped-index-crate"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang%2Fcrates.io-index"
+
+[[package]]
+name = "escaped-sparse-crate"
+version = "1.0.0"
+source = "sparse+https://index.crates.io/%2F"
+`)
+
+	sbom, err := Run(warn.NewContext(context.Background(), true), Options{Path: dir, NoExec: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertPurls(t, wirePurls(sbom), []string{
+		"pkg:cargo/escaped-index-crate@1.0.0?repository_url=https:%2F%2Fgithub.com%2F",
+		"pkg:cargo/escaped-sparse-crate@1.0.0?repository_url=https:%2F%2Findex.crates.io%2F",
+	})
+}
