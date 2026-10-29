@@ -656,8 +656,8 @@ func TestSkipMessage(t *testing.T) {
 			"Nothing in this project is in an ecosystem Ossprey scans",
 		},
 		{
-			"null ecosystems",
-			`{"skipped":true,"reason":"no_scannable_components","skipped_ecosystems":null}`,
+			"ecosystems in an unexpected shape keep the reason",
+			`{"skipped":true,"reason":"no_scannable_components","skipped_ecosystems":{"cargo":2}}`,
 			"Nothing in this project is in an ecosystem Ossprey scans",
 		},
 		{

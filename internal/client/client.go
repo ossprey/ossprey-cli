@@ -241,14 +241,16 @@ type submitResponse struct {
 	ScanID string `json:"scan_id"`
 }
 
-// skipMessage reads why the API skipped a scan from output, naming Rust alone and never the API's ecosystem list.
+// skipMessage explains a skip from output; Rust is the only ecosystem it names.
 func skipMessage(output json.RawMessage) string {
 	const quota = "Quota exhausted"
 	var o struct {
 		Reason            string   `json:"reason"`
 		SkippedEcosystems []string `json:"skipped_ecosystems"`
 	}
-	if err := json.Unmarshal(output, &o); err != nil {
+	// A field of the wrong type still leaves the reason decoded.
+	var te *json.UnmarshalTypeError
+	if err := json.Unmarshal(output, &o); err != nil && !errors.As(err, &te) {
 		return quota
 	}
 	if o.Reason == "no_scannable_components" {
