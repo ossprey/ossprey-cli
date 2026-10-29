@@ -666,6 +666,11 @@ func TestSkipMessage(t *testing.T) {
 			"Nothing in this project is in an ecosystem Ossprey scans",
 		},
 		{
+			"a list holding a null is not trusted",
+			`{"skipped":true,"reason":"no_scannable_components","skipped_ecosystems":["cargo",null]}`,
+			"Nothing in this project is in an ecosystem Ossprey scans",
+		},
+		{
 			"quota, which stores no message",
 			`{"skipped":true,"reason":"usage_limit_exceeded"}`,
 			"Quota exhausted",

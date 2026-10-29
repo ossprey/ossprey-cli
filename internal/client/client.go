@@ -245,20 +245,21 @@ type submitResponse struct {
 func skipMessage(output json.RawMessage) string {
 	const quota = "Quota exhausted"
 	var o struct {
-		Reason            string   `json:"reason"`
-		SkippedEcosystems []string `json:"skipped_ecosystems"`
+		Reason            string    `json:"reason"`
+		SkippedEcosystems []*string `json:"skipped_ecosystems"`
 	}
 	// A field of the wrong type still leaves the reason decoded.
 	var te *json.UnmarshalTypeError
-	if err := json.Unmarshal(output, &o); err != nil {
-		if !errors.As(err, &te) {
-			return quota
-		}
-		// A list that failed part way may keep the entries before the bad one.
+	err := json.Unmarshal(output, &o)
+	if err != nil && !errors.As(err, &te) {
+		return quota
+	}
+	// A list that failed part way, or holds a null, is not trusted.
+	if err != nil || slices.Contains(o.SkippedEcosystems, nil) {
 		o.SkippedEcosystems = nil
 	}
 	if o.Reason == "no_scannable_components" {
-		if slices.Contains(o.SkippedEcosystems, "cargo") {
+		if slices.ContainsFunc(o.SkippedEcosystems, func(e *string) bool { return *e == "cargo" }) {
 			return "Rust crates are not enabled for this account"
 		}
 		return "Nothing in this project is in an ecosystem Ossprey scans"

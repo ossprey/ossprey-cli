@@ -367,6 +367,16 @@ func TestPrintSkippedOmitsResetWhenUnknown(t *testing.T) {
 	}
 }
 
+// The client's quota message has no full stop, so the reset clause brings its own.
+func TestPrintSkippedPunctuatesTheResetClause(t *testing.T) {
+	out := captureStdout(t, func() {
+		printSkipped(&client.ErrSkipped{Message: "Quota exhausted", ResetAt: "2026-11-01T00:00:00Z"})
+	})
+	if want := "Ossprey scan skipped: Quota exhausted. Quota resets at 2026-11-01T00:00:00Z.\n"; out != want {
+		t.Errorf("stdout = %q, want %q", out, want)
+	}
+}
+
 // --- quota skip through scan/check ------------------------------------------
 
 func skippingAPI(t *testing.T, status string) string {
