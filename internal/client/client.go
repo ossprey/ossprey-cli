@@ -250,8 +250,12 @@ func skipMessage(output json.RawMessage) string {
 	}
 	// A field of the wrong type still leaves the reason decoded.
 	var te *json.UnmarshalTypeError
-	if err := json.Unmarshal(output, &o); err != nil && !errors.As(err, &te) {
-		return quota
+	if err := json.Unmarshal(output, &o); err != nil {
+		if !errors.As(err, &te) {
+			return quota
+		}
+		// A list that failed part way may keep the entries before the bad one.
+		o.SkippedEcosystems = nil
 	}
 	if o.Reason == "no_scannable_components" {
 		if slices.Contains(o.SkippedEcosystems, "cargo") {
