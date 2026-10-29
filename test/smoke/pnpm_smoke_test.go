@@ -453,7 +453,7 @@ func TestPnpmThroughShim(t *testing.T) {
 		t.Fatalf("pnpm through the shim exited %d\nstdout: %s\nstderr: %s", res.exitCode, res.stdout, res.stderr)
 	}
 	got := res.stdout + res.stderr
-	if !strings.Contains(got, "no malware found in 1 package, forwarding to pnpm") {
+	if !strings.Contains(got, "no malware found in 1 package (1 requested + 0 dependencies), forwarding to pnpm") {
 		t.Errorf("shim did not run the ossprey check:\n%s", got)
 	}
 	if !installed(dir, "left-pad") {

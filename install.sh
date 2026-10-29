@@ -28,6 +28,11 @@
 #   OSSPREY_WATCHDOG=1                    Same as --watchdog.
 #   OSSPREY_MONITOR_ID=<id>               Same as --monitor <id>.
 #   OSSPREY_SHIM_GIT=1                    Same as --git.
+#   OSSPREY_SKIP_CHECKSUM=1               Install without verifying the sha256
+#                                         (not recommended).
+#
+# Upgrading: shims already installed are re-pointed at the new binary, keeping
+# each one's mode; nothing else is shimmed and no profile is touched.
 
 set -eu
 
@@ -39,6 +44,7 @@ OVERRIDE="${OSSPREY_OVERRIDE_PACKAGE_MANAGERS:-}"
 WATCHDOG="${OSSPREY_WATCHDOG:-}"
 MONITOR_ID="${OSSPREY_MONITOR_ID:-}"
 SHIM_GIT="${OSSPREY_SHIM_GIT:-}"
+SKIP_CHECKSUM="${OSSPREY_SKIP_CHECKSUM:-}"
 
 log()  { printf '==> %s\n' "$*" >&2; }
 err()  { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -70,6 +76,8 @@ Env vars:
   OSSPREY_WATCHDOG=1            Same as --watchdog.
   OSSPREY_MONITOR_ID=<id>       Same as --monitor <id>.
   OSSPREY_SHIM_GIT=1            Same as --git.
+  OSSPREY_SKIP_CHECKSUM=1       Install without verifying the sha256
+                                (not recommended).
 EOF
   exit 0
 }
@@ -138,21 +146,38 @@ trap 'rm -rf "$tmpdir"' EXIT
 log "downloading $URL"
 $DL "$tmpdir/$BIN" "$URL" || err "download failed"
 
-# --- verify sha256 if available ---
-if $DL "$tmpdir/$ASSET.sha256" "$SUM_URL" 2>/dev/null; then
-  log "verifying sha256"
-  expected="$(awk '{print $1}' "$tmpdir/$ASSET.sha256")"
+# --- verify sha256 ---
+# Fail closed: a binary we could not verify is not installed. Every release
+# asset ships a .sha256 sidecar, so a missing one means something is wrong
+# (a proxy, a mirror, a tampered release) -- not a reason to trust the binary.
+# OSSPREY_SKIP_CHECKSUM=1 is the explicit, logged escape hatch.
+sha256_of() {
   if command -v sha256sum >/dev/null 2>&1; then
-    actual="$(sha256sum "$tmpdir/$BIN" | awk '{print $1}')"
+    sha256sum "$1" | awk '{print $1}'
   elif command -v shasum >/dev/null 2>&1; then
-    actual="$(shasum -a 256 "$tmpdir/$BIN" | awk '{print $1}')"
+    shasum -a 256 "$1" | awk '{print $1}'
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 "$1" | awk '{print $NF}'
   else
-    log "no sha256 tool found, skipping verification"
-    actual="$expected"
+    return 1
   fi
-  [ "$expected" = "$actual" ] || err "sha256 mismatch: expected $expected, got $actual"
+}
+
+if [ -n "$SKIP_CHECKSUM" ]; then
+  log "OSSPREY_SKIP_CHECKSUM is set: NOT verifying the sha256 of $ASSET"
 else
-  log "no sha256 file found, skipping verification"
+  $DL "$tmpdir/$ASSET.sha256" "$SUM_URL" \
+    || err "could not download $SUM_URL to verify the binary (set OSSPREY_SKIP_CHECKSUM=1 to install unverified)"
+  log "verifying sha256"
+  expected="$(awk 'NR==1 {print tolower($1)}' "$tmpdir/$ASSET.sha256")"
+  case "$expected" in
+    *[!0-9a-f]*|'') err "malformed checksum file $SUM_URL" ;;
+  esac
+  [ "${#expected}" -eq 64 ] || err "malformed checksum file $SUM_URL"
+  actual="$(sha256_of "$tmpdir/$BIN")" \
+    || err "no sha256 tool found (sha256sum, shasum or openssl) to verify the binary (set OSSPREY_SKIP_CHECKSUM=1 to install unverified)"
+  actual="$(printf '%s' "$actual" | tr 'A-F' 'a-f')"
+  [ "$expected" = "$actual" ] || err "sha256 mismatch: expected $expected, got $actual"
 fi
 
 chmod +x "$tmpdir/$BIN"
@@ -177,7 +202,7 @@ else
   err "$INSTALL_DIR not writable and sudo unavailable. Set OSSPREY_INSTALL_DIR to a writable path."
 fi
 
-log "installed $($INSTALL_DIR/$BIN --version 2>/dev/null || echo "$BIN") to $INSTALL_DIR/$BIN"
+log "installed $("$INSTALL_DIR/$BIN" --version 2>/dev/null || echo "$BIN") to $INSTALL_DIR/$BIN"
 
 # --- optional: PATH shims over the package managers ---
 if [ -n "$MONITOR_ID" ] && [ -n "$WATCHDOG" ]; then
@@ -205,13 +230,44 @@ if [ -n "$SHIM_GIT" ]; then
   set -- "$@" --git
 fi
 
+# Run ossprey as the invoking user: under `curl ... | sudo sh` the shims and
+# profiles belong to $SUDO_USER, not root.
+as_user() {
+  if [ "$(id -u)" = 0 ] && [ -n "${SUDO_USER:-}" ]; then
+    sudo -u "$SUDO_USER" -H "$INSTALL_DIR/$BIN" "$@"
+  else
+    "$INSTALL_DIR/$BIN" "$@"
+  fi
+}
+
+# existing_shims prints a comma-separated list of the managers already shimmed
+# (files in the shim directory carrying the shim marker), or nothing.
+existing_shims() {
+  shim_dir="$(as_user shim dir 2>/dev/null)" || return 0
+  [ -d "$shim_dir" ] || return 0
+  found=''
+  for f in "$shim_dir"/*; do
+    [ -f "$f" ] && grep -q 'OSSPREY-SHIM-V1' "$f" 2>/dev/null || continue
+    name="$(basename "$f")"
+    case "$name" in *.*) continue ;; esac  # a leftover npm.tmp, not a manager
+    found="${found:+$found,}$name"
+  done
+  printf '%s' "$found"
+}
+
 if [ -n "$OVERRIDE" ]; then
   log "installing package-manager shims"
-  if [ "$(id -u)" = 0 ] && [ -n "${SUDO_USER:-}" ]; then
-    sudo -u "$SUDO_USER" -H "$INSTALL_DIR/$BIN" shim install "$@" \
-      || log "shim install failed; ossprey itself is installed — run 'ossprey shim install' to retry"
-  else
-    "$INSTALL_DIR/$BIN" shim install "$@" \
-      || log "shim install failed; ossprey itself is installed — run 'ossprey shim install' to retry"
+  as_user shim install "$@" \
+    || log "shim install failed; ossprey itself is installed — run 'ossprey shim install' to retry"
+else
+  # An upgrade re-points the shims already installed, so they call this binary
+  # and pick up the current shim script. Explicit --managers and --no-path keep
+  # it to exactly that: each shim keeps its own mode, nothing new is shimmed,
+  # and no profile is edited.
+  shimmed="$(existing_shims)"
+  if [ -n "$shimmed" ]; then
+    log "re-pointing existing shims ($shimmed)"
+    as_user shim install --no-path --managers "$shimmed" >/dev/null \
+      || log "could not re-point the shims — run 'ossprey shim install' to retry"
   fi
 fi

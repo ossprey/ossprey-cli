@@ -73,9 +73,9 @@ func (c *PipCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]p
 	// requirements.txt goes to pip as-is: pip honours the `-r` includes,
 	// index URLs and constraints declared inside it, exactly as an install would.
 	reqParse := func(absPath string, loc file.Location) ([]pkg.Package, error) {
-		return runPipResolve(ctx, python, cache, filepath.Dir(absPath), []string{"-r", absPath}, loc)
+		return runPipResolve(ctx, python, cache, cache, filepath.Dir(absPath), []string{"-r", absPath}, loc)
 	}
-	reqs, err := catalogByGlob(ctx, resolver, c.root, "**/requirements.txt", "pip", reqParse)
+	reqs, err := catalogByGlob(ctx, resolver, c.root, requirementsGlob, "pip", reqParse)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -93,7 +93,7 @@ func (c *PipCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]p
 		if err := os.WriteFile(reqFile, []byte(strings.Join(specs, "\n")+"\n"), 0o600); err != nil {
 			return nil, fmt.Errorf("pip %s: write requirements: %w", absPath, err)
 		}
-		return runPipResolve(ctx, python, cache, filepath.Dir(absPath), []string{"-r", reqFile}, loc)
+		return runPipResolve(ctx, python, cache, cache, filepath.Dir(absPath), []string{"-r", reqFile}, loc)
 	}
 	projs, err := catalogByGlob(ctx, resolver, c.root, "**/pyproject.toml", "pip", projParse)
 	if err != nil {
@@ -168,7 +168,10 @@ func requirementsFileID(path string) string {
 // an ossprey shim (see internal/shim), and a shim would route this straight back
 // into `ossprey pip install`, which scans the project again — an unbounded
 // recursion. `python` is not a shimmed manager.
-func runPipResolve(ctx context.Context, python, cache, dir string, specArgs []string, loc file.Location) ([]pkg.Package, error) {
+//
+// reportDir receives the report; cacheDir is pip's cache, or "" to leave pip
+// on the user's own (the forwarder's choice, since the real install follows).
+func runPipResolve(ctx context.Context, python, reportDir, cacheDir, dir string, specArgs []string, loc file.Location) ([]pkg.Package, error) {
 	budget := resolverTimeout()
 	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
@@ -176,7 +179,7 @@ func runPipResolve(ctx context.Context, python, cache, dir string, specArgs []st
 	// OS-allocated, not a timestamp: manifests resolve concurrently into one
 	// shared cache dir, and a clock coarse enough to repeat (Windows) would let
 	// two pip processes share a report — one overwriting what the other reads.
-	reportFile, err := os.CreateTemp(cache, "report-*.json")
+	reportFile, err := os.CreateTemp(reportDir, "report-*.json")
 	if err != nil {
 		return nil, fmt.Errorf("pip %s: create report: %w", dir, err)
 	}
@@ -200,12 +203,14 @@ func runPipResolve(ctx context.Context, python, cache, dir string, specArgs []st
 	cmd := exec.CommandContext(ctx, python, args...)
 	cmd.Dir = dir // relative -r includes and local paths resolve against the manifest
 	cmd.Env = append(os.Environ(),
-		"PIP_CACHE_DIR="+cache,
 		// A user or image with require-virtualenv set refuses every pip
 		// invocation outside a venv, including one that installs nothing.
 		"PIP_REQUIRE_VIRTUALENV=0",
 		"PIP_DISABLE_PIP_VERSION_CHECK=1",
 	)
+	if cacheDir != "" {
+		cmd.Env = append(cmd.Env, "PIP_CACHE_DIR="+cacheDir)
+	}
 	cmd.WaitDelay = 5 * time.Second // the kill lands on pip, but Output still waits on pipes a PEP 517 build backend may hold
 
 	if _, err = cmd.Output(); err != nil {
@@ -373,7 +378,7 @@ func warnNoPythonResolver(reason string) {
 // hasPythonManifest reports whether the tree declares Python dependencies
 // anywhere outside a vendored directory.
 func hasPythonManifest(resolver file.Resolver) bool {
-	for _, glob := range []string{"**/requirements.txt", "**/pyproject.toml", "**/setup.py"} {
+	for _, glob := range []string{requirementsGlob, "**/pyproject.toml", "**/setup.py"} {
 		locs, err := resolver.FilesByGlob(glob)
 		if err != nil {
 			continue

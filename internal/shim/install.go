@@ -31,6 +31,9 @@ type Options struct {
 	ClearMode bool
 	// Git adds the opt-in git shim to whatever else is being installed.
 	Git bool
+	// Agents names coding agents whose own settings get the PATH entry, for
+	// agents that run shells reading no profile. See AgentClaude.
+	Agents []string
 }
 
 // ValidateMode checks the mode/monitor-id pairing before anything is written.
@@ -80,14 +83,20 @@ type Result struct {
 	Done      []ManagerResult
 	Skipped   []ManagerResult
 	Profiles  []string
-	OnPath    bool
-	PathHint  string
+	// Agents lists the agent settings files carrying (or, from Plan, about to
+	// carry) the PATH entry.
+	Agents   []string
+	OnPath   bool
+	PathHint string
+	// Warnings are things that did not happen but must not fail the command.
+	Warnings []string
 }
 
 // resolveMode keeps an installed passive mode across a re-run that names none.
 //
 // `shim install` is documented as safe to re-run, and is how you re-point shims
-// after moving the binary -- install.sh calls it on every upgrade. Taking the
+// after moving the binary -- install.sh/install.ps1 re-run it on every upgrade
+// (as `--no-path --managers <the installed shims>`, naming no mode). Taking the
 // mode from the flags alone would mean a routine upgrade silently rewrote a
 // fleet's monitor shims into blocking ones, and the next `npm install` that hit
 // a flagged transitive dependency would start failing builds everywhere. So an
@@ -102,6 +111,9 @@ func resolveMode(o Options, dir, manager string) (Mode, string) {
 
 func Plan(o Options) (*Result, error) {
 	if err := ValidateMode(o); err != nil {
+		return nil, err
+	}
+	if err := ValidateAgents(o.Agents); err != nil {
 		return nil, err
 	}
 	dir, bin, err := resolve(o)
@@ -137,11 +149,23 @@ func Plan(o Options) (*Result, error) {
 		})
 	}
 	res.Mode, res.MonitorID = summariseMode(res.Done, o)
-	if o.SkipProfiles || runtime.GOOS == "windows" {
-		return res, nil
-	}
 	home, err := homeDir(o)
 	if err != nil {
+		return res, nil
+	}
+	if len(o.Agents) > 0 && runtime.GOOS == "windows" {
+		res.Warnings = append(res.Warnings, agentsUnsupported)
+	}
+	for _, path := range agentSettings(o, home) {
+		if _, err := claudeHookCommands(path); err != nil {
+			res.Warnings = append(res.Warnings, "Claude Code hook not updated: "+err.Error())
+			continue
+		}
+		if !hasClaudeHookFor(path, dir) {
+			res.Agents = append(res.Agents, path)
+		}
+	}
+	if o.SkipProfiles || runtime.GOOS == "windows" {
 		return res, nil
 	}
 	for _, p := range Profiles(home) {
@@ -209,6 +233,23 @@ func Install(o Options) (*Result, error) {
 		}
 		res.Profiles, res.PathHint = profiles, hint
 	}
+	res.Agents = nil
+	if home, err := homeDir(o); err == nil {
+		for _, path := range agentSettings(o, home) {
+			wrote, err := WriteClaudeHook(path, res.Dir)
+			if err != nil {
+				// Re-pointing an existing hook is best effort: a settings file
+				// the user has since broken must not fail a routine upgrade.
+				if !slices.Contains(o.Agents, AgentClaude) {
+					continue
+				}
+				return nil, err
+			}
+			if wrote {
+				res.Agents = append(res.Agents, path)
+			}
+		}
+	}
 	res.OnPath = onPath(res.Dir)
 	return res, nil
 }
@@ -264,6 +305,21 @@ func Uninstall(o Options) (*Result, error) {
 		if runtime.GOOS == "windows" {
 			if changed, err := windowsRemoveUserPath(dir); err == nil && changed {
 				res.Profiles = append(res.Profiles, "Windows user PATH")
+			}
+		}
+	}
+	// The Claude hook goes with a full uninstall, and also under --no-path when
+	// it points at the directory just emptied, which would leave it dangling.
+	if home, err := homeDir(o); err == nil && len(only) == 0 {
+		path := ClaudeSettingsPath(home)
+		abs, _ := filepath.Abs(dir)
+		if !o.SkipProfiles || hasClaudeHookFor(path, abs) {
+			removed, err := RemoveClaudeHook(path)
+			switch {
+			case err != nil:
+				res.Warnings = append(res.Warnings, "Claude Code hook not removed: "+err.Error())
+			case removed:
+				res.Profiles = append(res.Profiles, path)
 			}
 		}
 	}
@@ -331,6 +387,12 @@ func resolve(o Options) (dir, bin string, err error) {
 	}
 	if bin, err = filepath.Abs(bin); err != nil {
 		return "", "", fmt.Errorf("resolve ossprey binary path: %w", err)
+	}
+	// Both paths are written into the shim, and the binary into its
+	// `ossprey-bin:` header line: a line break would end that line early (and
+	// split a .cmd shim's commands), so it is refused rather than escaped.
+	if strings.ContainsAny(dir+bin, "\r\n") {
+		return "", "", fmt.Errorf("the shim directory and ossprey binary paths must not contain a line break: %q, %q", dir, bin)
 	}
 	if filepath.Dir(bin) == dir {
 		return "", "", fmt.Errorf("the ossprey binary is inside the shim directory (%s); shims must call an ossprey outside it", dir)

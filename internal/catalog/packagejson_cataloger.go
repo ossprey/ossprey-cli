@@ -57,6 +57,13 @@ func parsePackageJSONFile(path string, loc file.Location) ([]pkg.Package, error)
 		if name == "" || name == pj.Name {
 			return
 		}
+		// A link:/file:/workspace:/portal: spec is a local path or workspace
+		// member — the project's own code, not a registry package. exactVersion
+		// rejects the spec, so emitting it would yield a versionless component
+		// that then resolves the local name against the public registry.
+		if isLocalNpmVersion(raw) {
+			return
+		}
 		version := exactVersion(raw)
 		key := name + "@" + version
 		if _, ok := seen[key]; ok {

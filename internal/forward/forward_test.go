@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/ossprey/ossprey-cli/internal/ansi"
+	"github.com/ossprey/ossprey-cli/internal/catalog"
 	"github.com/ossprey/ossprey-cli/internal/check"
 	"github.com/ossprey/ossprey-cli/internal/env"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
@@ -251,15 +252,29 @@ func (s *stubExec) fn(_ context.Context, bin string, args []string) error {
 // swap replaces the exec + check seams and restores them after the test. The
 // scan-project seam is replaced with a stub that fails the test if Run reaches
 // the project-scan path unexpectedly; tests that exercise it call swapScan.
+// Dependency expansion is stubbed to "nothing beyond the names", so the named
+// packages resolve through the test's own resolver; tests that exercise it
+// call swapExpand.
 func swap(t *testing.T, exec func(context.Context, string, []string) error, chk func(context.Context, check.Options) (*ossbom.SBOM, error)) {
 	t.Helper()
-	oe, oc, os := execFn, checkFn, scanProjectFn
+	oe, oc, os, ox := execFn, checkFn, scanProjectFn, expandFn
 	execFn, checkFn = exec, chk
 	scanProjectFn = func(context.Context, scanRequest) (*ossbom.SBOM, error) {
 		t.Error("scanProjectFn called unexpectedly")
 		return ossbom.New(ossbom.Environment{}), nil
 	}
-	t.Cleanup(func() { execFn, checkFn, scanProjectFn = oe, oc, os })
+	expandFn = func(context.Context, *Manager, []string, int, installArgs) ([]catalog.Resolved, error) {
+		return nil, nil
+	}
+	t.Cleanup(func() { execFn, checkFn, scanProjectFn, expandFn = oe, oc, os, ox })
+}
+
+// swapExpand replaces the dependency-expansion seam.
+func swapExpand(t *testing.T, fn func(context.Context, *Manager, []string, int, installArgs) ([]catalog.Resolved, error)) {
+	t.Helper()
+	old := expandFn
+	expandFn = fn
+	t.Cleanup(func() { expandFn = old })
 }
 
 // swapScan replaces the project-scan seam for tests that exercise the bare /
@@ -1044,7 +1059,9 @@ func TestPassivePip_DoesNotDelayTheInstall(t *testing.T) {
 }
 
 // The non-passive install does wait for a verdict, so it keeps the checking
-// wording — the two must not collapse into one message.
+// wording — the two must not collapse into one message. The resolution of
+// the tree is announced first: it is a wait of its own, before there is a
+// count to report.
 func TestNonPassiveInstallAnnouncesTheCheck(t *testing.T) {
 	ex := &stubExec{}
 	swap(t, ex.fn, cleanSBOM)
@@ -1055,7 +1072,8 @@ func TestNonPassiveInstallAnnouncesTheCheck(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if got, want := buf.String(), "ossprey: scan in progress, checking 1 package...\n"; got != want {
+	want := "ossprey: resolving dependencies...\nossprey: scan in progress, checking 1 package...\n"
+	if got := buf.String(); got != want {
 		t.Errorf("progress = %q, want %q", got, want)
 	}
 }

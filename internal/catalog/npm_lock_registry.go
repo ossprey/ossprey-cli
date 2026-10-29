@@ -110,7 +110,36 @@ func (c *npmLockClassifier) registryEntries(lockPath string) map[string]struct{}
 }
 
 // isLocalNpmResolved reports whether a lockfile "resolved" value points at
-// local code instead of a registry tarball.
+// local code instead of a registry tarball. npm 7+ records a link entry's
+// (workspace member's) target as a bare relative path, e.g. "packages/lib":
+// anything without a scheme is a path, never a registry or git source.
 func isLocalNpmResolved(resolved string) bool {
-	return strings.HasPrefix(resolved, "file:") || strings.HasPrefix(resolved, "link:")
+	if strings.HasPrefix(resolved, "file:") || strings.HasPrefix(resolved, "link:") {
+		return true
+	}
+	return resolved != "" && !strings.Contains(resolved, ":")
+}
+
+// npmLocalProtocols are the npm/yarn/pnpm dependency protocols whose "version"
+// names local code — a sibling directory or a workspace member — rather than a
+// published release: "link:../x", "file:./y", "workspace:*", "portal:../z".
+var npmLocalProtocols = []string{"link:", "file:", "workspace:", "portal:"}
+
+// isLocalNpmVersion reports whether an npm component version is a local or
+// workspace protocol spec rather than a published release. Such a component is
+// the project's own code wired to a local path or workspace member, so it is
+// never on the registry: submitting it yields a spurious NOT_FOUND (or a
+// dependency-confusion hit on a public name) and a purl like
+// pkg:npm/bar@link:../bar. The lockfile-metadata drops (isUnpublishedNpmLockEntry)
+// miss a package-lock.json entry whose "version" holds the protocol spec with no
+// "resolved" field, so this version-shape check backs them up wherever syft
+// reads the spec straight into the component version.
+func isLocalNpmVersion(version string) bool {
+	v := strings.TrimSpace(version)
+	for _, proto := range npmLocalProtocols {
+		if strings.HasPrefix(v, proto) {
+			return true
+		}
+	}
+	return false
 }

@@ -24,8 +24,14 @@ func Profiles(home string) []Profile {
 		{rel: ".profile", always: true},
 		{rel: ".bashrc", shell: "bash"},
 		{rel: ".bash_profile"},
+		// A login bash reads only the first of .bash_profile, .bash_login and
+		// .profile, so an existing .bash_login hides the .profile block.
+		{rel: ".bash_login"},
 		{rel: ".zshrc", shell: "zsh"},
 		{rel: ".zprofile"},
+		// Every zsh reads ~/.zshenv, including `zsh -c` from scripts and
+		// agents, which read none of the files above.
+		{rel: ".zshenv", shell: "zsh"},
 		{rel: filepath.Join(".config", "fish", "config.fish"), shell: "fish", fish: true},
 	}
 

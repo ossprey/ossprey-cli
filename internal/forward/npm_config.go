@@ -1,6 +1,6 @@
 package forward
 
-// Copied from @npmcli/config/lib/definitions in npm 11.12.1.
+// Copied from @npmcli/config/lib/definitions in npm 11.19.1, the npm CI pins.
 // TestNpmConfigTableMatchesNpm diffs it against the installed npm and names any
 // option missing or typed differently here.
 
@@ -9,8 +9,14 @@ var npmConfig = map[string]npmFlagKind{
 	"_auth":                           npmValue,
 	"access":                          npmValue,
 	"all":                             npmBool,
+	"allow-directory":                 npmValue,
+	"allow-file":                      npmValue,
 	"allow-git":                       npmValue,
+	"allow-remote":                    npmValue,
 	"allow-same-version":              npmBool,
+	"allow-scripts":                   npmValue,
+	"allow-scripts-pending":           npmBool,
+	"allow-scripts-pin":               npmBool,
 	"also":                            npmValue,
 	"audit":                           npmBool,
 	"audit-level":                     npmValue,
@@ -30,6 +36,7 @@ var npmConfig = map[string]npmFlagKind{
 	"color":                           npmBoolOrAlways,
 	"commit-hooks":                    npmBool,
 	"cpu":                             npmValue,
+	"dangerously-allow-all-scripts":   npmBool,
 	"depth":                           npmValue,
 	"description":                     npmBool,
 	"dev":                             npmBool,
@@ -101,6 +108,7 @@ var npmConfig = map[string]npmFlagKind{
 	"maxsockets":                      npmValue,
 	"message":                         npmString,
 	"min-release-age":                 npmValue,
+	"min-release-age-exclude":         npmValue,
 	"name":                            npmValue,
 	"node-gyp":                        npmValue,
 	"node-options":                    npmValue,
@@ -158,6 +166,7 @@ var npmConfig = map[string]npmFlagKind{
 	"shrinkwrap":                      npmBool,
 	"sign-git-commit":                 npmBool,
 	"sign-git-tag":                    npmBool,
+	"strict-allow-scripts":            npmBool,
 	"strict-peer-deps":                npmBool,
 	"strict-ssl":                      npmBool,
 	"tag":                             npmString,

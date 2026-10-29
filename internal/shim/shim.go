@@ -20,6 +20,13 @@ const (
 
 	DirEnv = "OSSPREY_SHIM_DIR"
 
+	// depthEnv counts fail-open hand-offs from shim to manager. Reaching
+	// maxDepth means PATH leads back to a shim however it is filtered, and the
+	// shim errors out instead of looping. High enough that a manager's own
+	// nested invocations never trip it.
+	depthEnv = "OSSPREY_SHIM_DEPTH"
+	maxDepth = "8"
+
 	binPrefix = "ossprey-bin: "
 
 	// Header line recording a passive shim's mode, so `shim status` can report
