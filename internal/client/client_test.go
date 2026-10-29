@@ -643,15 +643,35 @@ func TestSkipMessage(t *testing.T) {
 			// to blame quota for every skipped scan.
 			"nothing scannable",
 			`{"skipped":true,"reason":"no_scannable_components","error_message":"No supported package ecosystems found in this SBOM. Skipped: 2 cargo. Supported ecosystems: pypi, npm."}`,
-			"Scan skipped: nothing in this project is in an ecosystem Ossprey scans",
+			"Nothing in this project is in an ecosystem Ossprey scans",
+		},
+		{
+			"crates on an account without Rust",
+			`{"skipped":true,"reason":"no_scannable_components","skipped_ecosystems":["cargo","maven"]}`,
+			"Rust crates are not enabled for this account",
+		},
+		{
+			"other ecosystems are never named",
+			`{"skipped":true,"reason":"no_scannable_components","skipped_ecosystems":["maven"]}`,
+			"Nothing in this project is in an ecosystem Ossprey scans",
+		},
+		{
+			"null ecosystems",
+			`{"skipped":true,"reason":"no_scannable_components","skipped_ecosystems":null}`,
+			"Nothing in this project is in an ecosystem Ossprey scans",
 		},
 		{
 			"quota, which stores no message",
 			`{"skipped":true,"reason":"usage_limit_exceeded"}`,
-			"Scan skipped due to quota exhaustion",
+			"Quota exhausted",
 		},
-		{"no output at all", ``, "Scan skipped due to quota exhaustion"},
-		{"unrecognised reason", `{"reason":"something_new"}`, "Scan skipped due to quota exhaustion"},
+		{
+			"quota wins over ecosystems",
+			`{"skipped":true,"reason":"usage_limit_exceeded","skipped_ecosystems":["cargo"]}`,
+			"Quota exhausted",
+		},
+		{"no output at all", ``, "Quota exhausted"},
+		{"unrecognised reason", `{"reason":"something_new"}`, "Quota exhausted"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -661,8 +681,12 @@ func TestSkipMessage(t *testing.T) {
 			}
 			// The API's own text enumerates the ecosystems it skipped. That is
 			// the platform's business, not something to print over a build.
-			if strings.Contains(got, "cargo") || strings.Contains(got, "Supported ecosystems") {
+			if strings.Contains(got, "cargo") || strings.Contains(got, "maven") || strings.Contains(got, "Supported ecosystems") {
 				t.Errorf("the API's ecosystem list leaked into CLI output: %q", got)
+			}
+			// printSkipped already says the scan was skipped.
+			if strings.Contains(strings.ToLower(got), "skipped") {
+				t.Errorf("message repeats the skipped prefix: %q", got)
 			}
 		})
 	}

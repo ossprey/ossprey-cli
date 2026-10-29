@@ -318,7 +318,13 @@ func TestPoll_StatusOutcomes(t *testing.T) {
 		{
 			name:      "skipped with no message reads the nested reason",
 			replies:   []pollReply{{200, `{"status":"SKIPPED","output":{"reason":"no_scannable_components"}}`}},
-			wantSkip:  "Scan skipped: nothing in this project is in an ecosystem Ossprey scans",
+			wantSkip:  "Nothing in this project is in an ecosystem Ossprey scans",
+			wantPolls: 1,
+		},
+		{
+			name:      "skipped crates name Rust",
+			replies:   []pollReply{{200, `{"status":"SKIPPED","output":{"reason":"no_scannable_components","skipped_ecosystems":["cargo"]}}`}},
+			wantSkip:  "Rust crates are not enabled for this account",
 			wantPolls: 1,
 		},
 	}
