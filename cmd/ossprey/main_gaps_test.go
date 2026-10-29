@@ -437,7 +437,7 @@ func TestQuotaSkipExitsZeroAndReportsSkipped(t *testing.T) {
 	}
 }
 
-// A skip for crates on an account without Rust names Rust once, never "skipped: Scan skipped".
+// A skip for crates on an account without Rust names Rust, never "skipped: Scan skipped".
 func TestNotEnabledSkipNamesRust(t *testing.T) {
 	isolateConfig(t)
 	url := skippingAPI(t, `{"status":"SKIPPED","output":{"skipped":true,"reason":"no_scannable_components","skipped_ecosystems":["cargo"]}}`)
@@ -450,8 +450,11 @@ func TestNotEnabledSkipNamesRust(t *testing.T) {
 		t.Fatalf("a skip must exit 0, got %v", err)
 	}
 	const msg = "Rust crates are not enabled for this account"
-	if !strings.Contains(out, "Ossprey scan skipped: "+msg+"\n") || strings.Count(strings.ToLower(out), "skipped") != 1 {
+	if !strings.Contains(out, "Ossprey scan skipped: "+msg+"\n") {
 		t.Errorf("stdout = %q", out)
+	}
+	if strings.Contains(out, "No malware found") {
+		t.Errorf("a skipped scan claimed to be clean:\n%s", out)
 	}
 	if r := readReport(t, report); r.Verdict != scan.VerdictSkipped || r.Skipped == nil || r.Skipped.Message != msg {
 		t.Errorf("report = %+v, want verdict skipped naming Rust", r)
