@@ -208,11 +208,15 @@ func TestUnresolvedEntryAllYanked(t *testing.T) {
 
 	yanked := UnresolvedEntry("cargo", "acme-retired", err, "left unversioned")
 	missing := UnresolvedEntry("cargo", "acme-private", ErrNotFound, "left unversioned")
-	if yanked.Class != missing.Class {
-		t.Errorf("all-yanked graded as %q, want the not-found class %q", yanked.Class, missing.Class)
+	down := UnresolvedEntry("cargo", "acme-retired", errors.New("registry returned status 503"), "left unversioned")
+	if yanked.Class == missing.Class || yanked.Class == down.Class {
+		t.Errorf("all-yanked graded as %q, want a class apart from %q and %q", yanked.Class, missing.Class, down.Class)
 	}
-	if !strings.Contains(yanked.Item, "yanked") || strings.Contains(yanked.Item, "404") {
-		t.Errorf("item: got %q, want it to say yanked rather than 404", yanked.Item)
+	if !strings.Contains(yanked.One, "yanked") || strings.Contains(yanked.One, "not on the public registry") {
+		t.Errorf("headline: got %q, want it to say yanked rather than not on the registry", yanked.One)
+	}
+	if !strings.Contains(yanked.Item, "cargo/acme-retired") || strings.Contains(yanked.Item, "404") {
+		t.Errorf("item: got %q, want the crate without a 404", yanked.Item)
 	}
 	if !strings.Contains(missing.Item, "(404)") {
 		t.Errorf("plain not-found item: got %q, want (404)", missing.Item)

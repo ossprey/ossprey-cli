@@ -212,16 +212,21 @@ func getJSONAs(ctx context.Context, endpoint, accept string, out any) error {
 // between the scan path (submitted unversioned) and the forward path (not
 // checked at all).
 func UnresolvedEntry(ecosystem, name string, err error, outcome string) warn.Entry {
-	if errors.Is(err, ErrNotFound) {
-		why := "404"
-		if errors.Is(err, errAllYanked) {
-			why = "all releases yanked"
+	// A yanked crate is on crates.io, so it gets its own headline, still apart from outages.
+	if errors.Is(err, errAllYanked) {
+		return warn.Entry{
+			Class: "registry-yanked:" + outcome,
+			One:   "1 crate has every release yanked; " + outcome,
+			Many:  "%d crates have every release yanked; " + outcome,
+			Item:  fmt.Sprintf("%s/%s (all releases yanked)", ecosystem, name),
 		}
+	}
+	if errors.Is(err, ErrNotFound) {
 		return warn.Entry{
 			Class: "registry-missing:" + outcome,
 			One:   "1 package not on the public registry; " + outcome,
 			Many:  "%d packages not on the public registry; " + outcome,
-			Item:  fmt.Sprintf("%s/%s (%s)", ecosystem, name, why),
+			Item:  fmt.Sprintf("%s/%s (404)", ecosystem, name),
 		}
 	}
 	return warn.Entry{
