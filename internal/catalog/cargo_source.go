@@ -128,8 +128,8 @@ func cargoSourceQualifiers(source string) (map[string]string, string) {
 	}
 	clean := crateURLCleaner.Replace(trimC0(raw))
 	u, err := url.Parse(clean)
-	if err != nil || u.Scheme == "" {
-		// Cargo's parser accepts more than Go's, so keep the scheme alone.
+	if err != nil || u.Scheme == "" || atPastSlash(clean) {
+		// Cargo's parser accepts more than Go's, and a password may sit past a '/', so keep the scheme alone.
 		scheme, _, ok := strings.Cut(clean, ":")
 		if u, err = url.Parse(scheme + ":/"); !ok || err != nil {
 			return nil, unsendableSource
@@ -153,6 +153,17 @@ func cargoSourceQualifiers(source string) (map[string]string, string) {
 		}
 	}
 	return nil, "its source is over the API's length limit"
+}
+
+// atPastSlash reports an '@' after a '/' in the authority or path, where Go reads a password's tail as host or path.
+func atPastSlash(clean string) bool {
+	_, rest, _ := strings.Cut(clean, ":")
+	rest = strings.TrimLeft(rest, "/")
+	if i := strings.IndexAny(rest, "?#"); i >= 0 {
+		rest = rest[:i]
+	}
+	at := strings.LastIndex(rest, "@")
+	return at > 0 && strings.Contains(rest[:at], "/")
 }
 
 // qualifierKey spells qualifiers in key order, for keys that must tell sources apart.
