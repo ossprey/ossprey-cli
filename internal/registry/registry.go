@@ -144,19 +144,25 @@ func resolvePyPI(ctx context.Context, name string) (string, error) {
 // one is expected, the other means the scan resolved almost nothing.
 var ErrNotFound = errors.New("not on the public registry")
 
-// resolveCargo reads the crate's latest stable release. Unreached today, since
-// Cargo.lock always pins and resolveVersionless skips anything versioned, but a
-// hand-written SBOM can still arrive carrying a bare crate name.
+// errAllYanked is a not-found: a crate with every release yanked has nothing to pin.
+var errAllYanked = fmt.Errorf("%w (every release is yanked)", ErrNotFound)
+
+// resolveCargo reads the crate's latest stable release for a Cargo.toml range no lockfile pins.
 func resolveCargo(ctx context.Context, name string) (string, error) {
 	endpoint := cratesBaseURL + url.PathEscape(name)
 	var body struct {
 		Crate struct {
+			Yanked           bool   `json:"yanked"`
 			MaxStableVersion string `json:"max_stable_version"`
 			NewestVersion    string `json:"newest_version"`
 		} `json:"crate"`
 	}
 	if err := getJSON(ctx, endpoint, &body); err != nil {
 		return "", err
+	}
+	// crates.io sets yanked only when every release is, and then names a placeholder 0.0.0.
+	if body.Crate.Yanked {
+		return "", errAllYanked
 	}
 	// max_stable_version is empty for a crate that has only ever pre-released.
 	if v := body.Crate.MaxStableVersion; v != "" {
@@ -207,11 +213,15 @@ func getJSONAs(ctx context.Context, endpoint, accept string, out any) error {
 // checked at all).
 func UnresolvedEntry(ecosystem, name string, err error, outcome string) warn.Entry {
 	if errors.Is(err, ErrNotFound) {
+		why := "404"
+		if errors.Is(err, errAllYanked) {
+			why = "all releases yanked"
+		}
 		return warn.Entry{
 			Class: "registry-missing:" + outcome,
 			One:   "1 package not on the public registry; " + outcome,
 			Many:  "%d packages not on the public registry; " + outcome,
-			Item:  fmt.Sprintf("%s/%s (404)", ecosystem, name),
+			Item:  fmt.Sprintf("%s/%s (%s)", ecosystem, name, why),
 		}
 	}
 	return warn.Entry{
