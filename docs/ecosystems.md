@@ -8,7 +8,7 @@ Python, JavaScript and Rust, via syft's static catalogers.
 |-----------|--------------|
 | Python | `requirements.txt` (and any `*requirements*.txt`, e.g. `requirements-dev.txt`), `Pipfile.lock`, `poetry.lock`, `uv.lock`, `pdm.lock`, `setup.py`, `pyproject.toml`, wheel / egg metadata |
 | JavaScript | `package.json`, `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml` |
-| Rust | `Cargo.lock`, and `Cargo.toml` for direct dependencies when no lockfile is committed. |
+| Rust | `Cargo.lock`, and `Cargo.toml` direct dependencies (one a lockfile pins is sent at its locked version) |
 
 The CLI never installs your dependencies. It does run a resolver — `npm install
 --package-lock-only` (in a temporary directory) or `uv pip compile` — when a
@@ -32,12 +32,14 @@ npm workspace links, and yarn `workspace:`, `portal:`, `link:` and `file:`
 dependencies are left out, since none of them is published to a registry.
 A `Cargo.lock` crate that Cargo fetches from git or from a registry other than
 crates.io is sent marked with its source, as a `vcs_url` or `repository_url`
-purl qualifier with credentials removed (a registry by its origin only), so the
-platform can tell it apart from the crates.io crate of that name. A dependency
-that `[patch.crates-io]` redirects to git is sent both ways: the git crate from
-`Cargo.lock`, and the crates.io crate `Cargo.toml` declares. A crate whose
-source cannot be sent that way (not a git or registry URL, or too long) is
-skipped with a warning.
+purl qualifier with credentials removed (a registry by its origin only, and a
+source too long to send by its origin or scheme), so the platform can tell it
+apart from the crates.io crate of that name. A crate from a registry host
+spelled with non-ASCII characters is sent both marked and as the crates.io
+crate, since Cargo reads some such hosts as crates.io. A dependency that `[patch.crates-io]`
+redirects to git is sent both ways when its `Cargo.lock` is committed: the git
+crate from the lock, and the crates.io crate `Cargo.toml` declares. Without the
+lock, the git crate is not seen and only the crates.io declaration is sent.
 
 When a dependency's version can't be determined — an unpinned range in a
 manifest (`click = "^8"`, or a bare `requests` in a requirements file) with no

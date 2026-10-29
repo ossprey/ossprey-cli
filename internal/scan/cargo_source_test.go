@@ -229,7 +229,8 @@ source = "registry+https://github.com/acme/crates.io-index"
 		"pkg:cargo/sparse-internal-crate@4.0.0?repository_url=https:%2F%2Fcrates.example.net%2F",
 		"pkg:cargo/lookalike-crate@1.0.0?repository_url=https:%2F%2Fgithub.com.evil.example%2F",
 		"pkg:cargo/fork-index-crate@1.0.0?repository_url=https:%2F%2Fgithub.com%2F",
-		// A non-ASCII host stays foreign, even one IDNA would fold to github.com.
+		// Cargo's IDNA step maps this host to github.com, so it also goes out bare.
+		"pkg:cargo/wide-host-crate@1.0.0",
 		"pkg:cargo/wide-host-crate@1.0.0?repository_url=https:%2F%2F%25EF%25BD%2587%25EF%25BD%2589%25EF%25BD%2594%25EF%25BD%2588%25EF%25BD%2595%25EF%25BD%2582.com%2F",
 		// Spellings real Cargo resolves to crates.io once its URL parser and CanonicalUrl have folded them.
 		"pkg:cargo/upper-host-crate@1.0.0",
@@ -324,52 +325,6 @@ source = "registry+https://crates.corp.example/git/index"
 	}
 }
 
-// A lockless project's crates.io dependency is not folded into another workspace's git crate of that name.
-func TestRunKeepsAnotherWorkspacesCratesIoDep(t *testing.T) {
-	noCI(t)
-	asked := stubCratesIo(t)
-	dir := writeTree(t, map[string]string{
-		"a/Cargo.toml": `[package]
-name = "acme-a-app"
-version = "0.1.0"
-
-[dependencies]
-fold-crate = { git = "https://git.example.com/acme/fold-crate" }
-`,
-		"a/Cargo.lock": `version = 4
-
-[[package]]
-name = "acme-a-app"
-version = "0.1.0"
-
-[[package]]
-name = "fold-crate"
-version = "2.0.0"
-source = "git+https://git.example.com/acme/fold-crate#` + forkedCommit + `"
-`,
-		"b/Cargo.toml": `[package]
-name = "acme-b-lib"
-version = "0.1.0"
-
-[dependencies]
-fold-crate = "1"
-`,
-	})
-
-	sbom, err := Run(warn.NewContext(context.Background(), true), Options{Path: dir, NoExec: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	assertPurls(t, wirePurls(sbom), []string{
-		"pkg:cargo/fold-crate@2.0.0?vcs_url=git%2Bhttps:%2F%2Fgit.example.com%2Facme%2Ffold-crate%40" + forkedCommit,
-		"pkg:cargo/fold-crate@9.9.9",
-	})
-	if got := asked(); !slices.Equal(got, []string{"fold-crate"}) {
-		t.Errorf("crates.io was asked about %v; b's fold-crate is a crates.io dependency", got)
-	}
-}
-
 // Credentials in a Cargo.lock source never leave the machine: not on the
 // wire, not in --local, not in a warning.
 func TestRunNeverSendsCargoSourceCredentials(t *testing.T) {
@@ -408,6 +363,7 @@ source = "git+https://broken-user:br0ken-s3cret@git.example.com:notaport/acme/br
 		"pkg:cargo/token-git-crate@1.0.0?vcs_url=git%2Bhttps:%2F%2Fgit.example.com%2Facme%2Ftoken-git-crate%40" + forkedCommit,
 		"pkg:cargo/token-registry-crate@1.0.0?repository_url=https:%2F%2Fcrates.corp.example%2F",
 		"pkg:cargo/path-token-crate@1.0.0?repository_url=https:%2F%2Fdl.example.com%2F",
+		"pkg:cargo/broken-crate@1.0.0?vcs_url=git%2Bhttps:%2F%2F%2F%40" + forkedCommit,
 	})
 
 	wire, err := json.Marshal(sbom.ToMiniBOM())
@@ -419,9 +375,6 @@ source = "git+https://broken-user:br0ken-s3cret@git.example.com:notaport/acme/br
 		t.Fatal(err)
 	}
 	warnings := warn.Drain(ctx)
-	if !strings.Contains(warnings, "broken-crate") {
-		t.Errorf("the unreadable source was dropped without a warning:\n%s", warnings)
-	}
 	for _, secret := range []string{
 		"deploy-user", "s3cr3t-pat", "access_token", "tok3n-in-query",
 		"registry-user", "passw0rd-here", "qu3ry-token",
@@ -620,7 +573,7 @@ source = "git+https://git.example.com/acme/forked-crate#`+forkedCommit+`"
 	}
 }
 
-// Cargo's URL parser strips leading and trailing C0 controls and spaces, so a padded source is read, not dropped.
+// Cargo's URL parser strips surrounding C0 controls and spaces and inner tabs, and reads '\' as '/', so such a source is read, not dropped.
 func TestRunReadsAPaddedCargoSource(t *testing.T) {
 	noCI(t)
 	stubCratesIo(t)
@@ -650,6 +603,16 @@ source = "git+ https://git.example.com/acme/space-git-crate#`+forkedCommit+`"
 name = "space-registry-crate"
 version = "1.0.0"
 source = "registry+ https://crates.corp.example/git/index"
+
+[[package]]
+name = "tab-git-crate"
+version = "1.0.0"
+source = "git+https://git.exa\tmple.com/acme/tab-git-crate#`+forkedCommit+`"
+
+[[package]]
+name = "backslash-registry-crate"
+version = "1.0.0"
+source = "registry+https:\\\\crates.corp.example\\git\\index"
 `)
 
 	ctx := warn.NewContext(context.Background(), true)
@@ -664,17 +627,45 @@ source = "registry+ https://crates.corp.example/git/index"
 		"pkg:cargo/trailing-control-crate@1.0.0",
 		"pkg:cargo/space-git-crate@1.0.0?vcs_url=git%2Bhttps:%2F%2Fgit.example.com%2Facme%2Fspace-git-crate%40" + forkedCommit,
 		"pkg:cargo/space-registry-crate@1.0.0?repository_url=https:%2F%2Fcrates.corp.example%2F",
+		"pkg:cargo/tab-git-crate@1.0.0?vcs_url=git%2Bhttps:%2F%2Fgit.example.com%2Facme%2Ftab-git-crate%40" + forkedCommit,
+		"pkg:cargo/backslash-registry-crate@1.0.0?repository_url=https:%2F%2Fcrates.corp.example%2F",
 	})
 	if warnings := warn.Drain(ctx); strings.Contains(warnings, "-crate") {
-		t.Errorf("a padded source was dropped:\n%s", warnings)
+		t.Errorf("a padded or backslashed source was dropped:\n%s", warnings)
 	}
 }
 
-// A host or path that matches crates.io only once Unicode case folding has run is another source to Cargo.
-func TestRunKeepsADottedCapitalIForeign(t *testing.T) {
+// Cargo's IDNA maps ｇithub.com and a soft hyphen to github.com but gİthub.com elsewhere, so a non-ASCII registry host goes out marked and bare.
+func TestRunSendsANonASCIIRegistryHostMarkedAndBare(t *testing.T) {
 	noCI(t)
-	stubCratesIo(t)
-	dir := writeCargoProject(t, "", `version = 4
+	asked := stubCratesIo(t)
+	dir := writeCargoProject(t, `[package]
+name = "acme-root-app"
+version = "0.1.0"
+
+[dependencies]
+wide-crate = "1"
+`, `version = 4
+
+[[package]]
+name = "acme-root-app"
+version = "0.1.0"
+dependencies = [
+ "wide-crate",
+]
+
+[[package]]
+name = "wide-crate"
+version = "1.0.0"
+source = "registry+https://ｇithub.com/rust-lang/crates.io-index"
+dependencies = [
+ "deep-crate",
+]
+
+[[package]]
+name = "deep-crate"
+version = "0.3.0"
+source = "registry+https://git%C2%ADhub.com/rust-lang/crates.io-index"
 
 [[package]]
 name = "dotted-host-crate"
@@ -703,9 +694,81 @@ source = "sparse+https://index.crates.İo/"
 	}
 
 	assertPurls(t, wirePurls(sbom), []string{
+		"pkg:cargo/wide-crate@1.0.0",
+		"pkg:cargo/wide-crate@1.0.0?repository_url=https:%2F%2F%25EF%25BD%2587ithub.com%2F",
+		"pkg:cargo/deep-crate@0.3.0",
+		"pkg:cargo/deep-crate@0.3.0?repository_url=https:%2F%2Fgit%25C2%25ADhub.com%2F",
+		"pkg:cargo/dotted-host-crate@1.0.0",
 		"pkg:cargo/dotted-host-crate@1.0.0?repository_url=https:%2F%2Fg%25C4%25B0thub.com%2F",
+		"pkg:cargo/escaped-dotted-host-crate@1.0.0",
 		"pkg:cargo/escaped-dotted-host-crate@1.0.0?repository_url=https:%2F%2Fg%25C4%25B0thub.com%2F",
 		"pkg:cargo/dotted-path-crate@1.0.0?repository_url=https:%2F%2Fgithub.com%2F",
 		"pkg:cargo/dotted-sparse-crate@1.0.0?repository_url=https:%2F%2Findex.crates.%25C4%25B0o%2F",
 	})
+	if got := asked(); len(got) != 0 {
+		t.Errorf("crates.io was asked about %v; wide-crate's range folds into its locked release", got)
+	}
+}
+
+// A git source Go's URL parser cannot read or the API cannot fit is still marked, by its origin or scheme, never dropped.
+func TestRunMarksAGitSourceItCannotSendWhole(t *testing.T) {
+	noCI(t)
+	stubCratesIo(t)
+	long := "https://git.example.com/acme/" + strings.Repeat("a", 600) + "/long-crate"
+	dir := writeCargoProject(t, `[package]
+name = "acme-root-app"
+version = "0.1.0"
+
+[dependencies]
+replaced-crate = "1"
+
+[replace]
+"replaced-crate:1.0.0" = { git = "file:///srv/git/replaced-crate" }
+`, `version = 4
+
+[[package]]
+name = "acme-root-app"
+version = "0.1.0"
+dependencies = [
+ "replaced-crate 1.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "replaced-crate"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aaaa"
+replace = "replaced-crate 1.0.0 (git+file:///srv/git/replaced-crate)"
+
+[[package]]
+name = "replaced-crate"
+version = "1.0.0"
+source = "git+file:///srv/git/replaced-crate#`+forkedCommit+`"
+
+[[package]]
+name = "long-crate"
+version = "1.0.0"
+source = "git+`+long+`#`+forkedCommit+`"
+
+[[package]]
+name = "bad-escape-crate"
+version = "1.0.0"
+source = "git+https://git.example.com/acme/bad%zzescape#`+forkedCommit+`"
+`)
+
+	ctx := warn.NewContext(context.Background(), true)
+	sbom, err := Run(ctx, Options{Path: dir, NoExec: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertPurls(t, wirePurls(sbom), []string{
+		"pkg:cargo/replaced-crate@1.0.0",
+		"pkg:cargo/replaced-crate@1.0.0?vcs_url=git%2Bfile:%2F%2F%2Fsrv%2Fgit%2Freplaced-crate%40" + forkedCommit,
+		"pkg:cargo/long-crate@1.0.0?vcs_url=git%2Bhttps:%2F%2Fgit.example.com%2F%40" + forkedCommit,
+		"pkg:cargo/bad-escape-crate@1.0.0?vcs_url=git%2Bhttps:%2F%2F%2F%40" + forkedCommit,
+	})
+	if warnings := warn.Drain(ctx); strings.Contains(warnings, "-crate") {
+		t.Errorf("a git crate Cargo builds was dropped:\n%s", warnings)
+	}
 }

@@ -264,32 +264,34 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 			// version rule, so gate every cargo source here: one component the
 			// API rejects fails the customer's whole SBOM, npm and pypi included.
 			if t == "cargo" && !validCargoComponent(p.Name, version) {
-				warn.Add(ctx, cargoDropEntry(cargoDropReason(p.Name), p.Name))
+				warn.Add(ctx, cargoDropEntry("cargotoml", cargoDropReason(p.Name), p.Name))
 				continue
 			}
-			qualifiers, why := cargoSourceQualifiers(p)
+			marks, why := cargoSourceMarks(p)
 			if why != "" {
-				warn.Add(ctx, cargoDropEntry(why, p.Name))
+				warn.Add(ctx, cargoDropEntry("cargolock", why, p.Name))
 				continue
 			}
-			key := dedupKey(t, p.Name, version) + qualifierKey(qualifiers)
-			if i, ok := seen[key]; ok {
-				// Every sighting's source counts toward trust, not just the
-				// first: one lockfile fetching it from the public index is
-				// enough to need a check.
-				out[i].Registries = mergeUnique(out[i].Registries, []string{registryOf(p)})
-				continue
+			for _, qualifiers := range marks {
+				key := dedupKey(t, p.Name, version) + qualifierKey(qualifiers)
+				if i, ok := seen[key]; ok {
+					// Every sighting's source counts toward trust, not just the
+					// first: one lockfile fetching it from the public index is
+					// enough to need a check.
+					out[i].Registries = mergeUnique(out[i].Registries, []string{registryOf(p)})
+					continue
+				}
+				seen[key] = len(out)
+				out = append(out, Package{
+					Name:       p.Name,
+					Version:    version,
+					Type:       t,
+					Source:     []string{c.Name()},
+					Locations:  locations(p),
+					Registries: mergeUnique(nil, []string{registryOf(p)}),
+					Qualifiers: qualifiers,
+				})
 			}
-			seen[key] = len(out)
-			out = append(out, Package{
-				Name:       p.Name,
-				Version:    version,
-				Type:       t,
-				Source:     []string{c.Name()},
-				Locations:  locations(p),
-				Registries: mergeUnique(nil, []string{registryOf(p)}),
-				Qualifiers: qualifiers,
-			})
 		}
 	}
 
