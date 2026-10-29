@@ -35,8 +35,8 @@ fail the scan. The default floor is `Info`, the bottom of the scale, so nothing
 is below it and every graded finding fails until an account raises its floor. A
 finding the API could not grade fails at every floor.
 
-`--fail-on-informational` sets the floor to `Info`, which is now the default, so
-it no longer changes anything.
+`--fail-on <level>` overrides the account's floor for one run, in either
+direction.
 
 Exit `0` covers both "clean" and "skipped" (nothing was checked), so if CI
 needs to tell those apart, write a
@@ -83,7 +83,7 @@ ossprey scan [path] [flags]
 | `--timeout <dur>` | Give up cataloguing after this long and emit whatever resolved (or `OSSPREY_SCAN_TIMEOUT`). Off by default. |
 | `--url <url>` | Override the Ossprey API URL (default `https://api.ossprey.com`). |
 | `--api-key <key>` | Provide the API key on the command line instead of an env var. |
-| `--fail-on-informational` | Sets the floor to `Info`. That is the default, so this no longer changes anything. |
+| `--fail-on <level>` | Fail on findings at or above `<level>` (`Info`, `Low`, `Medium`, `High`, `Critical`), overriding the account's floor for this run. |
 | `--dry-run-safe` | Skip the API; report an empty vulnerability list. |
 | `--dry-run-malicious` | Skip the API; inject a test finding against the first component. |
 | `--skip-ci` | Skip the Ossprey scan entirely and exit 0. Also settable as `OSSPREY_SKIP_CI=1`. |

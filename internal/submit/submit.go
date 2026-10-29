@@ -26,11 +26,17 @@ func Validate(ctx context.Context, sbom *ossbom.SBOM, apiURL, apiKey string) err
 	if err != nil {
 		return err
 	}
-	raw, err := c.Validate(ctx, sbom.ToMiniBOM())
+	raw, floor, err := c.Validate(ctx, sbom.ToMiniBOM())
 	if err != nil {
 		return err
 	}
-	return sbom.ApplyAPIResponse(raw)
+	if err := sbom.ApplyAPIResponse(raw); err != nil {
+		return err
+	}
+	// From the envelope, the one place the service publishes it. Empty when the
+	// API served none, which severity.ParseFloor turns into the default.
+	sbom.FailingSeverityFloor = floor
+	return nil
 }
 
 // Post submits the SBOM and returns as soon as the API has accepted it, without

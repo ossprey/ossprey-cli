@@ -210,7 +210,7 @@ func TestPoll_NonGatewayErrorFailsImmediately(t *testing.T) {
 	srv, polls := pollServer(t, []pollReply{{http.StatusInternalServerError, `boom`}})
 	defer srv.Close()
 
-	_, err := testRetryClient(t, srv).Validate(context.Background(), ossbom.MiniBOM{})
+	_, _, err := testRetryClient(t, srv).Validate(context.Background(), ossbom.MiniBOM{})
 	if err == nil || !strings.Contains(err.Error(), "status poll failed (500)") {
 		t.Fatalf("err: got %v, want the 500", err)
 	}
@@ -236,7 +236,7 @@ func TestPoll_TransientCounterResetsOnAnAnswer(t *testing.T) {
 	srv, polls := pollServer(t, replies)
 	defer srv.Close()
 
-	if _, err := testRetryClient(t, srv).Validate(context.Background(), ossbom.MiniBOM{}); err != nil {
+	if _, _, err := testRetryClient(t, srv).Validate(context.Background(), ossbom.MiniBOM{}); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
 	if got := int(polls.Load()); got != len(replies) {
@@ -262,7 +262,7 @@ func TestPoll_CancelDuringBackoffReturnsPromptly(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := c.Validate(ctx, ossbom.MiniBOM{})
+		_, _, err := c.Validate(ctx, ossbom.MiniBOM{})
 		done <- err
 	}()
 	select {
@@ -327,7 +327,7 @@ func TestPoll_StatusOutcomes(t *testing.T) {
 			srv, polls := pollServer(t, tt.replies)
 			defer srv.Close()
 
-			_, err := testRetryClient(t, srv).Validate(context.Background(), ossbom.MiniBOM{})
+			_, _, err := testRetryClient(t, srv).Validate(context.Background(), ossbom.MiniBOM{})
 			switch {
 			case tt.wantSkip != "":
 				var skipped *ErrSkipped
@@ -376,7 +376,7 @@ func TestPoll_SendsScanIDsAndCredential(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := testRetryClient(t, srv).Validate(context.Background(), ossbom.MiniBOM{}); err != nil {
+	if _, _, err := testRetryClient(t, srv).Validate(context.Background(), ossbom.MiniBOM{}); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
 	if !strings.Contains(query, "sbom_id=sb-42") || !strings.Contains(query, "scan_id=sc-7") {
