@@ -25,6 +25,9 @@ func gitT(t *testing.T, dir string, args ...string) {
 
 func initRepo(t *testing.T) string {
 	t.Helper()
+	// A developer's global core.hooksPath would run their hooks on these commits.
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	dir := t.TempDir()
 	gitT(t, dir, "init", "-q")
 	gitT(t, dir, "config", "user.email", "test@ossprey.com")
