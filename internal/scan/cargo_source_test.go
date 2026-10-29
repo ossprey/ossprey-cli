@@ -785,3 +785,53 @@ source = "git+https://git.example.com/acme/bad%zzescape#`+forkedCommit+`"
 		t.Errorf("a git crate Cargo builds was dropped:\n%s", warnings)
 	}
 }
+
+// A file registry is a local index with no host, so a path that spells crates.io's never makes it crates.io.
+func TestRunMarksAFileRegistryThatSpellsCratesIo(t *testing.T) {
+	noCI(t)
+	stubCratesIo(t)
+	dir := writeCargoProject(t, "", `version = 4
+
+[[package]]
+name = "file-registry-crate"
+version = "1.0.0"
+source = "registry+file:///github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "short-file-registry-crate"
+version = "1.0.0"
+source = "registry+file:/github.com/rust-lang/crates.io-index"
+`)
+
+	sbom, err := Run(warn.NewContext(context.Background(), true), Options{Path: dir, NoExec: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertPurls(t, wirePurls(sbom), []string{
+		"pkg:cargo/file-registry-crate@1.0.0?repository_url=file:%2F%2F%2F",
+		"pkg:cargo/short-file-registry-crate@1.0.0?repository_url=file:%2F%2F%2F",
+	})
+}
+
+// An escaped slash in a git path names another repository, so vcs_url keeps it escaped.
+func TestRunKeepsAnEscapedSlashInAGitSource(t *testing.T) {
+	noCI(t)
+	stubCratesIo(t)
+	dir := writeCargoProject(t, "", `version = 4
+
+[[package]]
+name = "escaped-crate"
+version = "1.0.0"
+source = "git+https://git.example.com/acme%2Ffork.git#`+forkedCommit+`"
+`)
+
+	sbom, err := Run(warn.NewContext(context.Background(), true), Options{Path: dir, NoExec: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertPurls(t, wirePurls(sbom), []string{
+		"pkg:cargo/escaped-crate@1.0.0?vcs_url=git%2Bhttps:%2F%2Fgit.example.com%2Facme%252Ffork.git%40" + forkedCommit,
+	})
+}

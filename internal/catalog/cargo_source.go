@@ -36,7 +36,8 @@ func isCratesIo(source string) (is, maybe bool) {
 		return false, false
 	}
 	scheme, rest, ok := strings.Cut(crateURLCleaner.Replace(trimC0(raw)), ":")
-	if !ok {
+	// A file URL has no host, so its first path segment is never crates.io's.
+	if !ok || strings.EqualFold(scheme, "file") {
 		return false, false
 	}
 	rest = strings.TrimLeft(rest, "/")
@@ -134,19 +135,19 @@ func cargoSourceQualifiers(source string) (map[string]string, string) {
 			return nil, unsendableSource
 		}
 	}
-	prefix, p, commit := "", "/", ""
+	prefix, p, rawPath, commit := "", "/", "", ""
 	if kind == "git" {
 		prefix = "git+"
 		// With no parsed host Go leaves any userinfo in the path, so only a file URL keeps its path.
 		if u.Host != "" || u.Scheme == "file" {
-			p = u.Path
+			p, rawPath = u.Path, u.RawPath
 		}
 		if _, frag, _ := strings.Cut(clean, "#"); gitCommit.MatchString(frag) {
 			commit = "@" + frag
 		}
 	}
 	// Userinfo, query and fragment are never copied, nor a registry's path: any of them can hold a token.
-	for _, v := range []url.URL{{Scheme: u.Scheme, Host: u.Host, Path: p}, {Scheme: u.Scheme, Host: u.Host, Path: "/"}, {Scheme: u.Scheme, Path: "/"}} {
+	for _, v := range []url.URL{{Scheme: u.Scheme, Host: u.Host, Path: p, RawPath: rawPath}, {Scheme: u.Scheme, Host: u.Host, Path: "/"}, {Scheme: u.Scheme, Path: "/"}} {
 		if value := prefix + v.String() + commit; len(value) <= maxSourceQualifier {
 			return map[string]string{key: value}, ""
 		}
