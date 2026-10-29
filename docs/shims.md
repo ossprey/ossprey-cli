@@ -40,6 +40,7 @@ speaks up for a block (the full malware report) or a platform error; set
 | `ossprey shim dir` | Print the shim directory (for `ENV PATH=…` in a Dockerfile) |
 | `ossprey shim install --watchdog` | Passive: submit scans with this machine's login, never block an install |
 | `ossprey shim install --monitor <id>` | Passive: submit through a monitor's id, with no credential on the machine |
+| `ossprey shim install --agent claude` | Also put the shims on PATH for Claude Code's Bash commands |
 
 Useful flags: `--git` to also shim git (opt-in, see [git.md](git.md)),
 `--managers npm,pip` to shim a subset, `--all` to shim managers
@@ -67,10 +68,35 @@ yourself, `--dir` / `$OSSPREY_SHIM_DIR` to relocate them.
   generated.
 
 Which profiles get the PATH entry: `~/.profile` always; `~/.bashrc`,
-`~/.zshrc` and `~/.config/fish/config.fish` if the file exists or that shell is
-installed; `~/.bash_profile` and `~/.zprofile` only if they already exist. On
-Windows the shims are `.cmd` files and the directory is prepended to your user
-PATH.
+`~/.zshrc`, `~/.zshenv` and `~/.config/fish/config.fish` if the file exists or
+that shell is installed; `~/.bash_profile`, `~/.bash_login` and `~/.zprofile` only if
+they already exist (bash reads only the first of `~/.bash_profile`,
+`~/.bash_login` and `~/.profile`). On Windows the shims are `.cmd` files and the directory is
+prepended to your user PATH.
+
+**Which shells see the shims**
+
+A profile only reaches the shells that read it:
+
+| Shell | Reads | Shims on PATH |
+|-------|-------|---------------|
+| Your terminal (login or interactive) | `~/.profile`, `~/.bashrc`, `~/.zshrc` | yes |
+| `zsh -c …` | `~/.zshenv` | yes |
+| `bash -c …`, `sh -c …` | nothing | only if the parent process had them |
+
+So a script, Makefile or agent started from your terminal is covered, because it
+inherits your PATH. One started some other way (a coding agent's tool, a cron
+job, a CI runner) is not. `ossprey shim status` says so when the directory is
+missing from PATH. Cover those by setting PATH where they start:
+
+- **Claude Code:** `ossprey shim install --agent claude` adds a SessionStart
+  hook to `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR`) that puts the shim
+  directory first on PATH for every Bash command Claude Code runs. It applies from
+  the next session, is re-pointed by a later `shim install`, and is removed by
+  `shim uninstall`. `--no-path` leaves an existing hook alone unless you also
+  pass `--agent`. Not needed on Windows, where the user PATH already reaches
+  agents.
+- **CI and containers:** `--no-path`, then set PATH in the job or image (below).
 
 In a container image, skip the profile edit and set PATH directly:
 
@@ -78,6 +104,16 @@ In a container image, skip the profile edit and set PATH directly:
 RUN ossprey shim install --no-path --all
 ENV PATH="/root/.ossprey/shims:${PATH}"
 ```
+
+**What is not covered**
+
+- **pip inside a virtualenv.** Activating a venv puts its own `bin` ahead of
+  the shims, so `pip install` runs the venv's pip directly. Use `ossprey pip
+  install …`, or run the venv's installs through `uv` / `poetry`, which are
+  shimmed.
+- **A package manager called by path or as a module**: `./venv/bin/pip`,
+  `/usr/bin/npm`, `python -m pip`. A PATH shim only sees commands looked up on
+  PATH.
 
 > **Note on latency:** a package Ossprey has never seen before takes a scan to
 > come back, so the first install of a brand-new version is slower than an

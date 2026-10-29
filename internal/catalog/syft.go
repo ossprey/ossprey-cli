@@ -254,6 +254,14 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 			if isWorkspaceCargoEntry(p) {
 				continue
 			}
+			// A local/workspace protocol version ("link:../bar", "file:./x",
+			// "workspace:*") is the project's own code, not a registry package.
+			// The npm/yarn lock-metadata drops above miss a package-lock.json
+			// entry whose "version" holds the spec with no "resolved" field, which
+			// reached the API as pkg:npm/bar@link:../bar.
+			if t == "npm" && isLocalNpmVersion(p.Version) {
+				continue
+			}
 			// Syft truncates PEP 440 versions it reads out of a requirements
 			// file; re-derive the pinned one from the file itself (OSS-1869).
 			version := p.Version
