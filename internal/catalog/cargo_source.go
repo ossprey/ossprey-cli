@@ -136,7 +136,11 @@ func cargoSourceQualifiers(source string) (map[string]string, string) {
 	}
 	prefix, p, commit := "", "/", ""
 	if kind == "git" {
-		prefix, p = "git+", u.Path
+		prefix = "git+"
+		// With no parsed host Go leaves any userinfo in the path, so only a file URL keeps its path.
+		if u.Host != "" || u.Scheme == "file" {
+			p = u.Path
+		}
 		if _, frag, _ := strings.Cut(clean, "#"); gitCommit.MatchString(frag) {
 			commit = "@" + frag
 		}

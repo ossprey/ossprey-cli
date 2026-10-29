@@ -351,6 +351,16 @@ source = "sparse+https://dl.example.com/ent1tlement-t0ken/acme/cargo/index/"
 name = "broken-crate"
 version = "1.0.0"
 source = "git+https://broken-user:br0ken-s3cret@git.example.com:notaport/acme/broken-crate#`+forkedCommit+`"
+
+[[package]]
+name = "slashes-crate"
+version = "1.0.0"
+source = "git+https:///slash-user:sl4sh-s3cret@git.example.com/acme/slashes-crate#`+forkedCommit+`"
+
+[[package]]
+name = "single-slash-crate"
+version = "1.0.0"
+source = "git+https:/single-user:s1ngle-s3cret@git.example.com/acme/single-slash-crate#`+forkedCommit+`"
 `)
 
 	ctx := warn.NewContext(context.Background(), true)
@@ -364,6 +374,8 @@ source = "git+https://broken-user:br0ken-s3cret@git.example.com:notaport/acme/br
 		"pkg:cargo/token-registry-crate@1.0.0?repository_url=https:%2F%2Fcrates.corp.example%2F",
 		"pkg:cargo/path-token-crate@1.0.0?repository_url=https:%2F%2Fdl.example.com%2F",
 		"pkg:cargo/broken-crate@1.0.0?vcs_url=git%2Bhttps:%2F%2F%2F%40" + forkedCommit,
+		"pkg:cargo/slashes-crate@1.0.0?vcs_url=git%2Bhttps:%2F%2F%2F%40" + forkedCommit,
+		"pkg:cargo/single-slash-crate@1.0.0?vcs_url=git%2Bhttps:%2F%2F%2F%40" + forkedCommit,
 	})
 
 	wire, err := json.Marshal(sbom.ToMiniBOM())
@@ -379,6 +391,7 @@ source = "git+https://broken-user:br0ken-s3cret@git.example.com:notaport/acme/br
 		"deploy-user", "s3cr3t-pat", "access_token", "tok3n-in-query",
 		"registry-user", "passw0rd-here", "qu3ry-token",
 		"ent1tlement-t0ken", "broken-user", "br0ken-s3cret",
+		"slash-user", "sl4sh-s3cret", "single-user", "s1ngle-s3cret",
 	} {
 		for where, out := range map[string]string{"wire": string(wire), "--local": local.String(), "warnings": warnings} {
 			if strings.Contains(out, secret) {
