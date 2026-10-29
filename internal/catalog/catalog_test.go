@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -12,6 +13,8 @@ import (
 
 	"github.com/anchore/syft/syft/file"
 	"github.com/anchore/syft/syft/pkg"
+
+	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
 // pkgKey collapses a package to "name@version" for set comparisons.
@@ -1527,6 +1530,48 @@ pinned = { workspace = true }
 		if p.Name == "pinned" {
 			t.Errorf("inherited %q from the outer workspace across a nested root", p.Name)
 		}
+	}
+}
+
+// OSS-2098: one manifest nested too deep to parse is skipped with a warning, not left to OOM the scan.
+func TestCatalogSkipsTOMLNestedTooDeepToParse(t *testing.T) {
+	for _, tc := range []struct{ manifest, normal, want string }{
+		{"Cargo.toml", "[dependencies]\nserde = \"=1.0.200\"\n", "serde@1.0.200"},
+		{"pyproject.toml", "[project]\nname = \"app\"\ndependencies = [\"requests==2.31.0\"]\n", "requests@2.31.0"},
+	} {
+		t.Run(tc.manifest, func(t *testing.T) {
+			dir := t.TempDir()
+			for _, sub := range []string{"normal", "deep"} {
+				if err := os.Mkdir(filepath.Join(dir, sub), 0o755); err != nil {
+					t.Fatalf("mkdir: %v", err)
+				}
+			}
+			writeFile(t, filepath.Join(dir, "normal"), tc.manifest, tc.normal)
+			writeFile(t, filepath.Join(dir, "deep"), tc.manifest, deepTOMLKey(4000))
+
+			ctx := warn.NewContext(context.Background(), false)
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
+			got, err := Catalog(ctx, dir, Options{SkipVersionLookup: true, NoExec: true})
+			runtime.ReadMemStats(&after)
+			if err != nil {
+				t.Fatalf("Catalog: %v", err)
+			}
+
+			found := false
+			for _, p := range got {
+				found = found || p.Name+"@"+p.Version == tc.want
+			}
+			if !found {
+				t.Errorf("Catalog() = %v, want the normal manifest's %s", got, tc.want)
+			}
+			if drained := warn.Drain(ctx); !strings.Contains(drained, "nested deeper than") {
+				t.Errorf("warnings = %q, want the deep manifest reported", drained)
+			}
+			if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 16<<20 {
+				t.Errorf("Catalog allocated %d MB", alloc>>20)
+			}
+		})
 	}
 }
 

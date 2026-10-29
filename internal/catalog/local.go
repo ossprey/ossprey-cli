@@ -1,11 +1,9 @@
 package catalog
 
 import (
-	"os"
 	"regexp"
 	"strings"
 
-	"github.com/BurntSushi/toml"
 	"github.com/anchore/syft/syft/file"
 )
 
@@ -48,7 +46,7 @@ func findLocalPackageNames(resolver file.Resolver, root string) map[string]struc
 		if isVendoredPath(loc.RealPath) {
 			continue
 		}
-		data, err := os.ReadFile(hostPath(root, loc.RealPath))
+		data, err := readTOML(hostPath(root, loc.RealPath))
 		if err != nil {
 			continue
 		}
@@ -61,7 +59,7 @@ func findLocalPackageNames(resolver file.Resolver, root string) map[string]struc
 // every locally-sourced package to out.
 func collectLocalNames(data []byte, out map[string]struct{}) {
 	var pp localPyProject
-	if err := toml.Unmarshal(data, &pp); err != nil {
+	if _, err := decodeTOML(data, &pp); err != nil {
 		return
 	}
 	for name, src := range pp.Tool.Uv.Sources {

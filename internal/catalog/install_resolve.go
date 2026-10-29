@@ -909,7 +909,7 @@ func uvToolRunConfig(flags []string, scratch string) ([]string, error) {
 	merged := map[string]any{}
 	found := false
 	for _, source := range sources {
-		data, err := os.ReadFile(source)
+		data, err := readTOML(source)
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				continue
@@ -917,7 +917,7 @@ func uvToolRunConfig(flags []string, scratch string) ([]string, error) {
 			return nil, err
 		}
 		var cfg map[string]any
-		if _, err := toml.Decode(string(data), &cfg); err != nil {
+		if _, err := decodeTOML(data, &cfg); err != nil {
 			return flags, nil
 		}
 		anchorUVConfigPaths(cfg, filepath.Dir(source))
@@ -1147,12 +1147,12 @@ func absDir(dir string) string {
 // uvResolutionKeys. Unreadable or unparseable is true: what cannot be read
 // cannot be reproduced for pip.
 func tomlShapesResolution(path, table string) bool {
-	data, err := os.ReadFile(path)
+	data, err := readTOML(path)
 	if err != nil {
 		return true
 	}
 	var cfg map[string]any
-	if _, err := toml.Decode(string(data), &cfg); err != nil {
+	if _, err := decodeTOML(data, &cfg); err != nil {
 		return true
 	}
 	if table != "" {

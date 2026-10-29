@@ -4,11 +4,9 @@ import (
 	"context"
 	"errors"
 	"io/fs"
-	"os"
 	"regexp"
 	"strings"
 
-	"github.com/BurntSushi/toml"
 	"github.com/anchore/syft/syft/artifact"
 	"github.com/anchore/syft/syft/file"
 	"github.com/anchore/syft/syft/pkg"
@@ -50,7 +48,7 @@ var pep508 = regexp.MustCompile(`^([A-Za-z0-9_.\-]+)(?:\[[^\]]+\])?\s*(.*)$`)
 // readPyProject parses one pyproject.toml. A file that has vanished since the
 // resolver globbed it yields (nil, nil) rather than an error.
 func readPyProject(path string) (*pyproject, error) {
-	data, err := os.ReadFile(path)
+	data, err := readTOML(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
@@ -58,7 +56,7 @@ func readPyProject(path string) (*pyproject, error) {
 		return nil, err
 	}
 	var pp pyproject
-	if err := toml.Unmarshal(data, &pp); err != nil {
+	if _, err := decodeTOML(data, &pp); err != nil {
 		return nil, err
 	}
 	return &pp, nil
