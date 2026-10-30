@@ -41,9 +41,9 @@ make tidy          # go mod tidy  (run first time / after dep changes)
 Run a single test: `go test ./internal/catalog/ -run TestName -v`.
 Smoke tests live behind the `smoke` build tag: `go test -tags smoke -run TestName -v ./test/smoke/...`.
 
-CI (`.github/workflows/ci.yml`) gates on `gofmt -l` being empty, `go vet`
-(with and without `-tags smoke`), `go test`, and `go test -race`, on ubuntu and
-windows. Keep code gofmt-clean. Requires Go 1.25+.
+CI (`.github/workflows/ci.yml`) gates on `gofmt -l` being empty and `go vet`
+(with and without `-tags smoke`) on ubuntu, and on `go test` and `go test -race`
+on ubuntu and windows. Keep code gofmt-clean. Requires Go 1.25+.
 
 The `smoke` job also runs the whole tagged suite on both OSes, because the
 forwarders and shims can only be verified with the real binaries (pnpm on
