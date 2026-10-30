@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -119,5 +120,19 @@ func TestReadTOMLRefusesAnOversizedManifest(t *testing.T) {
 	// Callers treat a manifest gone since the glob as nothing found.
 	if _, err := readTOML(filepath.Join(dir, "gone.toml")); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("readTOML() error = %v, want fs.ErrNotExist", err)
+	}
+}
+
+// A manifest whose size says 0 but whose read never ends must still stop at the limit.
+func TestReadTOMLBoundsTheReadNotJustTheSize(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no /dev/zero on Windows")
+	}
+	path := filepath.Join(t.TempDir(), "Cargo.toml")
+	if err := os.Symlink("/dev/zero", path); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	if _, err := readTOML(path); err == nil || !strings.HasPrefix(err.Error(), "Cargo.toml is over ") {
+		t.Errorf("readTOML() error = %v, want the size refusal naming the file", err)
 	}
 }

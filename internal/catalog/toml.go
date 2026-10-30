@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -18,14 +19,27 @@ var errTOMLTooDeep = fmt.Errorf("toml: nested deeper than %d levels", maxTOMLDep
 
 // readTOML reads a TOML manifest, refusing one too large to be genuine.
 func readTOML(path string) ([]byte, error) {
-	info, err := os.Stat(path)
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
 	if err != nil {
 		return nil, err
 	}
 	if info.Size() > maxManifestBytes {
 		return nil, fmt.Errorf("%s is %d bytes, over the %d limit", filepath.Base(path), info.Size(), maxManifestBytes)
 	}
-	return os.ReadFile(path)
+	// The size is only a hint: a device or a file still growing reads past it, so the read is bounded too.
+	data, err := io.ReadAll(io.LimitReader(f, maxManifestBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxManifestBytes {
+		return nil, fmt.Errorf("%s is over the %d byte limit", filepath.Base(path), maxManifestBytes)
+	}
+	return data, nil
 }
 
 // decodeTOML decodes data into v, refusing data nested deeper than maxTOMLDepth.
