@@ -144,19 +144,25 @@ func resolvePyPI(ctx context.Context, name string) (string, error) {
 // one is expected, the other means the scan resolved almost nothing.
 var ErrNotFound = errors.New("not on the public registry")
 
-// resolveCargo reads the crate's latest stable release. Unreached today, since
-// Cargo.lock always pins and resolveVersionless skips anything versioned, but a
-// hand-written SBOM can still arrive carrying a bare crate name.
+// errAllYanked is a not-found: a crate with every release yanked has nothing to pin.
+var errAllYanked = fmt.Errorf("%w (every release is yanked)", ErrNotFound)
+
+// resolveCargo reads the crate's latest stable release for a Cargo.toml range no lockfile pins.
 func resolveCargo(ctx context.Context, name string) (string, error) {
 	endpoint := cratesBaseURL + url.PathEscape(name)
 	var body struct {
 		Crate struct {
+			Yanked           bool   `json:"yanked"`
 			MaxStableVersion string `json:"max_stable_version"`
 			NewestVersion    string `json:"newest_version"`
 		} `json:"crate"`
 	}
 	if err := getJSON(ctx, endpoint, &body); err != nil {
 		return "", err
+	}
+	// crates.io sets yanked only when every release is, and then names a placeholder 0.0.0.
+	if body.Crate.Yanked {
+		return "", errAllYanked
 	}
 	// max_stable_version is empty for a crate that has only ever pre-released.
 	if v := body.Crate.MaxStableVersion; v != "" {
@@ -206,6 +212,15 @@ func getJSONAs(ctx context.Context, endpoint, accept string, out any) error {
 // between the scan path (submitted unversioned) and the forward path (not
 // checked at all).
 func UnresolvedEntry(ecosystem, name string, err error, outcome string) warn.Entry {
+	// A yanked crate is on crates.io, so it gets its own headline, still apart from outages.
+	if errors.Is(err, errAllYanked) {
+		return warn.Entry{
+			Class: "registry-yanked:" + outcome,
+			One:   "1 crate has every release yanked; " + outcome,
+			Many:  "%d crates have every release yanked; " + outcome,
+			Item:  fmt.Sprintf("%s/%s (all releases yanked)", ecosystem, name),
+		}
+	}
 	if errors.Is(err, ErrNotFound) {
 		return warn.Entry{
 			Class: "registry-missing:" + outcome,
