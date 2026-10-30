@@ -598,7 +598,7 @@ func printSkipped(err error) (skipped *client.ErrSkipped, ok bool) {
 	}
 	msg := "Ossprey scan skipped: " + skipped.Message
 	if skipped.ResetAt != "" {
-		msg += " Quota resets at " + skipped.ResetAt + "."
+		msg = strings.TrimSuffix(msg, ".") + ". Quota resets at " + skipped.ResetAt + "."
 	}
 	fmt.Println(msg)
 	return skipped, true

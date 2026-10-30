@@ -331,13 +331,13 @@ func fakeManagerDir(t *testing.T, name string, code int) string {
 // --- forwardResult / printSkipped (in-process branches) ---------------------
 
 func TestForwardResultQuotaSkipIsSuccess(t *testing.T) {
-	skipped := &client.ErrSkipped{Message: "Scan skipped due to quota exhaustion.", ResetAt: "2026-11-01T00:00:00Z"}
+	skipped := &client.ErrSkipped{Message: "Quota exhausted.", ResetAt: "2026-11-01T00:00:00Z"}
 	var err error
 	out := captureStdout(t, func() { err = forwardResult(fmt.Errorf("check: %w", skipped)) })
 	if err != nil {
 		t.Fatalf("a quota skip must exit 0, got %v", err)
 	}
-	want := "Ossprey scan skipped: Scan skipped due to quota exhaustion. Quota resets at 2026-11-01T00:00:00Z.\n"
+	want := "Ossprey scan skipped: Quota exhausted. Quota resets at 2026-11-01T00:00:00Z.\n"
 	if out != want {
 		t.Errorf("stdout = %q, want %q", out, want)
 	}
@@ -367,9 +367,19 @@ func TestPrintSkippedOmitsResetWhenUnknown(t *testing.T) {
 	}
 }
 
+// The client's quota message has no full stop, so the reset clause brings its own.
+func TestPrintSkippedPunctuatesTheResetClause(t *testing.T) {
+	out := captureStdout(t, func() {
+		printSkipped(&client.ErrSkipped{Message: "Quota exhausted", ResetAt: "2026-11-01T00:00:00Z"})
+	})
+	if want := "Ossprey scan skipped: Quota exhausted. Quota resets at 2026-11-01T00:00:00Z.\n"; out != want {
+		t.Errorf("stdout = %q, want %q", out, want)
+	}
+}
+
 // --- quota skip through scan/check ------------------------------------------
 
-func skippingAPI(t *testing.T) string {
+func skippingAPI(t *testing.T, status string) string {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -377,7 +387,7 @@ func skippingAPI(t *testing.T) string {
 			w.WriteHeader(http.StatusAccepted)
 			io.WriteString(w, `{"sbom_id":"sb1","scan_id":"sc1"}`)
 		case "/public/v1/scans/status":
-			io.WriteString(w, `{"status":"SKIPPED","message":"Quota exhausted.","reset_at":"2026-11-01T00:00:00Z"}`)
+			io.WriteString(w, status)
 		default:
 			t.Errorf("unexpected path %s", r.URL.Path)
 		}
@@ -403,7 +413,7 @@ func readReport(t *testing.T, path string) scan.Report {
 // "skipped", never "clean": nothing was checked.
 func TestQuotaSkipExitsZeroAndReportsSkipped(t *testing.T) {
 	isolateConfig(t)
-	url := skippingAPI(t)
+	url := skippingAPI(t, `{"status":"SKIPPED","message":"Quota exhausted.","reset_at":"2026-11-01T00:00:00Z"}`)
 
 	for _, tc := range []struct {
 		name string
@@ -434,6 +444,30 @@ func TestQuotaSkipExitsZeroAndReportsSkipped(t *testing.T) {
 				t.Errorf("report = %+v, want verdict skipped with reset_at", r)
 			}
 		})
+	}
+}
+
+// A skip for crates on an account without Rust names Rust, never "skipped: Scan skipped".
+func TestNotEnabledSkipNamesRust(t *testing.T) {
+	isolateConfig(t)
+	url := skippingAPI(t, `{"status":"SKIPPED","output":{"skipped":true,"reason":"no_scannable_components","skipped_ecosystems":["cargo"]}}`)
+	report := filepath.Join(t.TempDir(), "report.json")
+	var err error
+	out := captureStdout(t, func() {
+		err = runScan(t, npmProject(t), "--url", url, "--api-key", "k", "--report", report)
+	})
+	if err != nil {
+		t.Fatalf("a skip must exit 0, got %v", err)
+	}
+	const msg = "Rust crates are not enabled for this account"
+	if !strings.Contains(out, "Ossprey scan skipped: "+msg+"\n") {
+		t.Errorf("stdout = %q", out)
+	}
+	if strings.Contains(out, "No malware found") {
+		t.Errorf("a skipped scan claimed to be clean:\n%s", out)
+	}
+	if r := readReport(t, report); r.Verdict != scan.VerdictSkipped || r.Skipped == nil || r.Skipped.Message != msg {
+		t.Errorf("report = %+v, want verdict skipped naming Rust", r)
 	}
 }
 

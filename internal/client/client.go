@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -240,21 +241,28 @@ type submitResponse struct {
 	ScanID string `json:"scan_id"`
 }
 
-// skipMessage names why the API skipped a scan. It reports the reason under
-// output.reason, so a top-level message alone cannot tell quota apart from an
-// SBOM holding nothing scannable. The API's own error_message is deliberately
-// not surfaced: it enumerates the ecosystems it skipped, which is the platform's
-// business and not something to print over a customer's build.
+// skipMessage explains a skip from output; Rust is the only ecosystem it names.
 func skipMessage(output json.RawMessage) string {
-	const quota = "Scan skipped due to quota exhaustion"
+	const quota = "Quota exhausted"
 	var o struct {
-		Reason string `json:"reason"`
+		Reason            string    `json:"reason"`
+		SkippedEcosystems []*string `json:"skipped_ecosystems"`
 	}
-	if err := json.Unmarshal(output, &o); err != nil {
+	// A field of the wrong type still leaves the reason decoded.
+	var te *json.UnmarshalTypeError
+	err := json.Unmarshal(output, &o)
+	if err != nil && !errors.As(err, &te) {
 		return quota
 	}
+	// A list that failed part way, or holds a null, is not trusted.
+	if err != nil || slices.Contains(o.SkippedEcosystems, nil) {
+		o.SkippedEcosystems = nil
+	}
 	if o.Reason == "no_scannable_components" {
-		return "Scan skipped: nothing in this project is in an ecosystem Ossprey scans"
+		if slices.ContainsFunc(o.SkippedEcosystems, func(e *string) bool { return *e == "cargo" }) {
+			return "Rust crates are not enabled for this account"
+		}
+		return "Nothing in this project is in an ecosystem Ossprey scans"
 	}
 	return quota
 }
@@ -271,7 +279,7 @@ type statusResponse struct {
 // dashboard.
 var ErrIngestSubmitOnly = errors.New("a monitor id can submit scans but cannot fetch a verdict; results appear in the Ossprey dashboard")
 
-// ErrSkipped indicates the scan was skipped (quota exhausted).
+// ErrSkipped indicates the scan was skipped, for quota or because nothing in it was scannable.
 type ErrSkipped struct {
 	Message string
 	ResetAt string
