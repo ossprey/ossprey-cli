@@ -52,6 +52,8 @@ func TestReportOnMalware(t *testing.T) {
 	reportFile := filepath.Join(t.TempDir(), "nested", "report.json")
 
 	cmd := exec.Command(binPath, "scan", pkgDir, "--dry-run-malicious", "--report", reportFile)
+	// On a CI runner the project would take the CI repo's name, not the scanned dir's.
+	cmd.Env = append(os.Environ(), "GITHUB_ACTIONS=", "TF_BUILD=")
 	var stdout, stderr strings.Builder
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
