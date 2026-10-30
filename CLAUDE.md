@@ -47,7 +47,10 @@ windows. Keep code gofmt-clean. Requires Go 1.25+.
 
 The `smoke` job also runs the whole tagged suite on both OSes, because the
 forwarders and shims can only be verified with the real binaries (pnpm on
-Windows is a `.cmd`, as are the shims). Tests that need the shim
+Windows is a `.cmd`, as are the shims). It pins Python 3.12 with `setup-python`:
+the Python fixtures pin numpy releases whose wheels stop at 3.12, and on the
+26.04 image's newer Python pip builds them from source, so every scan of them
+waits out `OSSPREY_RESOLVE_TIMEOUT` and the suite misses its 15m budget. Tests that need the shim
 directory must ask `ossprey shim dir` rather than assuming `~/.ossprey/shims` —
 Windows resolves it under `%LOCALAPPDATA%`.
 
