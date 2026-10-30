@@ -44,6 +44,9 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      - name: go vet -tags smoke
+        run: go vet -tags smoke ./...
+
   test-matrix:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -80,11 +83,9 @@ jobs:
       - name: go test -race
         run: go test -race ./...
 
-  # The pnpm forwarder drives a real pnpm, so unit tests can't cover it. Runs on
-  # Windows as well because pnpm there is a .cmd and the shims are .cmd files —
-  # the combination that unit tests only model (OSS-1566).
-  pnpm-smoke:
-    name: pnpm smoke (${{ matrix.os }})
+  # Runs the whole tagged suite, on Windows too since pnpm and the shims are .cmd files there (OSS-1566).
+  smoke:
+    name: smoke (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -112,18 +113,23 @@ jobs:
       - name: Pin npm and install pnpm
         run: npm install -g npm@11.19.1 pnpm@latest
 
+      # The Python fixtures pin numpy releases with wheels only up to 3.12; newer Pythons build them from source past the resolve timeout.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
       - name: pnpm version
         run: pnpm --version
 
-      - name: go test -tags smoke -run TestPnpm
-        run: go test -tags smoke -count=1 -timeout 15m -v -run TestPnpm ./test/smoke/...
+      - name: go test -tags smoke
+        run: go test -tags smoke -count=1 -timeout 15m -v ./test/smoke/...
 
   # Aggregate gate for branch protection: reports a single "Test" check that
   # is green only when every matrix leg passed. `if: always()` is required —
   # a skipped job would satisfy the required check even when the matrix failed.
   test:
     name: Test
-    needs: [test-matrix, pnpm-smoke]
+    needs: [test-matrix, smoke]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -136,8 +142,8 @@ jobs:
       - name: Require all matrix jobs to pass
         env:
           RESULT: ${{ needs.test-matrix.result }}
-          PNPM_RESULT: ${{ needs.pnpm-smoke.result }}
+          SMOKE_RESULT: ${{ needs.smoke.result }}
         run: |
           echo "matrix result: $RESULT"
-          echo "pnpm smoke result: $PNPM_RESULT"
-          [ "$RESULT" = "success" ] && [ "$PNPM_RESULT" = "success" ]
+          echo "smoke result: $SMOKE_RESULT"
+          [ "$RESULT" = "success" ] && [ "$SMOKE_RESULT" = "success" ]
