@@ -5,12 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
-
-	"github.com/BurntSushi/toml"
 
 	"github.com/anchore/syft/syft/artifact"
 	"github.com/anchore/syft/syft/file"
@@ -67,7 +64,7 @@ type cargoManifest struct {
 }
 
 func parseCargoTomlFile(ctx context.Context, path string, loc file.Location, scanRoot string) ([]pkg.Package, error) {
-	data, err := readManifest(path)
+	data, err := readTOML(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
@@ -75,7 +72,7 @@ func parseCargoTomlFile(ctx context.Context, path string, loc file.Location, sca
 		return nil, err
 	}
 	var m cargoManifest
-	md, err := toml.Decode(string(data), &m)
+	md, err := decodeTOML(data, &m)
 	if err != nil {
 		return nil, err
 	}
@@ -117,22 +114,6 @@ func parseCargoTomlFile(ctx context.Context, path string, loc file.Location, sca
 	return out, nil
 }
 
-// maxManifestBytes is a sanity bound, not a fix for deeply nested TOML, which
-// allocates quadratically in every toml cataloguer here (OSS-2098).
-const maxManifestBytes = 1 << 20
-
-// readManifest reads a Cargo.toml, refusing one too large to be genuine.
-func readManifest(path string) ([]byte, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, err
-	}
-	if info.Size() > maxManifestBytes {
-		return nil, fmt.Errorf("Cargo.toml is %d bytes, over the %d limit", info.Size(), maxManifestBytes)
-	}
-	return os.ReadFile(path)
-}
-
 // workspacePool returns the [workspace.dependencies] table governing this
 // manifest: its own when it declares one, else the nearest ancestor manifest
 // that does, since a workspace member conventionally holds only the opt-in.
@@ -159,12 +140,12 @@ func workspacePool(m cargoManifest, isRoot bool, manifestPath, scanRoot string) 
 		if !withinRoot(ancestorPath, root) {
 			continue
 		}
-		data, err := readManifest(ancestorPath)
+		data, err := readTOML(ancestorPath)
 		if err != nil {
 			continue
 		}
 		var ancestor cargoManifest
-		if md, err := toml.Decode(string(data), &ancestor); err == nil && md.IsDefined("workspace") {
+		if md, err := decodeTOML(data, &ancestor); err == nil && md.IsDefined("workspace") {
 			return ancestor.Workspace.Dependencies
 		}
 	}

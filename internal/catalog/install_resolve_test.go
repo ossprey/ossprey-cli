@@ -819,6 +819,10 @@ func TestUVConfigShapesResolution(t *testing.T) {
 	if UVConfigShapesResolution(nil, proj) {
 		t.Error("project [tool.uv] without resolution keys: shapes")
 	}
+	write(filepath.Join(proj, "pyproject.toml"), "[tool.uv]\n"+deepTOMLKey(maxTOMLDepth))
+	if !UVConfigShapesResolution(nil, proj) {
+		t.Error("project pyproject.toml nested too deep to parse: does not shape")
+	}
 	write(filepath.Join(proj, "uv.toml"), "resolution = \"lowest\"\n")
 	if !UVConfigShapesResolution(nil, proj) {
 		t.Error("project uv.toml resolution: does not shape")
