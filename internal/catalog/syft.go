@@ -44,6 +44,8 @@ type Package struct {
 	// internal/trust). It is not version-resolved against the public registry
 	// and callers leave it out of the SBOM.
 	Trusted bool
+	// Qualifiers are purl qualifiers marking a git or private-registry crate.
+	Qualifiers map[string]string
 }
 
 // Options tunes a Catalog run.
@@ -270,26 +272,34 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 			// version rule, so gate every cargo source here: one component the
 			// API rejects fails the customer's whole SBOM, npm and pypi included.
 			if t == "cargo" && !validCargoComponent(p.Name, version) {
-				warn.Add(ctx, cargoDropEntry(cargoDropReason(p.Name), p.Name))
+				warn.Add(ctx, cargoDropEntry("cargotoml", cargoDropReason(p.Name), p.Name))
 				continue
 			}
-			key := dedupKey(t, p.Name, version)
-			if i, ok := seen[key]; ok {
-				// Every sighting's source counts toward trust, not just the
-				// first: one lockfile fetching it from the public index is
-				// enough to need a check.
-				out[i].Registries = mergeUnique(out[i].Registries, []string{registryOf(p)})
+			marks, why := cargoSourceMarks(p)
+			if why != "" {
+				warn.Add(ctx, cargoDropEntry("cargolock", why, p.Name))
 				continue
 			}
-			seen[key] = len(out)
-			out = append(out, Package{
-				Name:       p.Name,
-				Version:    version,
-				Type:       t,
-				Source:     []string{c.Name()},
-				Locations:  locations(p),
-				Registries: mergeUnique(nil, []string{registryOf(p)}),
-			})
+			for _, qualifiers := range marks {
+				key := dedupKey(t, p.Name, version) + qualifierKey(qualifiers)
+				if i, ok := seen[key]; ok {
+					// Every sighting's source counts toward trust, not just the
+					// first: one lockfile fetching it from the public index is
+					// enough to need a check.
+					out[i].Registries = mergeUnique(out[i].Registries, []string{registryOf(p)})
+					continue
+				}
+				seen[key] = len(out)
+				out = append(out, Package{
+					Name:       p.Name,
+					Version:    version,
+					Type:       t,
+					Source:     []string{c.Name()},
+					Locations:  locations(p),
+					Registries: mergeUnique(nil, []string{registryOf(p)}),
+					Qualifiers: qualifiers,
+				})
+			}
 		}
 	}
 
@@ -334,6 +344,10 @@ func resolveVersionless(ctx context.Context, pkgs []Package, opts Options) {
 		// A trusted package is by definition one the public registry may not
 		// have, and it is not going to be checked anyway.
 		if pkgs[i].Version != "" || pkgs[i].Local || pkgs[i].Trusted {
+			continue
+		}
+		// A git or private-registry crate's latest on crates.io is another crate's.
+		if len(pkgs[i].Qualifiers) > 0 {
 			continue
 		}
 		// Skip anything registry.ResolveLatest cannot answer for.
@@ -463,29 +477,32 @@ func mergeVersionless(pkgs []Package) []Package {
 		return p.Type + "@" + normalizeName(p.Name)
 	}
 
+	// A source-marked crate is its own component: it neither absorbs a sighting nor folds into one.
+	versioned := func(p Package) bool { return p.Version != "" && len(p.Qualifiers) == 0 }
 	hasVersioned := map[string]bool{}
 	for _, p := range pkgs {
-		if p.Version != "" {
+		if versioned(p) {
 			hasVersioned[gkey(p)] = true
 		}
 	}
+	folds := func(p Package) bool { return p.Version == "" && len(p.Qualifiers) == 0 && hasVersioned[gkey(p)] }
 
 	// Keep versioned entries and versionless ones with no versioned sibling;
 	// remember where each versioned group landed so we can fold sources into it.
 	var out []Package
 	groupIdx := map[string][]int{}
 	for _, p := range pkgs {
-		if p.Version == "" && hasVersioned[gkey(p)] {
+		if folds(p) {
 			continue // folded below
 		}
-		if p.Version != "" {
+		if versioned(p) {
 			groupIdx[gkey(p)] = append(groupIdx[gkey(p)], len(out))
 		}
 		out = append(out, p)
 	}
 
 	for _, p := range pkgs {
-		if p.Version == "" && hasVersioned[gkey(p)] {
+		if folds(p) {
 			for _, i := range groupIdx[gkey(p)] {
 				out[i].Source = mergeUnique(out[i].Source, p.Source)
 				out[i].Locations = mergeUnique(out[i].Locations, p.Locations)

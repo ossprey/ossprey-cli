@@ -86,7 +86,7 @@ func parseCargoTomlFile(ctx context.Context, path string, loc file.Location, sca
 	add := func(alias string, spec any) {
 		name, version, ok, why := cargoDep(alias, spec, pool)
 		if why != "" {
-			warn.Add(ctx, cargoDropEntry(why, alias))
+			warn.Add(ctx, cargoDropEntry("cargotoml", why, alias))
 		}
 		if !ok || name == "" || name == m.Package.Name {
 			return
@@ -254,11 +254,11 @@ func vouched(name, version string) (string, string, bool, string) {
 	return name, version, true, ""
 }
 
-func cargoDropEntry(why, alias string) warn.Entry {
+func cargoDropEntry(file, why, alias string) warn.Entry {
 	return warn.Entry{
-		Class: "cargo:undeclarable:" + why,
-		One:   fmt.Sprintf("cargotoml: skipped %q because %s", alias, why),
-		Many:  "cargotoml: skipped %d dependencies because " + why,
+		Class: "cargo:undeclarable:" + file + ":" + why,
+		One:   fmt.Sprintf("%s: skipped %q because %s", file, alias, why),
+		Many:  file + ": skipped %d dependencies because " + why,
 		Item:  alias,
 	}
 }
