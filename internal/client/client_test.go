@@ -650,7 +650,8 @@ func TestPoll_AttemptBudget(t *testing.T) {
 	c := testRetryClient(t, srv)
 	c.PollBackoff = func(int) time.Duration { return 0 }
 	_, _, err := c.Validate(context.Background(), ossbom.MiniBOM{})
-	if err == nil || !strings.Contains(err.Error(), "took too long") {
+	var te *ErrVerdictTimeout
+	if !errors.As(err, &te) {
 		t.Fatalf("err: got %v, want the poll ceiling", err)
 	}
 	if got := hits.Load(); got != maxPollAttempts {

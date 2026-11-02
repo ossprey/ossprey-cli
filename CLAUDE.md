@@ -465,7 +465,8 @@ changes.
 ### API client (`internal/client`)
 
 `Validate` POSTs the MiniBOM to `/public/v1/scans`, then polls
-`/public/v1/scans/status` (quadratic backoff, capped at `maxPollAttempts`), and
+`/public/v1/scans/status` (capped at `OSSPREY_VERDICT_TIMEOUT`, default
+`maxPollAttempts` x `pollInterval` = 15m), and
 refuses outright for an ingest client (see "Passive modes and monitor ids"). A
 quota-exhausted response surfaces as a typed `*ErrSkipped` that propagates
 unwrapped so callers can detect it via `errors.As` and **exit 0** rather than
@@ -488,6 +489,13 @@ accepted deliberately, because quota exhaustion fails **open** (`ErrSkipped`,
 exit 0) and the failure it prevents fails **closed** and reads as malware. Retries wait via `sleepOrDone` so a cancelled
 scan is never held open by a backoff, and `RetryBackoff` is overridable for the
 same reason `PollBackoff` is: no test should sleep.
+
+**A poll ceiling is not a scan failure.** It returns `*ErrVerdictTimeout`
+naming the scan id and last status, because the scan keeps running and lands
+in the dashboard; real scans do exceed 15m at peak (~02:15 UTC). The service's
+`ScanExceededClientTimeout` metric counts them, so keep its threshold in step
+with the default here. Network timeouts go through `explainTimeout` so a bare
+`context deadline exceeded` never reaches the user.
 
 `401`/`403` become `authError`, which names the credential the client actually
 used (`--api-key`/env, a stored login, or a monitor id — see

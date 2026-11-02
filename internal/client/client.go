@@ -21,7 +21,8 @@ import (
 
 const pollInterval = 3 * time.Second
 
-// 300 polls at pollInterval gives a ~15 minute ceiling, above the platform's 850s budget.
+// 300 polls at pollInterval gives a ~15 minute default ceiling, above the
+// platform's 850s budget. OSSPREY_VERDICT_TIMEOUT overrides it.
 const maxPollAttempts = 300
 
 // retryInterval is the wait before the first submit retry; the second waits
@@ -110,6 +111,9 @@ type Client struct {
 	// in tests, for the same reason PollBackoff is: nothing in the suite should
 	// spend real seconds asleep.
 	RetryBackoff func(attempt int) time.Duration
+
+	// VerdictTimeout caps how long Validate polls for a verdict.
+	VerdictTimeout time.Duration
 }
 
 // New constructs an API-key Client; baseURL defaults to https://api.ossprey.com.
@@ -151,10 +155,11 @@ func newClient(baseURL string) *Client {
 		baseURL = defaultBaseURL
 	}
 	return &Client{
-		BaseURL:      baseURL,
-		HTTP:         &http.Client{Timeout: 60 * time.Second},
-		PollBackoff:  defaultPollBackoff,
-		RetryBackoff: defaultRetryBackoff,
+		BaseURL:        baseURL,
+		HTTP:           &http.Client{Timeout: 60 * time.Second},
+		PollBackoff:    defaultPollBackoff,
+		RetryBackoff:   defaultRetryBackoff,
+		VerdictTimeout: verdictTimeoutFromEnv(),
 	}
 }
 
@@ -428,7 +433,7 @@ func (c *Client) postScan(ctx context.Context, mb ossbom.MiniBOM) (int, []byte, 
 		}
 	}
 
-	return 0, nil, lastErr
+	return 0, nil, explainTimeout(lastErr, "submitting the scan")
 }
 
 // doSubmit sends one attempt and reads its body. Split out so the retry loop
@@ -484,11 +489,13 @@ func (c *Client) waitForCompletion(ctx context.Context, sbomID, scanID string) (
 	// Consecutive transient failures, reset by any answer the API does give.
 	var transient int
 	var lastErr error
+	var lastStatus string
+	start := time.Now()
 
-	for i := 1; i <= maxPollAttempts; i++ {
+	for i := 1; i <= c.pollAttempts(); i++ {
 		select {
 		case <-ctx.Done():
-			return nil, "", ctx.Err()
+			return nil, "", explainTimeout(ctx.Err(), "waiting for the scan verdict")
 		case <-time.After(backoff(i)):
 		}
 
@@ -517,7 +524,7 @@ func (c *Client) waitForCompletion(ctx context.Context, sbomID, scanID string) (
 			}
 			lastErr = err
 			if transient++; transient >= maxTransientPolls {
-				return nil, "", lastErr
+				return nil, "", explainTimeout(lastErr, "polling for the scan verdict")
 			}
 			continue
 		}
@@ -559,13 +566,14 @@ func (c *Client) waitForCompletion(ctx context.Context, sbomID, scanID string) (
 			}
 			return nil, "", errors.New(msg)
 		case "RUNNING", "QUEUED", "PENDING":
+			lastStatus = sr.Status
 			continue
 		default:
 			return nil, "", fmt.Errorf("unknown scan status: %q", sr.Status)
 		}
 	}
 
-	return nil, "", errors.New("scan took too long to complete")
+	return nil, "", &ErrVerdictTimeout{SBOMID: sbomID, ScanID: scanID, Waited: time.Since(start), LastStatus: lastStatus}
 }
 
 func truncate(s string, n int) string {
