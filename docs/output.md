@@ -132,7 +132,7 @@ ossprey scan . --report report.json
 |-----------|-----------|---------|
 | `clean`   | 0         | Scanned, nothing flagged. Check `unscanned` for how much was covered. |
 | `malware` | 1         | `findings` lists every flagged package. |
-| `skipped` | 0         | **Nothing was checked**: either your quota was exhausted or the SBOM held nothing this platform scans. `skipped.message` and `skipped.reset_at` say why and until when. Do not read this as "clean". |
+| `skipped` | 0         | **Nothing was checked**: either your quota was exhausted or the SBOM held nothing this platform scans. `skipped.message` and `skipped.reset_at` say why and until when, and the message names Rust when crates are not enabled for your account. Do not read this as "clean". |
 
 `unscanned` is how many of `components` the platform did not check: packages in
 an ecosystem it does not scan, packages it only matched against known
