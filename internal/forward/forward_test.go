@@ -257,8 +257,14 @@ func (s *stubExec) fn(_ context.Context, bin string, args []string) error {
 // call swapExpand.
 func swap(t *testing.T, exec func(context.Context, string, []string) error, chk func(context.Context, check.Options) (*ossbom.SBOM, error)) {
 	t.Helper()
-	oe, oc, os, ox := execFn, checkFn, scanProjectFn, expandFn
-	execFn, checkFn = exec, chk
+	origExec := execFn
+	origHandoff := handoffFn
+	origCheck := checkFn
+	origScanProject := scanProjectFn
+	origExpand := expandFn
+	execFn = exec
+	handoffFn = exec
+	checkFn = chk
 	scanProjectFn = func(context.Context, scanRequest) (*ossbom.SBOM, error) {
 		t.Error("scanProjectFn called unexpectedly")
 		return ossbom.New(ossbom.Environment{}), nil
@@ -266,7 +272,13 @@ func swap(t *testing.T, exec func(context.Context, string, []string) error, chk 
 	expandFn = func(context.Context, *Manager, []string, int, installArgs) ([]catalog.Resolved, error) {
 		return nil, nil
 	}
-	t.Cleanup(func() { execFn, checkFn, scanProjectFn, expandFn = oe, oc, os, ox })
+	t.Cleanup(func() {
+		execFn = origExec
+		handoffFn = origHandoff
+		checkFn = origCheck
+		scanProjectFn = origScanProject
+		expandFn = origExpand
+	})
 }
 
 // swapExpand replaces the dependency-expansion seam.

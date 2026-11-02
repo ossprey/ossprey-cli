@@ -59,8 +59,8 @@ func TestRun_GitHubFailuresFailOpenWithAWarning(t *testing.T) {
 			if err := Run(context.Background(), Options{Args: []string{"clone", "https://github.com/o/pub"}}); err != nil {
 				t.Fatalf("Run = %v, want git forwarded", err)
 			}
-			if len(c.checks) != 0 || len(c.execs) != 1 {
-				t.Fatalf("checks=%d execs=%d, want 0 and 1", len(c.checks), len(c.execs))
+			if len(c.checks) != 0 || len(c.handoffs) != 1 {
+				t.Fatalf("checks=%d handoffs=%d, want 0 and 1", len(c.checks), len(c.handoffs))
 			}
 			if !strings.Contains(errOut.(*bytes.Buffer).String(), "could not look up o/pub") {
 				t.Fatalf("fail-open was silent: %q", errOut.(*bytes.Buffer).String())
@@ -82,8 +82,8 @@ func TestRun_GitHubUnreachableFailsOpen(t *testing.T) {
 	if err := Run(context.Background(), Options{Args: []string{"clone", "git@github.com:o/pub.git"}}); err != nil {
 		t.Fatal(err)
 	}
-	if len(c.checks) != 0 || len(c.execs) != 1 {
-		t.Fatalf("checks=%d execs=%d", len(c.checks), len(c.execs))
+	if len(c.checks) != 0 || len(c.handoffs) != 1 {
+		t.Fatalf("checks=%d handoffs=%d", len(c.checks), len(c.handoffs))
 	}
 	if !strings.Contains(errOut.(*bytes.Buffer).String(), "warning") {
 		t.Fatal("network failure was silent")
@@ -160,8 +160,8 @@ func TestRun_SkipCIMakesNoLookup(t *testing.T) {
 	if err := Run(context.Background(), Options{Args: []string{"clone", "https://github.com/o/pub"}, SkipCI: true}); err != nil {
 		t.Fatal(err)
 	}
-	if len(*paths) != 0 || len(c.checks) != 0 || len(c.execs) != 1 {
-		t.Fatalf("lookups=%v checks=%d execs=%d", *paths, len(c.checks), len(c.execs))
+	if len(*paths) != 0 || len(c.checks) != 0 || len(c.handoffs) != 1 {
+		t.Fatalf("lookups=%v checks=%d handoffs=%d", *paths, len(c.checks), len(c.handoffs))
 	}
 }
 
@@ -183,7 +183,7 @@ func TestRun_GitErrorIsReturned(t *testing.T) {
 	fakeGitHub(t)
 	stub(t, false)
 	gitErr := errors.New("exit status 128")
-	execFn = func(context.Context, string, []string) error { return gitErr }
+	handoffFn = func(context.Context, string, []string) error { return gitErr }
 	if err := Run(context.Background(), Options{Args: []string{"clone", "https://github.com/o/pub"}}); !errors.Is(err, gitErr) {
 		t.Fatalf("Run = %v, want git's error", err)
 	}
@@ -198,8 +198,8 @@ func TestRun_PassiveFailuresNeverBlock(t *testing.T) {
 		if err := Run(context.Background(), Options{Args: []string{"clone", "https://github.com/o/pub"}, Passive: true}); err != nil {
 			t.Fatal(err)
 		}
-		if len(c.checks) != 0 || len(c.execs) != 1 {
-			t.Fatalf("checks=%d execs=%d", len(c.checks), len(c.execs))
+		if len(c.checks) != 0 || len(c.handoffs) != 1 {
+			t.Fatalf("checks=%d handoffs=%d", len(c.checks), len(c.handoffs))
 		}
 	})
 	t.Run("submit fails", func(t *testing.T) {
