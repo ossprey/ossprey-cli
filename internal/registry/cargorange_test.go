@@ -35,6 +35,8 @@ func TestCargoSatisfies(t *testing.T) {
 		{"1.0.0", "1.1.0-alpha.1", false, true},
 		{"1.1.0-alpha.0", "1.1.0-alpha.1", true, true},
 		{"0.9", "0.9.12+spec-1.1.0", true, true},
+		{"1.2.3-alpha.x", "1.4.0", true, true},
+		{"1.2.3+build.x", "1.4.0", true, true},
 		// Not Cargo's grammar.
 		{"1.0 || 2.0", "1.0.0", false, false},
 		{"1.0 - 2.0", "1.0.0", false, false},

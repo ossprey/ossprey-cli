@@ -2,7 +2,7 @@ package registry
 
 import "strings"
 
-// CargoSatisfies reports whether version meets a Cargo requirement, read through the npm port; ok is false if unreadable.
+// CargoSatisfies reports whether version meets a Cargo requirement via the npm port; ok is false if unreadable.
 func CargoSatisfies(req, version string) (match, ok bool) {
 	v, ok := parseSemver(version)
 	if !ok || strings.ContainsAny(req, "|") {
@@ -14,8 +14,8 @@ func CargoSatisfies(req, version string) (match, ok bool) {
 		if c == "" || strings.ContainsAny(c, " \t") {
 			return false, false
 		}
-		// A wildcard is an x-range in both grammars, so only a plain bare version gains the caret.
-		if c[0] >= '0' && c[0] <= '9' && !strings.ContainsAny(c, "*xX") {
+		// A wildcard in the release core is an x-range in both grammars, so only a plain bare version gains the caret.
+		if core, _, _ := strings.Cut(strings.SplitN(c, "+", 2)[0], "-"); c[0] >= '0' && c[0] <= '9' && !strings.ContainsAny(core, "*xX") {
 			c = "^" + c
 		}
 		parts = append(parts, c)
