@@ -34,7 +34,7 @@ func (e *ErrVerdictTimeout) Error() string {
 		status = "pending"
 	}
 	return fmt.Sprintf(
-		"scan took too long to complete: no verdict after %s (scan %s still %s). "+
+		"scan took too long to complete: no verdict after %s (scan %q still %s). "+
 			"The scan keeps running and its result will appear at %s; re-run later to pick up the cached verdict, "+
 			"or raise %s (e.g. %s=30m)",
 		e.Waited.Round(time.Second), e.ScanID, strings.ToLower(status), dashboardURL,
@@ -49,7 +49,8 @@ func verdictTimeoutFromEnv() time.Duration {
 	return defaultVerdictTimeout
 }
 
-// pollAttempts is how many status polls fit in VerdictTimeout.
+// pollAttempts caps status polls at what fits in VerdictTimeout at the default
+// interval, as a backstop to the elapsed-time deadline.
 func (c *Client) pollAttempts() int {
 	if c.VerdictTimeout <= 0 {
 		return maxPollAttempts

@@ -415,7 +415,7 @@ func (c *Client) postScan(ctx context.Context, mb ossbom.MiniBOM) (int, []byte, 
 			// A cancelled or expired context is not transient: retrying would
 			// only fail the same way, once per remaining attempt.
 			if ctx.Err() != nil {
-				return 0, nil, err
+				return 0, nil, explainTimeout(err, "submitting the scan")
 			}
 			lastErr = err
 			continue
@@ -491,15 +491,33 @@ func (c *Client) waitForCompletion(ctx context.Context, sbomID, scanID string) (
 	var lastErr error
 	var lastStatus string
 	start := time.Now()
+	timedOut := func() error {
+		return &ErrVerdictTimeout{SBOMID: sbomID, ScanID: scanID, Waited: time.Since(start), LastStatus: lastStatus}
+	}
 
+	// The verdict deadline bounds backoffs and in-flight polls alike; ctx
+	// stays separate so a caller's own cancellation is reported as such.
+	vctx := ctx
+	if c.VerdictTimeout > 0 {
+		var cancel context.CancelFunc
+		vctx, cancel = context.WithTimeout(ctx, c.VerdictTimeout)
+		defer cancel()
+	}
+
+	// pollAttempts is a safety limit; the deadline is what normally ends the wait.
 	for i := 1; i <= c.pollAttempts(); i++ {
 		select {
 		case <-ctx.Done():
 			return nil, "", explainTimeout(ctx.Err(), "waiting for the scan verdict")
+		case <-vctx.Done():
+			if ctx.Err() != nil {
+				return nil, "", explainTimeout(ctx.Err(), "waiting for the scan verdict")
+			}
+			return nil, "", timedOut()
 		case <-time.After(backoff(i)):
 		}
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		req, err := http.NewRequestWithContext(vctx, http.MethodGet, endpoint, nil)
 		if err != nil {
 			return nil, "", err
 		}
@@ -520,7 +538,10 @@ func (c *Client) waitForCompletion(ctx context.Context, sbomID, scanID string) (
 		}
 		if err != nil {
 			if ctx.Err() != nil {
-				return nil, "", err
+				return nil, "", explainTimeout(err, "polling for the scan verdict")
+			}
+			if vctx.Err() != nil {
+				return nil, "", timedOut()
 			}
 			lastErr = err
 			if transient++; transient >= maxTransientPolls {
@@ -573,7 +594,7 @@ func (c *Client) waitForCompletion(ctx context.Context, sbomID, scanID string) (
 		}
 	}
 
-	return nil, "", &ErrVerdictTimeout{SBOMID: sbomID, ScanID: scanID, Waited: time.Since(start), LastStatus: lastStatus}
+	return nil, "", timedOut()
 }
 
 func truncate(s string, n int) string {
