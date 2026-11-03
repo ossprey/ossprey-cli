@@ -346,16 +346,36 @@ cannot say "a directory holding this file", so the filter wraps the resolver
 every cataloger reads instead of the index. A crate at the scan root is exempt,
 since that scan asked for it.
 
-**The marker is repository content, so it proves nothing alone.** The first
-revision hid every file under a marked directory, so a pull request adding a
-`.cargo-checksum.json` beside a `package-lock.json` hid that lockfile from every
-cataloger. Now a directory is vendored only when its `Cargo.toml` names a crate
-that a `Cargo.lock` outside every marked directory locks with the checksum the
-marker records (what `cargo vendor` writes), and only its `Cargo.toml` and
-`Cargo.lock` are hidden, never another file. Forging that takes a real locked
-entry with a matching checksum in the project's own lock, at which point the
-directory is a locked dependency whose own manifest and lock are not built.
-`TestCatalogDoesNotLetACargoMarkerHideOtherFiles` pins the three ways in.
+**The marker is repository content, so it proves nothing alone.** Review broke
+two earlier rules. Hiding every file under a marked directory let a marker
+beside a `package-lock.json` hide it, and accepting any lockfile as proof let a
+decoy `Cargo.lock` naming a standalone project hide that project's own lock. So
+the proof is now what cargo itself would do. The vendoring project is a strict
+ancestor whose `Cargo.lock` (beside its `Cargo.toml`) locks the crate's
+name@version from a registry with the marker's checksum, has no path entry of
+that name@version, and names every non-optional normal and build dependency the
+crate's manifest declares (so an edited vendored manifest stays visible). The
+nearest cargo config for that project and for the crate's own directory
+replaces `crates-io` with a `directory` source equal to the crate's parent.
+Under that replacement cargo can take a crates.io dependency only from the
+vendor tree, so a hidden manifest cannot pull one from the network. A crate any
+manifest or config builds by path is never hidden (`path`, `workspace`,
+`members` and `paths` keys, read from every file in the scan, every ancestor of
+the scan root and `CARGO_HOME`), nor is one whose manifest has `[workspace]`,
+which `cargo publish` strips. References are resolved from both the path a file
+was reached by and its real path, through symlinks, with case and Unicode
+folded, both backslash readings, and a suffix match for one that leaves the
+root; member globs are expanded on disk. Anything it cannot place (a member
+glob with `[` or `**` or outside the root, a `path-bases` `base`, a config
+`include`, an unreadable or over-limit file) turns the filter off, and a hidden
+file reached through a symlink stays visible. Out of reach: `--config`,
+`CARGO_*` environment overrides and CI steps, which no manifest scan sees, and
+`path` dependencies inside package sinks, which the index never holds.
+`TestCatalogDoesNotLetACargoMarkerHideOtherFiles`,
+`TestCatalogReadsAProjectCrateThatLooksVendored`,
+`TestCatalogReadsACrateAProjectAboveTheScanBuilds` and
+`TestCatalogHidesNothingWhenAPathCannotBePlaced` pin one case per guard; each
+of the 25 fails with its guard removed.
 
 #### Why the npm resolve skips workspace members (OSS-1353)
 

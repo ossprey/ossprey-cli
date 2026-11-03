@@ -2,30 +2,44 @@ package catalog
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
+	"os"
 	"path"
 	"path/filepath"
 	"strings"
 
 	"github.com/BurntSushi/toml"
 	"github.com/anchore/syft/syft/file"
+	"golang.org/x/text/unicode/norm"
 )
 
 // cargoVendorMarker sits at the root of every crate `cargo vendor` writes, whatever the vendor directory is called.
 const cargoVendorMarker = ".cargo-checksum.json"
 
-// maxCargoLockBytes bounds a lockfile read to prove a vendored crate; real ones are a few MB at most.
-const maxCargoLockBytes = 32 << 20
+// maxCargoProofBytes bounds a lockfile or marker read; real ones are a few MB at most.
+const maxCargoProofBytes = 32 << 20
 
 // cargoVendored hides the Cargo.toml and Cargo.lock of proven vendored crates; it never hides any other file.
 type cargoVendored struct {
 	file.Resolver
-	dirs []string
+	rootPrefix string
+	hidden     map[string]bool
 }
 
-// withoutCargoVendor wraps r so no lookup returns a vendored crate's own manifest or lockfile below root.
-// The marker is a repository file, so it proves nothing alone: the crate must also be locked outside every
-// marked directory with the checksum the marker records, and that lockfile already names its dependencies.
+// cargoFile is a parsed manifest or cargo config with every directory cargo may resolve its paths against.
+type cargoFile struct {
+	doc   map[string]any
+	bases []string
+}
+
+// lockedSet is one project's Cargo.lock: checksums per name@version ("" for a path crate) and every package name.
+type lockedSet struct {
+	sums  map[string]map[string]bool
+	names map[string]bool
+}
+
+// withoutCargoVendor hides the Cargo files of crates the project above them vendored (see CLAUDE.md, OSS-2561).
 func withoutCargoVendor(r file.Resolver, root string) file.Resolver {
 	marks, err := r.FilesByGlob("**/" + cargoVendorMarker)
 	if err != nil || len(marks) == 0 {
@@ -35,75 +49,406 @@ func withoutCargoVendor(r file.Resolver, root string) file.Resolver {
 	if resolved, err := filepath.EvalSymlinks(root); err == nil {
 		root = resolved
 	}
-	rootPrefix := filepath.ToSlash(root) + "/"
+	rootSlash := filepath.ToSlash(root)
+	rootPrefix := rootSlash + "/"
 	marked := map[string]file.Location{}
 	for _, m := range marks {
-		p := filepath.ToSlash(m.RealPath)
-		// A crate scanned directly is what was asked for.
-		if path.Dir(strings.TrimPrefix(p, rootPrefix)) == "." {
-			continue
-		}
-		marked[path.Dir(p)] = m
+		marked[path.Dir(rootRel(m.RealPath, rootPrefix))] = m
 	}
-	if len(marked) == 0 {
-		return r
-	}
-	manifests, err := r.FilesByGlob("**/Cargo.toml")
+	manifestLocs, err := r.FilesByGlob("**/Cargo.toml")
 	if err != nil {
 		return r
 	}
-	locked := lockedCrates(r, marked)
-	var dirs []string
-	for _, m := range manifests {
-		dir := path.Dir(filepath.ToSlash(m.RealPath))
-		mark, ok := marked[dir]
-		if !ok {
-			continue
-		}
-		var manifest struct {
-			Package struct {
-				Name    string `toml:"name"`
-				Version string `toml:"version"`
-			} `toml:"package"`
-		}
-		if decodeTOML(r, m, maxManifestBytes, &manifest) != nil || manifest.Package.Name == "" {
-			continue
-		}
-		sum := locked[manifest.Package.Name+"@"+manifest.Package.Version]
-		if sum != "" && sum == vendoredChecksum(r, mark) {
-			dirs = append(dirs, dir+"/")
-		}
-	}
-	if len(dirs) == 0 {
+	dotted, err := r.FilesByGlob("**/.*/*")
+	if err != nil {
 		return r
 	}
-	return cargoVendored{Resolver: r, dirs: dirs}
+	// Any case, as cargo opens .cargo/config(.toml) on a case-insensitive filesystem.
+	var configLocs []file.Location
+	for _, l := range dotted {
+		p := strings.ToLower(rootRel(l.RealPath, rootPrefix))
+		if path.Base(path.Dir(p)) == ".cargo" && (path.Base(p) == "config" || path.Base(p) == "config.toml") {
+			configLocs = append(configLocs, l)
+		}
+	}
+	manifests, ok := readCargoFiles(r, manifestLocs, rootSlash, 1)
+	if !ok {
+		return r
+	}
+	configs, ok := readCargoFiles(r, configLocs, rootSlash, 2)
+	if !ok {
+		return r
+	}
+	aboveManifests, aboveConfigs, ok := cargoFilesAbove(root)
+	if !ok {
+		return r
+	}
+	all := append(aboveManifests, aboveConfigs...)
+	levels := map[string][]cargoFile{}
+	for _, c := range aboveConfigs {
+		levels[foldPath(c.bases[0])] = append(levels[foldPath(c.bases[0])], c)
+	}
+	for _, files := range []map[string]cargoFile{manifests, configs} {
+		for _, f := range files {
+			all = append(all, f)
+		}
+	}
+	for _, c := range configs {
+		levels[foldPath(c.bases[0])] = append(levels[foldPath(c.bases[0])], c)
+	}
+	owned, unsure := projectCrates(all, marked, rootSlash)
+	if unsure {
+		return r
+	}
+	locks := projectLocks(r, manifests, marked, rootPrefix)
+	hidden := map[string]bool{}
+	for p, m := range manifests {
+		dir := path.Dir(p)
+		mark, ok := marked[dir]
+		// cargo publish strips [workspace], so a manifest holding one is a project's own.
+		if !ok || owned[dir] || m.doc["workspace"] != nil {
+			continue
+		}
+		name, _ := tomlLookup(m.doc, "package", "name").(string)
+		version, _ := tomlLookup(m.doc, "package", "version").(string)
+		sum := vendoredChecksum(r, mark)
+		source := foldPath(realPath(path.Join(rootSlash, path.Dir(dir))))
+		if name == "" || sum == "" || vendorDir(levels, path.Join(rootSlash, dir)) != source {
+			continue
+		}
+		// The vendoring project is a strict ancestor, so a crate scanned directly is always read.
+		for a := dir; a != "."; {
+			a = path.Dir(a)
+			lock, ok := locks[a]
+			if !ok {
+				continue
+			}
+			// "" is a path crate of the same name and version, which the project builds itself.
+			sums := lock.sums[name+"@"+version]
+			if sums[sum] && !sums[""] && lockNamesDeps(lock, m.doc) && vendorDir(levels, path.Join(rootSlash, a)) == source {
+				hidden[p] = true
+				hidden[dir+"/Cargo.lock"] = true
+				break
+			}
+		}
+	}
+	if len(hidden) == 0 {
+		return r
+	}
+	return cargoVendored{Resolver: r, rootPrefix: rootPrefix, hidden: hidden}
 }
 
-// lockedCrates maps name@version to its checksum in every Cargo.lock outside a marked directory.
-func lockedCrates(r file.Resolver, marked map[string]file.Location) map[string]string {
-	out := map[string]string{}
+// rootRel is a RealPath relative to the scan root, in slash form.
+func rootRel(p, rootPrefix string) string {
+	return strings.TrimPrefix(filepath.ToSlash(p), rootPrefix)
+}
+
+// readCargoFiles parses each file once by real path, with a base up levels from both its real and its access path.
+func readCargoFiles(r file.Resolver, locs []file.Location, rootSlash string, up int) (map[string]cargoFile, bool) {
+	out := map[string]cargoFile{}
+	for _, l := range locs {
+		real := rootRel(l.RealPath, rootSlash+"/")
+		f, ok := out[real]
+		if !ok {
+			if _, err := decodeTOML(r, l, maxManifestBytes, &f.doc); err != nil {
+				return nil, false
+			}
+		}
+		for _, p := range []string{real, rootRel(l.AccessPath, rootSlash+"/")} {
+			for i := 0; i < up; i++ {
+				p = path.Dir(p)
+			}
+			f.bases = append(f.bases, path.Join(rootSlash, p))
+		}
+		out[real] = f
+	}
+	return out, true
+}
+
+// cargoFilesAbove reads the manifests and configs cargo run inside root also sees: every ancestor's, and CARGO_HOME's.
+func cargoFilesAbove(root string) (manifests, configs []cargoFile, ok bool) {
+	read := func(p, base string) (cargoFile, bool) {
+		info, err := os.Stat(p)
+		if err != nil || info.Size() > maxManifestBytes {
+			return cargoFile{}, false
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return cargoFile{}, false
+		}
+		f := cargoFile{bases: []string{filepath.ToSlash(base)}}
+		_, err = toml.Decode(string(data), &f.doc)
+		return f, err == nil
+	}
+	configsIn := func(dir, base string) bool {
+		entries, _ := os.ReadDir(dir)
+		for _, e := range entries {
+			if n := strings.ToLower(e.Name()); n == "config" || n == "config.toml" {
+				c, ok := read(filepath.Join(dir, e.Name()), base)
+				if !ok {
+					return false
+				}
+				configs = append(configs, c)
+			}
+		}
+		return true
+	}
+	seen := map[string]bool{}
+	for d := filepath.Dir(root); ; d = filepath.Dir(d) {
+		entries, _ := os.ReadDir(d)
+		for _, e := range entries {
+			switch strings.ToLower(e.Name()) {
+			case "cargo.toml":
+				m, ok := read(filepath.Join(d, e.Name()), d)
+				if !ok {
+					return nil, nil, false
+				}
+				manifests = append(manifests, m)
+			case ".cargo":
+				if !configsIn(filepath.Join(d, e.Name()), d) {
+					return nil, nil, false
+				}
+				seen[foldPath(filepath.ToSlash(filepath.Join(d, e.Name())))] = true
+			}
+		}
+		if filepath.Dir(d) == d {
+			break
+		}
+	}
+	home := os.Getenv("CARGO_HOME")
+	if home == "" {
+		if h, err := os.UserHomeDir(); err == nil {
+			home = filepath.Join(h, ".cargo")
+		}
+	}
+	if home != "" && !seen[foldPath(filepath.ToSlash(home))] && !configsIn(home, filepath.Dir(home)) {
+		return nil, nil, false
+	}
+	return manifests, configs, true
+}
+
+// vendorDir is the folded directory cargo run in dir takes crates.io crates from, or "" when unreplaced or unclear.
+func vendorDir(levels map[string][]cargoFile, dir string) string {
+	find := func(keys ...string) (string, string) {
+		for d := dir; ; d = path.Dir(d) {
+			// Two config files at one level leave cargo's choice unclear.
+			if cs := levels[foldPath(d)]; len(cs) > 1 {
+				return "", ""
+			} else if len(cs) == 1 {
+				if v, ok := tomlLookup(cs[0].doc, keys...).(string); ok {
+					return v, cs[0].bases[0]
+				}
+			}
+			if path.Dir(d) == d {
+				return "", ""
+			}
+		}
+	}
+	name, _ := find("source", "crates-io", "replace-with")
+	if name == "" {
+		return ""
+	}
+	directory, base := find("source", name, "directory")
+	if directory == "" {
+		return ""
+	}
+	return foldPath(realPath(placeRef(base, directory)))
+}
+
+func tomlLookup(v any, keys ...string) any {
+	for _, k := range keys {
+		m, ok := v.(map[string]any)
+		if !ok {
+			return nil
+		}
+		v = m[k]
+	}
+	return v
+}
+
+// placeRef is ref, relative to the absolute slash path base, as an absolute slash path.
+func placeRef(base, ref string) string {
+	if path.IsAbs(ref) || filepath.VolumeName(ref) != "" {
+		return filepath.ToSlash(ref)
+	}
+	return path.Join(base, ref)
+}
+
+// realPath resolves every symlink in p, or cleans it when it does not exist here.
+func realPath(p string) string {
+	if real, err := filepath.EvalSymlinks(filepath.FromSlash(p)); err == nil {
+		return filepath.ToSlash(real)
+	}
+	return path.Clean(p)
+}
+
+// foldPath folds case and Unicode normalization, as a filesystem may.
+func foldPath(p string) string {
+	return strings.ToLower(norm.NFC.String(p))
+}
+
+// projectCrates returns the marked directories any manifest or cargo config builds by path, or unsure.
+func projectCrates(files []cargoFile, marked map[string]file.Location, rootSlash string) (map[string]bool, bool) {
+	inRoot := foldPath(rootSlash) + "/"
+	byReal := map[string]string{}
+	for dir := range marked {
+		byReal[foldPath(realPath(path.Join(rootSlash, dir)))] = dir
+	}
+	owned := map[string]bool{}
+	own := func(p string) {
+		for _, q := range []string{foldPath(p), foldPath(realPath(p))} {
+			if dir, ok := byReal[q]; ok {
+				owned[dir] = true
+			}
+			// A path leaving the root may come back in under another checkout's name.
+			if !strings.HasPrefix(q, inRoot) {
+				for dir := range marked {
+					if strings.HasSuffix(q, "/"+foldPath(dir)) {
+						owned[dir] = true
+					}
+				}
+			}
+		}
+	}
+	for _, f := range files {
+		literals, globs, unsure := cargoPathRefs(f.doc)
+		if unsure {
+			return nil, true
+		}
+		for _, base := range f.bases {
+			for _, ref := range literals {
+				own(placeRef(base, ref))
+				own(placeRef(base, strings.ReplaceAll(ref, `\`, "/")))
+			}
+			for _, g := range globs {
+				pattern := placeRef(base, strings.ReplaceAll(g, `\`, "/"))
+				// Go's and cargo's globs differ on classes and **, and one outside the root may name anything.
+				if strings.ContainsAny(g, "[]") || strings.Contains(g, "**") || !strings.HasPrefix(foldPath(pattern), inRoot) {
+					return nil, true
+				}
+				matches, err := filepath.Glob(filepath.FromSlash(pattern))
+				if err != nil {
+					return nil, true
+				}
+				for _, m := range matches {
+					own(filepath.ToSlash(m))
+				}
+			}
+		}
+	}
+	return owned, false
+}
+
+// cargoPathRefs collects `path`, `workspace`, `paths` and `members` values, unsure on a `base` or config `include`.
+func cargoPathRefs(doc map[string]any) (literals, globs []string, unsure bool) {
+	unsure = doc["include"] != nil
+	var walk func(v any)
+	walk = func(v any) {
+		switch t := v.(type) {
+		case map[string]any:
+			if t["path"] != nil && t["base"] != nil {
+				unsure = true
+			}
+			for k, e := range t {
+				switch e := e.(type) {
+				case string:
+					if k == "path" || k == "workspace" {
+						literals = append(literals, e)
+					}
+				case []any:
+					for _, s := range e {
+						if s, ok := s.(string); ok && k == "paths" {
+							literals = append(literals, s)
+						} else if ok && k == "members" {
+							globs = append(globs, s)
+						}
+					}
+				}
+				walk(e)
+			}
+		case []map[string]any:
+			for _, e := range t {
+				walk(e)
+			}
+		case []any:
+			for _, e := range t {
+				walk(e)
+			}
+		}
+	}
+	walk(doc)
+	return literals, globs, unsure
+}
+
+// lockNamesDeps reports whether the lock names every non-optional normal and build dependency doc declares.
+func lockNamesDeps(lock lockedSet, doc map[string]any) bool {
+	tables := []any{doc["dependencies"], doc["build-dependencies"], doc["build_dependencies"]}
+	if targets, ok := doc["target"].(map[string]any); ok {
+		for _, t := range targets {
+			tables = append(tables, tomlLookup(t, "dependencies"), tomlLookup(t, "build-dependencies"), tomlLookup(t, "build_dependencies"))
+		}
+	}
+	for _, t := range tables {
+		deps, _ := t.(map[string]any)
+		for alias, spec := range deps {
+			name := alias
+			if s, ok := spec.(map[string]any); ok {
+				if optional, _ := s["optional"].(bool); optional {
+					continue
+				}
+				if pkg, ok := s["package"].(string); ok {
+					name = pkg
+				}
+			}
+			if !lock.names[name] {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// projectLocks reads the Cargo.lock of each unmarked directory that also holds a Cargo.toml.
+func projectLocks(r file.Resolver, manifests map[string]cargoFile, marked map[string]file.Location, rootPrefix string) map[string]lockedSet {
+	out := map[string]lockedSet{}
 	locks, err := r.FilesByGlob("**/Cargo.lock")
 	if err != nil {
 		return out
 	}
 	for _, l := range locks {
-		if underMarked(filepath.ToSlash(l.RealPath), marked) {
+		p := rootRel(l.RealPath, rootPrefix)
+		dir := path.Dir(p)
+		if _, ok := marked[dir]; ok || underMarked(p, marked) {
+			continue
+		}
+		if _, ok := manifests[path.Join(dir, "Cargo.toml")]; !ok {
 			continue
 		}
 		var lock struct {
 			Package []struct {
 				Name     string `toml:"name"`
 				Version  string `toml:"version"`
+				Source   string `toml:"source"`
 				Checksum string `toml:"checksum"`
 			} `toml:"package"`
 		}
-		if decodeTOML(r, l, maxCargoLockBytes, &lock) != nil {
+		if _, err := decodeTOML(r, l, maxCargoProofBytes, &lock); err != nil {
 			continue
 		}
+		set := lockedSet{sums: map[string]map[string]bool{}, names: map[string]bool{}}
 		for _, p := range lock.Package {
-			out[p.Name+"@"+p.Version] = p.Checksum
+			set.names[p.Name] = true
+			// A git crate has a source but no checksum, and proves nothing either way.
+			if p.Checksum == "" && p.Source != "" {
+				continue
+			}
+			key := p.Name + "@" + p.Version
+			if set.sums[key] == nil {
+				set.sums[key] = map[string]bool{}
+			}
+			set.sums[key][p.Checksum] = true
 		}
+		out[dir] = set
 	}
 	return out
 }
@@ -117,9 +462,9 @@ func underMarked(p string, marked map[string]file.Location) bool {
 	return false
 }
 
-// vendoredChecksum is the .crate checksum `cargo vendor` recorded, or "" when it recorded none or the file is unreadable.
+// vendoredChecksum is the .crate checksum `cargo vendor` recorded, or "".
 func vendoredChecksum(r file.Resolver, mark file.Location) string {
-	data, err := readLocation(r, mark, maxManifestBytes)
+	data, err := readLocation(r, mark, maxCargoProofBytes)
 	if err != nil {
 		return ""
 	}
@@ -132,48 +477,44 @@ func vendoredChecksum(r file.Resolver, mark file.Location) string {
 	return marker.Package
 }
 
-func decodeTOML(r file.Resolver, loc file.Location, limit int64, v any) error {
+func decodeTOML(r file.Resolver, loc file.Location, limit int64, v any) (toml.MetaData, error) {
 	data, err := readLocation(r, loc, limit)
 	if err != nil {
-		return err
+		return toml.MetaData{}, err
 	}
-	_, err = toml.Decode(string(data), v)
-	return err
+	return toml.Decode(string(data), v)
 }
 
+// readLocation refuses a file over limit, since a truncated one could drop a reference.
 func readLocation(r file.Resolver, loc file.Location, limit int64) ([]byte, error) {
 	rc, err := r.FileContentsByLocation(loc)
 	if err != nil {
 		return nil, err
 	}
 	defer rc.Close()
-	return io.ReadAll(io.LimitReader(rc, limit))
+	data, err := io.ReadAll(io.LimitReader(rc, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("%s is over %d bytes", loc.RealPath, limit)
+	}
+	return data, nil
 }
 
+// keep drops a hidden file only when reached by its own path, never through a symlink to it.
 func (r cargoVendored) keep(locs []file.Location, err error) ([]file.Location, error) {
 	if err != nil {
 		return nil, err
 	}
 	var out []file.Location
 	for _, l := range locs {
-		if !r.vendored(l.RealPath) {
+		real := rootRel(l.RealPath, r.rootPrefix)
+		if !r.hidden[real] || rootRel(l.AccessPath, r.rootPrefix) != real {
 			out = append(out, l)
 		}
 	}
 	return out, nil
-}
-
-func (r cargoVendored) vendored(p string) bool {
-	p = filepath.ToSlash(p)
-	if base := path.Base(p); base != "Cargo.toml" && base != "Cargo.lock" {
-		return false
-	}
-	for _, d := range r.dirs {
-		if strings.HasPrefix(p, d) {
-			return true
-		}
-	}
-	return false
 }
 
 func (r cargoVendored) FilesByGlob(patterns ...string) ([]file.Location, error) {

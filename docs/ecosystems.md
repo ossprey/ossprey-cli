@@ -28,14 +28,30 @@ add minutes to a scan. A project whose only record of its dependencies is an
 installed tree, with no lockfile or manifest, catalogues nothing from it.
 
 Crates that `cargo vendor` copied into the project are not read either,
-whatever the vendor directory is called. A directory counts as a vendored
-crate when it holds the `.cargo-checksum.json` that `cargo vendor` writes and
-your own `Cargo.lock` names that crate at that version with the same checksum.
-Its `Cargo.toml` and `Cargo.lock` then describe that crate's build, not yours,
-and your `Cargo.lock` already names everything it brings in. Only those two
-files are skipped; a `.cargo-checksum.json` never hides anything else, such as
-an npm or Python lockfile beside it. A path dependency kept under `vendor/` has
-no such file and is still read, and so is a vendored crate you scan directly.
+whatever the vendor directory is called. A crate's `Cargo.toml` and
+`Cargo.lock` are skipped only when all of these hold.
+
+- Its directory holds the `.cargo-checksum.json` that `cargo vendor` writes.
+- A project above it, with its own `Cargo.toml` and `Cargo.lock`, locks that
+  crate at that version with the same checksum, and that lock also names
+  every non-optional dependency the crate's `Cargo.toml` declares.
+- That project's cargo config (`.cargo/config.toml` or `.cargo/config`)
+  replaces crates.io with the directory holding the crate, as the config
+  `cargo vendor` prints does, and the crate's own directory sees the same
+  replacement.
+- Nothing builds the crate by path (a path dependency, `[patch]`, workspace
+  member or `paths` override, in any `Cargo.toml` or cargo config in the scan,
+  above it, or in `CARGO_HOME`), and its `Cargo.toml` has no `[workspace]`.
+
+Your `Cargo.lock` then already names everything the crate brings in. Only
+those two files are skipped; a `.cargo-checksum.json` never hides anything
+else, such as an npm or Python lockfile beside it, and a file reached through
+a symlink is always read. Crates vendored from git, vendor trees whose cargo
+config is generated at build time rather than committed, and a vendored crate
+you scan directly are still read. Nothing is skipped when any `Cargo.toml` or
+cargo config cannot be read, or names a path the scan cannot place: a
+workspace member glob with `[` or `**`, a glob outside the scan, a
+`path-bases` `base`, or a config `include`.
 
 Lockfile entries for your own code are not components: the root project,
 npm workspace links, and yarn `workspace:`, `portal:`, `link:` and `file:`

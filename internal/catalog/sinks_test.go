@@ -2,7 +2,9 @@ package catalog
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -109,7 +111,27 @@ func TestCatalogStillReadsLockfileBesideSinks(t *testing.T) {
 	t.Fatalf("is-odd@3.0.1 from package-lock.json missing: %+v", pkgs)
 }
 
-// cargoVendorFixture vendors into vendor/ and third_party/rust, beside a path dependency under vendor/.
+// vendorConfig is the cargo config `cargo vendor` tells a project to add for vendor directory dir.
+func vendorConfig(dir string) string {
+	return fmt.Sprintf("[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.vendored-sources]\ndirectory = %q\n", dir)
+}
+
+// lockEntry is a Cargo.lock package from crates.io with checksum sum, or a path crate when sum is "".
+func lockEntry(name, version, sum string) string {
+	if sum == "" {
+		return fmt.Sprintf("\n[[package]]\nname = %q\nversion = %q\n", name, version)
+	}
+	return fmt.Sprintf("\n[[package]]\nname = %q\nversion = %q\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = %q\n", name, version, sum)
+}
+
+// vendoredCrate writes a crate's marker recording sum and its manifest declaring deps.
+func vendoredCrate(t *testing.T, proj, dir, version, sum, deps string) {
+	t.Helper()
+	sinkFixture(t, proj, dir+"/.cargo-checksum.json", fmt.Sprintf(`{"files":{},"package":%q}`, sum))
+	sinkFixture(t, proj, dir+"/Cargo.toml", fmt.Sprintf("[package]\nname = %q\nversion = %q\n\n%s", path.Base(dir), version, deps))
+}
+
+// cargoVendorFixture vendors into vendor/ and, in a second project, third_party/rust.
 func cargoVendorFixture(t *testing.T) string {
 	t.Helper()
 	proj := t.TempDir()
@@ -120,29 +142,14 @@ version = "0.1.0"
 
 [workspace]
 members = ["crates/app"]
+exclude = ["other-proj"]
 
 [dependencies]
 anyhow = "=1.0.100"
 patched = { path = "vendor/patched" }
 `,
-		"Cargo.lock": `version = 4
-
-[[package]]
-name = "my-app"
-version = "0.1.0"
-
-[[package]]
-name = "anyhow"
-version = "1.0.100"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aaaa"
-
-[[package]]
-name = "serde"
-version = "1.0.228"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cccc"
-`,
+		"Cargo.lock":         "version = 4\n" + lockEntry("my-app", "0.1.0", "") + lockEntry("anyhow", "1.0.100", "aaaa"),
+		".cargo/config.toml": vendorConfig("vendor"),
 		"crates/app/Cargo.toml": `[package]
 name = "app"
 version = "0.1.0"
@@ -157,54 +164,39 @@ version = "0.1.0"
 [dependencies]
 memchr = "=2.7.4"
 `,
-		"vendor/anyhow/.cargo-checksum.json": `{"files":{},"package":"aaaa"}`,
-		"vendor/anyhow/Cargo.toml": `[package]
-name = "anyhow"
-version = "1.0.100"
+		"vendor/anyhow/Cargo.lock": "version = 4\n" + lockEntry("anyhow", "1.0.100", "") + lockEntry("futures", "0.3.31", "bbbb"),
+		// Only the crate's own Cargo files are hidden.
+		"vendor/anyhow/package-lock.json": `{
+  "name": "anyhow-site", "version": "1.0.0", "lockfileVersion": 3,
+  "packages": {
+    "": {"name": "anyhow-site", "version": "1.0.0", "dependencies": {"in-vendor": "1.0.0"}},
+    "node_modules/in-vendor": {"version": "1.0.0", "resolved": "https://registry.npmjs.org/in-vendor/-/in-vendor-1.0.0.tgz"}
+  }
+}`,
+		// Another lockfile recording a different checksum proves nothing either way.
+		"tools/other/Cargo.lock": "version = 4\n" + lockEntry("anyhow", "1.0.100", "zzzz"),
+		"other-proj/Cargo.toml": `[package]
+name = "other-proj"
+version = "0.1.0"
 
-[dev-dependencies]
-trybuild = "1.0.108"
+[dependencies]
+serde = "=1.0.228"
 `,
-		"vendor/anyhow/Cargo.lock": `version = 4
-
-[[package]]
-name = "anyhow"
-version = "1.0.100"
-
-[[package]]
-name = "futures"
-version = "0.3.31"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbbb"
-`,
-		"third_party/rust/serde/.cargo-checksum.json": `{"files":{},"package":"cccc"}`,
-		"third_party/rust/serde/Cargo.toml": `[package]
-name = "serde"
-version = "1.0.228"
-
-[dev-dependencies]
-serde_derive = "=1.0.228"
-`,
+		"other-proj/Cargo.lock":         "version = 4\n" + lockEntry("other-proj", "0.1.0", "") + lockEntry("serde", "1.0.228", "cccc"),
+		"other-proj/.cargo/config.toml": vendorConfig("third_party/rust"),
 	} {
 		sinkFixture(t, proj, rel, content)
 	}
+	vendoredCrate(t, proj, "vendor/anyhow", "1.0.100", "aaaa", "[dev-dependencies]\ntrybuild = \"1.0.108\"\n")
+	vendoredCrate(t, proj, "other-proj/third_party/rust/serde", "1.0.228", "cccc", "[dev-dependencies]\nserde_derive = \"=1.0.228\"\n")
 	return proj
 }
 
 // TestCatalogSkipsCargoVendorTrees: a vendored crate's own lockfile and dev-dependencies are not the project's.
 func TestCatalogSkipsCargoVendorTrees(t *testing.T) {
-	proj := cargoVendorFixture(t)
-
-	pkgs, err := Catalog(context.Background(), proj, Options{SkipVersionLookup: true, NoExec: true})
-	if err != nil {
-		t.Fatalf("Catalog: %v", err)
-	}
-	got := map[string]string{}
-	for _, p := range pkgs {
-		got[p.Name] = p.Version
-	}
-	// The root lock, a workspace member, and a path dependency with no marker.
-	for name, version := range map[string]string{"anyhow": "1.0.100", "itoa": "1.0.15", "memchr": "2.7.4"} {
+	got := catalogNames(t, cargoVendorFixture(t))
+	// Root lock, workspace member, unmarked path dependency, second project's lock, npm lockfile in a vendored crate.
+	for name, version := range map[string]string{"anyhow": "1.0.100", "itoa": "1.0.15", "memchr": "2.7.4", "serde": "1.0.228", "in-vendor": "1.0.0"} {
 		if v, ok := got[name]; !ok || v != version {
 			t.Errorf("%s@%s missing, got %v", name, version, got)
 		}
@@ -216,29 +208,22 @@ func TestCatalogSkipsCargoVendorTrees(t *testing.T) {
 	}
 }
 
+// vendoringRoot is a project vendoring into vendor/ whose lock pins each crate in locked.
+func vendoringRoot(t *testing.T, proj, manifestExtra, configExtra string, locked ...string) {
+	t.Helper()
+	sinkFixture(t, proj, "Cargo.toml", "[package]\nname = \"my-app\"\nversion = \"0.1.0\"\n"+manifestExtra)
+	sinkFixture(t, proj, "Cargo.lock", "version = 4\n"+lockEntry("my-app", "0.1.0", "")+strings.Join(locked, ""))
+	sinkFixture(t, proj, ".cargo/config.toml", configExtra+vendorConfig("vendor"))
+}
+
 // TestCatalogDoesNotLetACargoMarkerHideOtherFiles: the marker is a repository file, so on its own it hides nothing.
 func TestCatalogDoesNotLetACargoMarkerHideOtherFiles(t *testing.T) {
 	proj := t.TempDir()
+	vendoringRoot(t, proj, "", "",
+		lockEntry("serde", "1.0.228", "cccc"), lockEntry("forged", "1.0.0", "ffff"),
+		lockEntry("ws", "0.1.0", "wwww"), lockEntry("repoint", "0.1.0", "rrrr"),
+		lockEntry("edited", "0.1.0", "eded"), lockEntry("optional", "0.1.0", "opop"))
 	for rel, content := range map[string]string{
-		"Cargo.toml": `[package]
-name = "my-app"
-version = "0.1.0"
-
-[dependencies]
-anyhow = "=1.0.100"
-`,
-		"Cargo.lock": `version = 4
-
-[[package]]
-name = "my-app"
-version = "0.1.0"
-
-[[package]]
-name = "anyhow"
-version = "1.0.100"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aaaa"
-`,
 		// Beside an npm lockfile, the marker must not hide it.
 		"packages/web/.cargo-checksum.json": `{"files":{},"package":"dddd"}`,
 		"packages/web/package.json":         `{"name":"web","version":"1.0.0","dependencies":{"left-pad":"1.3.0"}}`,
@@ -250,45 +235,200 @@ checksum = "aaaa"
     "node_modules/is-odd": {"version": "3.0.1", "resolved": "https://registry.npmjs.org/is-odd/-/is-odd-3.0.1.tgz"}
   }
 }`,
-		// A crate no lockfile outside it names is a project, not a vendored dependency.
-		"tools/x/.cargo-checksum.json": `{"files":{},"package":"eeee"}`,
-		"tools/x/Cargo.toml": `[package]
-name = "x"
-version = "0.1.0"
-`,
-		"tools/x/Cargo.lock": `version = 4
-
-[[package]]
-name = "unlocked-dep"
-version = "9.9.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ffff"
-`,
-		// A locked crate whose marker records another checksum is not what cargo vendored.
-		"vendor/anyhow/.cargo-checksum.json": `{"files":{},"package":"0000"}`,
-		"vendor/anyhow/Cargo.toml": `[package]
-name = "anyhow"
-version = "1.0.100"
-
-[dependencies]
-forged-dep = "=1.0.0"
-`,
+		// A standalone project, and a lock elsewhere that names it with the marker's checksum.
+		"backend/Cargo.toml":           "[package]\nname = \"backend\"\nversion = \"0.1.0\"\n\n[dependencies]\nevil = \"=6.6.6\"\n",
+		"backend/Cargo.lock":           "version = 4\n" + lockEntry("backend", "0.1.0", "") + lockEntry("evil", "6.6.6", "6666"),
+		"backend/.cargo-checksum.json": `{"files":{},"package":"xxxx"}`,
+		"docs/examples/Cargo.toml":     "[package]\nname = \"example\"\nversion = \"0.1.0\"\n",
+		"docs/examples/Cargo.lock":     "version = 4\n" + lockEntry("backend", "0.1.0", "xxxx") + lockEntry("decoyed", "0.1.0", "yyyy"),
+		// A crate cargo replaces crates.io with a registry for, when run in its own directory.
+		"vendor/repoint/.cargo/config.toml": "[source.crates-io]\nreplace-with = \"upstream\"\n\n[source.upstream]\nregistry = \"sparse+https://index.crates.io/\"\n",
+		// A nested project whose two config files leave cargo's choice unclear.
+		"amb/Cargo.toml":         "[package]\nname = \"amb\"\nversion = \"0.1.0\"\n",
+		"amb/Cargo.lock":         "version = 4\n" + lockEntry("amb", "0.1.0", "") + lockEntry("ambiguous", "0.1.0", "mmmm"),
+		"amb/.cargo/config":      vendorConfig("vendor"),
+		"amb/.cargo/config.toml": vendorConfig("vendor"),
+		// A lockfile with no manifest beside it is no project.
+		"vendor/Cargo.lock": "version = 4\n" + lockEntry("lonely", "0.1.0", "llll"),
+		// A nested project that does not vendor, under a config only its vendor directory reads.
+		"nested-proj/Cargo.toml":                "[package]\nname = \"nested-proj\"\nversion = \"0.1.0\"\n",
+		"nested-proj/Cargo.lock":                "version = 4\n" + lockEntry("nested-proj", "0.1.0", "") + lockEntry("unvendored", "0.1.0", "uuuu"),
+		"nested-proj/vendor/.cargo/config.toml": vendorConfig("."),
 	} {
 		sinkFixture(t, proj, rel, content)
 	}
+	// Each is under vendor/ with a marker, but fails one part of the proof.
+	vendoredCrate(t, proj, "vendor/forged", "1.0.0", "0000", "[dev-dependencies]\nforged-dep = \"=1.0.0\"\n")
+	vendoredCrate(t, proj, "vendor/unlocked", "0.1.0", "eeee", "[dev-dependencies]\nunlocked-dep = \"=1.0.0\"\n")
+	vendoredCrate(t, proj, "vendor/decoyed", "0.1.0", "yyyy", "[dev-dependencies]\ndecoy-dep = \"=1.0.0\"\n")
+	vendoredCrate(t, proj, "vendor/ws", "0.1.0", "wwww", "[workspace]\n\n[dev-dependencies]\nws-dep = \"=1.0.0\"\n")
+	vendoredCrate(t, proj, "vendor/repoint", "0.1.0", "rrrr", "[dev-dependencies]\nrepoint-dep = \"=1.0.0\"\n")
+	vendoredCrate(t, proj, "amb/vendor/ambiguous", "0.1.0", "mmmm", "[dev-dependencies]\nambiguous-dep = \"=1.0.0\"\n")
+	vendoredCrate(t, proj, "vendor/lonely", "0.1.0", "llll", "[dev-dependencies]\nlonely-dep = \"=1.0.0\"\n")
+	vendoredCrate(t, proj, "nested-proj/vendor/unvendored", "0.1.0", "uuuu", "[dev-dependencies]\nunvendored-dep = \"=1.0.0\"\n")
+	// Proven but for a dependency the project's lock does not name, which cargo would resolve.
+	vendoredCrate(t, proj, "vendor/edited", "0.1.0", "eded", "[dependencies]\nedit-dep = \"=1.0.0\"\n")
+	// An optional dependency may be unused, so it does not block the proof.
+	vendoredCrate(t, proj, "vendor/optional", "0.1.0", "opop", "[dependencies]\nopt-dep = { version = \"=1.0.0\", optional = true }\n\n[dev-dependencies]\noptional_dev = \"=1.0.0\"\n")
+	// Proven, so its own files are hidden but a manifest below it is not.
+	vendoredCrate(t, proj, "vendor/serde", "1.0.228", "cccc", "[dev-dependencies]\nserde_derive = \"=1.0.228\"\n")
+	// The hidden lock reached through a symlink is another file, so it stays visible.
+	sinkFixture(t, proj, "vendor/serde/Cargo.lock", `{
+  "name": "site", "version": "1.0.0", "lockfileVersion": 3,
+  "packages": {
+    "": {"name": "site", "version": "1.0.0", "dependencies": {"aliased-dep": "1.0.0"}},
+    "node_modules/aliased-dep": {"version": "1.0.0", "resolved": "https://registry.npmjs.org/aliased-dep/-/aliased-dep-1.0.0.tgz"}
+  }
+}`)
+	aliased := os.Symlink(filepath.Join(proj, "vendor/serde/Cargo.lock"), filepath.Join(proj, "package-lock.json")) == nil
+	sinkFixture(t, proj, "vendor/serde/sub/Cargo.toml", "[package]\nname = \"sub\"\nversion = \"0.1.0\"\n\n[dependencies]\nnested-dep = \"=1.0.0\"\n")
 
-	pkgs, err := Catalog(context.Background(), proj, Options{SkipVersionLookup: true, NoExec: true})
-	if err != nil {
-		t.Fatalf("Catalog: %v", err)
-	}
-	got := map[string]string{}
-	for _, p := range pkgs {
-		got[p.Name] = p.Version
-	}
-	for name, version := range map[string]string{"is-odd": "3.0.1", "unlocked-dep": "9.9.9", "forged-dep": "1.0.0"} {
+	got := catalogNames(t, proj)
+	for name, version := range map[string]string{
+		"is-odd": "3.0.1", "evil": "6.6.6", "forged-dep": "1.0.0", "unlocked-dep": "1.0.0", "decoy-dep": "1.0.0",
+		"ws-dep": "1.0.0", "repoint-dep": "1.0.0", "ambiguous-dep": "1.0.0", "unvendored-dep": "1.0.0", "lonely-dep": "1.0.0", "nested-dep": "1.0.0",
+		"edit-dep": "1.0.0",
+	} {
 		if v, ok := got[name]; !ok || v != version {
 			t.Errorf("%s@%s hidden by a .cargo-checksum.json, got %v", name, version, got)
 		}
+	}
+	if aliased && got["aliased-dep"] != "1.0.0" {
+		t.Errorf("aliased-dep@1.0.0 hidden behind a symlink to a hidden file, got %v", got)
+	}
+	for _, name := range []string{"serde_derive", "optional_dev"} {
+		if _, ok := got[name]; ok {
+			t.Errorf("%s came from a proven vendored crate: %v", name, got)
+		}
+	}
+}
+
+// TestCatalogReadsAProjectCrateThatLooksVendored: a crate the project builds by path is never hidden.
+func TestCatalogReadsAProjectCrateThatLooksVendored(t *testing.T) {
+	proj := t.TempDir()
+	// Each crate: its marker's checksum, its version, and a dev-dependency only it declares.
+	crates := map[string][3]string{
+		"itoa":      {"gggg", "1.0.15", "path-dep"},
+		"inner":     {"iiii", "0.1.0", "transitive-dep"},
+		"wsmember":  {"hhhh", "0.1.0", "member-dep"},
+		"mlink":     {"mmmm", "0.1.0", "member-link-dep"},
+		"memchr":    {"pppp", "2.7.4", "patch-dep"},
+		"semver":    {"ssss", "1.0.26", "override-dep"},
+		"cfgcase":   {"cfcf", "0.1.0", "config-case-dep"},
+		"ryu":       {"rrrr", "1.0.20", "case-dep"},
+		"smallvec":  {"vvvv", "1.13.2", "sourceless-dep"},
+		"hashbrown": {"kkkk", "0.15.0", "linked-dep"},
+		"bk":        {"bkbk", "0.1.0", "bracket-dep"},
+		"smlink":    {"smsm", "0.1.0", "symlinked-manifest-dep"},
+		"esc":       {"eses", "0.1.0", "escape-dep"},
+		"bsl":       {"bsbs", "0.1.0", "backslash-dep"},
+		"café":      {"cfee", "0.1.0", "unicode-dep"},
+	}
+	var locked []string
+	for name, c := range crates {
+		deps := fmt.Sprintf("[dev-dependencies]\n%s = \"=1.0.0\"\n", c[2])
+		if name == "itoa" {
+			deps += "\n[dependencies]\ninner = { path = \"../inner\" }\n"
+		}
+		dir := "vendor/" + name
+		if name == "café" {
+			// Decomposed on disk, composed in the reference.
+			dir = "vendor/café"
+		}
+		vendoredCrate(t, proj, dir, c[1], c[0], deps)
+		locked = append(locked, lockEntry(path.Base(dir), c[1], c[0]))
+	}
+	vendoredCrate(t, proj, "vendor/serde", "1.0.228", "cccc", "[dev-dependencies]\nserde_derive = \"=1.0.228\"\n")
+	// smallvec is also locked as a path crate, built from outside the scan.
+	locked = append(locked, lockEntry("serde", "1.0.228", "cccc"), lockEntry("smallvec", "1.13.2", ""))
+	vendoringRoot(t, proj, `
+[workspace]
+members = ["vendor/wsmem*", "crates/*"]
+
+[dependencies]
+itoa = { path = "vendor/itoa" }
+ryu = { path = "Vendor/Ryu" }
+hashbrown = { path = "link/hashbrown" }
+bk = { path = "we[ird]/bk" }
+esc = { path = "../another-checkout/vendor/esc" }
+bsl = { path = 'vendor\bsl' }
+cafe = { path = "vendor/caf`+"é"+`" }
+
+[patch.crates-io]
+memchr = { path = "vendor/memchr" }
+`, "paths = [\"vendor/semver\"]\n\n", locked...)
+	sinkFixture(t, proj, "tools/.cargo/Config.toml", "paths = [\"../vendor/cfgcase\"]\n")
+	sinkFixture(t, proj, "templates/deep/app.toml", "[package]\nname = \"app2\"\nversion = \"0.1.0\"\n\n[dependencies]\nsmlink = { path = \"../vendor/smlink\" }\n")
+	want := []string{"path-dep", "transitive-dep", "member-dep", "patch-dep", "override-dep", "config-case-dep", "case-dep",
+		"sourceless-dep", "escape-dep", "backslash-dep", "unicode-dep"}
+	if err := os.MkdirAll(filepath.Join(proj, "crates"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	links := map[string][2]string{
+		"linked-dep":             {"vendor", "link"},
+		"bracket-dep":            {"vendor", "we[ird]"},
+		"member-link-dep":        {"vendor/mlink", "crates/linked"},
+		"symlinked-manifest-dep": {"templates/deep/app.toml", "app/Cargo.toml"},
+	}
+	for dep, l := range links {
+		_ = os.MkdirAll(filepath.Dir(filepath.Join(proj, l[1])), 0o755)
+		if os.Symlink(filepath.Join(proj, l[0]), filepath.Join(proj, l[1])) == nil {
+			want = append(want, dep)
+		}
+	}
+
+	got := catalogNames(t, proj)
+	for _, name := range want {
+		if v, ok := got[name]; !ok || v != "1.0.0" {
+			t.Errorf("%s@1.0.0 hidden from a crate the project builds, got %v", name, got)
+		}
+	}
+	if _, ok := got["serde_derive"]; ok {
+		t.Errorf("serde_derive came from a proven vendored crate, so the filter never ran: %v", got)
+	}
+}
+
+// TestCatalogReadsACrateAProjectAboveTheScanBuilds: cargo run in a scanned subdirectory reads the configs above it.
+func TestCatalogReadsACrateAProjectAboveTheScanBuilds(t *testing.T) {
+	repo := t.TempDir()
+	proj := filepath.Join(repo, "svc")
+	sinkFixture(t, repo, ".cargo/config.toml", "[patch.crates-io]\nx = { path = \"svc/vendor/x\" }\n")
+	vendoredCrate(t, proj, "vendor/x", "0.1.0", "xxxx", "[dev-dependencies]\nabove-dep = \"=1.0.0\"\n")
+	vendoredCrate(t, proj, "vendor/serde", "1.0.228", "cccc", "[dev-dependencies]\nserde_derive = \"=1.0.228\"\n")
+	vendoringRoot(t, proj, "", "", lockEntry("x", "0.1.0", "xxxx"), lockEntry("serde", "1.0.228", "cccc"))
+
+	got := catalogNames(t, proj)
+	if got["above-dep"] != "1.0.0" {
+		t.Errorf("above-dep@1.0.0 hidden from a crate a config above the scan builds, got %v", got)
+	}
+	if _, ok := got["serde_derive"]; ok {
+		t.Errorf("serde_derive came from a proven vendored crate, so the filter never ran: %v", got)
+	}
+}
+
+// TestCatalogHidesNothingWhenAPathCannotBePlaced: a reference the filter cannot place could name any crate.
+func TestCatalogHidesNothingWhenAPathCannotBePlaced(t *testing.T) {
+	for name, c := range map[string][3]string{
+		// manifest addition, config addition, extra file
+		"class glob":           {"[workspace]\nmembers = [\"crates/[!_]x\"]\n", "", ""},
+		"doublestar glob":      {"[workspace]\nmembers = [\"crates/**\"]\n", "", ""},
+		"glob above the root":  {"[workspace]\nmembers = [\"../*\"]\n", "", ""},
+		"path base":            {"[dependencies]\nx = { path = \"x\", base = \"b\" }\n", "", ""},
+		"config include":       {"", "include = \"extra.toml\"\n", ""},
+		"unparseable manifest": {"", "", "[package\n"},
+		"oversized manifest":   {"", "", "# " + strings.Repeat("x", maxManifestBytes) + "\n"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			proj := t.TempDir()
+			vendoredCrate(t, proj, "vendor/serde", "1.0.228", "cccc", "[dev-dependencies]\nserde_derive = \"=1.0.228\"\n")
+			vendoringRoot(t, proj, c[0], c[1], lockEntry("serde", "1.0.228", "cccc"))
+			if c[2] != "" {
+				sinkFixture(t, proj, "other/Cargo.toml", c[2])
+			}
+			if got := catalogNames(t, proj); got["serde_derive"] != "1.0.228" {
+				t.Errorf("serde_derive@1.0.228 hidden although the filter could not place every path, got %v", got)
+			}
+		})
 	}
 }
 
@@ -306,6 +446,21 @@ func TestCatalogReadsAVendoredCrateScannedDirectly(t *testing.T) {
 		}
 	}
 	t.Fatalf("futures@0.3.31 from the scanned crate's Cargo.lock missing: %+v", pkgs)
+}
+
+func catalogNames(t *testing.T, proj string) map[string]string {
+	t.Helper()
+	// The filter reads CARGO_HOME's config, so keep the machine's out of the result.
+	t.Setenv("CARGO_HOME", t.TempDir())
+	pkgs, err := Catalog(context.Background(), proj, Options{SkipVersionLookup: true, NoExec: true})
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	got := map[string]string{}
+	for _, p := range pkgs {
+		got[p.Name] = p.Version
+	}
+	return got
 }
 
 func sinkFixture(t *testing.T, root, rel, content string) {
