@@ -222,10 +222,10 @@ func TestCatalogDoesNotLetACargoMarkerHideOtherFiles(t *testing.T) {
 	proj := t.TempDir()
 	vendoringRoot(t, proj, "", "",
 		lockEntry("serde", "1.0.228", "cccc"), lockEntry("forged", "1.0.0", "ffff"),
-		lockEntry("ws", "0.1.0", "wwww"), lockEntry("repoint", "0.1.0", "rrrr"),
+		lockEntry("ws", "0.1.0", "wwww"),
 		lockEntry("edited", "0.1.0", "eded"), lockEntry("optional", "0.1.0", "opop"),
 		lockEntry("featured", "0.1.0", "fefe"), lockEntry("bumped", "0.1.0", "bubu"), lockEntry("bumpdep", "1.0.0", "b1b1"),
-		lockEntry("ranged", "0.1.0", "rara"), lockEntry("rangedep", "1.4.0", "r1r1"), lockEntry("symrepoint", "0.1.0", "srsr"))
+		lockEntry("ranged", "0.1.0", "rara"), lockEntry("rangedep", "1.4.0", "r1r1"))
 	for rel, content := range map[string]string{
 		// Beside an npm lockfile, the marker must not hide it.
 		"packages/web/.cargo-checksum.json": `{"files":{},"package":"dddd"}`,
@@ -245,20 +245,11 @@ func TestCatalogDoesNotLetACargoMarkerHideOtherFiles(t *testing.T) {
 		"docs/examples/Cargo.toml":     "[package]\nname = \"example\"\nversion = \"0.1.0\"\n",
 		"docs/examples/Cargo.lock":     "version = 4\n" + lockEntry("backend", "0.1.0", "xxxx") + lockEntry("decoyed", "0.1.0", "yyyy"),
 		// A crate cargo replaces crates.io with a registry for, when run in its own directory.
-		"vendor/repoint/.cargo/config.toml": "[source.crates-io]\nreplace-with = \"upstream\"\n\n[source.upstream]\nregistry = \"sparse+https://index.crates.io/\"\n",
 		// A nested project whose two config files leave cargo's choice unclear.
-		"amb/Cargo.toml":         "[package]\nname = \"amb\"\nversion = \"0.1.0\"\n",
-		"amb/Cargo.lock":         "version = 4\n" + lockEntry("amb", "0.1.0", "") + lockEntry("ambiguous", "0.1.0", "mmmm"),
-		"amb/.cargo/config":      vendorConfig("vendor"),
-		"amb/.cargo/config.toml": vendorConfig("vendor"),
 		// A lockfile with no manifest beside it is no project.
 		"vendor/Cargo.lock": "version = 4\n" + lockEntry("lonely", "0.1.0", "llll"),
 		// A nested project whose vendor source is itself replaced, which cargo follows.
-		"chain/Cargo.toml":         "[package]\nname = \"chain\"\nversion = \"0.1.0\"\n",
-		"chain/Cargo.lock":         "version = 4\n" + lockEntry("chain", "0.1.0", "") + lockEntry("chained", "0.1.0", "chch"),
-		"chain/.cargo/config.toml": vendorConfig("vendor") + "replace-with = \"mirror\"\n\n[source.mirror]\nregistry = \"sparse+https://index.crates.io/\"\n",
 		// A config cargo reads through a symlink in the crate's own .cargo directory.
-		"cfgs/upstream.toml": "[source.crates-io]\nreplace-with = \"upstream\"\n\n[source.upstream]\nregistry = \"sparse+https://index.crates.io/\"\n",
 		// A nested project that does not vendor, under a config only its vendor directory reads.
 		"nested-proj/Cargo.toml":                "[package]\nname = \"nested-proj\"\nversion = \"0.1.0\"\n",
 		"nested-proj/Cargo.lock":                "version = 4\n" + lockEntry("nested-proj", "0.1.0", "") + lockEntry("unvendored", "0.1.0", "uuuu"),
@@ -271,19 +262,15 @@ func TestCatalogDoesNotLetACargoMarkerHideOtherFiles(t *testing.T) {
 	vendoredCrate(t, proj, "vendor/unlocked", "0.1.0", "eeee", "[dev-dependencies]\nunlocked-dep = \"=1.0.0\"\n")
 	vendoredCrate(t, proj, "vendor/decoyed", "0.1.0", "yyyy", "[dev-dependencies]\ndecoy-dep = \"=1.0.0\"\n")
 	vendoredCrate(t, proj, "vendor/ws", "0.1.0", "wwww", "[workspace]\n\n[dev-dependencies]\nws-dep = \"=1.0.0\"\n")
-	vendoredCrate(t, proj, "vendor/repoint", "0.1.0", "rrrr", "[dev-dependencies]\nrepoint-dep = \"=1.0.0\"\n")
-	vendoredCrate(t, proj, "amb/vendor/ambiguous", "0.1.0", "mmmm", "[dev-dependencies]\nambiguous-dep = \"=1.0.0\"\n")
 	vendoredCrate(t, proj, "vendor/lonely", "0.1.0", "llll", "[dev-dependencies]\nlonely-dep = \"=1.0.0\"\n")
 	vendoredCrate(t, proj, "nested-proj/vendor/unvendored", "0.1.0", "uuuu", "[dev-dependencies]\nunvendored-dep = \"=1.0.0\"\n")
 	// Proven but for a dependency the project's lock does not name, which cargo would resolve.
 	vendoredCrate(t, proj, "vendor/edited", "0.1.0", "eded", "[dependencies]\nedit-dep = \"=1.0.0\"\n")
-	vendoredCrate(t, proj, "chain/vendor/chained", "0.1.0", "chch", "[dev-dependencies]\nchained-dep = \"=1.0.0\"\n")
 	// Its default features turn on an optional dependency the lock does not hold.
 	vendoredCrate(t, proj, "vendor/featured", "0.1.0", "fefe", "[dependencies]\nevil-opt = { version = \"=1.0.0\", optional = true }\n\n[features]\ndefault = [\"fast\"]\nfast = [\"dep:evil-opt\"]\n\n[dev-dependencies]\nfeatured_dev = \"=1.0.0\"\n")
 	// A locked name at a release the manifest no longer asks for, and one it still does.
 	vendoredCrate(t, proj, "vendor/bumped", "0.1.0", "bubu", "[dependencies]\nbumpdep = \"=2.0.0\"\n\n[dev-dependencies]\nbumped_dev = \"=1.0.0\"\n")
 	vendoredCrate(t, proj, "vendor/ranged", "0.1.0", "rara", "[dependencies]\nrangedep = \"1.2\"\n\n[dev-dependencies]\nranged_dev = \"=1.0.0\"\n")
-	vendoredCrate(t, proj, "vendor/symrepoint", "0.1.0", "srsr", "[dev-dependencies]\nsymrepoint-dep = \"=1.0.0\"\n")
 	// An optional dependency may be unused, so it does not block the proof.
 	vendoredCrate(t, proj, "vendor/optional", "0.1.0", "opop", "[dependencies]\nopt-dep = { version = \"=1.0.0\", optional = true }\n\n[dev-dependencies]\noptional_dev = \"=1.0.0\"\n")
 	// Proven, so its own files are hidden but a manifest below it is not.
@@ -298,15 +285,13 @@ func TestCatalogDoesNotLetACargoMarkerHideOtherFiles(t *testing.T) {
 }`)
 	// Symlinks need privileges on Windows, as in the other symlink tests.
 	aliased := runtime.GOOS != "windows" && os.Symlink(filepath.Join(proj, "vendor/serde/Cargo.lock"), filepath.Join(proj, "package-lock.json")) == nil
-	_ = os.MkdirAll(filepath.Join(proj, "vendor/symrepoint/.cargo"), 0o755)
-	symConfig := runtime.GOOS != "windows" && os.Symlink(filepath.Join(proj, "cfgs/upstream.toml"), filepath.Join(proj, "vendor/symrepoint/.cargo/config.toml")) == nil
 	sinkFixture(t, proj, "vendor/serde/sub/Cargo.toml", "[package]\nname = \"sub\"\nversion = \"0.1.0\"\n\n[dependencies]\nnested-dep = \"=1.0.0\"\n")
 
 	got := catalogNames(t, proj)
 	for name, version := range map[string]string{
 		"is-odd": "3.0.1", "evil": "6.6.6", "forged-dep": "1.0.0", "unlocked-dep": "1.0.0", "decoy-dep": "1.0.0",
-		"ws-dep": "1.0.0", "repoint-dep": "1.0.0", "ambiguous-dep": "1.0.0", "unvendored-dep": "1.0.0", "lonely-dep": "1.0.0", "nested-dep": "1.0.0",
-		"edit-dep": "1.0.0", "chained-dep": "1.0.0", "featured_dev": "1.0.0", "bumped_dev": "1.0.0",
+		"ws-dep": "1.0.0", "unvendored-dep": "1.0.0", "lonely-dep": "1.0.0", "nested-dep": "1.0.0",
+		"edit-dep": "1.0.0", "featured_dev": "1.0.0", "bumped_dev": "1.0.0",
 	} {
 		if v, ok := got[name]; !ok || v != version {
 			t.Errorf("%s@%s hidden by a .cargo-checksum.json, got %v", name, version, got)
@@ -314,9 +299,6 @@ func TestCatalogDoesNotLetACargoMarkerHideOtherFiles(t *testing.T) {
 	}
 	if aliased && got["aliased-dep"] != "1.0.0" {
 		t.Errorf("aliased-dep@1.0.0 hidden behind a symlink to a hidden file, got %v", got)
-	}
-	if symConfig && got["symrepoint-dep"] != "1.0.0" {
-		t.Errorf("symrepoint-dep@1.0.0 hidden though a symlinked config repoints crates.io, got %v", got)
 	}
 	for _, name := range []string{"serde_derive", "optional_dev", "ranged_dev"} {
 		if _, ok := got[name]; ok {
@@ -337,7 +319,7 @@ func TestCatalogReadsAProjectCrateThatLooksVendored(t *testing.T) {
 		"mlink":     {"mmmm", "0.1.0", "member-link-dep"},
 		"memchr":    {"pppp", "2.7.4", "patch-dep"},
 		"semver":    {"ssss", "1.0.26", "override-dep"},
-		"cfgcase":   {"cfcf", "0.1.0", "config-case-dep"},
+		"aliased":   {"alal", "0.1.0", "alias-dep"},
 		"ryu":       {"rrrr", "1.0.20", "case-dep"},
 		"smallvec":  {"vvvv", "1.13.2", "sourceless-dep"},
 		"hashbrown": {"kkkk", "0.15.0", "linked-dep"},
@@ -380,9 +362,9 @@ cafe = { path = "vendor/caf`+"é"+`" }
 [patch.crates-io]
 memchr = { path = "vendor/memchr" }
 `, "paths = [\"vendor/semver\"]\n\n", locked...)
-	sinkFixture(t, proj, "tools/.cargo/Config.toml", "paths = [\"../vendor/cfgcase\"]\n")
+	sinkFixture(t, proj, "tools/.cargo/config.toml", "[alias]\nvendored-test = \"test --manifest-path ../vendor/aliased/Cargo.toml\"\n")
 	sinkFixture(t, proj, "templates/deep/app.toml", "[package]\nname = \"app2\"\nversion = \"0.1.0\"\n\n[dependencies]\nsmlink = { path = \"../vendor/smlink\" }\n")
-	want := []string{"path-dep", "transitive-dep", "member-dep", "patch-dep", "override-dep", "config-case-dep", "case-dep",
+	want := []string{"path-dep", "transitive-dep", "member-dep", "patch-dep", "override-dep", "alias-dep", "case-dep",
 		"sourceless-dep", "escape-dep", "backslash-dep", "unicode-dep"}
 	if err := os.MkdirAll(filepath.Join(proj, "crates"), 0o755); err != nil {
 		t.Fatal(err)
@@ -429,24 +411,52 @@ func TestCatalogReadsACrateAProjectAboveTheScanBuilds(t *testing.T) {
 	}
 }
 
-// TestCatalogHidesNothingWhenAPathCannotBePlaced: a reference the filter cannot place could name any crate.
+// TestCatalogHidesNothingWhenAPathCannotBePlaced: a reference or config the filter cannot place could name any crate.
 func TestCatalogHidesNothingWhenAPathCannotBePlaced(t *testing.T) {
-	for name, c := range map[string][3]string{
-		// manifest addition, config addition, extra file
-		"class glob":           {"[workspace]\nmembers = [\"crates/[!_]x\"]\n", "", ""},
-		"doublestar glob":      {"[workspace]\nmembers = [\"crates/**\"]\n", "", ""},
-		"glob above the root":  {"[workspace]\nmembers = [\"../*\"]\n", "", ""},
-		"path base":            {"[dependencies]\nx = { path = \"x\", base = \"b\" }\n", "", ""},
-		"config include":       {"", "include = \"extra.toml\"\n", ""},
-		"unparseable manifest": {"", "", "[package\n"},
-		"oversized manifest":   {"", "", "# " + strings.Repeat("x", maxManifestBytes) + "\n"},
+	mirror := "[source.crates-io]\nreplace-with = \"mirror\"\n\n[registries.mirror]\nindex = \"sparse+https://index.crates.io/\"\n"
+	for name, c := range map[string]struct {
+		manifest, config string
+		files, links     map[string]string
+	}{
+		"class glob":           {manifest: "[workspace]\nmembers = [\"crates/[!_]x\"]\n"},
+		"doublestar glob":      {manifest: "[workspace]\nmembers = [\"crates/**\"]\n"},
+		"glob above the root":  {manifest: "[workspace]\nmembers = [\"../*\"]\n"},
+		"path base":            {manifest: "[dependencies]\nx = { path = \"x\", base = \"b\" }\n"},
+		"config include":       {config: "include = \"extra.toml\"\n"},
+		"vendor alias":         {config: "[alias]\nvend = \"vendor\"\n\n"},
+		"unparseable manifest": {files: map[string]string{"other/Cargo.toml": "[package\n"}},
+		"oversized manifest":   {files: map[string]string{"other/Cargo.toml": "# " + strings.Repeat("x", maxManifestBytes) + "\n"}},
+		// cargo run in another directory, through an alias or --manifest-path, reads that directory's config.
+		"a level repointing crates.io": {files: map[string]string{"tools/.cargo/config.toml": mirror}},
+		"a level with two configs":     {files: map[string]string{"tools/.cargo/config": "", "tools/.cargo/config.toml": ""}},
+		"a config in another case":     {files: map[string]string{"tools/.cargo/Config.toml": ""}},
+		// cargo follows a replace-with on the vendor source itself.
+		"a chained replacement": {files: map[string]string{"vendor/serde/.cargo/config.toml": "[source.vendored-sources]\nreplace-with = \"mirror\"\n\n[registries.mirror]\nindex = \"sparse+https://index.crates.io/\"\n"}},
+		"a symlinked repointing config": {
+			files: map[string]string{"cfgs/up.toml": mirror},
+			links: map[string]string{"vendor/serde/.cargo/config.toml": "cfgs/up.toml"},
+		},
+		// A file reached through a symlink out of the root has no place inside it.
+		"a symlink out of the root": {links: map[string]string{"vendor/ext/Cargo.toml": "../outside/Cargo.toml"}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			proj := t.TempDir()
+			base := t.TempDir()
+			proj := filepath.Join(base, "proj")
 			vendoredCrate(t, proj, "vendor/serde", "1.0.228", "cccc", "[dev-dependencies]\nserde_derive = \"=1.0.228\"\n")
-			vendoringRoot(t, proj, c[0], c[1], lockEntry("serde", "1.0.228", "cccc"))
-			if c[2] != "" {
-				sinkFixture(t, proj, "other/Cargo.toml", c[2])
+			vendoringRoot(t, proj, c.manifest, c.config, lockEntry("serde", "1.0.228", "cccc"))
+			for rel, content := range c.files {
+				sinkFixture(t, proj, rel, content)
+			}
+			sinkFixture(t, base, "outside/Cargo.toml", "[package]\nname = \"ext\"\nversion = \"0.1.0\"\n")
+			for link, target := range c.links {
+				// Symlinks need privileges on Windows, as in the other symlink tests.
+				if runtime.GOOS == "windows" {
+					t.Skip("symlinks need privileges on Windows")
+				}
+				_ = os.MkdirAll(filepath.Dir(filepath.Join(proj, link)), 0o755)
+				if err := os.Symlink(filepath.Join(proj, target), filepath.Join(proj, link)); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
 			}
 			if got := catalogNames(t, proj); got["serde_derive"] != "1.0.228" {
 				t.Errorf("serde_derive@1.0.228 hidden although the filter could not place every path, got %v", got)

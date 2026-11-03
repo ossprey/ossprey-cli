@@ -356,9 +356,11 @@ name@version from a registry with the marker's checksum, has no path entry of
 that name@version, and holds a release meeting every normal and build
 dependency the crate's manifest turns on, non-optional or enabled by its default
 features (so an edited vendored manifest stays visible). The nearest cargo
-config for that project and for the crate's own directory replaces `crates-io`
-with a `directory` source equal to the crate's parent, and that source is not
-replaced again.
+config for that project replaces `crates-io` with a `directory` source equal to
+the crate's parent, and that source is not replaced again. cargo reads config
+from where it runs, and an alias or `--manifest-path` reaches any crate from any
+directory, so every committed config level in the scan must also resolve
+`crates-io` to some directory source.
 Under that replacement cargo can take a crates.io dependency only from the
 vendor tree, so a hidden manifest cannot pull one from the network. A crate any
 manifest or config builds by path is never hidden (`path`, `workspace`,
@@ -368,17 +370,21 @@ which `cargo publish` strips. References are resolved from both the path a file
 was reached by and its real path, through symlinks, with case and Unicode
 folded, both backslash readings, and a suffix match for one that leaves the
 root; member globs are expanded on disk against a literal base, and a config
-counts at the directory cargo reads it from, symlink or not. Anything it cannot place (a member
-glob with `[` or `**` or outside the root, a `path-bases` `base`, a config
-`include`, an unreadable or over-limit file) turns the filter off, and a hidden
-file reached through a symlink stays visible. Out of reach: `--config`,
-`CARGO_*` environment overrides and CI steps, which no manifest scan sees, and
-`path` dependencies inside package sinks, which the index never holds.
+counts at the directory cargo reads it from, symlink or not. An alias's `--manifest-path`
+counts as a reference. Anything it cannot place (a member glob with `[` or `**`
+or outside the root, a `path-bases` `base`, a config `include`, an alias running
+`cargo vendor`, which ignores source replacement, two configs or one named in
+another case at a level, a file reached through a symlink out of the root, an
+unreadable or over-limit file) turns the filter off, and a hidden file reached
+through a symlink stays visible. Out of reach: `--config`, `CARGO_*` environment
+overrides and CI steps, which no manifest scan sees, and configs and `path`
+dependencies inside package sinks, which the index never holds and which only a
+command run from inside a build or install directory would use.
 `TestCatalogDoesNotLetACargoMarkerHideOtherFiles`,
 `TestCatalogReadsAProjectCrateThatLooksVendored`,
 `TestCatalogReadsACrateAProjectAboveTheScanBuilds` and
 `TestCatalogHidesNothingWhenAPathCannotBePlaced` pin one case per guard; each
-of the 30 fails with its guard removed.
+of the 34 fails with its guard removed.
 
 #### Why the npm resolve skips workspace members (OSS-1353)
 

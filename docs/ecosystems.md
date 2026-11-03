@@ -38,8 +38,9 @@ whatever the vendor directory is called. A crate's `Cargo.toml` and
   non-optional ones and those its default features enable).
 - That project's cargo config (`.cargo/config.toml` or `.cargo/config`)
   replaces crates.io with the directory holding the crate, as the config
-  `cargo vendor` prints does, that source is not replaced again, and the
-  crate's own directory sees the same replacement.
+  `cargo vendor` prints does, and that source is not replaced again. Since
+  cargo reads its config from wherever it runs, every other committed cargo
+  config in the scan must still send crates.io to a vendor directory.
 - Nothing builds the crate by path (a path dependency, `[patch]`, workspace
   member or `paths` override, in any `Cargo.toml` or cargo config in the scan,
   above it, or in `CARGO_HOME`), and its `Cargo.toml` has no `[workspace]`.
@@ -52,7 +53,10 @@ config is generated at build time rather than committed, and a vendored crate
 you scan directly are still read. Nothing is skipped when any `Cargo.toml` or
 cargo config cannot be read, or names a path the scan cannot place: a
 workspace member glob with `[` or `**`, a glob outside the scan, a
-`path-bases` `base`, or a config `include`.
+`path-bases` `base`, a config `include`, a cargo alias that runs
+`cargo vendor` (which ignores source replacement), two configs or a config
+named in another case in one directory, or a file reached through a symlink
+that leaves the scan.
 
 Lockfile entries for your own code are not components: the root project,
 npm workspace links, and yarn `workspace:`, `portal:`, `link:` and `file:`
