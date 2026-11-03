@@ -324,7 +324,7 @@ func TestPoll_StatusOutcomes(t *testing.T) {
 		{
 			name:      "skipped crates name Rust",
 			replies:   []pollReply{{200, `{"status":"SKIPPED","output":{"reason":"no_scannable_components","skipped_ecosystems":["cargo"]}}`}},
-			wantSkip:  "Rust crates are not enabled for this account",
+			wantSkip:  "Rust (crates.io) scanning is available on Teams and Enterprise plans",
 			wantPolls: 1,
 		},
 	}

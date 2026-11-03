@@ -260,7 +260,7 @@ func skipMessage(output json.RawMessage) string {
 	}
 	if o.Reason == "no_scannable_components" {
 		if slices.ContainsFunc(o.SkippedEcosystems, func(e *string) bool { return *e == "cargo" }) {
-			return "Rust crates are not enabled for this account"
+			return "Rust (crates.io) scanning is available on Teams and Enterprise plans"
 		}
 		return "Nothing in this project is in an ecosystem Ossprey scans"
 	}

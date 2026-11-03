@@ -447,8 +447,8 @@ func TestQuotaSkipExitsZeroAndReportsSkipped(t *testing.T) {
 	}
 }
 
-// A skip for crates on an account without Rust names Rust, never "skipped: Scan skipped".
-func TestNotEnabledSkipNamesRust(t *testing.T) {
+// A skip for crates on a plan without Rust names Rust, never "skipped: Scan skipped".
+func TestPlanWithoutRustSkipNamesRust(t *testing.T) {
 	isolateConfig(t)
 	url := skippingAPI(t, `{"status":"SKIPPED","output":{"skipped":true,"reason":"no_scannable_components","skipped_ecosystems":["cargo"]}}`)
 	report := filepath.Join(t.TempDir(), "report.json")
@@ -459,7 +459,7 @@ func TestNotEnabledSkipNamesRust(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a skip must exit 0, got %v", err)
 	}
-	const msg = "Rust crates are not enabled for this account"
+	const msg = "Rust (crates.io) scanning is available on Teams and Enterprise plans"
 	if !strings.Contains(out, "Ossprey scan skipped: "+msg+"\n") {
 		t.Errorf("stdout = %q", out)
 	}
