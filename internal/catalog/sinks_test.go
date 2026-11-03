@@ -109,6 +109,123 @@ func TestCatalogStillReadsLockfileBesideSinks(t *testing.T) {
 	t.Fatalf("is-odd@3.0.1 from package-lock.json missing: %+v", pkgs)
 }
 
+// cargoVendorFixture vendors into vendor/ and third_party/rust, beside a path dependency under vendor/.
+func cargoVendorFixture(t *testing.T) string {
+	t.Helper()
+	proj := t.TempDir()
+	for rel, content := range map[string]string{
+		"Cargo.toml": `[package]
+name = "my-app"
+version = "0.1.0"
+
+[workspace]
+members = ["crates/app"]
+
+[dependencies]
+anyhow = "=1.0.100"
+patched = { path = "vendor/patched" }
+`,
+		"Cargo.lock": `version = 4
+
+[[package]]
+name = "my-app"
+version = "0.1.0"
+
+[[package]]
+name = "anyhow"
+version = "1.0.100"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aaaa"
+`,
+		"crates/app/Cargo.toml": `[package]
+name = "app"
+version = "0.1.0"
+
+[dependencies]
+itoa = "=1.0.15"
+`,
+		"vendor/patched/Cargo.toml": `[package]
+name = "patched"
+version = "0.1.0"
+
+[dependencies]
+memchr = "=2.7.4"
+`,
+		"vendor/anyhow/.cargo-checksum.json": `{"files":{},"package":"aaaa"}`,
+		"vendor/anyhow/Cargo.toml": `[package]
+name = "anyhow"
+version = "1.0.100"
+
+[dev-dependencies]
+trybuild = "1.0.108"
+`,
+		"vendor/anyhow/Cargo.lock": `version = 4
+
+[[package]]
+name = "anyhow"
+version = "1.0.100"
+
+[[package]]
+name = "futures"
+version = "0.3.31"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbbb"
+`,
+		"third_party/rust/serde/.cargo-checksum.json": `{"files":{},"package":"cccc"}`,
+		"third_party/rust/serde/Cargo.toml": `[package]
+name = "serde"
+version = "1.0.228"
+
+[dev-dependencies]
+serde_derive = "=1.0.228"
+`,
+	} {
+		sinkFixture(t, proj, rel, content)
+	}
+	return proj
+}
+
+// TestCatalogSkipsCargoVendorTrees: a vendored crate's own lockfile and dev-dependencies are not the project's.
+func TestCatalogSkipsCargoVendorTrees(t *testing.T) {
+	proj := cargoVendorFixture(t)
+
+	pkgs, err := Catalog(context.Background(), proj, Options{SkipVersionLookup: true, NoExec: true})
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	got := map[string]string{}
+	for _, p := range pkgs {
+		got[p.Name] = p.Version
+	}
+	// The root lock, a workspace member, and a path dependency with no marker.
+	for name, version := range map[string]string{"anyhow": "1.0.100", "itoa": "1.0.15", "memchr": "2.7.4"} {
+		if v, ok := got[name]; !ok || v != version {
+			t.Errorf("%s@%s missing, got %v", name, version, got)
+		}
+	}
+	for _, name := range []string{"futures", "trybuild", "serde_derive"} {
+		if _, ok := got[name]; ok {
+			t.Errorf("%s came from a vendored crate: %v", name, got)
+		}
+	}
+}
+
+// TestCatalogReadsAVendoredCrateScannedDirectly: scanning a vendored crate asks for that crate.
+func TestCatalogReadsAVendoredCrateScannedDirectly(t *testing.T) {
+	proj := cargoVendorFixture(t)
+
+	pkgs, err := Catalog(context.Background(), filepath.Join(proj, "vendor", "anyhow"), Options{SkipVersionLookup: true, NoExec: true})
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	for _, p := range pkgs {
+		if p.Name == "futures" && p.Version == "0.3.31" {
+			return
+		}
+	}
+	t.Fatalf("futures@0.3.31 from the scanned crate's Cargo.lock missing: %+v", pkgs)
+}
+
 func sinkFixture(t *testing.T, root, rel, content string) {
 	t.Helper()
 	p := filepath.Join(root, filepath.FromSlash(rel))

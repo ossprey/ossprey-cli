@@ -27,6 +27,13 @@ lockfile beside them already names what they contain, and walking them could
 add minutes to a scan. A project whose only record of its dependencies is an
 installed tree, with no lockfile or manifest, catalogues nothing from it.
 
+Crates that `cargo vendor` copied into the project are not read either,
+whatever the vendor directory is called: a directory holding a
+`.cargo-checksum.json` is a vendored crate, and its own `Cargo.toml` and
+`Cargo.lock` describe that crate's build, not yours. Your `Cargo.lock` already
+names every crate it vendored. A path dependency kept under `vendor/` has no
+such file and is still read, and so is a vendored crate you scan directly.
+
 Lockfile entries for your own code are not components: the root project,
 npm workspace links, and yarn `workspace:`, `portal:`, `link:` and `file:`
 dependencies are left out, since none of them is published to a registry.

@@ -336,6 +336,16 @@ root is `EvalSymlinks`ed first or no exclusion matches under macOS `/var`.
 `TestDirectorySourceSkipsPackageSinks` asserts on the index, not on catalog
 output, because catalog output was already clean before the fix.
 
+**`cargo vendor` crates are hidden by marker, not by name** (`withoutCargoVendor`,
+OSS-2561). Every crate it writes holds a `.cargo-checksum.json`, and the vendor
+directory's name is configurable, so a `vendor` sink would miss
+`third_party/rust` and drop a path dependency kept under `vendor/`. A published
+crate ships its own `Cargo.lock` (anyhow 1.0.100's names 59 crates, its dev
+tree), which syft's `**/Cargo.lock` glob read as the project's. An exclusion glob
+cannot say "a directory holding this file", so the filter wraps the resolver
+every cataloger reads instead of the index. A crate at the scan root is exempt,
+since that scan asked for it.
+
 #### Why the npm resolve skips workspace members (OSS-1353)
 
 `NpmResolveCataloger` stands down for a manifest whose own dir ships a lockfile,
