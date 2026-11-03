@@ -979,9 +979,9 @@ func TestSkipMessage(t *testing.T) {
 			"Nothing in this project is in an ecosystem Ossprey scans",
 		},
 		{
-			"crates on an account without Rust",
+			"crates on a plan without Rust",
 			`{"skipped":true,"reason":"no_scannable_components","skipped_ecosystems":["cargo","maven"]}`,
-			"Rust crates are not enabled for this account",
+			"Rust (crates.io) scanning is available on Teams and Enterprise plans",
 		},
 		{
 			"other ecosystems are never named",
