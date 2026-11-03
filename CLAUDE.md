@@ -353,10 +353,12 @@ decoy `Cargo.lock` naming a standalone project hide that project's own lock. So
 the proof is now what cargo itself would do. The vendoring project is a strict
 ancestor whose `Cargo.lock` (beside its `Cargo.toml`) locks the crate's
 name@version from a registry with the marker's checksum, has no path entry of
-that name@version, and names every non-optional normal and build dependency the
-crate's manifest declares (so an edited vendored manifest stays visible). The
-nearest cargo config for that project and for the crate's own directory
-replaces `crates-io` with a `directory` source equal to the crate's parent.
+that name@version, and holds a release meeting every normal and build
+dependency the crate's manifest turns on, non-optional or enabled by its default
+features (so an edited vendored manifest stays visible). The nearest cargo
+config for that project and for the crate's own directory replaces `crates-io`
+with a `directory` source equal to the crate's parent, and that source is not
+replaced again.
 Under that replacement cargo can take a crates.io dependency only from the
 vendor tree, so a hidden manifest cannot pull one from the network. A crate any
 manifest or config builds by path is never hidden (`path`, `workspace`,
@@ -365,7 +367,8 @@ the scan root and `CARGO_HOME`), nor is one whose manifest has `[workspace]`,
 which `cargo publish` strips. References are resolved from both the path a file
 was reached by and its real path, through symlinks, with case and Unicode
 folded, both backslash readings, and a suffix match for one that leaves the
-root; member globs are expanded on disk. Anything it cannot place (a member
+root; member globs are expanded on disk against a literal base, and a config
+counts at the directory cargo reads it from, symlink or not. Anything it cannot place (a member
 glob with `[` or `**` or outside the root, a `path-bases` `base`, a config
 `include`, an unreadable or over-limit file) turns the filter off, and a hidden
 file reached through a symlink stays visible. Out of reach: `--config`,
@@ -375,7 +378,7 @@ file reached through a symlink stays visible. Out of reach: `--config`,
 `TestCatalogReadsAProjectCrateThatLooksVendored`,
 `TestCatalogReadsACrateAProjectAboveTheScanBuilds` and
 `TestCatalogHidesNothingWhenAPathCannotBePlaced` pin one case per guard; each
-of the 25 fails with its guard removed.
+of the 30 fails with its guard removed.
 
 #### Why the npm resolve skips workspace members (OSS-1353)
 

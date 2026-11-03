@@ -33,12 +33,13 @@ whatever the vendor directory is called. A crate's `Cargo.toml` and
 
 - Its directory holds the `.cargo-checksum.json` that `cargo vendor` writes.
 - A project above it, with its own `Cargo.toml` and `Cargo.lock`, locks that
-  crate at that version with the same checksum, and that lock also names
-  every non-optional dependency the crate's `Cargo.toml` declares.
+  crate at that version with the same checksum, and that lock also holds a
+  release meeting every dependency the crate's `Cargo.toml` turns on (its
+  non-optional ones and those its default features enable).
 - That project's cargo config (`.cargo/config.toml` or `.cargo/config`)
   replaces crates.io with the directory holding the crate, as the config
-  `cargo vendor` prints does, and the crate's own directory sees the same
-  replacement.
+  `cargo vendor` prints does, that source is not replaced again, and the
+  crate's own directory sees the same replacement.
 - Nothing builds the crate by path (a path dependency, `[patch]`, workspace
   member or `paths` override, in any `Cargo.toml` or cargo config in the scan,
   above it, or in `CARGO_HOME`), and its `Cargo.toml` has no `[workspace]`.

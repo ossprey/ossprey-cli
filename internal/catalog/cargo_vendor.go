@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/anchore/syft/syft/file"
+	"github.com/ossprey/ossprey-cli/internal/registry"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -33,10 +35,10 @@ type cargoFile struct {
 	bases []string
 }
 
-// lockedSet is one project's Cargo.lock: checksums per name@version ("" for a path crate) and every package name.
+// lockedSet is one project's Cargo.lock: checksums per name@version ("" for a path crate) and versions per name.
 type lockedSet struct {
-	sums  map[string]map[string]bool
-	names map[string]bool
+	sums     map[string]map[string]bool
+	versions map[string][]string
 }
 
 // withoutCargoVendor hides the Cargo files of crates the project above them vendored (see CLAUDE.md, OSS-2561).
@@ -63,11 +65,9 @@ func withoutCargoVendor(r file.Resolver, root string) file.Resolver {
 	if err != nil {
 		return r
 	}
-	// Any case, as cargo opens .cargo/config(.toml) on a case-insensitive filesystem.
 	var configLocs []file.Location
 	for _, l := range dotted {
-		p := strings.ToLower(rootRel(l.RealPath, rootPrefix))
-		if path.Base(path.Dir(p)) == ".cargo" && (path.Base(p) == "config" || path.Base(p) == "config.toml") {
+		if isCargoConfig(rootRel(l.AccessPath, rootPrefix)) || isCargoConfig(rootRel(l.RealPath, rootPrefix)) {
 			configLocs = append(configLocs, l)
 		}
 	}
@@ -93,8 +93,17 @@ func withoutCargoVendor(r file.Resolver, root string) file.Resolver {
 			all = append(all, f)
 		}
 	}
-	for _, c := range configs {
-		levels[foldPath(c.bases[0])] = append(levels[foldPath(c.bases[0])], c)
+	// A config counts at each directory cargo reads it from, which a symlink can make its access path's.
+	placed := map[string]bool{}
+	for _, l := range configLocs {
+		doc := configs[rootRel(l.RealPath, rootPrefix)].doc
+		for _, p := range []string{rootRel(l.AccessPath, rootPrefix), rootRel(l.RealPath, rootPrefix)} {
+			base := path.Join(rootSlash, path.Dir(path.Dir(p)))
+			if isCargoConfig(p) && !placed[p] {
+				placed[p] = true
+				levels[foldPath(base)] = append(levels[foldPath(base)], cargoFile{doc: doc, bases: []string{base}})
+			}
+		}
 	}
 	owned, unsure := projectCrates(all, marked, rootSlash)
 	if unsure {
@@ -125,7 +134,7 @@ func withoutCargoVendor(r file.Resolver, root string) file.Resolver {
 			}
 			// "" is a path crate of the same name and version, which the project builds itself.
 			sums := lock.sums[name+"@"+version]
-			if sums[sum] && !sums[""] && lockNamesDeps(lock, m.doc) && vendorDir(levels, path.Join(rootSlash, a)) == source {
+			if sums[sum] && !sums[""] && lockCoversDeps(lock, m.doc) && vendorDir(levels, path.Join(rootSlash, a)) == source {
 				hidden[p] = true
 				hidden[dir+"/Cargo.lock"] = true
 				break
@@ -136,6 +145,12 @@ func withoutCargoVendor(r file.Resolver, root string) file.Resolver {
 		return r
 	}
 	return cargoVendored{Resolver: r, rootPrefix: rootPrefix, hidden: hidden}
+}
+
+// isCargoConfig matches .cargo/config(.toml) in any case, as cargo opens them on a case-insensitive filesystem.
+func isCargoConfig(p string) bool {
+	p = strings.ToLower(p)
+	return path.Base(path.Dir(p)) == ".cargo" && (path.Base(p) == "config" || path.Base(p) == "config.toml")
 }
 
 // rootRel is a RealPath relative to the scan root, in slash form.
@@ -245,7 +260,8 @@ func vendorDir(levels map[string][]cargoFile, dir string) string {
 		}
 	}
 	name, _ := find("source", "crates-io", "replace-with")
-	if name == "" {
+	// cargo follows a replacement's own replace-with, so only a source replaced once is the vendor tree.
+	if again, _ := find("source", name, "replace-with"); name == "" || again != "" {
 		return ""
 	}
 	directory, base := find("source", name, "directory")
@@ -321,17 +337,25 @@ func projectCrates(files []cargoFile, marked map[string]file.Location, rootSlash
 				own(placeRef(base, strings.ReplaceAll(ref, `\`, "/")))
 			}
 			for _, g := range globs {
-				pattern := placeRef(base, strings.ReplaceAll(g, `\`, "/"))
-				// Go's and cargo's globs differ on classes and **, and one outside the root may name anything.
-				if strings.ContainsAny(g, "[]") || strings.Contains(g, "**") || !strings.HasPrefix(foldPath(pattern), inRoot) {
+				g = path.Clean(strings.ReplaceAll(g, `\`, "/"))
+				// Go's and cargo's globs differ on classes and **, and an absolute one may name anything.
+				if strings.ContainsAny(g, "[]") || strings.Contains(g, "**") || path.IsAbs(g) || filepath.VolumeName(g) != "" {
 					return nil, true
 				}
-				matches, err := filepath.Glob(filepath.FromSlash(pattern))
+				dir := base
+				for strings.HasPrefix(g, "../") {
+					dir, g = path.Dir(dir), g[3:]
+				}
+				if g == ".." || strings.Contains("/"+g+"/", "/../") || !strings.HasPrefix(foldPath(dir)+"/", inRoot) {
+					return nil, true
+				}
+				// The base is read literally, so a checkout named with glob characters still expands.
+				matches, err := fs.Glob(os.DirFS(filepath.FromSlash(dir)), g)
 				if err != nil {
 					return nil, true
 				}
 				for _, m := range matches {
-					own(filepath.ToSlash(m))
+					own(path.Join(dir, m))
 				}
 			}
 		}
@@ -380,8 +404,9 @@ func cargoPathRefs(doc map[string]any) (literals, globs []string, unsure bool) {
 	return literals, globs, unsure
 }
 
-// lockNamesDeps reports whether the lock names every non-optional normal and build dependency doc declares.
-func lockNamesDeps(lock lockedSet, doc map[string]any) bool {
+// lockCoversDeps reports whether the lock holds a release meeting each normal and build dependency doc turns on.
+func lockCoversDeps(lock lockedSet, doc map[string]any) bool {
+	on := defaultFeatureDeps(doc)
 	tables := []any{doc["dependencies"], doc["build-dependencies"], doc["build_dependencies"]}
 	if targets, ok := doc["target"].(map[string]any); ok {
 		for _, t := range targets {
@@ -391,21 +416,69 @@ func lockNamesDeps(lock lockedSet, doc map[string]any) bool {
 	for _, t := range tables {
 		deps, _ := t.(map[string]any)
 		for alias, spec := range deps {
-			name := alias
-			if s, ok := spec.(map[string]any); ok {
-				if optional, _ := s["optional"].(bool); optional {
+			name, req := alias, ""
+			switch s := spec.(type) {
+			case string:
+				req = s
+			case map[string]any:
+				if optional, _ := s["optional"].(bool); optional && !on[alias] {
 					continue
 				}
 				if pkg, ok := s["package"].(string); ok {
 					name = pkg
 				}
+				req, _ = s["version"].(string)
 			}
-			if !lock.names[name] {
+			versions, ok := lock.versions[name]
+			if !ok {
+				return false
+			}
+			met := req == ""
+			for _, v := range versions {
+				if m, ok := registry.CargoSatisfies(req, v); ok && m {
+					met = true
+				}
+			}
+			if !met {
 				return false
 			}
 		}
 	}
 	return true
+}
+
+// defaultFeatureDeps returns the dependency keys doc's default features turn on, following its own features.
+func defaultFeatureDeps(doc map[string]any) map[string]bool {
+	features, _ := doc["features"].(map[string]any)
+	on, seen := map[string]bool{}, map[string]bool{}
+	var enable func(f string)
+	enable = func(f string) {
+		if seen[f] {
+			return
+		}
+		seen[f] = true
+		list, ok := features[f].([]any)
+		if !ok {
+			// An optional dependency is also a feature of its own name.
+			on[f] = true
+			return
+		}
+		for _, e := range list {
+			s, _ := e.(string)
+			if dep, ok := strings.CutPrefix(s, "dep:"); ok {
+				on[dep] = true
+			} else if dep, _, ok := strings.Cut(s, "/"); ok {
+				// "dep?/feature" turns on a feature only of a dependency something else turned on.
+				if !strings.HasSuffix(dep, "?") {
+					on[dep] = true
+				}
+			} else {
+				enable(s)
+			}
+		}
+	}
+	enable("default")
+	return on
 }
 
 // projectLocks reads the Cargo.lock of each unmarked directory that also holds a Cargo.toml.
@@ -435,9 +508,9 @@ func projectLocks(r file.Resolver, manifests map[string]cargoFile, marked map[st
 		if _, err := decodeTOML(r, l, maxCargoProofBytes, &lock); err != nil {
 			continue
 		}
-		set := lockedSet{sums: map[string]map[string]bool{}, names: map[string]bool{}}
+		set := lockedSet{sums: map[string]map[string]bool{}, versions: map[string][]string{}}
 		for _, p := range lock.Package {
-			set.names[p.Name] = true
+			set.versions[p.Name] = append(set.versions[p.Name], p.Version)
 			// A git crate has a source but no checksum, and proves nothing either way.
 			if p.Checksum == "" && p.Source != "" {
 				continue

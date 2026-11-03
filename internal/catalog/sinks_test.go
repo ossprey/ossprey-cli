@@ -223,7 +223,9 @@ func TestCatalogDoesNotLetACargoMarkerHideOtherFiles(t *testing.T) {
 	vendoringRoot(t, proj, "", "",
 		lockEntry("serde", "1.0.228", "cccc"), lockEntry("forged", "1.0.0", "ffff"),
 		lockEntry("ws", "0.1.0", "wwww"), lockEntry("repoint", "0.1.0", "rrrr"),
-		lockEntry("edited", "0.1.0", "eded"), lockEntry("optional", "0.1.0", "opop"))
+		lockEntry("edited", "0.1.0", "eded"), lockEntry("optional", "0.1.0", "opop"),
+		lockEntry("featured", "0.1.0", "fefe"), lockEntry("bumped", "0.1.0", "bubu"), lockEntry("bumpdep", "1.0.0", "b1b1"),
+		lockEntry("ranged", "0.1.0", "rara"), lockEntry("rangedep", "1.4.0", "r1r1"), lockEntry("symrepoint", "0.1.0", "srsr"))
 	for rel, content := range map[string]string{
 		// Beside an npm lockfile, the marker must not hide it.
 		"packages/web/.cargo-checksum.json": `{"files":{},"package":"dddd"}`,
@@ -251,6 +253,12 @@ func TestCatalogDoesNotLetACargoMarkerHideOtherFiles(t *testing.T) {
 		"amb/.cargo/config.toml": vendorConfig("vendor"),
 		// A lockfile with no manifest beside it is no project.
 		"vendor/Cargo.lock": "version = 4\n" + lockEntry("lonely", "0.1.0", "llll"),
+		// A nested project whose vendor source is itself replaced, which cargo follows.
+		"chain/Cargo.toml":         "[package]\nname = \"chain\"\nversion = \"0.1.0\"\n",
+		"chain/Cargo.lock":         "version = 4\n" + lockEntry("chain", "0.1.0", "") + lockEntry("chained", "0.1.0", "chch"),
+		"chain/.cargo/config.toml": vendorConfig("vendor") + "replace-with = \"mirror\"\n\n[source.mirror]\nregistry = \"sparse+https://index.crates.io/\"\n",
+		// A config cargo reads through a symlink in the crate's own .cargo directory.
+		"cfgs/upstream.toml": "[source.crates-io]\nreplace-with = \"upstream\"\n\n[source.upstream]\nregistry = \"sparse+https://index.crates.io/\"\n",
 		// A nested project that does not vendor, under a config only its vendor directory reads.
 		"nested-proj/Cargo.toml":                "[package]\nname = \"nested-proj\"\nversion = \"0.1.0\"\n",
 		"nested-proj/Cargo.lock":                "version = 4\n" + lockEntry("nested-proj", "0.1.0", "") + lockEntry("unvendored", "0.1.0", "uuuu"),
@@ -269,6 +277,13 @@ func TestCatalogDoesNotLetACargoMarkerHideOtherFiles(t *testing.T) {
 	vendoredCrate(t, proj, "nested-proj/vendor/unvendored", "0.1.0", "uuuu", "[dev-dependencies]\nunvendored-dep = \"=1.0.0\"\n")
 	// Proven but for a dependency the project's lock does not name, which cargo would resolve.
 	vendoredCrate(t, proj, "vendor/edited", "0.1.0", "eded", "[dependencies]\nedit-dep = \"=1.0.0\"\n")
+	vendoredCrate(t, proj, "chain/vendor/chained", "0.1.0", "chch", "[dev-dependencies]\nchained-dep = \"=1.0.0\"\n")
+	// Its default features turn on an optional dependency the lock does not hold.
+	vendoredCrate(t, proj, "vendor/featured", "0.1.0", "fefe", "[dependencies]\nevil-opt = { version = \"=1.0.0\", optional = true }\n\n[features]\ndefault = [\"fast\"]\nfast = [\"dep:evil-opt\"]\n\n[dev-dependencies]\nfeatured_dev = \"=1.0.0\"\n")
+	// A locked name at a release the manifest no longer asks for, and one it still does.
+	vendoredCrate(t, proj, "vendor/bumped", "0.1.0", "bubu", "[dependencies]\nbumpdep = \"=2.0.0\"\n\n[dev-dependencies]\nbumped_dev = \"=1.0.0\"\n")
+	vendoredCrate(t, proj, "vendor/ranged", "0.1.0", "rara", "[dependencies]\nrangedep = \"1.2\"\n\n[dev-dependencies]\nranged_dev = \"=1.0.0\"\n")
+	vendoredCrate(t, proj, "vendor/symrepoint", "0.1.0", "srsr", "[dev-dependencies]\nsymrepoint-dep = \"=1.0.0\"\n")
 	// An optional dependency may be unused, so it does not block the proof.
 	vendoredCrate(t, proj, "vendor/optional", "0.1.0", "opop", "[dependencies]\nopt-dep = { version = \"=1.0.0\", optional = true }\n\n[dev-dependencies]\noptional_dev = \"=1.0.0\"\n")
 	// Proven, so its own files are hidden but a manifest below it is not.
@@ -283,13 +298,15 @@ func TestCatalogDoesNotLetACargoMarkerHideOtherFiles(t *testing.T) {
 }`)
 	// Symlinks need privileges on Windows, as in the other symlink tests.
 	aliased := runtime.GOOS != "windows" && os.Symlink(filepath.Join(proj, "vendor/serde/Cargo.lock"), filepath.Join(proj, "package-lock.json")) == nil
+	_ = os.MkdirAll(filepath.Join(proj, "vendor/symrepoint/.cargo"), 0o755)
+	symConfig := runtime.GOOS != "windows" && os.Symlink(filepath.Join(proj, "cfgs/upstream.toml"), filepath.Join(proj, "vendor/symrepoint/.cargo/config.toml")) == nil
 	sinkFixture(t, proj, "vendor/serde/sub/Cargo.toml", "[package]\nname = \"sub\"\nversion = \"0.1.0\"\n\n[dependencies]\nnested-dep = \"=1.0.0\"\n")
 
 	got := catalogNames(t, proj)
 	for name, version := range map[string]string{
 		"is-odd": "3.0.1", "evil": "6.6.6", "forged-dep": "1.0.0", "unlocked-dep": "1.0.0", "decoy-dep": "1.0.0",
 		"ws-dep": "1.0.0", "repoint-dep": "1.0.0", "ambiguous-dep": "1.0.0", "unvendored-dep": "1.0.0", "lonely-dep": "1.0.0", "nested-dep": "1.0.0",
-		"edit-dep": "1.0.0",
+		"edit-dep": "1.0.0", "chained-dep": "1.0.0", "featured_dev": "1.0.0", "bumped_dev": "1.0.0",
 	} {
 		if v, ok := got[name]; !ok || v != version {
 			t.Errorf("%s@%s hidden by a .cargo-checksum.json, got %v", name, version, got)
@@ -298,7 +315,10 @@ func TestCatalogDoesNotLetACargoMarkerHideOtherFiles(t *testing.T) {
 	if aliased && got["aliased-dep"] != "1.0.0" {
 		t.Errorf("aliased-dep@1.0.0 hidden behind a symlink to a hidden file, got %v", got)
 	}
-	for _, name := range []string{"serde_derive", "optional_dev"} {
+	if symConfig && got["symrepoint-dep"] != "1.0.0" {
+		t.Errorf("symrepoint-dep@1.0.0 hidden though a symlinked config repoints crates.io, got %v", got)
+	}
+	for _, name := range []string{"serde_derive", "optional_dev", "ranged_dev"} {
 		if _, ok := got[name]; ok {
 			t.Errorf("%s came from a proven vendored crate: %v", name, got)
 		}
@@ -307,7 +327,8 @@ func TestCatalogDoesNotLetACargoMarkerHideOtherFiles(t *testing.T) {
 
 // TestCatalogReadsAProjectCrateThatLooksVendored: a crate the project builds by path is never hidden.
 func TestCatalogReadsAProjectCrateThatLooksVendored(t *testing.T) {
-	proj := t.TempDir()
+	// A checkout path with glob characters must not change how member globs expand.
+	proj := filepath.Join(t.TempDir(), "checkout[x]")
 	// Each crate: its marker's checksum, its version, and a dev-dependency only it declares.
 	crates := map[string][3]string{
 		"itoa":      {"gggg", "1.0.15", "path-dep"},
