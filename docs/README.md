@@ -15,6 +15,7 @@ detail behind it.
 - [PATH shims](shims.md) — intercept installs in scripts, Makefiles, CI and coding agents too
 - [Passive monitoring](passive-monitoring.md) — watchdog and monitor modes: see everything, block nothing
 - [Git wrapper](git.md) — opt-in: check a public GitHub repo before `git clone` / `git pull`
+- [Brew wrapper](brew.md) — opt-in: check a formula's GitHub source repos before `brew install`
 - [Pre-commit hook](precommit.md) — block commits that add known-malicious packages
 
 ## Running it for real

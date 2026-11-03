@@ -31,6 +31,8 @@ type Options struct {
 	ClearMode bool
 	// Git adds the opt-in git shim to whatever else is being installed.
 	Git bool
+	// Brew adds the opt-in brew shim likewise.
+	Brew bool
 	// Agents names coding agents whose own settings get the PATH entry, for
 	// agents that run shells reading no profile. See AgentClaude.
 	Agents []string
@@ -408,6 +410,9 @@ func managersFor(o Options) (names []string, explicit bool, err error) {
 	}
 	if o.Git && !slices.Contains(names, "git") {
 		names = append(names, "git")
+	}
+	if o.Brew && !slices.Contains(names, "brew") {
+		names = append(names, "brew")
 	}
 	return names, len(o.Managers) > 0, nil
 }

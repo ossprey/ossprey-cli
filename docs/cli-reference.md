@@ -9,6 +9,7 @@ Every command, flag and credential the CLI understands.
 | [`ossprey check -e <pypi\|npm> <pkg>...`](#check--scan-named-packages) | Check packages by name, no project needed. |
 | [`ossprey npm\|npx\|pnpm\|yarn\|bun\|bunx\|pip\|pip3\|poetry\|uv\|uvx ...`](forwarder.md) | Check, then run the real package manager. Blocks the install on malware. |
 | [`ossprey git clone\|pull ...`](git.md) | Check a public GitHub repo, then run git. Blocks on malware. |
+| [`ossprey brew install ...`](brew.md) | Check a formula's GitHub source repos, then run brew. Blocks on malware. |
 | [`ossprey shim install`](shims.md) | Put shims on `PATH` so installs are checked without the `ossprey` prefix. |
 | [`ossprey precommit`](precommit.md) | Git pre-commit hook: block commits that stage known-malicious packages. |
 | [`ossprey trust list\|add\|remove`](trust.md) | Manage trusted registries and npm scopes, whose packages are neither checked nor sent. |

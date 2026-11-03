@@ -42,6 +42,7 @@ func newShimInstallCmd() *cobra.Command {
 		monitorID string
 		noPassive bool
 		git       bool
+		brew      bool
 		agents    []string
 	)
 
@@ -71,6 +72,9 @@ upgrade never silently starts blocking a fleet that chose not to. Use
 
 --git also shims git (opt-in): a clone or pull of a public GitHub repository
 checks the repository itself before git runs. Private repos pass through.
+
+--brew also shims brew (opt-in): a formula install checks the GitHub
+repositories the formula and its dependencies build from.
 
 Shell profiles only reach login and interactive shells. A coding agent's
 commands run in neither, so --agent claude also puts the shim directory on PATH
@@ -113,6 +117,7 @@ through a Claude Code SessionStart hook in ~/.claude/settings.json.`,
 				MonitorID:    monitorID,
 				ClearMode:    noPassive,
 				Git:          git,
+				Brew:         brew,
 				Agents:       agents,
 			}
 			if printOnly {
@@ -138,6 +143,7 @@ through a Claude Code SessionStart hook in ~/.claude/settings.json.`,
 	cmd.Flags().BoolVar(&watchdog, "watchdog", false, "passive mode: submit scans with this machine's login and never block an install")
 	cmd.Flags().StringVar(&monitorID, "monitor", "", "passive mode: submit scans through a monitor's id, needing no login or API key")
 	cmd.Flags().BoolVar(&git, "git", false, "also shim git: check public GitHub repos on clone/pull (opt-in)")
+	cmd.Flags().BoolVar(&brew, "brew", false, "also shim brew: check formula source repos on install (opt-in)")
 	cmd.Flags().StringSliceVar(&agents, "agent", nil, "also put the shims on PATH for this coding agent's commands (supported: "+strings.Join(shim.SupportedAgents(), ", ")+")")
 	cmd.Flags().BoolVar(&noPassive, "no-passive", false, "go back to blocking installs, dropping a watchdog or monitor mode already installed")
 	cmd.MarkFlagsMutuallyExclusive("watchdog", "monitor")
