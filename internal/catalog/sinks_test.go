@@ -6,6 +6,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -280,7 +281,8 @@ func TestCatalogDoesNotLetACargoMarkerHideOtherFiles(t *testing.T) {
     "node_modules/aliased-dep": {"version": "1.0.0", "resolved": "https://registry.npmjs.org/aliased-dep/-/aliased-dep-1.0.0.tgz"}
   }
 }`)
-	aliased := os.Symlink(filepath.Join(proj, "vendor/serde/Cargo.lock"), filepath.Join(proj, "package-lock.json")) == nil
+	// Symlinks need privileges on Windows, as in the other symlink tests.
+	aliased := runtime.GOOS != "windows" && os.Symlink(filepath.Join(proj, "vendor/serde/Cargo.lock"), filepath.Join(proj, "package-lock.json")) == nil
 	sinkFixture(t, proj, "vendor/serde/sub/Cargo.toml", "[package]\nname = \"sub\"\nversion = \"0.1.0\"\n\n[dependencies]\nnested-dep = \"=1.0.0\"\n")
 
 	got := catalogNames(t, proj)
@@ -372,7 +374,7 @@ memchr = { path = "vendor/memchr" }
 	}
 	for dep, l := range links {
 		_ = os.MkdirAll(filepath.Dir(filepath.Join(proj, l[1])), 0o755)
-		if os.Symlink(filepath.Join(proj, l[0]), filepath.Join(proj, l[1])) == nil {
+		if runtime.GOOS != "windows" && os.Symlink(filepath.Join(proj, l[0]), filepath.Join(proj, l[1])) == nil {
 			want = append(want, dep)
 		}
 	}
