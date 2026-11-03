@@ -346,6 +346,17 @@ cannot say "a directory holding this file", so the filter wraps the resolver
 every cataloger reads instead of the index. A crate at the scan root is exempt,
 since that scan asked for it.
 
+**The marker is repository content, so it proves nothing alone.** The first
+revision hid every file under a marked directory, so a pull request adding a
+`.cargo-checksum.json` beside a `package-lock.json` hid that lockfile from every
+cataloger. Now a directory is vendored only when its `Cargo.toml` names a crate
+that a `Cargo.lock` outside every marked directory locks with the checksum the
+marker records (what `cargo vendor` writes), and only its `Cargo.toml` and
+`Cargo.lock` are hidden, never another file. Forging that takes a real locked
+entry with a matching checksum in the project's own lock, at which point the
+directory is a locked dependency whose own manifest and lock are not built.
+`TestCatalogDoesNotLetACargoMarkerHideOtherFiles` pins the three ways in.
+
 #### Why the npm resolve skips workspace members (OSS-1353)
 
 `NpmResolveCataloger` stands down for a manifest whose own dir ships a lockfile,

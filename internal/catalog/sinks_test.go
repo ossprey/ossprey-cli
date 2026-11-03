@@ -136,6 +136,12 @@ name = "anyhow"
 version = "1.0.100"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aaaa"
+
+[[package]]
+name = "serde"
+version = "1.0.228"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cccc"
 `,
 		"crates/app/Cargo.toml": `[package]
 name = "app"
@@ -206,6 +212,82 @@ func TestCatalogSkipsCargoVendorTrees(t *testing.T) {
 	for _, name := range []string{"futures", "trybuild", "serde_derive"} {
 		if _, ok := got[name]; ok {
 			t.Errorf("%s came from a vendored crate: %v", name, got)
+		}
+	}
+}
+
+// TestCatalogDoesNotLetACargoMarkerHideOtherFiles: the marker is a repository file, so on its own it hides nothing.
+func TestCatalogDoesNotLetACargoMarkerHideOtherFiles(t *testing.T) {
+	proj := t.TempDir()
+	for rel, content := range map[string]string{
+		"Cargo.toml": `[package]
+name = "my-app"
+version = "0.1.0"
+
+[dependencies]
+anyhow = "=1.0.100"
+`,
+		"Cargo.lock": `version = 4
+
+[[package]]
+name = "my-app"
+version = "0.1.0"
+
+[[package]]
+name = "anyhow"
+version = "1.0.100"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aaaa"
+`,
+		// Beside an npm lockfile, the marker must not hide it.
+		"packages/web/.cargo-checksum.json": `{"files":{},"package":"dddd"}`,
+		"packages/web/package.json":         `{"name":"web","version":"1.0.0","dependencies":{"left-pad":"1.3.0"}}`,
+		"packages/web/package-lock.json": `{
+  "name": "web", "version": "1.0.0", "lockfileVersion": 3,
+  "packages": {
+    "": {"name": "web", "version": "1.0.0", "dependencies": {"left-pad": "1.3.0"}},
+    "node_modules/left-pad": {"version": "1.3.0", "resolved": "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz", "dependencies": {"is-odd": "3.0.1"}},
+    "node_modules/is-odd": {"version": "3.0.1", "resolved": "https://registry.npmjs.org/is-odd/-/is-odd-3.0.1.tgz"}
+  }
+}`,
+		// A crate no lockfile outside it names is a project, not a vendored dependency.
+		"tools/x/.cargo-checksum.json": `{"files":{},"package":"eeee"}`,
+		"tools/x/Cargo.toml": `[package]
+name = "x"
+version = "0.1.0"
+`,
+		"tools/x/Cargo.lock": `version = 4
+
+[[package]]
+name = "unlocked-dep"
+version = "9.9.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ffff"
+`,
+		// A locked crate whose marker records another checksum is not what cargo vendored.
+		"vendor/anyhow/.cargo-checksum.json": `{"files":{},"package":"0000"}`,
+		"vendor/anyhow/Cargo.toml": `[package]
+name = "anyhow"
+version = "1.0.100"
+
+[dependencies]
+forged-dep = "=1.0.0"
+`,
+	} {
+		sinkFixture(t, proj, rel, content)
+	}
+
+	pkgs, err := Catalog(context.Background(), proj, Options{SkipVersionLookup: true, NoExec: true})
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	got := map[string]string{}
+	for _, p := range pkgs {
+		got[p.Name] = p.Version
+	}
+	for name, version := range map[string]string{"is-odd": "3.0.1", "unlocked-dep": "9.9.9", "forged-dep": "1.0.0"} {
+		if v, ok := got[name]; !ok || v != version {
+			t.Errorf("%s@%s hidden by a .cargo-checksum.json, got %v", name, version, got)
 		}
 	}
 }
