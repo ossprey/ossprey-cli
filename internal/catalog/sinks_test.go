@@ -424,6 +424,7 @@ func TestCatalogHidesNothingWhenAPathCannotBePlaced(t *testing.T) {
 		"path base":            {manifest: "[dependencies]\nx = { path = \"x\", base = \"b\" }\n"},
 		"config include":       {config: "include = \"extra.toml\"\n"},
 		"vendor alias":         {config: "[alias]\nvend = \"vendor\"\n\n"},
+		"alias passing config": {config: "[alias]\nt = [\"test\", \"--config\", \"source.crates-io.replace-with='mirror'\"]\n\n"},
 		"unparseable manifest": {files: map[string]string{"other/Cargo.toml": "[package\n"}},
 		"oversized manifest":   {files: map[string]string{"other/Cargo.toml": "# " + strings.Repeat("x", maxManifestBytes) + "\n"}},
 		// cargo run in another directory, through an alias or --manifest-path, reads that directory's config.

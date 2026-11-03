@@ -409,7 +409,8 @@ func cargoPathRefs(doc map[string]any) (literals, globs []string, unsure bool) {
 			}
 		}
 		for i, arg := range args {
-			if i == 0 && arg == "vendor" {
+			// --config can undo the replacement for that run.
+			if i == 0 && arg == "vendor" || arg == "--config" || strings.HasPrefix(arg, "--config=") {
 				unsure = true
 			}
 			if v, ok := strings.CutPrefix(arg, "--manifest-path="); ok {

@@ -54,7 +54,8 @@ you scan directly are still read. Nothing is skipped when any `Cargo.toml` or
 cargo config cannot be read, or names a path the scan cannot place: a
 workspace member glob with `[` or `**`, a glob outside the scan, a
 `path-bases` `base`, a config `include`, a cargo alias that runs
-`cargo vendor` (which ignores source replacement), two configs or a config
+`cargo vendor` (which ignores source replacement) or passes `--config`, two
+configs or a config
 named in another case in one directory, or a file reached through a symlink
 that leaves the scan.
 

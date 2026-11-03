@@ -373,7 +373,8 @@ root; member globs are expanded on disk against a literal base, and a config
 counts at the directory cargo reads it from, symlink or not. An alias's `--manifest-path`
 counts as a reference. Anything it cannot place (a member glob with `[` or `**`
 or outside the root, a `path-bases` `base`, a config `include`, an alias running
-`cargo vendor`, which ignores source replacement, two configs or one named in
+`cargo vendor`, which ignores source replacement, or passing `--config`, two
+configs or one named in
 another case at a level, a file reached through a symlink out of the root, an
 unreadable or over-limit file) turns the filter off, and a hidden file reached
 through a symlink stays visible. Out of reach: `--config`, `CARGO_*` environment
@@ -384,7 +385,7 @@ command run from inside a build or install directory would use.
 `TestCatalogReadsAProjectCrateThatLooksVendored`,
 `TestCatalogReadsACrateAProjectAboveTheScanBuilds` and
 `TestCatalogHidesNothingWhenAPathCannotBePlaced` pin one case per guard; each
-of the 34 fails with its guard removed.
+of the 35 fails with its guard removed.
 
 #### Why the npm resolve skips workspace members (OSS-1353)
 
