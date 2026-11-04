@@ -111,6 +111,16 @@ semver = "1"
 			"semver@1.0.26?vcs_url=git+https://git.example.com/acme/semver Cargo.toml",
 			"semver@9.9.9 Cargo.toml",
 		}},
+		// Cargo's parser refuses a core number past u64::MAX, so the spec names no version.
+		{"replace spec past u64", map[string]string{"Cargo.toml": `[package]
+name = "app"
+version = "0.1.0"
+
+[replace]
+"itoa:18446744073709551616.0.0" = { git = "https://git.example.com/acme/itoa" }
+`}, []string{
+			"itoa@?vcs_url=git+https://git.example.com/acme/itoa Cargo.toml",
+		}},
 		{"credentials stay home", map[string]string{"Cargo.toml": `[package]
 name = "app"
 version = "0.1.0"

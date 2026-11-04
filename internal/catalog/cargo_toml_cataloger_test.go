@@ -285,6 +285,12 @@ func TestCatalogCargoPinMustBeASemverRelease(t *testing.T) {
 		{"=1.0.0-alpha.01", "9.9.9"},
 		{"=1.0.0+sha..1", "9.9.9"},
 		{"=1.0.0-alpha+b+c", "9.9.9"},
+		// Cargo's parser refuses a core number past u64::MAX, but not a numeric pre-release identifier.
+		{"=18446744073709551616.0.0", "9.9.9"},
+		{"=1.99999999999999999999.0", "9.9.9"},
+		{"=1.0.18446744073709551616", "9.9.9"},
+		{"=18446744073709551615.0.0", "18446744073709551615.0.0"},
+		{"=1.0.0-99999999999999999999", "1.0.0-99999999999999999999"},
 		// Build metadata stays as written, since the release is fetched by its exact published string.
 		{"=1.0.100+sha.5114f85", "1.0.100+sha.5114f85"},
 		{"=1.0.0+001", "1.0.0+001"},

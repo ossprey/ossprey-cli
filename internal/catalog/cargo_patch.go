@@ -81,7 +81,7 @@ func cargoSpecCrate(spec string) (name, version string) {
 	if i := strings.IndexAny(id, ":@"); i >= 0 {
 		name, version = id[:i], id[i+1:]
 	}
-	if !cargoRelease.MatchString(version) {
+	if !isCargoRelease(version) {
 		version = ""
 	}
 	return name, version

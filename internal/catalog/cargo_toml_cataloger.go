@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -456,8 +457,22 @@ func cargoExactVersion(spec string) string {
 		return ""
 	}
 	s = strings.TrimSpace(s[1:])
-	if len(s) > maxCargoVersion || !cargoRelease.MatchString(s) {
+	if len(s) > maxCargoVersion || !isCargoRelease(s) {
 		return ""
 	}
 	return s
+}
+
+// isCargoRelease reports whether s is a release cargo's semver parser accepts, whose core numbers fit in a u64.
+func isCargoRelease(s string) bool {
+	if !cargoRelease.MatchString(s) {
+		return false
+	}
+	core, _, _ := strings.Cut(strings.SplitN(s, "+", 2)[0], "-")
+	for _, n := range strings.Split(core, ".") {
+		if _, err := strconv.ParseUint(n, 10, 64); err != nil {
+			return false
+		}
+	}
+	return true
 }
