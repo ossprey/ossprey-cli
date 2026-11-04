@@ -217,9 +217,17 @@ Every rule is a hole in the scan by design, so the rules are narrow:
   lock, a `Cargo.lock` `registry+`/`sparse+` `source` via `cargoRegistryOf`).
   Unrecorded means checked. A crate's source is never a git or crates.io one
   (OSS-2581 decides how git crates may count later), nor one with a non-ASCII
-  host or an `@` past a `/`: Go's `ToLower` maps `İ` to `i` where Cargo's IDNA
-  does not, and `sparse+` is a non-special scheme to Cargo, so `host\@evil` is
-  userinfo to it and a path to us. The crates.io twin of a trusted crate is its
+  host, an `@` past a `/` or a percent-escape past the host: Go's `ToLower`
+  maps `İ` to `i` where Cargo's IDNA does not, `sparse+` is a non-special
+  scheme to Cargo, so `host\@evil` is userinfo to it and a path to us, and
+  Cargo keeps `%2F` inside a segment where `canonicalURL` decodes and cleans
+  `public%2F..%2Finternal` to `/internal/` (npm and PyPI still decode). No
+  crate counts at all when any config cargo may read (in the scan, above it or
+  in `CARGO_HOME`, found with the vendor filter's readers) sets a
+  `replace-with`, or one cannot be read (`clearReplacedCrateRegistries`, one
+  warning): cargo then fetches from the replacement while the lock still names
+  the trusted index, and a repository-controlled lock can carry matching
+  checksums. The crates.io twin of a trusted crate is its
   own bare component with no recorded source, so it stays checked. Trusted
   needs **every** recorded sighting trusted: dedup and `mergeVersionless` fold
   sightings' `Registries` together rather than keeping the first, since one
