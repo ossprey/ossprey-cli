@@ -87,7 +87,7 @@ func withoutCargoVendor(r file.Resolver, root string) file.Resolver {
 	if !ok {
 		return r
 	}
-	aboveManifests, aboveConfigs, ok := cargoFilesAbove(root)
+	aboveManifests, aboveConfigs, ok := cargoFilesAbove(root, true)
 	if !ok {
 		return r
 	}
@@ -210,8 +210,8 @@ func readCargoFiles(r file.Resolver, locs []file.Location, rootSlash string, up 
 	return out, true
 }
 
-// cargoFilesAbove reads the manifests and configs cargo run inside root also sees: every ancestor's, and CARGO_HOME's.
-func cargoFilesAbove(root string) (manifests, configs []cargoFile, ok bool) {
+// cargoFilesAbove reads the configs, and with withManifests the manifests, cargo run inside root also sees: every ancestor's, and CARGO_HOME's.
+func cargoFilesAbove(root string, withManifests bool) (manifests, configs []cargoFile, ok bool) {
 	read := func(p, base string) (cargoFile, bool) {
 		info, err := os.Stat(p)
 		if err != nil || info.Size() > maxManifestBytes {
@@ -245,6 +245,9 @@ func cargoFilesAbove(root string) (manifests, configs []cargoFile, ok bool) {
 		for _, e := range entries {
 			switch strings.ToLower(e.Name()) {
 			case "cargo.toml":
+				if !withManifests {
+					continue
+				}
 				m, ok := read(filepath.Join(d, e.Name()), d)
 				if !ok {
 					return nil, nil, false
@@ -340,8 +343,8 @@ func cargoSourceReplaced(r file.Resolver, root string) bool {
 			maps.Copy(configs, c)
 		}
 	}
-	// A file above the scan that cannot be read drops only the configs found above it.
-	_, aboveConfigs, _ := cargoFilesAbove(root)
+	// A manifest above the scan names no source, so only configs are read there; one that cannot be read stops cargo too.
+	_, aboveConfigs, _ := cargoFilesAbove(root, false)
 	levels := cargoConfigLevels(configLocs, configs, aboveConfigs, rootSlash)
 	// Configs above the scan and CARGO_HOME's count by their effect at the scan root, not at their own directory.
 	dirs := []string{rootSlash}

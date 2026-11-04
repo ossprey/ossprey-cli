@@ -407,10 +407,14 @@ developer's own `CARGO_HOME` mirror, on every commit, against a hook whose clean
 output is nothing. The entry has no `Many`, which `warn.Drain` renders as `One`
 however often it is added, so a caller cataloguing twice still prints one
 accurate line. It finds
-configs with the vendor filter's own discovery (`cargoConfigLocations`,
-`cargoConfigLevels`, `cargoFilesAbove`: the scan, every ancestor and
-`CARGO_HOME`), reading each file on its own so one that cannot be parsed does
-not hide another's replacement. It judges the replacement in effect where cargo
+configs with the vendor filter's own discovery (`cargoConfigLocs`,
+`cargoConfigLevels`, and `cargoFilesAbove` without manifests: the scan, every
+ancestor and `CARGO_HOME`). Configs in the scan are read one at a time, so one
+that cannot be parsed does not hide another's replacement. Above the scan only
+configs are read, so an ancestor `Cargo.toml` that cannot be parsed hides
+nothing, while a config there that cannot be parsed hides the others, as cargo
+stops on it too; the vendor filter still reads the manifests and proves
+nothing when one fails. It judges the replacement in effect where cargo
 would run, at the scan root and at each directory in the scan holding a config
 (`cratesIoReplacement`: the nearest level that sets `replace-with`, as
 `vendorDir` walks, then `CARGO_HOME`'s, which cargo reads last), and stays

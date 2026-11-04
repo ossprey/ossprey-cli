@@ -218,6 +218,8 @@ func TestCatalogWarnsWhenCargoReplacesCratesIo(t *testing.T) {
 		{name: "CARGO_HOME", files: map[string]string{"Cargo.toml": project}, home: mirrorConfig, want: 1},
 		{name: "two configs", files: map[string]string{"Cargo.toml": project, ".cargo/config.toml": mirrorConfig, "tools/.cargo/config.toml": vendorConfig("vendor")}, want: 1},
 		{name: "beside an unreadable config", files: map[string]string{"Cargo.toml": project, ".cargo/config.toml": mirrorConfig, "docs/.cargo/config.toml": "[source.crates-io\n"}, want: 1},
+		{name: "above a manifest that cannot be parsed", files: map[string]string{"Cargo.toml": "this is [not toml", "proj/Cargo.toml": project}, scan: "proj", home: mirrorConfig, want: 1},
+		{name: "beside a manifest that cannot be parsed", files: map[string]string{"Cargo.toml": "this is [not toml", ".cargo/config.toml": mirrorConfig, "proj/Cargo.toml": project}, scan: "proj", want: 1},
 		{name: "proven vendor tree", tree: cargoVendorFixture, want: 0},
 		{name: "mirror beside a vendor tree", tree: cargoVendorFixture, files: map[string]string{"tools/.cargo/config.toml": mirrorConfig}, want: 1},
 		// The root's replace-with still holds in tools, where the vendored source now names an unproven directory.
