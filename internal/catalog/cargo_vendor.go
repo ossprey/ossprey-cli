@@ -558,10 +558,13 @@ func projectLocks(r file.Resolver, locks []file.Location, manifests map[string]c
 	return out
 }
 
-// maxLockNesting bounds how deeply a Cargo.lock nests brackets; real ones reach 2, and the decoder recurses once per level.
-const maxLockNesting = 8
+// maxProofNesting bounds how deeply a proof file nests brackets, braces and dotted keys; real ones reach 7, and the decoder's stack and memory grow with each level.
+const maxProofNesting = 16
 
-// ParseCargoLock reads a Cargo.lock as the vendor filter does, refusing one over its size or nesting bound.
+// maxProofLine bounds a proof file's line, since one dotted key costs the decoder memory quadratic in its length.
+const maxProofLine = 4096
+
+// ParseCargoLock reads a Cargo.lock as the vendor filter does, refusing one over its size bound or that proofTOMLError refuses.
 func ParseCargoLock(data []byte) (CargoLock, error) {
 	if len(data) > maxCargoProofBytes {
 		return CargoLock{}, fmt.Errorf("Cargo.lock is %d bytes, over the %d limit", len(data), maxCargoProofBytes)
@@ -598,8 +601,13 @@ func ParseCargoLock(data []byte) (CargoLock, error) {
 
 // proofTOMLError refuses a proof file nested too deep for the decoder, or one the nesting scan could misread.
 func proofTOMLError(data []byte) error {
-	quotes := 0
+	line, quotes := 0, 0
 	for _, c := range data {
+		if line++; c == '\n' {
+			line = 0
+		} else if line > maxProofLine {
+			return fmt.Errorf("has a line over %d bytes", maxProofLine)
+		}
 		if quotes++; c != '"' && c != '\'' {
 			quotes = 0
 		} else if quotes >= 6 {
@@ -607,15 +615,15 @@ func proofTOMLError(data []byte) error {
 			return errors.New("holds six quotes in a row")
 		}
 	}
-	if tomlNestsPast(data, maxLockNesting) {
-		return fmt.Errorf("nests brackets over %d deep", maxLockNesting)
+	if tomlNestsPast(data, maxProofNesting) {
+		return fmt.Errorf("nests over %d deep", maxProofNesting)
 	}
 	return nil
 }
 
-// tomlNestsPast reports whether data nests brackets or braces more than limit deep outside its strings and comments.
+// tomlNestsPast reports whether data nests brackets, braces or a key's dots more than limit deep outside its strings and comments.
 func tomlNestsPast(data []byte, limit int) bool {
-	depth := 0
+	depth, dots := 0, 0
 	for i := 0; i < len(data); i++ {
 		switch c := data[i]; c {
 		case '#':
@@ -639,12 +647,19 @@ func tomlNestsPast(data []byte, limit int) bool {
 				j++
 			}
 			i = j + len(q) - 1
+		case '.':
+			// Each dot of a key opens one more table, and only a byte no key holds ends the key.
+			if dots++; depth+dots > limit {
+				return true
+			}
 		case '[', '{':
 			if depth++; depth > limit {
 				return true
 			}
 		case ']', '}':
 			depth = max(depth-1, 0)
+		case '\n', '=', ',':
+			dots = 0
 		}
 	}
 	return false
@@ -685,10 +700,10 @@ func CargoVendorChecksum(data []byte) string {
 	return marker.Package
 }
 
-// CargoPackageID is the [package] name and version a Cargo.toml states as strings, or "" for either it does not.
+// CargoPackageID is the [package] name and version a Cargo.toml states as strings, or "" for either it does not or one proofTOMLError refuses.
 func CargoPackageID(data []byte) (name, version string) {
 	var doc map[string]any
-	if len(data) > maxManifestBytes {
+	if len(data) > maxManifestBytes || proofTOMLError(data) != nil {
 		return "", ""
 	}
 	if _, err := toml.Decode(string(data), &doc); err != nil {
@@ -699,10 +714,13 @@ func CargoPackageID(data []byte) (name, version string) {
 	return name, version
 }
 
-// ParseCargoConfig reads a .cargo/config(.toml) as the vendor filter does, refusing one over its size bound.
+// ParseCargoConfig reads a .cargo/config(.toml) as the vendor filter does, refusing one over its size bound or that proofTOMLError refuses.
 func ParseCargoConfig(data []byte) (map[string]any, error) {
 	if len(data) > maxManifestBytes {
 		return nil, fmt.Errorf("cargo config is %d bytes, over the %d limit", len(data), maxManifestBytes)
+	}
+	if err := proofTOMLError(data); err != nil {
+		return nil, fmt.Errorf("cargo config %w", err)
 	}
 	doc := map[string]any{}
 	_, err := toml.Decode(string(data), &doc)

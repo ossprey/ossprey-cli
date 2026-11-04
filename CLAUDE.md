@@ -397,9 +397,15 @@ parent (`CargoVendorSource`: nearest config wins per key, a path is relative to
 the directory holding `.cargo`, and no config, an unclear one or a mismatch
 skips nothing). That leaves a vendored crate's own lock out of the lookup,
 never skips a `Cargo.toml`, and still checks in full a `vendor/` change staged
-without its `Cargo.lock`. `ParseCargoLock` refuses a lock nested more than
-`maxLockNesting` deep outside its strings and comments, since the TOML decoder
-recurses once per level and a few million levels overflow the stack.
+without its `Cargo.lock`. `ParseCargoLock`, `ParseCargoConfig` and
+`CargoPackageID` run `proofTOMLError` before decoding. It refuses a file nested
+more than `maxProofNesting` deep outside its strings and comments, with each dot
+of a key counted as a level, since the TOML decoder recurses once per level (a
+few million overflow the stack) and its memory grows with the square of one
+key's parts. It also refuses a line over `maxProofLine` bytes, and six quotes
+in a row, where the decoder can close a multi-line string later than the
+nesting scan does. Real files reach 7 levels (hyper's
+`[[package.metadata.capi.install.include.asset]]`), so the bound is 16.
 
 #### Why the npm resolve skips workspace members (OSS-1353)
 
