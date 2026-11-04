@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -41,7 +42,9 @@ var (
 	handoffFn               = forward.Handoff
 	checkFn                 = check.Run
 	lsRemoteFn              = lsRemote
-	repoSBOMFn              = repoSBOM
+	newRepoSBOMer           = newClient
+	aliasFn                 = brewAlias
+	goos                    = runtime.GOOS
 	formulaAPIURL           = "https://formulae.brew.sh/api/formula/"
 	HTTP                    = &http.Client{Timeout: 10 * time.Second}
 	errOut        io.Writer = os.Stderr
@@ -100,8 +103,8 @@ func Run(ctx context.Context, opts Options) error {
 		return handoffFn(ctx, "brew", opts.Args)
 	}
 
-	names, head, ok := targets(opts.Args)
-	if !ok || len(names) == 0 {
+	req, ok := targets(opts.Args)
+	if !ok || len(req.names) == 0 {
 		return forwardTo()
 	}
 	if opts.SkipCI {
@@ -109,7 +112,7 @@ func Run(ctx context.Context, opts Options) error {
 		return forwardTo()
 	}
 
-	specs, err := resolve(ctx, names, head)
+	specs, err := resolve(ctx, req)
 	if err != nil {
 		// Fail open: a Homebrew API outage must not break brew.
 		fmt.Fprintf(errOut, "ossprey: warning: could not look up formulae (%v); checking what resolved\n", err)
@@ -179,6 +182,13 @@ func expand(ctx context.Context, opts Options, specs []check.Spec) []ossbom.Comp
 
 	out := make([][]ossbom.Component, len(specs))
 	errs := make([]error, len(specs))
+	// One client for all workers: a stored login refreshes its token here,
+	// once, not concurrently in every worker.
+	c, err := newRepoSBOMer(ctx, opts)
+	if err != nil {
+		fmt.Fprintf(errOut, "ossprey: warning: could not read repository dependencies (%v); checking the repositories alone\n", err)
+		return nil
+	}
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, workers)
 	for i, s := range specs {
@@ -187,7 +197,7 @@ func expand(ctx context.Context, opts Options, specs []check.Spec) []ossbom.Comp
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			out[i], errs[i] = repoSBOMFn(ctx, opts, purl)
+			out[i], errs[i] = c.RepoSBOM(ctx, purl)
 		}(i, "pkg:github/"+s.Name+"@"+s.Version)
 	}
 	wg.Wait()
@@ -208,42 +218,64 @@ func expand(ctx context.Context, opts Options, specs []check.Spec) []ossbom.Comp
 	return comps
 }
 
-func repoSBOM(ctx context.Context, opts Options, purl string) ([]ossbom.Component, error) {
-	c, err := submit.NewClient(ctx, opts.APIURL, opts.APIKey)
-	if err != nil {
-		return nil, err
-	}
-	return c.RepoSBOM(ctx, purl)
+// repoSBOMer fetches a repo's SBOM; *client.Client is one.
+type repoSBOMer interface {
+	RepoSBOM(ctx context.Context, purl string) ([]ossbom.Component, error)
 }
 
-// targets returns the core formulae an install names, and whether --HEAD was
-// asked for. ok is false for anything that is not a formula install.
-func targets(args []string) (names []string, head, ok bool) {
+func newClient(ctx context.Context, opts Options) (repoSBOMer, error) {
+	return submit.NewClient(ctx, opts.APIURL, opts.APIKey)
+}
+
+// request is what a formula install asks brew for.
+type request struct {
+	names      []string
+	head       bool // --HEAD: build the named formulae from their head repo
+	onlyDeps   bool // --only-dependencies: the named formulae are not installed
+	ignoreDeps bool // --ignore-dependencies: their dependencies are not
+}
+
+// targets parses a formula install. ok is false for anything else.
+func targets(args []string) (request, bool) {
+	var req request
 	i := 0
 	for i < len(args) && strings.HasPrefix(args[i], "-") {
 		i++
 	}
 	if i >= len(args) || !installVerbs[args[i]] {
-		return nil, false, false
+		return req, false
 	}
 	for _, a := range args[i+1:] {
 		switch {
 		case a == "--cask" || a == "--casks":
-			return nil, false, false
+			return request{}, false
 		case a == "--HEAD":
-			head = true
+			req.head = true
+		case a == "--only-dependencies":
+			req.onlyDeps = true
+		case a == "--ignore-dependencies":
+			req.ignoreDeps = true
 		case strings.HasPrefix(a, "-"):
 			// brew's value options are --opt=value; the rest are switches.
 		default:
 			n := strings.TrimPrefix(strings.ToLower(a), "homebrew/core/")
 			if formulaName.MatchString(n) {
-				names = append(names, n)
+				req.names = append(req.names, n)
 			} else {
 				note("ossprey: %s is not a homebrew/core formula; not checked\n", a)
 			}
 		}
 	}
-	return names, head, true
+	return req, true
+}
+
+// deps is one dependency set of the Homebrew API's formula JSON.
+type deps struct {
+	Dependencies  []string          `json:"dependencies"`
+	UsesFromMacOS []json.RawMessage `json:"uses_from_macos"`
+	// Bounds pairs with UsesFromMacOS: {"since": "sonoma"} means the OS
+	// supplies it from that release on, so older ones install it.
+	Bounds []map[string]string `json:"uses_from_macos_bounds"`
 }
 
 // formula is the part of the Homebrew API's formula JSON we read.
@@ -260,33 +292,82 @@ type formula struct {
 			Branch string `json:"branch"`
 		} `json:"head"`
 	} `json:"urls"`
-	Dependencies []string `json:"dependencies"`
+	deps
+	HeadDeps   *deps           `json:"head_dependencies"`
+	Variations map[string]deps `json:"variations"`
+}
+
+// runtimeDeps are the formulae brew installs beside f on this OS. It errs
+// toward checking: every variation for this OS family is included, since the
+// exact bottle tag (macOS release, arch) would need brew's own logic.
+func (f *formula) runtimeDeps(head bool) []string {
+	base := f.deps
+	if head && f.HeadDeps != nil {
+		base = *f.HeadDeps
+	}
+	sets := []deps{base}
+	for tag, v := range f.Variations {
+		if strings.HasSuffix(tag, "_linux") == (goos == "linux") {
+			sets = append(sets, v)
+		}
+	}
+	var out []string
+	for _, d := range sets {
+		out = append(out, d.Dependencies...)
+		out = append(out, d.usesFromMacOS()...)
+	}
+	return out
+}
+
+// usesFromMacOS returns the runtime uses_from_macos entries brew installs
+// here: all of them on Linux; on macOS only those the OS supplies from some
+// release on, since an older macOS installs them.
+func (d deps) usesFromMacOS() []string {
+	var out []string
+	for i, raw := range d.UsesFromMacOS {
+		var name string
+		if json.Unmarshal(raw, &name) != nil {
+			// {"perl": ["build", "test"]}: typed entries are build or test
+			// only, which a bottle install does not pull in.
+			continue
+		}
+		if goos != "linux" && (i >= len(d.Bounds) || len(d.Bounds[i]) == 0) {
+			continue
+		}
+		out = append(out, name)
+	}
+	return out
 }
 
 // resolve walks the named formulae and their runtime dependencies and returns
 // one github spec per distinct source. A lookup error is returned beside
 // whatever did resolve.
-func resolve(ctx context.Context, names []string, head bool) ([]check.Spec, error) {
+func resolve(ctx context.Context, req request) ([]check.Spec, error) {
 	type result struct {
 		name string
 		f    *formula
 		err  error
 	}
-	seen := map[string]bool{}
 	named := map[string]bool{}
-	for _, n := range names {
+	for _, n := range req.names {
 		named[n] = true
 	}
 	var (
-		specs   []check.Spec
-		errs    []error
-		dedup   = map[string]bool{}
-		pending = names
+		specs     []check.Spec
+		errs      []error
+		seen      = map[string]bool{}
+		dedup     = map[string]bool{}
+		pending   = req.names
+		truncated bool
 	)
-	for len(pending) > 0 && len(seen) < maxFormulae {
+	for len(pending) > 0 {
 		var batch []string
 		for _, n := range pending {
-			if !seen[n] && len(seen) < maxFormulae {
+			switch {
+			case seen[n]:
+			case len(seen) >= maxFormulae:
+				truncated = true
+			default:
 				seen[n] = true
 				batch = append(batch, n)
 			}
@@ -302,6 +383,12 @@ func resolve(ctx context.Context, names []string, head bool) ([]check.Spec, erro
 				sem <- struct{}{}
 				defer func() { <-sem }()
 				f, err := lookup(ctx, n)
+				if errors.Is(err, errNotFound) && named[n] {
+					// The API serves canonical names only; `python` is an alias.
+					if canon := aliasFn(ctx, n); canon != "" && canon != n {
+						f, err = lookup(ctx, canon)
+					}
+				}
 				results[i] = result{n, f, err}
 			}(i, n)
 		}
@@ -311,15 +398,20 @@ func resolve(ctx context.Context, names []string, head bool) ([]check.Spec, erro
 		for i, r := range results {
 			switch {
 			case errors.Is(r.err, errNotFound):
-				// Likely a cask (brew falls back to one) or an alias.
+				// Likely a cask (brew falls back to one).
 				note("ossprey: %s is not a homebrew/core formula; not checked\n", r.name)
 				continue
 			case r.err != nil:
 				errs = append(errs, fmt.Errorf("%s: %w", r.name, r.err))
 				continue
 			}
-			pending = append(pending, r.f.Dependencies...)
-			src, ok := sourceOf(r.f, head && named[r.name])
+			if !req.ignoreDeps {
+				pending = append(pending, r.f.runtimeDeps(req.head && named[r.name])...)
+			}
+			if req.onlyDeps && named[r.name] {
+				continue
+			}
+			src, ok := sourceOf(r.f, req.head && named[r.name])
 			if !ok {
 				note("ossprey: %s is not fetched from GitHub; not checked\n", r.name)
 				continue
@@ -342,11 +434,40 @@ func resolve(ctx context.Context, names []string, head bool) ([]check.Spec, erro
 			}
 		}
 	}
-	if len(pending) > 0 {
+	if truncated {
+		// A cap keeps a pathological tree from walking the whole catalogue.
 		fmt.Fprintf(errOut, "ossprey: warning: dependency tree exceeds %d formulae; the rest are not checked\n", maxFormulae)
 	}
 	sort.Slice(specs, func(i, j int) bool { return specs[i].String() < specs[j].String() })
 	return specs, errors.Join(errs...)
+}
+
+// brewAlias asks the real brew for a name's canonical formula, or "".
+func brewAlias(ctx context.Context, name string) string {
+	path, err := shim.LookPathReal("brew")
+	if err != nil {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, path, "info", "--json=v2", "--formula", name)
+	cmd.Env = append(os.Environ(), shim.BypassEnv+"=1", "HOMEBREW_NO_AUTO_UPDATE=1")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	var info struct {
+		Formulae []struct {
+			Name string `json:"name"`
+		} `json:"formulae"`
+	}
+	if json.Unmarshal(out, &info) != nil || len(info.Formulae) != 1 {
+		return ""
+	}
+	if n := info.Formulae[0].Name; formulaName.MatchString(n) {
+		return n
+	}
+	return ""
 }
 
 func lookup(ctx context.Context, name string) (*formula, error) {
@@ -372,10 +493,18 @@ func lookup(ctx context.Context, name string) (*formula, error) {
 	return &f, nil
 }
 
+// Ref kinds: brew names a tag or a branch; unknown tries both, tag first.
+const (
+	kindUnknown = ""
+	kindTag     = "tag"
+	kindBranch  = "branch"
+)
+
 // source is a GitHub repository at the ref a formula builds from.
 type source struct {
 	repo   gitscan.Repo
 	ref    string
+	kind   string
 	pinned bool // ref is already a commit sha
 }
 
@@ -386,7 +515,7 @@ func sourceOf(f *formula, head bool) (source, bool) {
 			return source{}, false
 		}
 		r, ok := gitscan.ParseGitHubURL(f.URLs.Head.URL)
-		return source{repo: r, ref: f.URLs.Head.Branch}, ok
+		return source{repo: r, ref: f.URLs.Head.Branch, kind: kindBranch}, ok
 	}
 	s := f.URLs.Stable
 	if r, ok := gitscan.ParseGitHubURL(s.URL); ok {
@@ -395,7 +524,7 @@ func sourceOf(f *formula, head bool) (source, bool) {
 		case s.Revision != nil && shaPattern.MatchString(*s.Revision):
 			return source{repo: r, ref: *s.Revision, pinned: true}, true
 		case s.Tag != nil:
-			return source{repo: r, ref: *s.Tag}, true
+			return source{repo: r, ref: *s.Tag, kind: kindTag}, true
 		}
 		return source{repo: r}, true
 	}
@@ -410,19 +539,24 @@ func parseArchiveURL(raw string) (source, bool) {
 	if err != nil || u.Scheme != "https" {
 		return source{}, false
 	}
-	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	// Split before unescaping, so an escaped "/" in a tag stays in the tag.
+	parts := strings.Split(strings.Trim(u.EscapedPath(), "/"), "/")
+	for i, p := range parts {
+		if parts[i], err = url.PathUnescape(p); err != nil {
+			return source{}, false
+		}
+	}
 	host := strings.ToLower(u.Hostname())
-	var owner, name, ref string
+	var owner, name, ref, kind string
 	switch {
 	case host == "github.com" && len(parts) >= 4 && parts[2] == "archive":
 		owner, name = parts[0], parts[1]
-		ref = strings.TrimPrefix(strings.Join(parts[3:], "/"), "refs/tags/")
-		ref = strings.TrimPrefix(ref, "refs/heads/")
-		ref = trimArchiveExt(ref)
+		ref, kind = splitRefKind(trimArchiveExt(strings.Join(parts[3:], "/")))
 	case host == "github.com" && len(parts) >= 6 && parts[2] == "releases" && parts[3] == "download":
-		owner, name, ref = parts[0], parts[1], parts[4]
+		owner, name, ref, kind = parts[0], parts[1], parts[4], kindTag
 	case host == "codeload.github.com" && len(parts) >= 4:
-		owner, name, ref = parts[0], parts[1], strings.Join(parts[3:], "/")
+		owner, name = parts[0], parts[1]
+		ref, kind = splitRefKind(strings.Join(parts[3:], "/"))
 	default:
 		return source{}, false
 	}
@@ -430,7 +564,18 @@ func parseArchiveURL(raw string) (source, bool) {
 	if !ok || ref == "" {
 		return source{}, false
 	}
-	return source{repo: r, ref: ref, pinned: shaPattern.MatchString(ref)}, true
+	return source{repo: r, ref: ref, kind: kind, pinned: shaPattern.MatchString(ref)}, true
+}
+
+// splitRefKind strips a qualified ref's namespace and reports which it was.
+func splitRefKind(ref string) (string, string) {
+	if t, ok := strings.CutPrefix(ref, "refs/tags/"); ok {
+		return t, kindTag
+	}
+	if b, ok := strings.CutPrefix(ref, "refs/heads/"); ok {
+		return b, kindBranch
+	}
+	return ref, kindUnknown
 }
 
 func trimArchiveExt(s string) string {
@@ -457,7 +602,7 @@ func pinSources(srcs []source) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			if sha := lsRemoteFn(s.repo, s.ref); sha != "" {
+			if sha := lsRemoteFn(s.repo, s.ref, s.kind); sha != "" {
 				s.ref, s.pinned = sha, true
 			}
 		}(&srcs[i])
@@ -465,30 +610,44 @@ func pinSources(srcs []source) {
 	wg.Wait()
 }
 
-// lsRemote returns the commit sha ref names in repo, or "". A tag's peeled
-// (^{}) entry wins, since an annotated tag's own sha is not a commit.
-func lsRemote(r gitscan.Repo, ref string) string {
+// refCandidates are the ls-remote names for ref, in preference order. A
+// tag's peeled (^{}) entry wins, since an annotated tag's own sha is not a
+// commit.
+func refCandidates(ref, kind string) []string {
+	if ref == "" {
+		return []string{"HEAD"}
+	}
+	tag := []string{"refs/tags/" + ref + "^{}", "refs/tags/" + ref}
+	branch := []string{"refs/heads/" + ref}
+	switch kind {
+	case kindTag:
+		return tag
+	case kindBranch:
+		return branch
+	}
+	return append(tag, branch...)
+}
+
+// lsRemote returns the commit sha ref names in repo, or "".
+func lsRemote(r gitscan.Repo, ref, kind string) string {
 	path, err := shim.LookPathReal("git")
 	if err != nil {
 		return ""
 	}
-	if ref == "" {
-		ref = "HEAD"
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, path, "ls-remote", "https://github.com/"+r.String()+".git",
-		ref, "refs/tags/"+ref+"^{}", "refs/heads/"+ref)
+	args := append([]string{"ls-remote", "https://github.com/" + r.String() + ".git"}, refCandidates(ref, kind)...)
+	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Env = append(os.Environ(), shim.BypassEnv+"=1", "GIT_TERMINAL_PROMPT=0")
 	out, err := cmd.Output()
 	if err != nil {
 		return ""
 	}
-	return pickSHA(string(out), ref)
+	return pickSHA(string(out), refCandidates(ref, kind))
 }
 
-// pickSHA chooses from ls-remote output: peeled tag, then tag, then branch.
-func pickSHA(out, ref string) string {
+// pickSHA returns the sha of the first candidate ls-remote listed.
+func pickSHA(out string, candidates []string) string {
 	got := map[string]string{}
 	for _, line := range strings.Split(out, "\n") {
 		sha, name, ok := strings.Cut(strings.TrimSpace(line), "\t")
@@ -496,7 +655,7 @@ func pickSHA(out, ref string) string {
 			got[name] = sha
 		}
 	}
-	for _, k := range []string{"refs/tags/" + ref + "^{}", "refs/tags/" + ref, "refs/heads/" + ref, ref} {
+	for _, k := range candidates {
 		if sha := got[k]; sha != "" {
 			return sha
 		}

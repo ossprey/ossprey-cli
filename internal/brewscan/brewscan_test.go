@@ -3,7 +3,9 @@ package brewscan
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -35,10 +37,14 @@ func TestTargets(t *testing.T) {
 		{[]string{"fetch", "jq"}, "", false, false},
 	}
 	for _, c := range cases {
-		names, head, ok := targets(c.args)
-		if strings.Join(names, ",") != c.want || head != c.head || ok != c.isOK {
-			t.Errorf("targets(%v) = %v, %v, %v; want %q, %v, %v", c.args, names, head, ok, c.want, c.head, c.isOK)
+		req, ok := targets(c.args)
+		if strings.Join(req.names, ",") != c.want || req.head != c.head || ok != c.isOK {
+			t.Errorf("targets(%v) = %+v, %v; want %q, %v, %v", c.args, req, ok, c.want, c.head, c.isOK)
 		}
+	}
+	req, _ := targets([]string{"install", "--only-dependencies", "--ignore-dependencies", "jq"})
+	if !req.onlyDeps || !req.ignoreDeps {
+		t.Errorf("dependency modes not read: %+v", req)
 	}
 }
 
@@ -56,7 +62,8 @@ func TestParseArchiveURL(t *testing.T) {
 		"https://GITHUB.com/o/r/archive/v3.tar.bz2":                                 "o/r@v3",
 		"https://github.com/o/r.js/releases/download/v1/r.tar.xz":                   "o/r.js@v1",
 		"https://github.com/o/r/archive/refs/tags/v1.0.tar.gz/":                     "o/r@v1.0",
-		"https://codeload.github.com/o/r/zip/refs/tags/v9":                          "o/r@refs/tags/v9",
+		"https://codeload.github.com/o/r/zip/refs/tags/v9":                          "o/r@v9",
+		"https://github.com/o/r/releases/download/release%2F1.0/src.tar.gz":         "o/r@release/1.0",
 		"https://github.com/o/r/releases/download/untagged-123/a.tar.gz":            "o/r@untagged-123",
 		"https://github.com/o/r/archive/refs/tags/1.0.tgz":                          "o/r@1.0",
 		"https://github.com/owner-with-dash/repo_with_underscore/archive/v1.tar.gz": "owner-with-dash/repo_with_underscore@v1",
@@ -108,14 +115,57 @@ func TestSourceOf(t *testing.T) {
 func TestPickSHA(t *testing.T) {
 	other := strings.Repeat("a", 40)
 	out := other + "\trefs/tags/v1\n" + sha + "\trefs/tags/v1^{}\n"
-	if got := pickSHA(out, "v1"); got != sha {
+	if got := pickSHA(out, refCandidates("v1", kindUnknown)); got != sha {
 		t.Errorf("peeled tag not preferred: %s", got)
 	}
-	if got := pickSHA(other+"\trefs/heads/main\n", "main"); got != other {
+	if got := pickSHA(other+"\trefs/heads/main\n", refCandidates("main", kindUnknown)); got != other {
 		t.Errorf("branch: %s", got)
 	}
-	if got := pickSHA("", "v1"); got != "" {
+	if got := pickSHA("", refCandidates("v1", kindTag)); got != "" {
 		t.Errorf("empty: %s", got)
+	}
+	// A tag and a branch sharing a name: the source's namespace decides.
+	both := other + "\trefs/tags/x\n" + sha + "\trefs/heads/x\n"
+	if got := pickSHA(both, refCandidates("x", kindBranch)); got != sha {
+		t.Errorf("branch source picked the tag: %s", got)
+	}
+	if got := pickSHA(both, refCandidates("x", kindTag)); got != other {
+		t.Errorf("tag source picked the branch: %s", got)
+	}
+	s, _ := parseArchiveURL("https://github.com/o/r/archive/refs/heads/x.tar.gz")
+	if s.kind != kindBranch {
+		t.Errorf("refs/heads archive kind = %q", s.kind)
+	}
+}
+
+func TestRuntimeDeps(t *testing.T) {
+	var f formula
+	if err := json.Unmarshal([]byte(`{
+		"dependencies": ["a"],
+		"uses_from_macos": ["expat", {"perl": ["build", "test"]}, "zlib"],
+		"uses_from_macos_bounds": [{}, {}, {"since": "sequoia"}],
+		"head_dependencies": {"dependencies": ["h"]},
+		"variations": {"x86_64_linux": {"dependencies": ["curl"]}, "arm64_sonoma": {"dependencies": ["mac"]}}
+	}`), &f); err != nil {
+		t.Fatal(err)
+	}
+	old := goos
+	t.Cleanup(func() { goos = old })
+	for _, c := range []struct {
+		os   string
+		head bool
+		want string
+	}{
+		{"linux", false, "a,curl,expat,zlib"},
+		{"darwin", false, "a,mac,zlib"},
+		{"darwin", true, "h,mac"},
+	} {
+		goos = c.os
+		got := f.runtimeDeps(c.head)
+		sort.Strings(got)
+		if strings.Join(got, ",") != c.want {
+			t.Errorf("%s head=%v: %v, want %s", c.os, c.head, got, c.want)
+		}
 	}
 }
 
@@ -142,7 +192,7 @@ func fakeBrewAPI(t *testing.T, formulae map[string]string, deps map[string][]str
 	t.Cleanup(srv.Close)
 	old, oldLs := formulaAPIURL, lsRemoteFn
 	formulaAPIURL = srv.URL + "/"
-	lsRemoteFn = func(gitscan.Repo, string) string { return sha }
+	lsRemoteFn = func(gitscan.Repo, string, string) string { return sha }
 	t.Cleanup(func() { formulaAPIURL, lsRemoteFn = old, oldLs })
 }
 
@@ -153,8 +203,9 @@ type calls struct {
 
 func stub(t *testing.T, malicious bool) *calls {
 	c := &calls{}
-	oldExec, oldHandoff, oldCheck, oldErr, oldProg, oldRepo := execFn, handoffFn, checkFn, errOut, progressOut, repoSBOMFn
-	repoSBOMFn = func(context.Context, Options, string) ([]ossbom.Component, error) { return nil, nil }
+	oldExec, oldHandoff, oldCheck, oldErr, oldProg, oldRepo, oldAlias := execFn, handoffFn, checkFn, errOut, progressOut, newRepoSBOMer, aliasFn
+	setRepoSBOM(func(string) ([]ossbom.Component, error) { return nil, nil })
+	aliasFn = func(context.Context, string) string { return "" }
 	execFn = func(_ context.Context, bin string, args []string) error {
 		c.execs = append(c.execs, append([]string{bin}, args...))
 		return nil
@@ -178,7 +229,7 @@ func stub(t *testing.T, malicious bool) *calls {
 	}
 	errOut, progressOut = &bytes.Buffer{}, &bytes.Buffer{}
 	t.Cleanup(func() {
-		execFn, handoffFn, checkFn, errOut, progressOut, repoSBOMFn = oldExec, oldHandoff, oldCheck, oldErr, oldProg, oldRepo
+		execFn, handoffFn, checkFn, errOut, progressOut, newRepoSBOMer, aliasFn = oldExec, oldHandoff, oldCheck, oldErr, oldProg, oldRepo, oldAlias
 	})
 	return c
 }
@@ -294,7 +345,7 @@ func TestRun_RepoDependenciesAreChecked(t *testing.T) {
 	c := stub(t, false)
 	var asked []string
 	var mu sync.Mutex
-	repoSBOMFn = func(_ context.Context, _ Options, purl string) ([]ossbom.Component, error) {
+	setRepoSBOM(func(purl string) ([]ossbom.Component, error) {
 		mu.Lock()
 		asked = append(asked, purl)
 		mu.Unlock()
@@ -302,7 +353,7 @@ func TestRun_RepoDependenciesAreChecked(t *testing.T) {
 			return nil, errors.New("timeout")
 		}
 		return []ossbom.Component{{Name: "regex", Version: "1.11.0", Type: "cargo"}}, nil
-	}
+	})
 	if err := Run(context.Background(), Options{Args: []string{"install", "ripgrep", "jq"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -322,11 +373,91 @@ func TestRun_RepoDependenciesAreChecked(t *testing.T) {
 func TestRun_MonitorPassiveSkipsExpansion(t *testing.T) {
 	fakeBrewAPI(t, map[string]string{"jq": "https://github.com/jqlang/jq/archive/v1.tar.gz"}, nil, "")
 	stub(t, false)
-	repoSBOMFn = func(context.Context, Options, string) ([]ossbom.Component, error) {
+	setRepoSBOM(func(string) ([]ossbom.Component, error) {
 		t.Error("monitor id has no tools route; expansion must be skipped")
 		return nil, nil
-	}
+	})
 	if err := Run(context.Background(), Options{Args: []string{"install", "jq"}, Passive: true, MonitorID: "ospi_x"}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// fakeSBOMer serves RepoSBOM from a function.
+type fakeSBOMer func(purl string) ([]ossbom.Component, error)
+
+func (f fakeSBOMer) RepoSBOM(_ context.Context, purl string) ([]ossbom.Component, error) {
+	return f(purl)
+}
+
+func setRepoSBOM(f func(string) ([]ossbom.Component, error)) {
+	newRepoSBOMer = func(context.Context, Options) (repoSBOMer, error) { return fakeSBOMer(f), nil }
+}
+
+func TestRun_DependencyModes(t *testing.T) {
+	fakeBrewAPI(t, map[string]string{
+		"rg":  "https://github.com/o/rg/archive/v1.tar.gz",
+		"dep": "https://github.com/o/dep/archive/v1.tar.gz",
+	}, map[string][]string{"rg": {"dep"}}, "")
+	c := stub(t, false)
+	for args, want := range map[string]string{
+		"install --only-dependencies rg":   "o/dep",
+		"install --ignore-dependencies rg": "o/rg",
+	} {
+		c.checks = nil
+		if err := Run(context.Background(), Options{Args: strings.Fields(args)}); err != nil {
+			t.Fatal(err)
+		}
+		if got := specNames(c.checks[0]); got != want {
+			t.Errorf("%s checked %s, want %s", args, got, want)
+		}
+	}
+}
+
+func TestRun_CapWarnsWhenAnyFormulaIsLeftOut(t *testing.T) {
+	formulae := map[string]string{"root": "https://github.com/o/root/archive/v1.tar.gz"}
+	var leaves []string
+	for i := 0; i < maxFormulae; i++ {
+		n := fmt.Sprintf("leaf%d", i)
+		formulae[n] = "https://example.com/" + n + ".tar.gz"
+		leaves = append(leaves, n)
+	}
+	fakeBrewAPI(t, formulae, map[string][]string{"root": leaves}, "")
+	stub(t, false)
+	if err := Run(context.Background(), Options{Args: []string{"install", "root"}}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(errOut.(*bytes.Buffer).String(), "exceeds") {
+		t.Error("root plus 300 leaves left one out without a warning")
+	}
+}
+
+func TestRun_AliasResolvesThroughBrew(t *testing.T) {
+	fakeBrewAPI(t, map[string]string{"python@3.14": "https://github.com/python/cpython/archive/v3.14.0.tar.gz"}, nil, "")
+	c := stub(t, false)
+	aliasFn = func(_ context.Context, n string) string {
+		if n == "python" {
+			return "python@3.14"
+		}
+		return ""
+	}
+	if err := Run(context.Background(), Options{Args: []string{"install", "python"}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.checks) != 1 || specNames(c.checks[0]) != "python/cpython" {
+		t.Errorf("alias not followed: %+v", c.checks)
+	}
+}
+
+func TestExpandSharesOneClient(t *testing.T) {
+	stub(t, false)
+	made := 0
+	newRepoSBOMer = func(context.Context, Options) (repoSBOMer, error) {
+		made++
+		return fakeSBOMer(func(string) ([]ossbom.Component, error) { return nil, nil }), nil
+	}
+	specs := []check.Spec{{Name: "a/b", Version: "1"}, {Name: "c/d", Version: "1"}, {Name: "e/f", Version: "1"}}
+	expand(context.Background(), Options{}, specs)
+	if made != 1 {
+		t.Errorf("clients made = %d, want 1 (concurrent token refresh)", made)
 	}
 }
