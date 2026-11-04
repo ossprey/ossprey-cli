@@ -115,8 +115,10 @@ func catalogByGlob(ctx context.Context, resolver file.Resolver, root, glob, labe
 				key += "#" + e.Source
 			}
 			if i, ok := seen[key]; ok {
-				// Keep every file's location, in a fresh set since a parser may share one between packages.
-				out[i].Locations = file.NewLocationSet(append(out[i].Locations.ToSlice(), p.Locations.ToSlice()...)...)
+				// mergeVersionless folds a crate per manifest, so a crate keeps every file's location, in a fresh set since a parser may share one.
+				if p.Type == pkg.RustPkg {
+					out[i].Locations = file.NewLocationSet(append(out[i].Locations.ToSlice(), p.Locations.ToSlice()...)...)
+				}
 				continue
 			}
 			seen[key] = len(out)

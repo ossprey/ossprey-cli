@@ -293,6 +293,44 @@ func TestCatalogCargoRangeFoldsOnlyIntoItsWorkspaceLock(t *testing.T) {
 	}
 }
 
+// A crate keeps every manifest it is declared in for the fold, but npm and PyPI keep one location, so a monorepo's SBOM does not grow with its lockfile count.
+func TestCatalogMergesLocationsOnlyForCargo(t *testing.T) {
+	t.Setenv("OSSPREY_RESOLVE_LATEST", "")
+	withResolveLatest(t, func(context.Context, string, string) (string, error) { return "9.9.9", nil })
+	const npmLock = `{"name": "svc", "lockfileVersion": 3, "packages": {
+  "": {"name": "svc", "dependencies": {"left-pad": "1.3.0"}},
+  "node_modules/left-pad": {"version": "1.3.0", "resolved": "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"}}}`
+	const cargoLock = "version = 3\n\n[[package]]\nname = \"rand\"\nversion = \"0.8.5\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n"
+	files := map[string]string{}
+	for _, svc := range []string{"a", "b", "c"} {
+		files[svc+"/package-lock.json"] = npmLock
+		files[svc+"/web/package.json"] = `{"name": "web-` + svc + `", "dependencies": {"is-odd": "^3.0.0"}}`
+		files[svc+"/requirements.txt"] = "requests==2.31.0\nclick\n"
+		files[svc+"/Cargo.lock"] = cargoLock
+		files[svc+"/tools/Cargo.toml"] = "[package]\nname = \"t" + svc + "\"\n[dependencies]\nserde = \"=1.0.100\"\n"
+	}
+	dir := t.TempDir()
+	writeTree(t, dir, files)
+	got, err := Catalog(context.Background(), dir, Options{NoExec: true})
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	want := map[string]int{"npm/left-pad": 1, "npm/is-odd": 1, "pypi/requests": 1, "pypi/click": 1, "cargo/rand": 3, "cargo/serde": 3}
+	for _, p := range got {
+		n, ok := want[p.Type+"/"+p.Name]
+		if !ok {
+			continue
+		}
+		delete(want, p.Type+"/"+p.Name)
+		if len(p.Locations) != n {
+			t.Errorf("%s/%s@%s has %d locations %v, want %d", p.Type, p.Name, p.Version, len(p.Locations), p.Locations, n)
+		}
+	}
+	for k := range want {
+		t.Errorf("%s not catalogued", k)
+	}
+}
+
 func TestPinnedRequirementsGaps(t *testing.T) {
 	cases := []struct {
 		name string

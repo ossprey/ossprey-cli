@@ -321,7 +321,7 @@ range or wildcard is left to syft's guess, and shapes syft drops outright (a bar
 `>2.0`, an epoch `==1!2.0.0`) stay missing for the resolver-backed catalogers to
 cover.
 
-Output is deduped by `(type, name, version)` plus a Cargo source mark, keeping every sighting's location. `mergeVersionless` then collapses
+Output is deduped by `(type, name, version)` plus a Cargo source mark. A crate keeps every sighting's location, which the per-manifest fold below needs; npm and PyPI keep the first, since one location per lockfile let a monorepo's SBOM outgrow the API's size limit. `mergeVersionless` then collapses
 a package emitted both versionless (direct-deps fallback) and pinned (uv-resolved)
 into the pinned one. Vendored paths (`node_modules/`) are skipped (`isVendoredPath`). Lockfile entries for the project's own code are dropped: yarn by resolution protocol (`workspace:`/`portal:`/`link:`/`file:`), npm when `resolved` is a scheme-less relative path (a workspace link). Otherwise the project's own name went to the API and was looked up on public npm.
 

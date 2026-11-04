@@ -295,7 +295,10 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 					// first: one lockfile fetching it from the public index is
 					// enough to need a check.
 					out[i].Registries = mergeUnique(out[i].Registries, []string{registryOf(p)})
-					out[i].Locations = mergeUnique(out[i].Locations, locations(p))
+					// Only a crate's fold needs every manifest; other ecosystems keep the first, so an SBOM does not grow with its lockfile count.
+					if t == "cargo" {
+						out[i].Locations = mergeUnique(out[i].Locations, locations(p))
+					}
 					continue
 				}
 				seen[key] = len(out)
