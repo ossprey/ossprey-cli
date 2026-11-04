@@ -757,25 +757,53 @@ func reportAndForward(ctx context.Context, m *Manager, opts Options, sbom *ossbo
 	// Both messages sit after the malware check, never in front of it: gating the
 	// block on a component count would forward an SBOM that carried a verdict but
 	// no components.
-	if n := len(sbom.Components); n == 0 {
+	n := len(sbom.Components)
+	scanned := n - sbom.Unscanned()
+	switch {
+	case n == 0:
 		// Nothing catalogued means nothing verified, whether the project declares
 		// nothing or every cataloger failed. "No malware found" would read as a
 		// clean bill of health for an install that was never checked.
 		note("ossprey: found no dependencies to check; forwarding `%s %s` unchecked\n",
 			m.Bin, strings.Join(opts.Args, " "))
-	} else {
+	case scanned <= 0:
+		// Submitted, but the platform checked none of it (not found,
+		// unsupported, lookup only): no more a clean verdict than the case above.
+		note("ossprey: the platform checked none of the %s; forwarding `%s %s` unchecked\n",
+			countPackages(n), m.Bin, strings.Join(opts.Args, " "))
+	default:
 		// The count is load-bearing: "no malware found" alone read the same
 		// whether 40 packages were checked or none were — and whether the
 		// named package's dependencies were among them. Printed even when
 		// quiet: a check that passed says so in one line, the last of ours
 		// before the manager's own output, so silence never has to stand in
-		// for a verdict. The zero-component case above stays narration, since
-		// nothing was verified there.
-		fmt.Fprintf(errOut, "ossprey: no malware found in %s%s, forwarding to %s\n",
-			countPackages(n), coverage, m.Bin)
+		// for a verdict. The cases above stay narration, since nothing was
+		// verified there.
+		fmt.Fprintf(errOut, "ossprey: %s, forwarding to %s\n",
+			cleanVerdict(n, scanned, len(summary.Informational), coverage), m.Bin)
 	}
 	// Already drained at the top of this function, ahead of the verdict.
 	return handoffFn(ctx, m.Bin, opts.Args)
+}
+
+// cleanVerdict words a passed check without overstating it. It counts only
+// what the platform scanned, as `scan`'s noMalwareLine does, and when a finding
+// fell below the failing floor it says so: quiet mode hides that finding's
+// note, and a bare "no malware found" would deny a finding the scan made.
+func cleanVerdict(n, scanned, informational int, coverage string) string {
+	what := countPackages(n)
+	if scanned < n {
+		what = fmt.Sprintf("%d of %s", scanned, countPackages(n))
+	}
+	if informational == 0 {
+		return fmt.Sprintf("no malware found in %s%s", what, coverage)
+	}
+	findings := "1 finding"
+	if informational > 1 {
+		findings = fmt.Sprintf("%d findings", informational)
+	}
+	return fmt.Sprintf("no malware found at or above the failing severity in %s%s (%s below it)",
+		what, coverage, findings)
 }
 
 func countPackages(n int) string {

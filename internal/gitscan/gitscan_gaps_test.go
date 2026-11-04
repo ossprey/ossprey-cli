@@ -179,6 +179,31 @@ func TestRun_CleanCheckPrintsOnlyTheVerdict(t *testing.T) {
 	}
 }
 
+// A repo the platform did not check gets no clean verdict: quiet, it prints
+// nothing, and git still runs.
+func TestRun_UnscannedRepoIsNotCalledClean(t *testing.T) {
+	t.Setenv("OSSPREY_VERBOSE", "")
+	fakeGitHub(t)
+	c := stub(t, false)
+	checkFn = func(_ context.Context, o check.Options) (*ossbom.SBOM, error) {
+		sbom := ossbom.New(ossbom.Environment{})
+		for _, s := range o.Specs {
+			sbom.AddComponent(ossbom.Component{Name: s.Name, Version: s.Version, Type: s.Ecosystem})
+			sbom.Findings = append(sbom.Findings, ossbom.Finding{Purl: "pkg:github/o/pub", Type: "NOT_FOUND"})
+		}
+		return sbom, nil
+	}
+	if err := Run(context.Background(), Options{Args: []string{"clone", "https://github.com/o/pub"}}); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.handoffs) != 1 {
+		t.Fatalf("handoffs=%d, want git to run", len(c.handoffs))
+	}
+	if s := errOut.(*bytes.Buffer).String(); s != "" {
+		t.Fatalf("an unchecked repo must not be called clean, got %q", s)
+	}
+}
+
 // git's own exit status reaches the caller unchanged.
 func TestRun_GitErrorIsReturned(t *testing.T) {
 	fakeGitHub(t)

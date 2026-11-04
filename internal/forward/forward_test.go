@@ -1186,6 +1186,50 @@ func TestQuietForwarder_CleanInstallPrintsOnlyTheVerdict(t *testing.T) {
 	}
 }
 
+// Quiet, the verdict claims no more than the check covered: packages the
+// platform did not scan are not counted, a scan that covered none of them is
+// no verdict at all, and a finding below the failing floor is not denied.
+func TestQuietForwarder_VerdictDoesNotOverstate(t *testing.T) {
+	ex := &stubExec{}
+	swap(t, ex.fn, cleanSBOM)
+	for _, tc := range []struct {
+		name  string
+		build func(*ossbom.SBOM)
+		want  string
+	}{
+		{"partly unscanned", func(s *ossbom.SBOM) {
+			s.Findings = []ossbom.Finding{{Purl: "pkg:npm/b@1.0.0", Type: "NOT_FOUND"}}
+		}, "ossprey: no malware found in 1 of 2 packages, forwarding to npm\n"},
+		{"nothing scanned", func(s *ossbom.SBOM) {
+			s.Findings = []ossbom.Finding{
+				{Purl: "pkg:npm/a@1.0.0", Type: "NOT_FOUND"},
+				{Purl: "pkg:npm/b@1.0.0", Type: "UNSUPPORTED"},
+			}
+		}, ""},
+		{"finding below the floor", func(s *ossbom.SBOM) {
+			s.FailingSeverityFloor = "Critical"
+			s.AddVulnerability(ossbom.Vulnerability{ID: "V1", Purl: "pkg:npm/a@1.0.0", Severity: "High"})
+		}, "ossprey: no malware found at or above the failing severity in 2 packages (1 finding below it), forwarding to npm\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			swapScan(t, func(context.Context, scanRequest) (*ossbom.SBOM, error) {
+				s := ossbom.New(ossbom.Environment{})
+				s.AddComponent(ossbom.Component{Name: "a", Version: "1.0.0", Type: "npm"})
+				s.AddComponent(ossbom.Component{Name: "b", Version: "1.0.0", Type: "npm"})
+				tc.build(s)
+				return s, nil
+			})
+			out, err := quietOutput(t, context.Background(), Options{Bin: "npm", Args: []string{"install"}})
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if out != tc.want {
+				t.Errorf("got %q, want %q", out, tc.want)
+			}
+		})
+	}
+}
+
 // Quiet, the outcomes that are not a check at all are silent too.
 func TestQuietForwarder_UncheckedOutcomesAreSilent(t *testing.T) {
 	ex := &stubExec{}

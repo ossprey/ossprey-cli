@@ -299,6 +299,13 @@ ossprey: no malware found in 1 package (1 requested + 0 dependencies), forwardin
 added 1 package in 525ms
 ```
 
+The count covers only what the platform scanned: `no malware found in 63 of
+65 packages` when some were not found or not supported. If a finding fell
+below your account's failing severity, the line says so instead of claiming
+no malware: `no malware found at or above the failing severity in 65 packages
+(1 finding below it)`, and `OSSPREY_VERBOSE=1` prints the finding. When the
+platform scanned none of the packages, there is no verdict line.
+
 The verdict is ossprey's last line, not the terminal's: the forwarder replaces
 itself with the manager once the check passes, so it cannot print after the
 manager finishes. An install that was not checked (no dependencies found,
