@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/ossprey/ossprey-cli/internal/identity"
@@ -240,8 +241,8 @@ const semverNum = `(?:0|[1-9][0-9]*)`
 // semverPre is one SemVer 2.0 pre-release identifier: numeric, or alphanumeric with a letter or '-'.
 const semverPre = `(?:` + semverNum + `|[0-9]*[A-Za-z-][0-9A-Za-z-]*)`
 
-// cargoExact is one crates.io release in the full SemVer 2.0 grammar, with Cargo's optional "=".
-var cargoExact = regexp.MustCompile(`^=?\s*(` + semverNum + `\.` + semverNum + `\.` + semverNum +
+// cargoExact is one crates.io release in the full SemVer 2.0 grammar, with Cargo's optional "=", capturing major, minor and patch.
+var cargoExact = regexp.MustCompile(`^=?\s*((` + semverNum + `)\.(` + semverNum + `)\.(` + semverNum + `)` +
 	`(?:-` + semverPre + `(?:\.` + semverPre + `)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)$`)
 
 // maxCargoVersion is the API's version length cap.
@@ -257,10 +258,20 @@ func splitCargo(token string) (Spec, error) {
 		return Spec{Name: name}, nil
 	}
 	m := cargoExact.FindStringSubmatch(strings.TrimSpace(version))
-	if m == nil || len(m[1]) > maxCargoVersion {
+	if m == nil || len(m[1]) > maxCargoVersion || !fitsU64(m[2:5]) {
 		return Spec{}, fmt.Errorf("cannot check %q: cargo needs an exact release (%s@1.2.3), or the bare name %s for its latest release", token, name, name)
 	}
 	return Spec{Name: name, Version: m[1]}, nil
+}
+
+// fitsU64 reports whether every number fits the u64 Cargo's semver crate holds major, minor and patch in.
+func fitsU64(nums []string) bool {
+	for _, n := range nums {
+		if _, err := strconv.ParseUint(n, 10, 64); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 // pypiName is the leading project name of a requirement (PEP 508).

@@ -285,6 +285,7 @@ func TestParseSpec_CargoTakesOnlyAnExactRelease(t *testing.T) {
 		{"serde@1.2.3-rc.1+", "exact release"},
 		{"serde@1.2.3+build..7", "exact release"},
 		{"serde@1.2.3-rc_1", "exact release"},
+		{"serde@18446744073709551616.0.0", "exact release"},
 		{"https://github.com/serde-rs/serde", "not a crates.io crate name"},
 		{"./crates/serde", "not a crates.io crate name"},
 		{"serde-rs/serde", "not a crates.io crate name"},
