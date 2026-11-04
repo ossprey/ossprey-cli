@@ -189,9 +189,10 @@ const (
 	sourceReplaced = "a source replacement is configured"
 	configIncluded = "a cargo config includes another file"
 	configUnread   = "a cargo config could not be read"
+	aliasConfig    = "a cargo alias passes --config"
 )
 
-// cargoReplacement says why no crate is trusted by registry: a cargo config cargo may read for root replaces a source, includes a file or cannot be read.
+// cargoReplacement says why no crate is trusted by registry: a cargo config cargo may read for root replaces a source, includes a file, has an alias passing --config or cannot be read.
 func cargoReplacement(r file.Resolver, root string) string {
 	root = resolvedRoot(root)
 	inScan, ok := cargoConfigsInScan(r, root)
@@ -212,6 +213,12 @@ func cargoReplacement(r file.Resolver, root string) string {
 		for _, s := range sources {
 			if tomlLookup(s, "replace-with") != nil {
 				return sourceReplaced
+			}
+		}
+		// An alias's --config sets a value or names a file the scan never reads.
+		for _, args := range cargoAliasArgs(c.doc) {
+			if slices.ContainsFunc(args, isConfigArg) {
+				return aliasConfig
 			}
 		}
 	}

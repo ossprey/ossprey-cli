@@ -454,22 +454,10 @@ func projectCrates(files []cargoFile, marked map[string]file.Location, rootSlash
 func cargoPathRefs(doc map[string]any) (literals, globs []string, unsure bool) {
 	unsure = doc["include"] != nil
 	// An alias runs cargo with its own arguments: `cargo vendor` ignores source replacement, and --manifest-path names a crate.
-	aliases, _ := doc["alias"].(map[string]any)
-	for _, a := range aliases {
-		var args []string
-		switch a := a.(type) {
-		case string:
-			args = strings.Fields(a)
-		case []any:
-			for _, s := range a {
-				if s, ok := s.(string); ok {
-					args = append(args, s)
-				}
-			}
-		}
+	for _, args := range cargoAliasArgs(doc) {
 		for i, arg := range args {
 			// --config can undo the replacement for that run.
-			if i == 0 && arg == "vendor" || arg == "--config" || strings.HasPrefix(arg, "--config=") {
+			if i == 0 && arg == "vendor" || isConfigArg(arg) {
 				unsure = true
 			}
 			if v, ok := strings.CutPrefix(arg, "--manifest-path="); ok {
@@ -515,6 +503,31 @@ func cargoPathRefs(doc map[string]any) (literals, globs []string, unsure bool) {
 	}
 	walk(doc)
 	return literals, globs, unsure
+}
+
+// cargoAliasArgs is each [alias] value in doc split into the arguments cargo runs it with.
+func cargoAliasArgs(doc map[string]any) [][]string {
+	aliases, _ := doc["alias"].(map[string]any)
+	var out [][]string
+	for _, a := range aliases {
+		var args []string
+		switch a := a.(type) {
+		case string:
+			args = strings.Fields(a)
+		case []any:
+			for _, s := range a {
+				if s, ok := s.(string); ok {
+					args = append(args, s)
+				}
+			}
+		}
+		out = append(out, args)
+	}
+	return out
+}
+
+func isConfigArg(arg string) bool {
+	return arg == "--config" || strings.HasPrefix(arg, "--config=")
 }
 
 // lockCoversDeps reports whether the lock holds a release meeting each normal and build dependency doc turns on.

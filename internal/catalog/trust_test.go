@@ -318,7 +318,7 @@ func TestCatalogTrustsCratesByTheirCargoLockIndex(t *testing.T) {
 // A cargo config replacing any source lets Cargo fetch a crate elsewhere while its Cargo.lock still names the trusted index.
 func TestCatalogTrustsNoCrateUnderASourceReplacement(t *testing.T) {
 	replace := "[source.corp]\nregistry = \"sparse+https://crates.corp.example/internal/\"\nreplace-with = \"elsewhere\"\n\n[source.elsewhere]\nregistry = \"sparse+https://crates.elsewhere.example/\"\n"
-	const replaced, included, unread = "because a source replacement is configured", "because a cargo config includes another file", "because a cargo config could not be read"
+	const replaced, included, unread, aliased = "because a source replacement is configured", "because a cargo config includes another file", "because a cargo config could not be read", "because a cargo alias passes --config"
 	for name, c := range map[string]struct {
 		files   map[string]string
 		links   map[string]string
@@ -346,6 +346,10 @@ func TestCatalogTrustsNoCrateUnderASourceReplacement(t *testing.T) {
 		"a symlinked config beside a plain one":           {files: map[string]string{"proj/.cargo/replace.toml": replace, "proj/.cargo/config.toml": "[net]\nretry = 2\n"}, links: map[string]string{"proj/.cargo/config": "replace.toml"}, warning: replaced},
 		"a symlinked config named in another case":        {files: map[string]string{"proj/.cargo/replace.toml": replace}, links: map[string]string{"proj/.cargo/Config.toml": "replace.toml"}, warning: replaced},
 		"a .cargo directory symlinked to a dot directory": {files: map[string]string{"proj/.yarn/config.toml": replace}, links: map[string]string{"proj/.cargo": ".yarn"}, warning: replaced},
+		// An alias applies its --config value or file whenever it runs.
+		"an alias passing --config":                 {files: map[string]string{"proj/.cargo/config.toml": "[alias]\nxtask = \"run --config xtask/replace.toml --package xtask --\"\n"}, warning: aliased},
+		"an alias passing --config= above the root": {files: map[string]string{".cargo/config.toml": "[alias]\nb = [\"build\", \"--config=source.corp.replace-with='elsewhere'\"]\n"}, warning: aliased},
+		"an alias without --config":                 {files: map[string]string{"proj/.cargo/config.toml": "[alias]\nxtask = \"run --package xtask --\"\n"}},
 		// A device reports no size and never ends, so only a regular file is read.
 		"a config symlinked to a device": {links: map[string]string{"proj/.cargo/config.toml": "/dev/zero"}, warning: unread},
 		"an oversized config":            {files: map[string]string{"proj/.cargo/config.toml": "# " + strings.Repeat("x", maxManifestBytes) + "\n"}, warning: unread},
