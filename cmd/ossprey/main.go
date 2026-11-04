@@ -392,6 +392,18 @@ func newCheckCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
+				// crates.io folds case and '-'/'_' into one crate, while the malware lookup matches names exactly.
+				if s.Ecosystem == "cargo" {
+					name, v, err := registry.CanonicalCrate(cmd.Context(), s.Name, s.Version)
+					switch {
+					case err == nil:
+						s.Name, s.Version = name, v
+					case s.Version != "" && errors.Is(err, registry.ErrNotFound):
+						// crates.io deletes a malicious crate, so a pinned crate it no longer has is checked as typed.
+					default:
+						return fmt.Errorf("look up crate %s on crates.io: %w", s.Name, err)
+					}
+				}
 				// `check` resolves latest for unpinned packages, failing closed:
 				// if we can't pin a version we can't honestly check it.
 				if s.Version == "" {

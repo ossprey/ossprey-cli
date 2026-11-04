@@ -115,6 +115,12 @@ release, or leave the version off to check the latest one. Rust (crates.io)
 scanning is available on Teams and Enterprise plans (see
 [supported ecosystems](ecosystems.md)).
 
+A crate is looked up on crates.io with or without a version, and checked under
+the name crates.io gives it, since crates.io reads `Serde_JSON` and
+`serde-json` as `serde_json`. When crates.io cannot be reached, `check` exits
+with an error rather than check a spelling it could not confirm. A pinned crate
+that crates.io no longer has, such as one it removed, is checked as typed.
+
 | Flag | Description |
 |------|-------------|
 | `-e, --eco-system <pypi\|npm\|cargo>` | Package ecosystem (required). |

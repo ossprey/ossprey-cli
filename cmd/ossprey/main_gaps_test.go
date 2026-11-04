@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -249,53 +250,75 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-// A bare crate name is checked at the latest stable release crates.io reports.
-func TestCheckCargoBareNameIsCheckedAtItsLatestRelease(t *testing.T) {
-	var asked []string
-	old := registry.DefaultHTTP
-	registry.DefaultHTTP = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		asked = append(asked, r.URL.Host+r.URL.Path)
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Body:       io.NopCloser(strings.NewReader(`{"crate":{"max_stable_version":"1.0.228"}}`)),
-			Request:    r,
-		}, nil
-	})}
-	t.Cleanup(func() { registry.DefaultHTTP = old })
+// A crate is checked under the name crates.io gives it, at its latest stable release when none is pinned.
+func TestCheckCargoSendsCratesIoSpelling(t *testing.T) {
+	for _, tc := range []struct {
+		name, token     string
+		status          int
+		body            string
+		wantErr         bool
+		wantAsked, want string
+	}{
+		{"bare name in another case", "Serde", 200, `{"crate":{"name":"serde","max_stable_version":"1.0.228"}}`,
+			false, "crates.io/api/v1/crates/Serde", "pkg:cargo/serde@1.0.228"},
+		{"pinned name with '-' for '_'", "Serde-JSON@1.0.140", 200, `{"crate":{"name":"serde_json","max_stable_version":"1.0.145"}}`,
+			false, "crates.io/api/v1/crates/Serde-JSON", "pkg:cargo/serde_json@1.0.140"},
+		{"pinned crate whose every release is yanked", "Acme-Yanked@0.1.0", 200, `{"crate":{"name":"acme_yanked","yanked":true}}`,
+			false, "crates.io/api/v1/crates/Acme-Yanked", "pkg:cargo/acme_yanked@0.1.0"},
+		{"pinned crate crates.io deleted", "acme_removed@1.7.8", 404, `{"errors":[]}`,
+			false, "crates.io/api/v1/crates/acme_removed", "pkg:cargo/acme_removed@1.7.8"},
+		{"pinned crate while crates.io is down", "Serde@1.0.228", 503, ``,
+			true, "crates.io/api/v1/crates/Serde", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var asked []string
+			old := registry.DefaultHTTP
+			registry.DefaultHTTP = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				asked = append(asked, r.URL.Host+r.URL.Path)
+				return &http.Response{StatusCode: tc.status, Body: io.NopCloser(strings.NewReader(tc.body)), Request: r}, nil
+			})}
+			t.Cleanup(func() { registry.DefaultHTTP = old })
 
-	var mu sync.Mutex
-	var sent []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var body struct {
-			SBOM struct {
-				Components []struct {
-					Purl string `json:"purl"`
-				} `json:"components"`
-			} `json:"sbom"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Errorf("decode body: %v", err)
-		}
-		mu.Lock()
-		for _, c := range body.SBOM.Components {
-			sent = append(sent, c.Purl)
-		}
-		mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, `{"components":[],"vulnerabilities":[]}`)
-	}))
-	t.Cleanup(srv.Close)
+			var mu sync.Mutex
+			var sent []string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body struct {
+					SBOM struct {
+						Components []struct {
+							Purl string `json:"purl"`
+						} `json:"components"`
+					} `json:"sbom"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Errorf("decode body: %v", err)
+				}
+				mu.Lock()
+				for _, c := range body.SBOM.Components {
+					sent = append(sent, c.Purl)
+				}
+				mu.Unlock()
+				w.Header().Set("Content-Type", "application/json")
+				io.WriteString(w, `{"components":[],"vulnerabilities":[]}`)
+			}))
+			t.Cleanup(srv.Close)
 
-	if err := runCheck(t, "-e", "cargo", "serde", "--url", srv.URL, "--api-key", "k"); err != nil {
-		t.Fatalf("check: %v", err)
-	}
-	if len(asked) != 1 || asked[0] != "crates.io/api/v1/crates/serde" {
-		t.Errorf("registry lookups = %v, want crates.io's serde", asked)
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if len(sent) != 1 || sent[0] != "pkg:cargo/serde@1.0.228" {
-		t.Errorf("purls sent = %v, want pkg:cargo/serde@1.0.228", sent)
+			err := runCheck(t, "-e", "cargo", tc.token, "--url", srv.URL, "--api-key", "k")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("check error = %v, want error %v", err, tc.wantErr)
+			}
+			if len(asked) != 1 || asked[0] != tc.wantAsked {
+				t.Errorf("registry lookups = %v, want %s", asked, tc.wantAsked)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			var want []string
+			if tc.want != "" {
+				want = []string{tc.want}
+			}
+			if !slices.Equal(sent, want) {
+				t.Errorf("purls sent = %v, want %v", sent, want)
+			}
+		})
 	}
 }
 
