@@ -222,17 +222,21 @@ Every rule is a hole in the scan by design, so the rules are narrow:
   scheme to Cargo, so `host\@evil` is userinfo to it and a path to us, and
   Cargo keeps `%2F` inside a segment where `canonicalURL` decodes and cleans
   `public%2F..%2Finternal` to `/internal/` (npm and PyPI still decode). No
-  crate counts at all when any config cargo may read (in the scan, above it or
-  in `CARGO_HOME`, found with the vendor filter's readers) sets a
-  `replace-with`, or one cannot be read (`clearReplacedCrateRegistries`, one
-  warning): cargo then fetches from the replacement while the lock still names
-  the trusted index, and a repository-controlled lock can carry matching
-  checksums. The crates.io twin of a trusted crate is its
-  own bare component with no recorded source, so it stays checked. Trusted
-  needs **every** recorded sighting trusted: dedup and `mergeVersionless` fold
-  sightings' `Registries` together rather than keeping the first, since one
-  lockfile fetching it publicly is enough to need a check. Don't add pnpm (no
-  URL) or Pipfile.lock (index *name*) without real URLs.
+  crate counts at all when any config cargo may read (every `.cargo` directory
+  the index holds, read on disk since a syft glob reports a symlink by its
+  target, plus those above the root and `CARGO_HOME`, opened by name where a
+  directory cannot be listed; manifests above the root play no part) sets a
+  `replace-with`, has an `include` (stable since Cargo 1.94), or cannot be read
+  (`clearReplacedCrateRegistries`, one warning): cargo then fetches from the
+  replacement while the lock still names the trusted index, and a
+  repository-controlled lock can carry matching checksums. Not checked:
+  `--config`, `CARGO_SOURCE_*_REPLACE_WITH`, `[http]` `proxy`/`cainfo`, and a
+  `.cargo` inside a scanned directory syft cannot list. The crates.io twin of
+  a trusted crate is its own bare component with no recorded source, so it
+  stays checked. Trusted needs **every** recorded sighting trusted: dedup and
+  `mergeVersionless` fold sightings' `Registries` together rather than keeping
+  the first, since one lockfile fetching it publicly is enough to need a check.
+  Don't add pnpm (no URL) or Pipfile.lock (index *name*) without real URLs.
 - **Named forwarded installs apply only the scope rule to the names typed**
   (`dropTrusted`, before anything is resolved so nothing private is looked up
   publicly). Inferring the registry from `pip.conf`/`.npmrc` was rejected:

@@ -54,9 +54,12 @@ fetches from git, whatever rule covers its repository, and a crate whose index
 host has non-ASCII characters, since Cargo may read that host as another one,
 or whose index URL has a percent-escape such as `%2F` after the host. When a
 Cargo config in the project, in a directory above it or in `CARGO_HOME` sets
-`replace-with` for any source, or cannot be read, every crate is checked and
-the scan says so in one warning, because Cargo may then fetch a crate from
-somewhere other than the index its lock names.
+`replace-with` for any source, has an `include`, or cannot be read, every crate
+is checked and the scan says so in one warning, because Cargo may then fetch a
+crate from somewhere other than the index its lock names. A config reached
+through a symlink counts like any other. Cargo's `--config` option,
+`CARGO_SOURCE_*_REPLACE_WITH` environment variables and `[http]` `proxy` or
+`cainfo` settings are not checked by a repository scan.
 A crate locked from your registry and the crates.io crate of the same name and
 version are different crates to Cargo, so trusting one never hides the other.
 
