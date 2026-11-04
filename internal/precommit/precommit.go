@@ -343,7 +343,10 @@ func withoutVendoredLocks(ctx context.Context, repoDir string, paths []string) [
 			return l
 		}
 		var l *catalog.CargoLock
-		if blob, err := gitShow(ctx, repoDir, ":"+path.Join(dir, "Cargo.lock")); err == nil {
+		// As in the scan's filter, only a lock beside its Cargo.toml in an unmarked directory is a project's.
+		_, manifestErr := gitShow(ctx, repoDir, ":"+path.Join(dir, "Cargo.toml"))
+		_, markerErr := gitShow(ctx, repoDir, ":"+path.Join(dir, ".cargo-checksum.json"))
+		if blob, err := gitShow(ctx, repoDir, ":"+path.Join(dir, "Cargo.lock")); err == nil && manifestErr == nil && markerErr != nil {
 			if parsed, err := catalog.ParseCargoLock(blob); err == nil {
 				l = &parsed
 			}
