@@ -187,10 +187,11 @@ func escapedPastHost(clean string) bool {
 
 const (
 	sourceReplaced = "a source replacement is configured"
+	configIncluded = "a cargo config includes another file"
 	configUnread   = "a cargo config could not be read"
 )
 
-// cargoReplacement says why no crate is trusted by registry: a cargo config cargo may read for root replaces a source or cannot be read.
+// cargoReplacement says why no crate is trusted by registry: a cargo config cargo may read for root replaces a source, includes a file or cannot be read.
 func cargoReplacement(r file.Resolver, root string) string {
 	root = resolvedRoot(root)
 	inScan, ok := cargoConfigsInScan(r, root)
@@ -202,6 +203,10 @@ func cargoReplacement(r file.Resolver, root string) string {
 		return configUnread
 	}
 	for _, c := range slices.Concat(above, inScan) {
+		// Cargo 1.94 merges an included file, which may set replace-with, so any include counts.
+		if c.doc["include"] != nil {
+			return configIncluded
+		}
 		sources, _ := c.doc["source"].(map[string]any)
 		for _, s := range sources {
 			if tomlLookup(s, "replace-with") != nil {

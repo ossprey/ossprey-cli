@@ -318,7 +318,7 @@ func TestCatalogTrustsCratesByTheirCargoLockIndex(t *testing.T) {
 // A cargo config replacing any source lets Cargo fetch a crate elsewhere while its Cargo.lock still names the trusted index.
 func TestCatalogTrustsNoCrateUnderASourceReplacement(t *testing.T) {
 	replace := "[source.corp]\nregistry = \"sparse+https://crates.corp.example/internal/\"\nreplace-with = \"elsewhere\"\n\n[source.elsewhere]\nregistry = \"sparse+https://crates.elsewhere.example/\"\n"
-	const replaced, unread = "because a source replacement is configured", "because a cargo config could not be read"
+	const replaced, included, unread = "because a source replacement is configured", "because a cargo config includes another file", "because a cargo config could not be read"
 	for name, c := range map[string]struct {
 		files      map[string]string
 		links      map[string]string
@@ -331,6 +331,8 @@ func TestCatalogTrustsNoCrateUnderASourceReplacement(t *testing.T) {
 		"a replacement in CARGO_HOME":       {files: map[string]string{"home/config.toml": replace}, warning: replaced},
 		"an unreadable config":              {files: map[string]string{"proj/.cargo/config.toml": "[net]\nretry = 2\n"}, unreadable: "proj/.cargo/config.toml", warning: unread},
 		"an unparseable config":             {files: map[string]string{"proj/.cargo/config.toml": "[source\n"}, warning: unread},
+		"an include in the scan":            {files: map[string]string{"proj/.cargo/config.toml": "include = [\"extra.toml\"]\n", "proj/.cargo/extra.toml": replace}, warning: included},
+		"an include in CARGO_HOME":          {files: map[string]string{"home/config.toml": "include = [{ path = \"extra.toml\" }]\n", "home/extra.toml": replace}, warning: included},
 		// A glob reports a symlink by its target when both match, which hid each of these.
 		"a config symlinked to its sibling":               {files: map[string]string{"proj/.cargo/replace.toml": replace}, links: map[string]string{"proj/.cargo/config.toml": "replace.toml"}, warning: replaced},
 		"a config symlinked into another dot directory":   {files: map[string]string{"proj/.yarn/cargo.toml": replace}, links: map[string]string{"proj/.cargo/config.toml": "../.yarn/cargo.toml"}, warning: replaced},
