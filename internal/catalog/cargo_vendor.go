@@ -63,7 +63,7 @@ func withoutCargoVendor(r file.Resolver, root string) file.Resolver {
 	if err != nil {
 		return r
 	}
-	configLocs, err := cargoConfigLocs(r, rootPrefix)
+	configLocs, err := cargoConfigLocs(r, rootPrefix, "**/.*/*")
 	if err != nil {
 		return r
 	}
@@ -155,14 +155,14 @@ func resolvedRoot(root string) string {
 	return root
 }
 
-// cargoConfigLocs lists the cargo configs in the scan, matched by access or real path.
-func cargoConfigLocs(r file.Resolver, rootPrefix string) ([]file.Location, error) {
-	dotted, err := r.FilesByGlob("**/.*/*")
+// cargoConfigLocs lists the cargo configs among the files globs match, by access or real path.
+func cargoConfigLocs(r file.Resolver, rootPrefix string, globs ...string) ([]file.Location, error) {
+	found, err := r.FilesByGlob(globs...)
 	if err != nil {
 		return nil, err
 	}
 	var locs []file.Location
-	for _, l := range dotted {
+	for _, l := range found {
 		if isCargoConfig(rootRel(l.AccessPath, rootPrefix)) || isCargoConfig(rootRel(l.RealPath, rootPrefix)) {
 			locs = append(locs, l)
 		}
@@ -332,7 +332,8 @@ func cargoSourceReplaced(r file.Resolver, root string) bool {
 	vendored, _ := r.(cargoVendored)
 	root = resolvedRoot(root)
 	rootSlash := filepath.ToSlash(root)
-	configLocs, err := cargoConfigLocs(r, rootSlash+"/")
+	// syft answers a plain basename from its index, where the vendor filter's "**/.*/*" walks every file.
+	configLocs, err := cargoConfigLocs(r, rootSlash+"/", "**/config", "**/config.toml")
 	if err != nil {
 		return false
 	}

@@ -2,11 +2,14 @@ package catalog
 
 import (
 	"context"
+	"path"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/anchore/syft/syft/file"
+	"github.com/anchore/syft/syft/source"
 	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
@@ -284,6 +287,42 @@ func TestCatalogWarnsWhenCargoReplacesCratesIo(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// globLog records the globs a resolver is asked for.
+type globLog struct {
+	file.Resolver
+	globs []string
+}
+
+func (g *globLog) FilesByGlob(patterns ...string) ([]file.Location, error) {
+	g.globs = append(g.globs, patterns...)
+	return g.Resolver.FilesByGlob(patterns...)
+}
+
+// The replacement check runs on every scan with a crate, so it may only ask for names syft looks up in its index, never a glob that walks every file (OSS-2099).
+func TestCargoSourceReplacedLooksUpConfigsByName(t *testing.T) {
+	t.Setenv("CARGO_HOME", filepath.Join(t.TempDir(), "user", ".cargo"))
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{"Cargo.toml": "[package]\nname = \"app\"\n", "tools/.cargo/config.toml": mirrorConfig, "web/.cache/index.js": ""})
+	src, err := newDirectorySource(dir)
+	if err != nil {
+		t.Fatalf("source: %v", err)
+	}
+	t.Cleanup(func() { src.Close() })
+	r, err := src.FileResolver(source.SquashedScope)
+	if err != nil {
+		t.Fatalf("resolver: %v", err)
+	}
+	log := &globLog{Resolver: r}
+	if !cargoSourceReplaced(log, dir) {
+		t.Fatal("mirror in tools/.cargo not reported")
+	}
+	for _, g := range log.globs {
+		if strings.ContainsAny(path.Base(g), "*?[]{}") {
+			t.Errorf("asked for %q, which syft answers by walking every file", g)
+		}
 	}
 }
 
