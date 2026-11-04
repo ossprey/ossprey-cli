@@ -148,7 +148,9 @@ Windows resolves it under `%LOCALAPPDATA%`.
 
 5. **`git`** (`internal/gitscan`) — before `git clone`/`git pull` of a **public** GitHub repo, checks the repo itself as `pkg:github/<owner>/<repo>@<sha>` via `check.Run` (ecosystem `github`), not its deps. **Opt-in**: git is in `shim.optInManagers`, not `DefaultManagers()`, so `shim install` only writes it with `--git` or `--managers git`; a flagless re-run re-points an existing git shim, and `shim status` lists git only once shimmed. Why opt-in: it puts a GitHub API round trip in front of every pull. "Public" = unauthenticated `GET /repos/o/r` returns 200 with `private:false`; never send a token, or a private repo would read as checkable. It **fails open** on any GitHub/API error (unlike the package forwarders) because breaking `git pull` in an outage gets the shim ripped out. `pull` resolves remote/ref by running the *real* git (`shim.LookPathReal` + `OSSPREY_SHIM_BYPASS=1`), never PATH `git`, for the same recursion reason as `lookTool`. Value-flag tables carry the forwarder's asymmetry: a boolean wrongly listed swallows the URL and skips the check.
 
-   **Forwarders are quiet by default.** A forwarder sits in front of every install a developer, script or agent runs, so without `OSSPREY_VERBOSE` a clean install prints exactly one line of ossprey's — the verdict (`ossprey: no malware found in N packages …, forwarding to npm`; git's names the repo) — and then the manager's own output. That line was verbose-only once, and was made unconditional because silence could not be told apart from "nothing was checked"; it is printed just before the handoff, since `syscall.Exec` leaves nothing to print after the manager. An unchecked outcome (no components, `skip-ci`, passive) prints no verdict, because claiming clean there would be false. Beyond that it speaks only for a platform error (main's `error:` line, or a passive `could not post scan` / git `could not look up` / named-install `could not resolve the dependencies` warning — fail-open must never also be silent) and for a block, which always gets the full malware report (alert box, `Error: WARNING:` lines, blocked line) — a one-line block was tried and rejected, because that is the outcome a developer must not scroll past. Everything else — why an install went unchecked, scan narration, collected warnings, informational findings, the update notice — is verbose-only. Smoke tests prove a silent check ran through the fake API's submitted purls, not a stderr line. The real manager's output is never touched (it inherits stdio). Three rules: route narration through `note`, never `Fprintf(errOut, ...)`; drain through `flushWarnings`, which **still drains** when quiet, or main's safety-net drain prints the warnings anyway; and draw progress through `progressTo()`, which keeps the self-erasing terminal animation but drops the plain line a pipe or CI log would keep. `gitscan` follows the same rules. `TestQuietForwarder_*` pins the contract; smoke tests that assert on narration use `runForwardVerbose`.
+6. **`brew`** (`internal/brewscan`) — checks the GitHub repos a formula and its runtime deps build from, plus each repo's own lockfile deps; behaviour is in `docs/brew.md`. The why: opt-in like git, since it puts a network walk in front of every install. Tags are pinned with `git ls-remote`, not the GitHub API, because a node install walks ~20 repos and the unauthenticated API allows 60 calls/hour. No public check: a homebrew/core source is fetched unauthenticated, so it is public. Repo deps come from the API's `POST /tools/sbom` (`client.RepoSBOM`) because bottles statically link them (crates, Go modules); one client is shared by the workers so a stored login refreshes once. Over-checking is the chosen error: every variation for the OS family, `uses_from_macos` with bounds on macOS. A ref keeps its tag/branch namespace (`source.kind`), since a tag and a branch can share a name.
+
+   **Forwarders are quiet by default.** A forwarder sits in front of every install a developer, script or agent runs, so without `OSSPREY_VERBOSE` a clean install prints exactly one line of ossprey's — the verdict (`ossprey: no malware found in N packages …, forwarding to npm`; git's names the repo), worded by `forward.CleanVerdict`, which counts only what the platform scanned and owns up to a finding below the failing floor — and then the manager's own output. That line was verbose-only once, and was made unconditional because silence could not be told apart from "nothing was checked"; it is printed just before the handoff, since `syscall.Exec` leaves nothing to print after the manager. An unchecked outcome (no components, nothing the platform scanned, `skip-ci`, passive) prints no verdict, because claiming clean there would be false. Beyond that it speaks only for a platform error (main's `error:` line, or a passive `could not post scan` / git `could not look up` / named-install `could not resolve the dependencies` warning — fail-open must never also be silent) and for a block, which always gets the full malware report (alert box, `Error: WARNING:` lines, blocked line) — a one-line block was tried and rejected, because that is the outcome a developer must not scroll past. Everything else — why an install went unchecked, scan narration, collected warnings, informational findings, the update notice — is verbose-only. Smoke tests prove a silent check ran through the fake API's submitted purls, not a stderr line. The real manager's output is never touched (it inherits stdio). Three rules: route narration through `note`, never `Fprintf(errOut, ...)`; drain through `flushWarnings`, which **still drains** when quiet, or main's safety-net drain prints the warnings anyway; and draw progress through `progressTo()`, which keeps the self-erasing terminal animation but drops the plain line a pipe or CI log would keep. `gitscan` and `brewscan` follow the same rules. `TestQuietForwarder_*` pins the contract; smoke tests that assert on narration use `runForwardVerbose`.
 
 **The forwarder replaces itself with the manager where nothing follows** (`forward.Handoff`, `syscall.Exec`), so `npm run start` shows as npm in `ps` and to parent-PID checks rather than as `ossprey`. Anything after the exec never runs, including defers: drain warnings and remove temp dirs first (`forwardTo` flushes; the `reqFilesDir` cleanups run before `finish`). A failed `syscall.Exec` falls back to the child-process `Exec`. Passive installs (`passiveAfterInstall`, `passiveAlongside`) must outlive the manager, so they keep the fork and the `ossprey` name; Windows has no exec(2) and does the same. `TestPassThroughReplacesTheProcess` pins it.
 
@@ -336,6 +338,57 @@ root is `EvalSymlinks`ed first or no exclusion matches under macOS `/var`.
 `TestDirectorySourceSkipsPackageSinks` asserts on the index, not on catalog
 output, because catalog output was already clean before the fix.
 
+**`cargo vendor` crates are hidden by marker, not by name** (`withoutCargoVendor`,
+OSS-2561). Every crate it writes holds a `.cargo-checksum.json`, and the vendor
+directory's name is configurable, so a `vendor` sink would miss
+`third_party/rust` and drop a path dependency kept under `vendor/`. A published
+crate ships its own `Cargo.lock` (anyhow 1.0.100's names 59 crates, its dev
+tree), which syft's `**/Cargo.lock` glob read as the project's. An exclusion glob
+cannot say "a directory holding this file", so the filter wraps the resolver
+every cataloger reads instead of the index. A crate at the scan root is exempt,
+since that scan asked for it.
+
+**The marker is repository content, so it proves nothing alone.** Review broke
+two earlier rules. Hiding every file under a marked directory let a marker
+beside a `package-lock.json` hide it, and accepting any lockfile as proof let a
+decoy `Cargo.lock` naming a standalone project hide that project's own lock. So
+the proof is now what cargo itself would do. The vendoring project is a strict
+ancestor whose `Cargo.lock` (beside its `Cargo.toml`) locks the crate's
+name@version from a registry with the marker's checksum, has no path entry of
+that name@version, and holds a release meeting every normal and build
+dependency the crate's manifest turns on, non-optional or enabled by its default
+features (so an edited vendored manifest stays visible). The nearest cargo
+config for that project replaces `crates-io` with a `directory` source equal to
+the crate's parent, and that source is not replaced again. cargo reads config
+from where it runs, and an alias or `--manifest-path` reaches any crate from any
+directory, so every committed config level in the scan must also resolve
+`crates-io` to some directory source.
+Under that replacement cargo can take a crates.io dependency only from the
+vendor tree, so a hidden manifest cannot pull one from the network. A crate any
+manifest or config builds by path is never hidden (`path`, `workspace`,
+`members` and `paths` keys, read from every file in the scan, every ancestor of
+the scan root and `CARGO_HOME`), nor is one whose manifest has `[workspace]`,
+which `cargo publish` strips. References are resolved from both the path a file
+was reached by and its real path, through symlinks, with case and Unicode
+folded, both backslash readings, and a suffix match for one that leaves the
+root; member globs are expanded on disk against a literal base, and a config
+counts at the directory cargo reads it from, symlink or not. An alias's `--manifest-path`
+counts as a reference. Anything it cannot place (a member glob with `[` or `**`
+or outside the root, a `path-bases` `base`, a config `include`, an alias running
+`cargo vendor`, which ignores source replacement, or passing `--config`, two
+configs or one named in
+another case at a level, a file reached through a symlink out of the root, an
+unreadable or over-limit file) turns the filter off, and a hidden file reached
+through a symlink stays visible. Out of reach: `--config`, `CARGO_*` environment
+overrides and CI steps, which no manifest scan sees, and configs and `path`
+dependencies inside package sinks, which the index never holds and which only a
+command run from inside a build or install directory would use.
+`TestCatalogDoesNotLetACargoMarkerHideOtherFiles`,
+`TestCatalogReadsAProjectCrateThatLooksVendored`,
+`TestCatalogReadsACrateAProjectAboveTheScanBuilds` and
+`TestCatalogHidesNothingWhenAPathCannotBePlaced` pin one case per guard; each
+of the 35 fails with its guard removed.
+
 #### Why the npm resolve skips workspace members (OSS-1353)
 
 `NpmResolveCataloger` stands down for a manifest whose own dir ships a lockfile,
@@ -465,7 +518,8 @@ changes.
 ### API client (`internal/client`)
 
 `Validate` POSTs the MiniBOM to `/public/v1/scans`, then polls
-`/public/v1/scans/status` (quadratic backoff, capped at `maxPollAttempts`), and
+`/public/v1/scans/status` (capped at `OSSPREY_VERDICT_TIMEOUT`, default
+`maxPollAttempts` x `pollInterval` = 15m), and
 refuses outright for an ingest client (see "Passive modes and monitor ids"). A
 quota-exhausted response surfaces as a typed `*ErrSkipped` that propagates
 unwrapped so callers can detect it via `errors.As` and **exit 0** rather than
@@ -488,6 +542,13 @@ accepted deliberately, because quota exhaustion fails **open** (`ErrSkipped`,
 exit 0) and the failure it prevents fails **closed** and reads as malware. Retries wait via `sleepOrDone` so a cancelled
 scan is never held open by a backoff, and `RetryBackoff` is overridable for the
 same reason `PollBackoff` is: no test should sleep.
+
+**A poll ceiling is not a scan failure.** It returns `*ErrVerdictTimeout`
+naming the scan id and last status, because the scan keeps running and lands
+in the dashboard; real scans do exceed 15m at peak (~02:15 UTC). The service's
+`ScanExceededClientTimeout` metric counts them, so keep its threshold in step
+with the default here. Network timeouts go through `explainTimeout` so a bare
+`context deadline exceeded` never reaches the user.
 
 `401`/`403` become `authError`, which names the credential the client actually
 used (`--api-key`/env, a stored login, or a monitor id — see

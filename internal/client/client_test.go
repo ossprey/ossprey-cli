@@ -634,6 +634,7 @@ func TestAuthError_SurvivesTruncatedBody(t *testing.T) {
 // TestPoll_AttemptBudget pins that maxPollAttempts polls actually happen. The
 // loop used to stop at maxPollAttempts-1, so the documented 300 was really 299.
 func TestPoll_AttemptBudget(t *testing.T) {
+	t.Setenv(VerdictTimeoutEnv, "")
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/public/v1/scans" {
@@ -650,7 +651,8 @@ func TestPoll_AttemptBudget(t *testing.T) {
 	c := testRetryClient(t, srv)
 	c.PollBackoff = func(int) time.Duration { return 0 }
 	_, _, err := c.Validate(context.Background(), ossbom.MiniBOM{})
-	if err == nil || !strings.Contains(err.Error(), "took too long") {
+	var te *ErrVerdictTimeout
+	if !errors.As(err, &te) {
 		t.Fatalf("err: got %v, want the poll ceiling", err)
 	}
 	if got := hits.Load(); got != maxPollAttempts {
