@@ -309,14 +309,19 @@ func cargoDirNames(dir string, exact ...string) ([]string, error) {
 	return names, nil
 }
 
-// readCargoFileAt parses the file at p on disk, through any symlink, resolving its paths against base.
+// readCargoFileAt parses the regular file at p on disk, through any symlink, resolving its paths against base.
 func readCargoFileAt(p, base string) (cargoFile, bool) {
-	info, err := os.Stat(p)
-	if err != nil || info.Size() > maxManifestBytes {
+	// A link to a device or FIFO may never end, so only a regular file is opened, and read no further than the limit.
+	if info, err := os.Stat(p); err != nil || !info.Mode().IsRegular() {
 		return cargoFile{}, false
 	}
-	data, err := os.ReadFile(p)
+	fh, err := os.Open(p)
 	if err != nil {
+		return cargoFile{}, false
+	}
+	defer fh.Close()
+	data, err := io.ReadAll(io.LimitReader(fh, maxManifestBytes+1))
+	if err != nil || len(data) > maxManifestBytes {
 		return cargoFile{}, false
 	}
 	f := cargoFile{bases: []string{filepath.ToSlash(base)}}

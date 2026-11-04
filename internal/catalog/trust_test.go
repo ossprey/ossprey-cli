@@ -346,6 +346,9 @@ func TestCatalogTrustsNoCrateUnderASourceReplacement(t *testing.T) {
 		"a symlinked config beside a plain one":           {files: map[string]string{"proj/.cargo/replace.toml": replace, "proj/.cargo/config.toml": "[net]\nretry = 2\n"}, links: map[string]string{"proj/.cargo/config": "replace.toml"}, warning: replaced},
 		"a symlinked config named in another case":        {files: map[string]string{"proj/.cargo/replace.toml": replace}, links: map[string]string{"proj/.cargo/Config.toml": "replace.toml"}, warning: replaced},
 		"a .cargo directory symlinked to a dot directory": {files: map[string]string{"proj/.yarn/config.toml": replace}, links: map[string]string{"proj/.cargo": ".yarn"}, warning: replaced},
+		// A device reports no size and never ends, so only a regular file is read.
+		"a config symlinked to a device": {links: map[string]string{"proj/.cargo/config.toml": "/dev/zero"}, warning: unread},
+		"an oversized config":            {files: map[string]string{"proj/.cargo/config.toml": "# " + strings.Repeat("x", maxManifestBytes) + "\n"}, warning: unread},
 	} {
 		t.Run(name, func(t *testing.T) {
 			base := t.TempDir()
