@@ -234,20 +234,15 @@ func cargoConfigsInScan(r file.Resolver, root string) ([]cargoFile, string) {
 	rootSlash := filepath.ToSlash(root)
 	var dirs []string
 	for l := range r.AllLocations(ctx) {
-		rel := rootRel(l.RealPath, rootSlash+"/")
 		m, err := r.FileMetadataByLocation(l)
 		if err != nil || m.FileInfo == nil {
 			return nil, configUnread
 		}
-		isCargoDir := strings.ToLower(path.Base(rel)) == ".cargo"
-		// cargo walks up from its physical cwd, which a link can move per process, so only a link to a file in the scan is allowed.
+		// cargo walks up from its physical cwd, which a link can move per process, so any link ends trust.
 		if m.Mode()&fs.ModeSymlink != 0 {
-			if isCargoDir || isCargoConfig(rel) || !linksToScannedFile(r, l, m.LinkDestination, rootSlash+"/") {
-				return nil, configLinked
-			}
-			continue
+			return nil, configLinked
 		}
-		if isCargoDir && m.IsDir() {
+		if rel := rootRel(l.RealPath, rootSlash+"/"); m.IsDir() && strings.ToLower(path.Base(rel)) == ".cargo" {
 			dirs = append(dirs, placeRef(rootSlash, rel))
 		}
 	}
@@ -260,15 +255,6 @@ func cargoConfigsInScan(r file.Resolver, root string) ([]cargoFile, string) {
 		configs = append(configs, cs...)
 	}
 	return configs, ""
-}
-
-// linksToScannedFile reports a link that points into the scan and resolves through the index to a regular file there.
-func linksToScannedFile(r file.Resolver, l file.Location, dest, rootPrefix string) bool {
-	if outsideRoot(rootRel(dest, rootPrefix)) {
-		return false
-	}
-	locs, err := r.FilesByPath(l.RealPath)
-	return err == nil && len(locs) == 1 && !outsideRoot(rootRel(locs[0].RealPath, rootPrefix))
 }
 
 // atPastSlash reports an '@' after a '/' in the authority or path, where Go reads a password's tail as host or path.

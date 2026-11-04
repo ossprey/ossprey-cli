@@ -359,9 +359,10 @@ func TestCatalogTrustsNoCrateUnderASourceReplacement(t *testing.T) {
 		"an include above a symlinked directory in a package sink":    {files: map[string]string{"proj/target/.cargo/config": "include = \"extra.toml\"\n", "proj/target/app/.keep": ""}, links: map[string]string{"proj/app": "target/app"}, warning: linked},
 		"a plain config above a symlinked directory":                  {files: map[string]string{"proj/.yarn/pkg/.cargo/config.toml": "[net]\nretry = 2\n", "proj/.yarn/pkg/app/.keep": ""}, links: map[string]string{"proj/app": ".yarn/pkg/app"}, warning: linked},
 		"a dangling directory symlink":                                {links: map[string]string{"proj/app": ".yarn/missing"}, warning: linked},
-		// A path out of the scan, such as /proc/self/cwd, may lead cargo elsewhere, so only a link to a file in the scan is allowed.
+		// Any link in the index ends trust, since the index cleans a target's ".." before an unindexed link in it resolves.
 		"a symlink to a file outside the scan": {files: map[string]string{"LICENSE": ""}, links: map[string]string{"proj/LICENSE": "../LICENSE"}, warning: linked},
-		"a symlink to a file in the scan":      {files: map[string]string{"proj/docs/LICENSE": ""}, links: map[string]string{"proj/LICENSE": "docs/LICENSE"}},
+		"a symlink to a file in the scan":      {files: map[string]string{"proj/docs/LICENSE": ""}, links: map[string]string{"proj/LICENSE": "docs/LICENSE"}, warning: linked},
+		"a symlink through a sink link and ..": {files: map[string]string{"proj/y": "", "proj/target/a/b/.keep": "", "proj/target/a/y/.cargo/config.toml": replace}, links: map[string]string{"proj/node_modules": "target/a/b", "proj/app": "node_modules/../y"}, warning: linked},
 		// Only a regular file is read, as a device or FIFO may never end.
 		"a config symlinked to a device": {links: map[string]string{"proj/.cargo/config.toml": "/dev/zero"}, warning: linked},
 		"a config that is a directory":   {files: map[string]string{"proj/.cargo/config.toml/.keep": ""}, warning: unread},
