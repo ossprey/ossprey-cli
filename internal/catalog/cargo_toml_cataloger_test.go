@@ -150,6 +150,31 @@ func TestCatalogCargoInheritsFromTheRootCargoFinds(t *testing.T) {
 			want: "1.0.200",
 		},
 		{
+			name: "an ancestor with only comments stops the walk",
+			files: map[string]string{
+				"Cargo.toml":           pool("", "1.0.200"),
+				"inner/Cargo.toml":     "# just a comment\n",
+				"inner/a/m/Cargo.toml": member,
+			},
+		},
+		{
+			name: "an ancestor with only dependencies stops the walk",
+			files: map[string]string{
+				"Cargo.toml":           pool("", "1.0.200"),
+				"inner/Cargo.toml":     "[dependencies]\nfoo = \"1\"\n",
+				"inner/a/m/Cargo.toml": member,
+			},
+		},
+		{
+			name: "an ancestor [project] is a package",
+			files: map[string]string{
+				"Cargo.toml":           pool("", "1.0.200"),
+				"inner/Cargo.toml":     "[project]\nname = \"inner\"\n",
+				"inner/a/m/Cargo.toml": member,
+			},
+			want: "1.0.200",
+		},
+		{
 			name: "a root that excludes the member is passed over",
 			files: map[string]string{
 				"Cargo.toml":      pool("members = [\"ws/m\"]\n", "1.0.100"),

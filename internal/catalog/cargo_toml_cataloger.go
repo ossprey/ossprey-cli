@@ -241,6 +241,9 @@ func pointedPool(manifestPath, pointer, root string) (map[string]any, string, bo
 	return m.Workspace.Dependencies, dir, true
 }
 
+// errNotAManifest is a Cargo.toml with no [package], [project] or [workspace], which cargo rejects as a workspace manifest.
+var errNotAManifest = errors.New("Cargo.toml declares no package or workspace")
+
 // readCargoManifest reads and decodes a Cargo.toml, and reports whether it declares [workspace].
 func readCargoManifest(path string) (m cargoManifest, isRoot bool, err error) {
 	data, err := readManifest(path)
@@ -248,6 +251,9 @@ func readCargoManifest(path string) (m cargoManifest, isRoot bool, err error) {
 		return m, false, err
 	}
 	md, err := toml.Decode(string(data), &m)
+	if err == nil && !md.IsDefined("package") && !md.IsDefined("project") && !md.IsDefined("workspace") {
+		err = errNotAManifest
+	}
 	return m, md.IsDefined("workspace"), err
 }
 
