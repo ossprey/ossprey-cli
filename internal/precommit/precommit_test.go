@@ -305,6 +305,50 @@ func TestStagedDeltaReadsAnUnstagedCargoWorkspaceRoot(t *testing.T) {
 	}
 }
 
+func TestStagedDeltaReadsTheMembersOfAStagedCargoWorkspaceRoot(t *testing.T) {
+	dir := initRepo(t)
+	root := "[workspace]\nmembers = [\"crates/*\"]\n\n[workspace.dependencies]\nserde = \"=%s\"\nrand = \"=0.8.5\"\n"
+	writeRepoFile(t, dir, "Cargo.toml", fmt.Sprintf(root, "1.0.228"))
+	for _, m := range []string{"a", "b"} {
+		writeRepoFile(t, dir, "crates/"+m+"/Cargo.toml", "[package]\nname = \""+m+"\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = { workspace = true }\nrand = { workspace = true }\n")
+	}
+	commitAll(t, dir)
+	writeRepoFile(t, dir, "Cargo.toml", fmt.Sprintf(root, "1.0.229"))
+	gitT(t, dir, "add", "Cargo.toml")
+
+	ctx := warn.NewContext(context.Background(), false)
+	got, err := StagedDelta(ctx, dir, trust.Policy{})
+	if err != nil {
+		t.Fatalf("StagedDelta: %v", err)
+	}
+	want := []Package{{Type: "cargo", Name: "serde", Version: "1.0.229", Path: "crates/a/Cargo.toml"}}
+	if !reflect.DeepEqual(got.Packages, want) {
+		t.Errorf("delta mismatch:\n got: %+v\nwant: %+v", got.Packages, want)
+	}
+	if out := warn.Drain(ctx); out != "" {
+		t.Errorf("a root-only pin change warned:\n%s", out)
+	}
+}
+
+func TestWorkspaceMembers(t *testing.T) {
+	for _, tc := range []struct {
+		dir                      string
+		members, exclude, listed []string
+		want                     []string
+	}{
+		{".", []string{"crates/*", "crates/legacy/core"}, []string{"crates/legacy"},
+			[]string{"Cargo.toml", "crates/a/Cargo.toml", "crates/a/sub/Cargo.toml", "crates/legacy/Cargo.toml", "crates/legacy/core/Cargo.toml", "tools/x/Cargo.toml"},
+			[]string{"crates/a/Cargo.toml", "crates/legacy/core/Cargo.toml"}},
+		{"rust", []string{"./crates/**", "tools/cli/"}, []string{"crates/old/"},
+			[]string{"rust/Cargo.toml", "rust/crates/a/Cargo.toml", "rust/crates/a/b/Cargo.toml", "rust/crates/old/x/Cargo.toml", "rust/tools/cli/Cargo.toml", "rust/tools/other/Cargo.toml", "rusty/crates/z/Cargo.toml"},
+			[]string{"rust/crates/a/Cargo.toml", "rust/crates/a/b/Cargo.toml", "rust/tools/cli/Cargo.toml"}},
+	} {
+		if got := workspaceMembers(tc.dir, tc.members, tc.exclude, tc.listed); !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("workspaceMembers(%q, %q, %q) = %q, want %q", tc.dir, tc.members, tc.exclude, got, tc.want)
+		}
+	}
+}
+
 // TestRepoRelLocation exercises every location spelling the resolvers are
 // known to produce, on every platform — including the Windows-only forms that
 // broke on CI (OSS-1564): the function is pure string work, so the

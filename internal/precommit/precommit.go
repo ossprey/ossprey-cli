@@ -23,8 +23,11 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/bmatcuk/doublestar/v4"
+
 	"github.com/ossprey/ossprey-cli/internal/catalog"
 	"github.com/ossprey/ossprey-cli/internal/trust"
+	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
 // Package is one dependency introduced (or version-changed) by the staged
@@ -121,6 +124,29 @@ func StagedDelta(ctx context.Context, repoDir string, policy trust.Policy) (Delt
 		}
 	}
 
+	// A pin changed only in a root's [workspace.dependencies] shows up through the members that inherit it.
+	staged := make(map[string]bool, len(paths))
+	for _, p := range paths {
+		staged[p] = true
+	}
+	known := slices.Clone(paths)
+	for _, p := range paths {
+		if path.Base(p) != "Cargo.toml" {
+			continue
+		}
+		members, err := writeWorkspaceMembers(ctx, repoDir, "", stagedRoot, p, staged)
+		if err != nil {
+			return Delta{}, err
+		}
+		known = append(known, members...)
+		if hasHead {
+			if members, err = writeWorkspaceMembers(ctx, repoDir, "HEAD", headRoot, p, staged); err != nil {
+				return Delta{}, err
+			}
+			known = append(known, members...)
+		}
+	}
+
 	// No-exec + no version lookup: a pre-commit hook must be fast, offline,
 	// and must never run npm/uv against a synthetic tree.
 	opts := catalog.Options{SkipVersionLookup: true, NoExec: true, Trust: policy}
@@ -133,7 +159,7 @@ func StagedDelta(ctx context.Context, repoDir string, policy trust.Policy) (Delt
 		return Delta{}, fmt.Errorf("precommit: catalog head tree: %w", err)
 	}
 
-	return diffPackages(stagedPkgs, headPkgs, stagedRoot, paths), nil
+	return diffPackages(stagedPkgs, headPkgs, stagedRoot, known), nil
 }
 
 // diffPackages returns the staged packages absent from head, keyed by
@@ -345,6 +371,112 @@ func writeWorkspaceRoot(ctx context.Context, repoDir, spec, root, repoRelPath st
 		return nil
 	}
 	return writeTreeFile(root, repoRelPath, blob)
+}
+
+// maxWorkspaceMembers bounds the member manifests read per workspace root and tree, so a huge workspace cannot stall a commit.
+const maxWorkspaceMembers = 100
+
+// writeWorkspaceMembers writes into root, from rev ("" for the index), the members of the workspace whose root manifest is already there at rootPath.
+func writeWorkspaceMembers(ctx context.Context, repoDir, rev, root, rootPath string, staged map[string]bool) ([]string, error) {
+	blob, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rootPath)))
+	if err != nil {
+		return nil, nil
+	}
+	members, exclude, ok := catalog.CargoWorkspaceMembers(blob)
+	if !ok || len(members) == 0 {
+		return nil, nil
+	}
+	dir := path.Dir(rootPath)
+	listed, err := gitCargoManifests(ctx, repoDir, rev, dir)
+	if err != nil {
+		return nil, fmt.Errorf("precommit: list members of %s: %w", rootPath, err)
+	}
+	matched := workspaceMembers(dir, members, exclude, listed)
+	var written []string
+	unread := 0
+	for _, m := range matched {
+		if staged[m] {
+			continue
+		}
+		if len(written) == maxWorkspaceMembers {
+			unread++
+			continue
+		}
+		b, err := gitShow(ctx, repoDir, rev+":"+m)
+		if err != nil {
+			unread++
+			continue
+		}
+		if err := writeTreeFile(root, m, b); err != nil {
+			return nil, err
+		}
+		written = append(written, m)
+	}
+	// Only the staged tree can hide a pin; a member missing from HEAD's tree reads as added.
+	if unread > 0 && rev == "" {
+		warn.Add(ctx, warn.Entry{
+			Class: "precommit:cargo-members-unread",
+			One:   fmt.Sprintf("%s: read %d of its %d workspace members, so a pin change reaching only the others is not checked", rootPath, len(matched)-unread, len(matched)),
+			Many:  "%d Cargo workspaces were read in part, so a pin change reaching only the members left out is not checked",
+			Item:  rootPath,
+		})
+	}
+	return written, nil
+}
+
+// workspaceMembers picks the manifests in listed whose directory, relative to the root's dir, a members glob names and no exclude path holds.
+func workspaceMembers(dir string, members, exclude, listed []string) []string {
+	var out []string
+	for _, m := range listed {
+		rel := m
+		if dir != "." {
+			var under bool
+			if rel, under = strings.CutPrefix(m, dir+"/"); !under {
+				continue
+			}
+		}
+		rel = path.Dir(rel)
+		if rel == "." {
+			continue
+		}
+		under := func(p string) bool {
+			p = path.Clean(p)
+			return rel == p || strings.HasPrefix(rel, p+"/")
+		}
+		globbed := slices.ContainsFunc(members, func(g string) bool {
+			hit, _ := doublestar.Match(path.Clean(g), rel)
+			return hit
+		})
+		// As in Cargo, an exclude entry gives way to a member named by its own path.
+		if !globbed || slices.ContainsFunc(exclude, under) && !slices.ContainsFunc(members, under) {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// gitCargoManifests lists the repo-relative Cargo.toml paths under dir in the index (rev "") or in rev.
+func gitCargoManifests(ctx context.Context, repoDir, rev, dir string) ([]string, error) {
+	spec := ":/"
+	if dir != "." {
+		spec = ":(top,literal)" + dir
+	}
+	args := []string{"ls-files", "--cached", "-z", "--full-name", "--", spec}
+	if rev != "" {
+		args = []string{"ls-tree", "-r", "-z", "--name-only", "--full-tree", rev, "--", spec}
+	}
+	raw, err := gitOutput(ctx, repoDir, args...)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, p := range strings.Split(string(raw), "\x00") {
+		if path.Base(p) == "Cargo.toml" && !isVendoredPath(p) {
+			out = append(out, p)
+		}
+	}
+	return out, nil
 }
 
 // writeTreeFile writes blob at root/<repoRelPath>, creating parent dirs.
