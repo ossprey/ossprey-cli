@@ -15,7 +15,7 @@ There are two kinds of rule:
 
 | Rule | Trusts | Decided from |
 | ---- | ------ | ------------ |
-| `--registry <url>` | Packages fetched from that registry or index, npm or PyPI | Where your **lockfile** says each package came from |
+| `--registry <url>` | Packages fetched from that registry or index (npm, PyPI or Rust) | Where your **lockfile** says each package came from |
 | `--npm-scope @org` | Every `@org/*` npm package | The package name |
 
 ## Trusted registries
@@ -43,7 +43,17 @@ The source of each package is read from the lockfile:
 | `yarn.lock` | `resolved` |
 | `uv.lock` | `source = { registry = … }` |
 | `poetry.lock` | `[package.source] url` |
+| `Cargo.lock` | `source`, a `registry+` or `sparse+` index URL |
 | no lockfile, resolved by pip | pip's `download_info.url` |
+
+A `Cargo.lock` records each crate's index URL, so for Rust register that URL
+without its `registry+` or `sparse+` prefix, or any prefix of it. A crate from
+crates.io is always checked, even under a rule such as `https://github.com/` or
+`https://index.crates.io/` that covers crates.io's index. So is a crate Cargo
+fetches from git, whatever rule covers its repository, and a crate whose index
+host has non-ASCII characters, since Cargo may read that host as another one.
+A crate locked from your registry and the crates.io crate of the same name and
+version are different crates to Cargo, so trusting one never hides the other.
 
 **A package whose source was not recorded is checked.** That covers
 `pnpm-lock.yaml` (it records no tarball URL), `Pipfile.lock` (it records an

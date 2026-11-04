@@ -122,7 +122,7 @@ func trustFixture(t *testing.T) string {
 
 func trustedNames(pkgs []Package) (trusted, checked []string) {
 	for _, p := range pkgs {
-		id := p.Type + "/" + strings.ToLower(p.Name)
+		id := p.Type + "/" + strings.ToLower(p.Name) + qualifierKey(p.Qualifiers)
 		if p.Trusted {
 			trusted = append(trusted, id)
 		} else {
@@ -158,6 +158,124 @@ func TestCatalogMarksPackagesFromTrustedSources(t *testing.T) {
 		"pypi/acme-dup", // one project fetches it through the proxy
 		"pypi/requests", // same host, public-proxy repository
 		"pypi/urllib3",  // no recorded source
+	}
+	if strings.Join(trusted, " ") != strings.Join(wantTrusted, " ") {
+		t.Errorf("trusted = %v\nwant      %v", trusted, wantTrusted)
+	}
+	if strings.Join(checked, " ") != strings.Join(wantChecked, " ") {
+		t.Errorf("checked = %v\nwant      %v", checked, wantChecked)
+	}
+}
+
+const trustCargoLock = `version = 4
+
+[[package]]
+name = "acme-sparse"
+version = "1.0.0"
+source = "sparse+https://crates.corp.example/internal/"
+checksum = "aaaa"
+
+[[package]]
+name = "acme-index"
+version = "1.0.0"
+source = "registry+https://git.corp.example/acme/crates-index.git"
+checksum = "bbbb"
+
+[[package]]
+name = "acme-hub"
+version = "1.0.0"
+source = "registry+https://github.com/acme/crates-index"
+
+[[package]]
+name = "acme-twin"
+version = "1.0.0"
+source = "sparse+https://crates.corp.example/internal/"
+
+[[package]]
+name = "acme-git"
+version = "1.0.0"
+source = "git+https://git.corp.example/acme/acme-git#0123456789abcdef0123456789abcdef01234567"
+
+[[package]]
+name = "acme-proxied"
+version = "1.0.0"
+source = "sparse+https://crates.corp.example/internal-proxy/"
+
+[[package]]
+name = "serde"
+version = "1.0.228"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cccc"
+
+[[package]]
+name = "itoa"
+version = "1.0.15"
+source = "sparse+https://index.crates.io/"
+checksum = "dddd"
+
+[[package]]
+name = "ryu"
+version = "1.0.20"
+source = "registry+https://gİthub.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "acme-dotted"
+version = "1.0.0"
+source = "registry+https://gİt.corp.example/acme/crates-index.git"
+
+[[package]]
+name = "acme-backslash"
+version = "1.0.0"
+source = "sparse+https://github.com\\@evil.example/acme/"
+`
+
+// Same acme-twin@1.0.0, but this project locks it from crates.io.
+const trustCargoLockCratesIoTwin = `version = 4
+
+[[package]]
+name = "acme-twin"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eeee"
+`
+
+// A crate is trusted by the private index its Cargo.lock names, never from crates.io, git or a host Go and Cargo read apart.
+func TestCatalogTrustsCratesByTheirCargoLockIndex(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		"rustapp/Cargo.lock":  trustCargoLock,
+		"rustapp2/Cargo.lock": trustCargoLockCratesIoTwin,
+	})
+	policy := testPolicy(t, []string{
+		"https://crates.corp.example/internal/",
+		"https://git.corp.example/acme/",
+		"https://github.com/",
+		"https://index.crates.io/",
+	}, nil)
+
+	pkgs, err := Catalog(context.Background(), root, Options{NoExec: true, SkipVersionLookup: true, Trust: policy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	trusted, checked := trustedNames(pkgs)
+
+	wantTrusted := []string{
+		"cargo/acme-hub?repository_url=https://github.com/",             // git index under a host-wide rule
+		"cargo/acme-index?repository_url=https://git.corp.example/",     // git index under its repository prefix
+		"cargo/acme-sparse?repository_url=https://crates.corp.example/", // sparse index
+		"cargo/acme-twin?repository_url=https://crates.corp.example/",   // the private crate of that name
+	}
+	wantChecked := []string{
+		"cargo/acme-backslash?repository_url=https:///",                   // Cargo reads github.com\ as userinfo and fetches from evil.example
+		"cargo/acme-dotted?repository_url=https://g%C4%B0t.corp.example/", // Go folds İ to i, Cargo's IDNA does not
+		// Git is never a registry, even under a trusted prefix.
+		"cargo/acme-git?vcs_url=git+https://git.corp.example/acme/acme-git@0123456789abcdef0123456789abcdef01234567",
+		"cargo/acme-proxied?repository_url=https://crates.corp.example/", // same host, another registry
+		"cargo/acme-twin", // locked from crates.io in rustapp2
+		"cargo/itoa",      // crates.io under its own sparse host's rule
+		"cargo/ryu",       // a non-ASCII host on crates.io's path goes out as twins, neither trusted
+		"cargo/ryu?repository_url=https://g%C4%B0thub.com/",
+		"cargo/serde", // crates.io under a github.com rule
 	}
 	if strings.Join(trusted, " ") != strings.Join(wantTrusted, " ") {
 		t.Errorf("trusted = %v\nwant      %v", trusted, wantTrusted)

@@ -159,6 +159,21 @@ func cargoSourceQualifiers(source string) (map[string]string, string) {
 	return nil, "its source is over the API's length limit"
 }
 
+// cargoRegistryOf returns the index URL of a registry or sparse source for the trust policy, or "" for git, crates.io or a spelling Go and Cargo may read apart.
+func cargoRegistryOf(m pkg.RustCargoLockEntry) string {
+	source := strings.TrimSpace(m.Source)
+	kind, raw, _ := strings.Cut(source, "+")
+	if is, _ := isCratesIo(source); is || kind != "registry" && kind != "sparse" {
+		return ""
+	}
+	clean := crateURLCleaner.Replace(trimC0(raw))
+	// Cargo's IDNA may read a non-ASCII host as crates.io or a host other than Go's, and Cargo reads a sparse source's '\' as userinfo.
+	if u, err := url.Parse(clean); err != nil || strings.ContainsFunc(u.Hostname(), nonASCII) || atPastSlash(clean) {
+		return ""
+	}
+	return clean
+}
+
 // atPastSlash reports an '@' after a '/' in the authority or path, where Go reads a password's tail as host or path.
 func atPastSlash(clean string) bool {
 	_, rest, _ := strings.Cut(clean, ":")

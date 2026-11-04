@@ -214,11 +214,17 @@ Every rule is a hole in the scan by design, so the rules are narrow:
   `/internal/../public-proxy/` (or `%2e%2e`) is judged where it lands.
 - **Provenance is what the lockfile recorded** (`registryOf`: npm/yarn
   `resolved`, uv/poetry `Index`, pip `download_info.url`, our npm resolver's
-  lock). Unrecorded means checked. Trusted needs **every** recorded sighting
-  trusted: dedup and `mergeVersionless` fold sightings' `Registries` together
-  rather than keeping the first, since one lockfile fetching it publicly is
-  enough to need a check. Don't add pnpm (no URL) or Pipfile.lock (index
-  *name*) without real URLs.
+  lock, a `Cargo.lock` `registry+`/`sparse+` `source` via `cargoRegistryOf`).
+  Unrecorded means checked. A crate's source is never a git or crates.io one
+  (OSS-2581 decides how git crates may count later), nor one with a non-ASCII
+  host or an `@` past a `/`: Go's `ToLower` maps `İ` to `i` where Cargo's IDNA
+  does not, and `sparse+` is a non-special scheme to Cargo, so `host\@evil` is
+  userinfo to it and a path to us. The crates.io twin of a trusted crate is its
+  own bare component with no recorded source, so it stays checked. Trusted
+  needs **every** recorded sighting trusted: dedup and `mergeVersionless` fold
+  sightings' `Registries` together rather than keeping the first, since one
+  lockfile fetching it publicly is enough to need a check. Don't add pnpm (no
+  URL) or Pipfile.lock (index *name*) without real URLs.
 - **Named forwarded installs apply only the scope rule to the names typed**
   (`dropTrusted`, before anything is resolved so nothing private is looked up
   publicly). Inferring the registry from `pip.conf`/`.npmrc` was rejected:

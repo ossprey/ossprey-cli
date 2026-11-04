@@ -455,6 +455,8 @@ func registryOf(p pkg.Package) string {
 		return m.Index
 	case pkg.PythonUvLockEntry:
 		return m.Index
+	case pkg.RustCargoLockEntry:
+		return cargoRegistryOf(m)
 	case registrySource:
 		return m.URL
 	}
