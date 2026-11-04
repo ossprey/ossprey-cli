@@ -389,13 +389,19 @@ of the 35 fails with its guard removed.
 
 The pre-commit hook's temp trees hold no marker, so the filter never runs
 there; `withoutVendoredLocks` instead drops a staged `Cargo.lock` beside a
-marker only when a strict ancestor's staged `Cargo.lock` pins that crate's
-name@version at the marker's checksum (`CargoLock.Vendors`, the filter's own
-lock check) and the staged `.cargo/config` or `.cargo/config.toml` at or above
-that ancestor replaces crates.io with a `directory` source that is the crate's
-parent (`CargoVendorSource`: nearest config wins per key, a path is relative to
-the directory holding `.cargo`, and no config, an unclear one or a mismatch
-skips nothing). That leaves a vendored crate's own lock out of the lookup,
+marker only when a strict ancestor's staged `Cargo.lock`, beside its own
+`Cargo.toml` in a directory with no marker as in `projectLocks`, pins that
+crate's name@version at the marker's checksum (`CargoLock.Vendors`, the
+filter's own lock check) and the staged `.cargo/config` or `.cargo/config.toml`
+at or above that ancestor replaces crates.io with a `directory` source that is
+the crate's parent (`CargoVendorSource`: nearest config wins per key, a path is
+relative to the directory holding `.cargo`, and no config, an unclear one or a
+mismatch skips nothing). `CargoVendorSource` places no directory with `..`
+after a named directory, because cargo resolves `..` after following symlinks
+and a lexical join can name another directory. Every proof file comes from one
+`git ls-files -s` listing and is read by its blob only when its entry is a
+regular file: a symlink's blob is its target text, which cargo never reads as
+the file. That leaves a vendored crate's own lock out of the lookup,
 never skips a `Cargo.toml`, and still checks in full a `vendor/` change staged
 without its `Cargo.lock`. `ParseCargoLock`, `ParseCargoConfig` and
 `CargoPackageID` run `proofTOMLError` before decoding. It refuses a file nested
