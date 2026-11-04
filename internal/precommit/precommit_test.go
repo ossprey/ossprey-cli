@@ -305,6 +305,83 @@ func TestStagedDeltaReadsAnUnstagedCargoWorkspaceRoot(t *testing.T) {
 	}
 }
 
+// stagedRootDelta commits files, stages the root Cargo.toml as next, and returns the delta with any warnings.
+func stagedRootDelta(t *testing.T, files map[string]string, next string) ([]Package, string) {
+	t.Helper()
+	dir := initRepo(t)
+	for rel, content := range files {
+		writeRepoFile(t, dir, rel, content)
+	}
+	commitAll(t, dir)
+	writeRepoFile(t, dir, "Cargo.toml", next)
+	gitT(t, dir, "add", "Cargo.toml")
+	ctx := warn.NewContext(context.Background(), false)
+	got, err := StagedDelta(ctx, dir, trust.Policy{})
+	if err != nil {
+		t.Fatalf("StagedDelta: %v", err)
+	}
+	return got.Packages, warn.Drain(ctx)
+}
+
+func TestStagedDeltaChecksAPinChangedOnlyInAStagedCargoWorkspacePool(t *testing.T) {
+	member := func(m string) string {
+		return "[package]\nname = \"" + m + "\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = { workspace = true }\nrand = { workspace = true }\n"
+	}
+	virtual := "[workspace]\nmembers = [\"crates/*\"]\n\n[workspace.dependencies]\nserde = \"=%s\"\nrand = \"=0.8.5\"\n"
+	// An empty [workspace] still roots one, and a path dependency under it is a member Cargo adds on its own.
+	implicit := "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nrand = { workspace = true }\nmylib = { path = \"mylib\" }\n\n[workspace]\n\n[workspace.dependencies]\nserde = \"=%s\"\nrand = \"=0.8.5\"\n"
+	for name, tc := range map[string]struct {
+		files map[string]string
+		root  string
+	}{
+		"virtual root":          {map[string]string{"crates/a/Cargo.toml": member("a"), "crates/b/Cargo.toml": member("b")}, virtual},
+		"empty workspace table": {map[string]string{"mylib/Cargo.toml": "[package]\nname = \"mylib\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = { workspace = true }\n"}, implicit},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tc.files["Cargo.toml"] = fmt.Sprintf(tc.root, "1.0.228")
+			got, warned := stagedRootDelta(t, tc.files, fmt.Sprintf(tc.root, "1.0.229"))
+			want := []Package{{Type: "cargo", Name: "serde", Version: "1.0.229", Path: "Cargo.toml"}}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("delta mismatch:\n got: %+v\nwant: %+v", got, want)
+			}
+			if warned != "" {
+				t.Errorf("a root-only pin change warned:\n%s", warned)
+			}
+		})
+	}
+}
+
+func TestStagedDeltaReportsNothingForACargoWorkspaceRootEditOutsideItsPool(t *testing.T) {
+	member := "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = { workspace = true }\n"
+	pool := "\n[workspace.dependencies]\nserde = \"=1.0.228\"\n"
+	got, warned := stagedRootDelta(t, map[string]string{
+		"Cargo.toml":          "[workspace]\nmembers = [\"crates/a\"]\n\n[workspace.package]\nversion = \"0.1.0\"\n" + pool,
+		"crates/a/Cargo.toml": member,
+		// A crate the edit makes a member brings no new pin, since its own were already committed.
+		"tools/x/Cargo.toml": "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n[dependencies]\nrand = \"=0.8.5\"\n",
+	}, "[workspace]\nmembers = [\"crates/a\", \"tools/x\"]\n\n[workspace.package]\nversion = \"0.2.0\"\n"+pool)
+	if len(got) != 0 || warned != "" {
+		t.Errorf("a root edit outside the pool reported %+v, warned %q", got, warned)
+	}
+}
+
+func TestStagedDeltaReportsNothingForAPathGitOrRegistryPoolEntryChange(t *testing.T) {
+	root := "[workspace]\nmembers = [\"crates/*\"]\n\n[workspace.dependencies]\n" +
+		"bar = { path = \"crates/bar\", version = \"=%[1]s\" }\n" +
+		"foo = { git = \"https://github.com/example/foo\", version = \"=%[1]s\" }\n" +
+		"baz = { version = \"=%[1]s\", registry = \"internal\" }\n" +
+		"qux = { version = \"=%[1]s\", registry-index = \"sparse+https://cargo.example.com/index/\" }\n"
+	member := "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\n[dependencies]\nfoo = { workspace = true }\nbaz = { workspace = true }\nqux = { workspace = true }\n"
+	got, warned := stagedRootDelta(t, map[string]string{
+		"Cargo.toml":            fmt.Sprintf(root, "0.1.0"),
+		"crates/a/Cargo.toml":   member,
+		"crates/bar/Cargo.toml": "[package]\nname = \"bar\"\nversion = \"0.1.0\"\n",
+	}, fmt.Sprintf(root, "0.2.0"))
+	if len(got) != 0 || warned != "" {
+		t.Errorf("a path, git or registry pool entry change reported %+v, warned %q", got, warned)
+	}
+}
+
 // TestRepoRelLocation exercises every location spelling the resolvers are
 // known to produce, on every platform — including the Windows-only forms that
 // broke on CI (OSS-1564): the function is pure string work, so the

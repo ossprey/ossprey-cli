@@ -133,6 +133,13 @@ func StagedDelta(ctx context.Context, repoDir string, policy trust.Policy) (Delt
 		return Delta{}, fmt.Errorf("precommit: catalog head tree: %w", err)
 	}
 
+	// A pin changed only in a root's [workspace.dependencies] reaches no manifest in the trees, so the root reports it.
+	for _, p := range paths {
+		if path.Base(p) == "Cargo.toml" {
+			stagedPkgs = append(stagedPkgs, workspacePinChanges(stagedRoot, headRoot, p)...)
+		}
+	}
+
 	return diffPackages(stagedPkgs, headPkgs, stagedRoot, paths), nil
 }
 
@@ -345,6 +352,27 @@ func writeWorkspaceRoot(ctx context.Context, repoDir, spec, root, repoRelPath st
 		return nil
 	}
 	return writeTreeFile(root, repoRelPath, blob)
+}
+
+// workspacePinChanges returns the exact crates.io pins in the staged [workspace.dependencies] of the Cargo.toml at p that its HEAD copy lacks.
+func workspacePinChanges(stagedRoot, headRoot, p string) []catalog.Package {
+	staged, err := os.ReadFile(filepath.Join(stagedRoot, filepath.FromSlash(p)))
+	if err != nil {
+		return nil
+	}
+	head, _ := os.ReadFile(filepath.Join(headRoot, filepath.FromSlash(p)))
+	old := map[string]bool{}
+	for _, q := range catalog.CargoWorkspacePins(head) {
+		old[pkgKey(q)] = true
+	}
+	var out []catalog.Package
+	for _, q := range catalog.CargoWorkspacePins(staged) {
+		if !old[pkgKey(q)] {
+			q.Locations = []string{p}
+			out = append(out, q)
+		}
+	}
+	return out
 }
 
 // writeTreeFile writes blob at root/<repoRelPath>, creating parent dirs.
