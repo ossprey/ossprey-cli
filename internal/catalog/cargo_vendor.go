@@ -637,6 +637,50 @@ func CargoPackageID(data []byte) (name, version string) {
 	return name, version
 }
 
+// ParseCargoConfig reads a .cargo/config(.toml) as the vendor filter does, refusing one over its size bound.
+func ParseCargoConfig(data []byte) (map[string]any, error) {
+	if len(data) > maxManifestBytes {
+		return nil, fmt.Errorf("cargo config is %d bytes, over the %d limit", len(data), maxManifestBytes)
+	}
+	doc := map[string]any{}
+	_, err := toml.Decode(string(data), &doc)
+	return doc, err
+}
+
+// CargoVendorSource is the slash directory that configAt's configs at or above dir replace crates.io with, or "" when none or unclear.
+func CargoVendorSource(dir string, configAt func(dir string) (doc map[string]any, ok bool)) string {
+	// find is the nearest value set at keys and its config's directory, with ok false at a config it cannot follow.
+	find := func(keys ...string) (v any, base string, ok bool) {
+		for d := dir; ; d = path.Dir(d) {
+			doc, ok := configAt(d)
+			if !ok || doc["include"] != nil {
+				return nil, "", false
+			}
+			if v := tomlLookup(doc, keys...); v != nil {
+				return v, d, true
+			}
+			if path.Dir(d) == d {
+				return nil, "", true
+			}
+		}
+	}
+	v, _, ok := find("source", "crates-io", "replace-with")
+	name, _ := v.(string)
+	if !ok || name == "" {
+		return ""
+	}
+	// cargo follows a replacement's own replace-with, so only a source replaced once is the vendor tree.
+	if again, _, ok := find("source", name, "replace-with"); !ok || again != nil {
+		return ""
+	}
+	v, base, ok := find("source", name, "directory")
+	directory, _ := v.(string)
+	if !ok || directory == "" || path.IsAbs(directory) || filepath.VolumeName(directory) != "" {
+		return ""
+	}
+	return path.Join(base, directory)
+}
+
 func decodeTOML(r file.Resolver, loc file.Location, limit int64, v any) (toml.MetaData, error) {
 	data, err := readLocation(r, loc, limit)
 	if err != nil {

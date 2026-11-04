@@ -326,8 +326,14 @@ func isVendoredPath(p string) bool {
 // maxVendorProofs bounds the staged Cargo.lock files tested as vendored copies; the rest are looked up as usual.
 const maxVendorProofs = 2048
 
-// maxProofLocks bounds the ancestor directories whose staged Cargo.lock is read as proof.
+// maxProofLocks bounds the ancestor directories read as proof, for Cargo.lock and cargo config each.
 const maxProofLocks = 64
+
+// cargoConfig is a directory's staged cargo config, nil for none, with ok false when cargo's reading of it is unclear.
+type cargoConfig struct {
+	doc map[string]any
+	ok  bool
+}
 
 // withoutVendoredLocks drops the Cargo.lock `cargo vendor` copied with a crate, which no build of the project reads.
 func withoutVendoredLocks(ctx context.Context, repoDir string, paths []string) []string {
@@ -345,12 +351,21 @@ func withoutVendoredLocks(ctx context.Context, repoDir string, paths []string) [
 		locks[dir] = l
 		return l
 	}
+	configs := map[string]cargoConfig{}
+	configAt := func(dir string) (map[string]any, bool) {
+		c, ok := configs[dir]
+		if !ok && len(configs) < maxProofLocks {
+			c = stagedCargoConfig(ctx, repoDir, dir)
+			configs[dir] = c
+		}
+		return c.doc, c.ok
+	}
 	tested := 0
 	out := make([]string, 0, len(paths))
 	for _, p := range paths {
 		if dir := path.Dir(p); path.Base(p) == "Cargo.lock" && dir != "." && tested < maxVendorProofs {
 			tested++
-			if vendoredCopy(ctx, repoDir, dir, lockAt) {
+			if vendoredCopy(ctx, repoDir, dir, lockAt, configAt) {
 				continue
 			}
 		}
@@ -359,8 +374,26 @@ func withoutVendoredLocks(ctx context.Context, repoDir string, paths []string) [
 	return out
 }
 
-// vendoredCopy reports whether a strict ancestor's staged Cargo.lock locks dir's crate at the .crate checksum its marker records.
-func vendoredCopy(ctx context.Context, repoDir, dir string, lockAt func(string) *catalog.CargoLock) bool {
+// stagedCargoConfig reads dir's .cargo/config or .cargo/config.toml from the index, unclear when both exist or one does not parse.
+func stagedCargoConfig(ctx context.Context, repoDir, dir string) cargoConfig {
+	var c cargoConfig
+	for _, name := range []string{"config", "config.toml"} {
+		blob, err := gitShow(ctx, repoDir, ":"+path.Join(dir, ".cargo", name))
+		if err != nil {
+			continue
+		}
+		doc, err := catalog.ParseCargoConfig(blob)
+		if err != nil || c.doc != nil {
+			return cargoConfig{}
+		}
+		c.doc = doc
+	}
+	c.ok = true
+	return c
+}
+
+// vendoredCopy reports whether a strict ancestor's staged Cargo.lock locks dir's crate at its marker's .crate checksum and its cargo config vendors crates.io into dir's parent.
+func vendoredCopy(ctx context.Context, repoDir, dir string, lockAt func(string) *catalog.CargoLock, configAt func(string) (map[string]any, bool)) bool {
 	marker, err := gitShow(ctx, repoDir, ":"+path.Join(dir, ".cargo-checksum.json"))
 	if err != nil {
 		return false
@@ -379,7 +412,7 @@ func vendoredCopy(ctx context.Context, repoDir, dir string, lockAt func(string) 
 	}
 	for a := dir; a != "."; {
 		a = path.Dir(a)
-		if l := lockAt(a); l != nil && l.Vendors(name, version, sum) {
+		if l := lockAt(a); l != nil && l.Vendors(name, version, sum) && catalog.CargoVendorSource(a, configAt) == path.Dir(dir) {
 			return true
 		}
 	}

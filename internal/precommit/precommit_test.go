@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -400,18 +401,32 @@ func vendorCrate(t *testing.T, repo, dir, name, version, sum, lock string) {
 	writeRepoFile(t, repo, dir+"/Cargo.lock", lock)
 }
 
+// vendorConfig is the .cargo/config.toml `cargo vendor` prints, replacing crates.io with dir.
+func vendorConfig(dir string) string {
+	return "[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.vendored-sources]\ndirectory = \"" + dir + "\"\n"
+}
+
 func TestStagedDeltaVendoredCrateLocks(t *testing.T) {
 	sumOld, sumSerde, sumOther := strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64)
 	devLock := lockedCrates([3]string{"criterion", "0.5.1", strings.Repeat("d", 64)})
 	evilLock := lockedCrates([3]string{"evil-crate", "6.6.6", strings.Repeat("e", 64)})
-	serdeBump := func(t *testing.T, dir, marker string) {
-		writeRepoFile(t, dir, "Cargo.lock", lockedCrates([3]string{"serde", "1.0.228", sumOld}))
+	serdeBump := func(t *testing.T, dir, project, marker string) {
+		writeRepoFile(t, dir, path.Join(project, "Cargo.lock"), lockedCrates([3]string{"serde", "1.0.228", sumOld}))
 		commitAll(t, dir)
-		writeRepoFile(t, dir, "Cargo.lock", lockedCrates([3]string{"serde", "1.0.229", sumSerde}))
-		vendorCrate(t, dir, "vendor/serde", "serde", "1.0.229", marker, devLock)
+		writeRepoFile(t, dir, path.Join(project, "Cargo.lock"), lockedCrates([3]string{"serde", "1.0.229", sumSerde}))
+		vendorCrate(t, dir, path.Join(project, "vendor/serde"), "serde", "1.0.229", marker, devLock)
+		gitT(t, dir, "add", "-A")
+	}
+	// plantedProject stages a nested project at tools/x with a marker matching the root lock's pin of x.
+	plantedProject := func(t *testing.T, dir string) {
+		writeRepoFile(t, dir, "Cargo.lock", lockedCrates([3]string{"x", "1.0.0", sumSerde}))
+		commitAll(t, dir)
+		vendorCrate(t, dir, "tools/x", "x", "1.0.0", sumSerde, evilLock)
 		gitT(t, dir, "add", "-A")
 	}
 	serde := Package{Type: "cargo", Name: "serde", Version: "1.0.229", Path: "Cargo.lock"}
+	criterion := Package{Type: "cargo", Name: "criterion", Version: "0.5.1", Path: "vendor/serde/Cargo.lock"}
+	plantedEvil := []Package{{Type: "cargo", Name: "evil-crate", Version: "6.6.6", Path: "tools/x/Cargo.lock"}}
 
 	cases := []struct {
 		name  string
@@ -419,19 +434,47 @@ func TestStagedDeltaVendoredCrateLocks(t *testing.T) {
 		want  []Package
 	}{
 		{
-			name:  "a vendored crate's own lock is skipped and the project's lock still checked",
-			setup: func(t *testing.T, dir string) { serdeBump(t, dir, sumSerde) },
-			want:  []Package{serde},
-		},
-		{
-			name:  "a marker whose checksum the project's lock does not pin skips nothing",
-			setup: func(t *testing.T, dir string) { serdeBump(t, dir, sumOther) },
-			want:  []Package{{Type: "cargo", Name: "criterion", Version: "0.5.1", Path: "vendor/serde/Cargo.lock"}, serde},
-		},
-		{
-			name: "a marker at the repo root does not hide the root lock",
+			name: "a vendored crate's own lock is skipped and the project's lock still checked",
 			setup: func(t *testing.T, dir string) {
-				writeRepoFile(t, dir, "README.md", "# hi\n")
+				writeRepoFile(t, dir, ".cargo/config.toml", vendorConfig("vendor"))
+				serdeBump(t, dir, ".", sumSerde)
+			},
+			want: []Package{serde},
+		},
+		{
+			name: "a marker whose checksum the project's lock does not pin skips nothing",
+			setup: func(t *testing.T, dir string) {
+				writeRepoFile(t, dir, ".cargo/config.toml", vendorConfig("vendor"))
+				serdeBump(t, dir, ".", sumOther)
+			},
+			want: []Package{criterion, serde},
+		},
+		{
+			name: "a nested project's nearest config sets the vendor directory, relative to that project",
+			setup: func(t *testing.T, dir string) {
+				writeRepoFile(t, dir, ".cargo/config.toml", vendorConfig("third_party"))
+				writeRepoFile(t, dir, "app/.cargo/config.toml", "[source.vendored-sources]\ndirectory = \"vendor\"\n")
+				serdeBump(t, dir, "app", sumSerde)
+			},
+			want: []Package{{Type: "cargo", Name: "serde", Version: "1.0.229", Path: "app/Cargo.lock"}},
+		},
+		{
+			name:  "a planted marker beside a nested project the root lock pins skips nothing without a cargo config",
+			setup: plantedProject,
+			want:  plantedEvil,
+		},
+		{
+			name: "a planted marker beside a nested project outside the configured vendor directory skips nothing",
+			setup: func(t *testing.T, dir string) {
+				writeRepoFile(t, dir, ".cargo/config.toml", vendorConfig("vendor"))
+				plantedProject(t, dir)
+			},
+			want: plantedEvil,
+		},
+		{
+			name: "a marker at the repo root does not hide the root lock, even with a config vendoring into the root",
+			setup: func(t *testing.T, dir string) {
+				writeRepoFile(t, dir, ".cargo/config.toml", vendorConfig("."))
 				commitAll(t, dir)
 				vendorCrate(t, dir, ".", "app", "0.1.0", sumOther, lockedCrates([3]string{"app", "0.1.0", sumOther}, [3]string{"evil-crate", "6.6.6", sumOld}))
 				gitT(t, dir, "add", "-A")
@@ -442,18 +485,20 @@ func TestStagedDeltaVendoredCrateLocks(t *testing.T) {
 			},
 		},
 		{
-			name: "a marker copying a vendored crate's checksum does not hide a project of another name",
+			name: "a marker copying a vendored crate's checksum does not hide a crate of another name",
 			setup: func(t *testing.T, dir string) {
+				writeRepoFile(t, dir, ".cargo/config.toml", vendorConfig("vendor"))
 				writeRepoFile(t, dir, "Cargo.lock", lockedCrates([3]string{"serde", "1.0.229", sumSerde}))
 				commitAll(t, dir)
-				vendorCrate(t, dir, "tools/x", "x", "1.0.229", sumSerde, evilLock)
+				vendorCrate(t, dir, "vendor/x", "x", "1.0.229", sumSerde, evilLock)
 				gitT(t, dir, "add", "-A")
 			},
-			want: []Package{{Type: "cargo", Name: "evil-crate", Version: "6.6.6", Path: "tools/x/Cargo.lock"}},
+			want: []Package{{Type: "cargo", Name: "evil-crate", Version: "6.6.6", Path: "vendor/x/Cargo.lock"}},
 		},
 		{
 			name: "an exact pin hand-added to a vendored manifest is still checked",
 			setup: func(t *testing.T, dir string) {
+				writeRepoFile(t, dir, ".cargo/config.toml", vendorConfig("vendor"))
 				writeRepoFile(t, dir, "Cargo.lock", lockedCrates([3]string{"serde", "1.0.229", sumSerde}))
 				vendorCrate(t, dir, "vendor/serde", "serde", "1.0.229", sumSerde, devLock)
 				commitAll(t, dir)

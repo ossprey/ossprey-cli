@@ -391,8 +391,12 @@ The pre-commit hook's temp trees hold no marker, so the filter never runs
 there; `withoutVendoredLocks` instead drops a staged `Cargo.lock` beside a
 marker only when a strict ancestor's staged `Cargo.lock` pins that crate's
 name@version at the marker's checksum (`CargoLock.Vendors`, the filter's own
-lock check), which leaves a vendored crate's own lock out of the lookup, never
-skips a `Cargo.toml`, and still checks in full a `vendor/` change staged
+lock check) and the staged `.cargo/config` or `.cargo/config.toml` at or above
+that ancestor replaces crates.io with a `directory` source that is the crate's
+parent (`CargoVendorSource`: nearest config wins per key, a path is relative to
+the directory holding `.cargo`, and no config, an unclear one or a mismatch
+skips nothing). That leaves a vendored crate's own lock out of the lookup,
+never skips a `Cargo.toml`, and still checks in full a `vendor/` change staged
 without its `Cargo.lock`.
 
 #### Why the npm resolve skips workspace members (OSS-1353)
