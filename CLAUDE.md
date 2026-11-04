@@ -400,7 +400,13 @@ crates.io in `Cargo.lock` while cargo builds whatever the replacement serves (a
 mirror, a git repository, a directory), so the scan checks crates.io releases
 that may not be the code built. Nothing in the scan records what the replacement
 served, so there is nothing to mark, and dropping the crates would only check
-less; one warning a scan says so, which is the decision for now. It finds
+less; one warning a scan says so, which is the decision for now. Only `scan.Run`
+asks for it (`Options.ReportCargoReplacement`): the pre-commit hook catalogues
+temp trees that hold no repository config, so all it could report is the
+developer's own `CARGO_HOME` mirror, on every commit, against a hook whose clean
+output is nothing. The entry has no `Many`, which `warn.Drain` renders as `One`
+however often it is added, so a caller cataloguing twice still prints one
+accurate line. It finds
 configs with the vendor filter's own discovery (`cargoConfigLocations`,
 `cargoConfigLevels`, `cargoFilesAbove`: the scan, every ancestor and
 `CARGO_HOME`), reading each file on its own so one that cannot be parsed does

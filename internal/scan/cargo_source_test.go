@@ -883,3 +883,23 @@ source = "sparse+https://index.crates.io/%2F"
 		"pkg:cargo/escaped-sparse-crate@1.0.0?repository_url=https:%2F%2Findex.crates.io%2F",
 	})
 }
+
+// A scan says once that a cargo config replaces crates.io, since only scan.Run asks the catalogue to (OSS-2099).
+func TestRunReportsCargoSourceReplacement(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CARGO_HOME", home)
+	if err := os.WriteFile(filepath.Join(home, "config.toml"), []byte("[source.crates-io]\nreplace-with = \"mirror\"\n\n[source.mirror]\nregistry = \"sparse+https://crates.corp.example/index/\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "Cargo.toml"), []byte("[package]\nname = \"app\"\n\n[dependencies]\nserde = \"=1.0.100\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx := warn.NewContext(context.Background(), false)
+	if _, err := Run(ctx, Options{Path: dir, NoExec: true, SkipVersionLookup: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got := warn.Drain(ctx); !strings.Contains(got, "replaces crates.io with another source") {
+		t.Errorf("warnings = %q, want the source replacement reported", got)
+	}
+}

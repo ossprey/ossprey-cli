@@ -235,7 +235,7 @@ func TestCatalogWarnsWhenCargoReplacesCratesIo(t *testing.T) {
 			}
 			writeTree(t, dir, tc.files)
 			ctx := warn.NewContext(context.Background(), false)
-			got, err := Catalog(ctx, filepath.Join(dir, tc.scan), Options{NoExec: true})
+			got, err := Catalog(ctx, filepath.Join(dir, tc.scan), Options{NoExec: true, ReportCargoReplacement: true})
 			if err != nil {
 				t.Fatalf("Catalog: %v", err)
 			}
@@ -248,6 +248,40 @@ func TestCatalogWarnsWhenCargoReplacesCratesIo(t *testing.T) {
 				if p.Type == "cargo" && p.Version == "" {
 					t.Errorf("%s left unversioned", p.Name)
 				}
+			}
+		})
+	}
+}
+
+// Only a scan reports a replacement, once and without a count, and the pre-commit hook's temp trees never do (OSS-2099).
+func TestCatalogReportsCargoReplacementOnlyForAScan(t *testing.T) {
+	t.Setenv("OSSPREY_RESOLVE_LATEST", "")
+	withResolveLatest(t, func(context.Context, string, string) (string, error) { return "9.9.9", nil })
+	home := t.TempDir()
+	t.Setenv("CARGO_HOME", home)
+	writeTree(t, home, map[string]string{"config.toml": mirrorConfig})
+	trees := []string{t.TempDir(), t.TempDir()}
+	for _, dir := range trees {
+		writeTree(t, dir, map[string]string{"Cargo.toml": "[package]\nname = \"app\"\n\n[dependencies]\nserde = \"=1.0.100\"\n"})
+	}
+	for _, tc := range []struct {
+		name string
+		opts Options
+		want string
+	}{
+		// The hook catalogues its staged and HEAD trees offline, as precommit.Run does.
+		{"pre-commit trees", Options{SkipVersionLookup: true, NoExec: true}, ""},
+		{"a scan cataloguing twice", Options{NoExec: true, ReportCargoReplacement: true}, "ossprey: " + cargoReplacedEntry.One + "\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := warn.NewContext(context.Background(), false)
+			for _, dir := range trees {
+				if _, err := Catalog(ctx, dir, tc.opts); err != nil {
+					t.Fatalf("Catalog: %v", err)
+				}
+			}
+			if got := warn.Drain(ctx); got != tc.want {
+				t.Errorf("warnings = %q, want %q", got, tc.want)
 			}
 		})
 	}

@@ -73,6 +73,9 @@ type Options struct {
 	// Trust names the sources whose packages are marked Trusted. The zero
 	// value trusts nothing.
 	Trust trust.Policy
+
+	// ReportCargoReplacement warns when a cargo config replaces crates.io; scan.Run sets it, and a caller cataloguing temp trees leaves it off.
+	ReportCargoReplacement bool
 }
 
 // packageSinks are directories package managers install into, cache in, or
@@ -321,7 +324,7 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 		}
 	}
 
-	if slices.ContainsFunc(out, isCratesIoCrate) && cargoSourceReplaced(resolver, absRoot) {
+	if opts.ReportCargoReplacement && slices.ContainsFunc(out, isCratesIoCrate) && cargoSourceReplaced(resolver, absRoot) {
 		warn.Add(ctx, cargoReplacedEntry)
 	}
 	merged := mergeVersionless(out, cargoRoots, cargoReqs)
@@ -334,11 +337,10 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 // isCratesIoCrate reports a crate sent as the crates.io release of its name.
 func isCratesIoCrate(p Package) bool { return p.Type == "cargo" && len(p.Qualifiers) == 0 }
 
-// cargoReplacedEntry says once per scan that cargo may build crates.io crates from another source.
+// cargoReplacedEntry says once that cargo may build crates.io crates from another source; with no Many it reads the same however often it is added.
 var cargoReplacedEntry = warn.Entry{
 	Class: "cargo:source-replaced",
 	One:   "a cargo config replaces crates.io with another source, so crates are checked as their crates.io releases",
-	Many:  "cargo configs replace crates.io with another source in %d scanned trees, so crates are checked as their crates.io releases",
 }
 
 // resolveLatestFn resolves the latest published version of a package from its
