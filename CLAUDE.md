@@ -410,10 +410,17 @@ accurate line. It finds
 configs with the vendor filter's own discovery (`cargoConfigLocations`,
 `cargoConfigLevels`, `cargoFilesAbove`: the scan, every ancestor and
 `CARGO_HOME`), reading each file on its own so one that cannot be parsed does
-not hide another's replacement. It stays quiet for a directory the vendor
-filter proved (`cargoVendored.vendors`), whose crates the lock pins to
-crates.io checksums, though the files cargo checks against
-`.cargo-checksum.json` are not compared with the release. It runs only when a
+not hide another's replacement. It judges the replacement in effect where cargo
+would run, at the scan root and at each directory in the scan holding a config
+(`cratesIoReplacement`: the nearest level that sets `replace-with`, as
+`vendorDir` walks, then `CARGO_HOME`'s, which cargo reads last), and stays
+quiet only where that is a vendor directory the filter proved
+(`cargoVendored.vendors`), whose crates the lock pins to crates.io checksums,
+though the files cargo checks against `.cargo-checksum.json` are not compared
+with the release. Judging each config at its own directory missed a nested
+config that redirects the vendored source without restating `replace-with`,
+and warned about a `CARGO_HOME` mirror that the project's own vendor config
+overrides everywhere in the project. It runs only when a
 crate goes out unmarked, so a scan with no Rust never mentions cargo.
 
 #### Why the npm resolve skips workspace members (OSS-1353)

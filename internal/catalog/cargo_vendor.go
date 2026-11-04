@@ -324,7 +324,7 @@ func cargoConfigLevels(configLocs []file.Location, configs map[string]cargoFile,
 	return levels
 }
 
-// cargoSourceReplaced reports whether a cargo config the vendor filter reads replaces crates.io with anything but a vendor directory it proved.
+// cargoSourceReplaced reports whether cargo run at the scan root or beside a config in it takes crates.io from anything but a vendor directory the filter proved.
 func cargoSourceReplaced(r file.Resolver, root string) bool {
 	vendored, _ := r.(cargoVendored)
 	root = resolvedRoot(root)
@@ -343,14 +343,55 @@ func cargoSourceReplaced(r file.Resolver, root string) bool {
 	// A file above the scan that cannot be read drops only the configs found above it.
 	_, aboveConfigs, _ := cargoFilesAbove(root)
 	levels := cargoConfigLevels(configLocs, configs, aboveConfigs, rootSlash)
+	// Configs above the scan and CARGO_HOME's count by their effect at the scan root, not at their own directory.
+	dirs := []string{rootSlash}
 	for _, cs := range levels {
-		for _, c := range cs {
-			if with, _ := tomlLookup(c.doc, "source", "crates-io", "replace-with").(string); with != "" && !vendored.vendors[vendorDir(levels, c.bases[0])] {
-				return true
-			}
+		if base := cs[0].bases[0]; strings.HasPrefix(foldPath(base)+"/", foldPath(rootSlash+"/")) {
+			dirs = append(dirs, base)
+		}
+	}
+	for _, d := range dirs {
+		if cratesIoReplacement(levels, d) != "" && !vendored.vendors[vendorDir(levels, d)] {
+			return true
 		}
 	}
 	return false
+}
+
+// cratesIoReplacement is the replace-with for crates.io in effect for cargo run in dir: the nearest level that sets one, else CARGO_HOME's.
+func cratesIoReplacement(levels map[string][]cargoFile, dir string) string {
+	at := func(d string) string {
+		for _, c := range levels[foldPath(d)] {
+			if with, _ := tomlLookup(c.doc, "source", "crates-io", "replace-with").(string); with != "" {
+				return with
+			}
+		}
+		return ""
+	}
+	for d := dir; ; d = path.Dir(d) {
+		if with := at(d); with != "" {
+			return with
+		}
+		if path.Dir(d) == d {
+			break
+		}
+	}
+	// cargoFilesAbove files CARGO_HOME's configs at its parent, which need not be above dir.
+	if home := cargoHome(); home != "" {
+		return at(filepath.ToSlash(filepath.Dir(home)))
+	}
+	return ""
+}
+
+// cargoHome is the directory cargo reads its user-level config from.
+func cargoHome() string {
+	if home := os.Getenv("CARGO_HOME"); home != "" {
+		return home
+	}
+	if h, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(h, ".cargo")
+	}
+	return ""
 }
 
 func tomlLookup(v any, keys ...string) any {

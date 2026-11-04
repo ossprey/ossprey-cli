@@ -220,11 +220,16 @@ func TestCatalogWarnsWhenCargoReplacesCratesIo(t *testing.T) {
 		{name: "beside an unreadable config", files: map[string]string{"Cargo.toml": project, ".cargo/config.toml": mirrorConfig, "docs/.cargo/config.toml": "[source.crates-io\n"}, want: 1},
 		{name: "proven vendor tree", tree: cargoVendorFixture, want: 0},
 		{name: "mirror beside a vendor tree", tree: cargoVendorFixture, files: map[string]string{"tools/.cargo/config.toml": mirrorConfig}, want: 1},
+		// The root's replace-with still holds in tools, where the vendored source now names an unproven directory.
+		{name: "vendored source redirected below the root", tree: cargoVendorFixture, files: map[string]string{"tools/.cargo/config.toml": "[source.vendored-sources]\ndirectory = \"../mirror-vendor\"\n"}, want: 1},
+		// Every cargo run in the project takes the project's proven vendor tree, so CARGO_HOME's mirror is never in effect.
+		{name: "CARGO_HOME mirror under a proven vendor tree", tree: cargoVendorFixture, home: mirrorConfig, want: 0},
 		{name: "not replaced", files: map[string]string{"Cargo.toml": project, ".cargo/config.toml": "[net]\ngit-fetch-with-cli = true\n"}, want: 0},
 		{name: "no crates", files: map[string]string{"package.json": `{"name":"web","dependencies":{"left-pad":"^1.3.0"}}`, ".cargo/config.toml": mirrorConfig}, want: 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			home := t.TempDir()
+			// A user's CARGO_HOME, whose parent is not above the scan.
+			home := filepath.Join(t.TempDir(), "user", ".cargo")
 			t.Setenv("CARGO_HOME", home)
 			if tc.home != "" {
 				writeTree(t, home, map[string]string{"config.toml": tc.home})
@@ -257,7 +262,7 @@ func TestCatalogWarnsWhenCargoReplacesCratesIo(t *testing.T) {
 func TestCatalogReportsCargoReplacementOnlyForAScan(t *testing.T) {
 	t.Setenv("OSSPREY_RESOLVE_LATEST", "")
 	withResolveLatest(t, func(context.Context, string, string) (string, error) { return "9.9.9", nil })
-	home := t.TempDir()
+	home := filepath.Join(t.TempDir(), "user", ".cargo")
 	t.Setenv("CARGO_HOME", home)
 	writeTree(t, home, map[string]string{"config.toml": mirrorConfig})
 	trees := []string{t.TempDir(), t.TempDir()}
