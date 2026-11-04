@@ -96,6 +96,60 @@ func TestCatalogCargoInheritsFromTheRootCargoFinds(t *testing.T) {
 			links: map[string]string{"scan/inner/Cargo.toml": "outside/Cargo.toml"},
 		},
 		{
+			name: "past a malformed ancestor, an outer root listing the member is its root",
+			files: map[string]string{
+				"Cargo.toml":           pool("members = [\"inner/a/m\"]\n", "1.0.200"),
+				"inner/Cargo.toml":     "[workspace\nmembers = [\"a/m\"]\n",
+				"inner/a/m/Cargo.toml": member,
+			},
+			want: "1.0.200",
+		},
+		{
+			name: "past a malformed ancestor, a members glob lists the member",
+			files: map[string]string{
+				"Cargo.toml":           pool("members = [\"./inner/*/*\"]\n", "1.0.200"),
+				"inner/Cargo.toml":     "[workspace\nmembers = [\"a/m\"]\n",
+				"inner/a/m/Cargo.toml": member,
+			},
+			want: "1.0.200",
+		},
+		{
+			name: "past a malformed ancestor, a glob of another depth does not list the member",
+			files: map[string]string{
+				"Cargo.toml":           pool("members = [\"inner/*\"]\n", "1.0.200"),
+				"inner/Cargo.toml":     "[workspace\nmembers = [\"a/m\"]\n",
+				"inner/a/m/Cargo.toml": member,
+			},
+		},
+		{
+			name: "past a malformed ancestor, an outer root excluding the member is not its root",
+			files: map[string]string{
+				"Cargo.toml":           pool("members = [\"inner/*/*\"]\nexclude = [\"inner/a\"]\n", "1.0.200"),
+				"inner/Cargo.toml":     "[workspace\nmembers = [\"a/m\"]\n",
+				"inner/a/m/Cargo.toml": member,
+			},
+		},
+		{
+			name: "past an ancestor linked out of the scan, an outer root listing the member is its root",
+			scan: "scan",
+			files: map[string]string{
+				"outside/Cargo.toml":      pool("", "1.0.100"),
+				"scan/Cargo.toml":         pool("members = [\"inner/m\"]\n", "1.0.200"),
+				"scan/inner/m/Cargo.toml": member,
+			},
+			links: map[string]string{"scan/inner/Cargo.toml": "outside/Cargo.toml"},
+			want:  "1.0.200",
+		},
+		{
+			name: "past an empty ancestor, an outer root listing the member is its root",
+			files: map[string]string{
+				"Cargo.toml":           pool("members = [\"inner/a/m\"]\n", "1.0.200"),
+				"inner/Cargo.toml":     "",
+				"inner/a/m/Cargo.toml": member,
+			},
+			want: "1.0.200",
+		},
+		{
 			name: "a root that excludes the member is passed over",
 			files: map[string]string{
 				"Cargo.toml":      pool("members = [\"ws/m\"]\n", "1.0.100"),

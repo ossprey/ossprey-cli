@@ -160,11 +160,7 @@ func readManifest(path string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
-// workspacePool returns the [workspace.dependencies] table of the root cargo finds for this manifest, that root's directory, and false when the root cannot be read inside the scan root.
-//
-// isRoot is whether this manifest declares [workspace] at all. Cargo roots a
-// workspace on that table, not on it having dependencies, so a nested workspace
-// that declares an empty one must not inherit an outer workspace's pool.
+// workspacePool returns the [workspace.dependencies] table of the root cargo finds for this manifest (isRoot: it declares [workspace]), that root's directory, and false when the root cannot be read inside the scan root.
 func workspacePool(m cargoManifest, isRoot bool, manifestPath, scanRoot string) (pool map[string]any, rootDir string, ok bool) {
 	manifestPath = filepath.Clean(manifestPath)
 	own := filepath.Dir(manifestPath)
@@ -175,27 +171,36 @@ func workspacePool(m cargoManifest, isRoot bool, manifestPath, scanRoot string) 
 	if m.Package.Workspace != "" {
 		return pointedPool(manifestPath, m.Package.Workspace, root)
 	}
+	// Cargo run from the member errors past an ancestor it cannot read, but run from a root that lists the member it never reads that ancestor.
+	broken := false
 	dir := own
 	for {
 		parent := filepath.Dir(dir)
 		if parent == dir || !withinRoot(parent, root) {
+			if broken {
+				return nil, "", false
+			}
 			return nil, own, true
 		}
 		dir = parent
 		ancestorPath := filepath.Join(dir, "Cargo.toml")
-		// Cargo climbs past a missing ancestor manifest but errors on one it cannot read or parse, so the walk stops there too.
+		// Cargo climbs past a missing ancestor manifest.
 		if _, err := os.Stat(ancestorPath); err != nil {
 			continue
 		}
-		// The directory is inside the root, but the manifest itself can be a
-		// symlink pointing out of it, which would adopt a pool from elsewhere.
+		// A manifest linked out of the scan root counts as unreadable, since its pool would come from elsewhere.
 		if !withinRoot(ancestorPath, root) {
-			return nil, "", false
+			broken = true
+			continue
 		}
 		ancestor, ancestorIsRoot, err := readCargoManifest(ancestorPath)
 		switch {
 		case err != nil:
-			return nil, "", false
+			broken = true
+		case broken:
+			if ancestorIsRoot && listsMember(ancestor, dir, manifestPath) && !excludes(ancestor, dir, manifestPath) {
+				return ancestor.Workspace.Dependencies, dir, true
+			}
 		case ancestorIsRoot && !excludes(ancestor, dir, manifestPath):
 			return ancestor.Workspace.Dependencies, dir, true
 		case !ancestorIsRoot && ancestor.Package.Workspace != "":
@@ -244,6 +249,39 @@ func readCargoManifest(path string) (m cargoManifest, isRoot bool, err error) {
 	}
 	md, err := toml.Decode(string(data), &m)
 	return m, md.IsDefined("workspace"), err
+}
+
+// listsMember reports whether a members entry of the workspace rooted at dir, matched component by component as cargo's glob expands it, names the member's directory.
+func listsMember(ws cargoManifest, dir, manifestPath string) bool {
+	rel, err := filepath.Rel(dir, filepath.Dir(manifestPath))
+	if err != nil {
+		return false
+	}
+	want := strings.Split(filepath.ToSlash(rel), "/")
+	for _, e := range ws.Workspace.Members {
+		if filepath.IsAbs(e) {
+			if e, err = filepath.Rel(dir, e); err != nil {
+				continue
+			}
+		}
+		if matchComponents(strings.Split(filepath.ToSlash(filepath.Clean(e)), "/"), want) {
+			return true
+		}
+	}
+	return false
+}
+
+// matchComponents reports whether each path component matches its glob, with as many components on each side.
+func matchComponents(pattern, path []string) bool {
+	if len(pattern) != len(path) {
+		return false
+	}
+	for i := range pattern {
+		if ok, err := filepath.Match(pattern[i], path[i]); err != nil || !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // excludes reports whether the workspace rooted at dir leaves a member out, as cargo's is_excluded does: an exclude entry covers it and no members entry does.
