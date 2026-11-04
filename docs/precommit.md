@@ -76,6 +76,11 @@ framework manage both.
 - **Crates from git or a private registry.** A `Cargo.lock` crate that Cargo
   fetches from anywhere but crates.io is not the crates.io crate of that name,
   so it is left out of the lookup.
+- **A vendored crate's own `Cargo.lock`.** A crate `cargo vendor` copies
+  keeps the `Cargo.lock` its author published, which your build never reads,
+  so it is not looked up when your project's `Cargo.lock` pins that crate at
+  its vendored checksum; a `vendor/` change staged without its `Cargo.lock` is
+  still checked in full.
 - **Rust crates on plans without Rust scanning.** Staged crates are not looked
   up; [supported ecosystems](ecosystems.md) says which plans include Rust.
 - **Packages already committed.** The hook diffs the staged manifests against

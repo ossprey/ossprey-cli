@@ -382,6 +382,102 @@ func TestStagedDeltaReportsNothingForAPathGitOrRegistryPoolEntryChange(t *testin
 	}
 }
 
+// lockedCrates renders a Cargo.lock of crates.io crates, each {name, version, checksum}.
+func lockedCrates(crates ...[3]string) string {
+	var b strings.Builder
+	b.WriteString("version = 4\n")
+	for _, c := range crates {
+		fmt.Fprintf(&b, "\n[[package]]\nname = %q\nversion = %q\nsource = %q\nchecksum = %q\n", c[0], c[1], cratesIoSource, c[2])
+	}
+	return b.String()
+}
+
+// vendorCrate writes dir as `cargo vendor` does: the crate's manifest, a marker recording sum, and the crate's own lock.
+func vendorCrate(t *testing.T, repo, dir, name, version, sum, lock string) {
+	t.Helper()
+	writeRepoFile(t, repo, dir+"/Cargo.toml", fmt.Sprintf("[package]\nname = %q\nversion = %q\n", name, version))
+	writeRepoFile(t, repo, dir+"/.cargo-checksum.json", `{"files":{},"package":"`+sum+`"}`)
+	writeRepoFile(t, repo, dir+"/Cargo.lock", lock)
+}
+
+func TestStagedDeltaVendoredCrateLocks(t *testing.T) {
+	sumOld, sumSerde, sumOther := strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64)
+	devLock := lockedCrates([3]string{"criterion", "0.5.1", strings.Repeat("d", 64)})
+	evilLock := lockedCrates([3]string{"evil-crate", "6.6.6", strings.Repeat("e", 64)})
+	serdeBump := func(t *testing.T, dir, marker string) {
+		writeRepoFile(t, dir, "Cargo.lock", lockedCrates([3]string{"serde", "1.0.228", sumOld}))
+		commitAll(t, dir)
+		writeRepoFile(t, dir, "Cargo.lock", lockedCrates([3]string{"serde", "1.0.229", sumSerde}))
+		vendorCrate(t, dir, "vendor/serde", "serde", "1.0.229", marker, devLock)
+		gitT(t, dir, "add", "-A")
+	}
+	serde := Package{Type: "cargo", Name: "serde", Version: "1.0.229", Path: "Cargo.lock"}
+
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, dir string)
+		want  []Package
+	}{
+		{
+			name:  "a vendored crate's own lock is skipped and the project's lock still checked",
+			setup: func(t *testing.T, dir string) { serdeBump(t, dir, sumSerde) },
+			want:  []Package{serde},
+		},
+		{
+			name:  "a marker whose checksum the project's lock does not pin skips nothing",
+			setup: func(t *testing.T, dir string) { serdeBump(t, dir, sumOther) },
+			want:  []Package{{Type: "cargo", Name: "criterion", Version: "0.5.1", Path: "vendor/serde/Cargo.lock"}, serde},
+		},
+		{
+			name: "a marker at the repo root does not hide the root lock",
+			setup: func(t *testing.T, dir string) {
+				writeRepoFile(t, dir, "README.md", "# hi\n")
+				commitAll(t, dir)
+				vendorCrate(t, dir, ".", "app", "0.1.0", sumOther, lockedCrates([3]string{"app", "0.1.0", sumOther}, [3]string{"evil-crate", "6.6.6", sumOld}))
+				gitT(t, dir, "add", "-A")
+			},
+			want: []Package{
+				{Type: "cargo", Name: "app", Version: "0.1.0", Path: "Cargo.lock"},
+				{Type: "cargo", Name: "evil-crate", Version: "6.6.6", Path: "Cargo.lock"},
+			},
+		},
+		{
+			name: "a marker copying a vendored crate's checksum does not hide a project of another name",
+			setup: func(t *testing.T, dir string) {
+				writeRepoFile(t, dir, "Cargo.lock", lockedCrates([3]string{"serde", "1.0.229", sumSerde}))
+				commitAll(t, dir)
+				vendorCrate(t, dir, "tools/x", "x", "1.0.229", sumSerde, evilLock)
+				gitT(t, dir, "add", "-A")
+			},
+			want: []Package{{Type: "cargo", Name: "evil-crate", Version: "6.6.6", Path: "tools/x/Cargo.lock"}},
+		},
+		{
+			name: "an exact pin hand-added to a vendored manifest is still checked",
+			setup: func(t *testing.T, dir string) {
+				writeRepoFile(t, dir, "Cargo.lock", lockedCrates([3]string{"serde", "1.0.229", sumSerde}))
+				vendorCrate(t, dir, "vendor/serde", "serde", "1.0.229", sumSerde, devLock)
+				commitAll(t, dir)
+				writeRepoFile(t, dir, "vendor/serde/Cargo.toml", "[package]\nname = \"serde\"\nversion = \"1.0.229\"\n\n[dependencies]\nanyhow = \"=1.0.100\"\n")
+				gitT(t, dir, "add", "-A")
+			},
+			want: []Package{{Type: "cargo", Name: "anyhow", Version: "1.0.100", Path: "vendor/serde/Cargo.toml"}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := initRepo(t)
+			tc.setup(t, dir)
+			got, err := StagedDelta(context.Background(), dir, trust.Policy{})
+			if err != nil {
+				t.Fatalf("StagedDelta: %v", err)
+			}
+			if !reflect.DeepEqual(got.Packages, tc.want) {
+				t.Errorf("delta mismatch:\n got: %+v\nwant: %+v", got.Packages, tc.want)
+			}
+		})
+	}
+}
+
 // TestRepoRelLocation exercises every location spelling the resolvers are
 // known to produce, on every platform — including the Windows-only forms that
 // broke on CI (OSS-1564): the function is pure string work, so the

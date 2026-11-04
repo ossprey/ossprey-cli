@@ -70,6 +70,7 @@ func StagedDelta(ctx context.Context, repoDir string, policy trust.Policy) (Delt
 	if err != nil {
 		return Delta{}, err
 	}
+	paths = withoutVendoredLocks(ctx, repoDir, paths)
 	if len(paths) == 0 {
 		return Delta{}, nil
 	}
@@ -320,6 +321,69 @@ func isManifestPath(p string) bool {
 // dependency tree is skipped.
 func isVendoredPath(p string) bool {
 	return strings.Contains(filepath.ToSlash(p), "node_modules/")
+}
+
+// maxVendorProofs bounds the staged Cargo.lock files tested as vendored copies; the rest are looked up as usual.
+const maxVendorProofs = 2048
+
+// maxProofLocks bounds the ancestor directories whose staged Cargo.lock is read as proof.
+const maxProofLocks = 64
+
+// withoutVendoredLocks drops the Cargo.lock `cargo vendor` copied with a crate, which no build of the project reads.
+func withoutVendoredLocks(ctx context.Context, repoDir string, paths []string) []string {
+	locks := map[string]*catalog.CargoLock{}
+	lockAt := func(dir string) *catalog.CargoLock {
+		if l, ok := locks[dir]; ok || len(locks) >= maxProofLocks {
+			return l
+		}
+		var l *catalog.CargoLock
+		if blob, err := gitShow(ctx, repoDir, ":"+path.Join(dir, "Cargo.lock")); err == nil {
+			if parsed, err := catalog.ParseCargoLock(blob); err == nil {
+				l = &parsed
+			}
+		}
+		locks[dir] = l
+		return l
+	}
+	tested := 0
+	out := make([]string, 0, len(paths))
+	for _, p := range paths {
+		if dir := path.Dir(p); path.Base(p) == "Cargo.lock" && dir != "." && tested < maxVendorProofs {
+			tested++
+			if vendoredCopy(ctx, repoDir, dir, lockAt) {
+				continue
+			}
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// vendoredCopy reports whether a strict ancestor's staged Cargo.lock locks dir's crate at the .crate checksum its marker records.
+func vendoredCopy(ctx context.Context, repoDir, dir string, lockAt func(string) *catalog.CargoLock) bool {
+	marker, err := gitShow(ctx, repoDir, ":"+path.Join(dir, ".cargo-checksum.json"))
+	if err != nil {
+		return false
+	}
+	sum := catalog.CargoVendorChecksum(marker)
+	if sum == "" {
+		return false
+	}
+	manifest, err := gitShow(ctx, repoDir, ":"+path.Join(dir, "Cargo.toml"))
+	if err != nil {
+		return false
+	}
+	name, version := catalog.CargoPackageID(manifest)
+	if name == "" || version == "" {
+		return false
+	}
+	for a := dir; a != "."; {
+		a = path.Dir(a)
+		if l := lockAt(a); l != nil && l.Vendors(name, version, sum) {
+			return true
+		}
+	}
+	return false
 }
 
 // cargoAncestors lists the unstaged Cargo.toml paths above each staged one, up to the repo root.

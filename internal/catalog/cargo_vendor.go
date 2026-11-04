@@ -37,8 +37,8 @@ type cargoFile struct {
 	inexact bool
 }
 
-// lockedSet is one project's Cargo.lock: checksums per name@version ("" for a path crate) and versions per name.
-type lockedSet struct {
+// CargoLock is one project's Cargo.lock: checksums per name@version ("" for a path crate) and versions per name.
+type CargoLock struct {
 	sums     map[string]map[string]bool
 	versions map[string][]string
 }
@@ -152,9 +152,7 @@ func withoutCargoVendor(r file.Resolver, root string) file.Resolver {
 			if !ok {
 				continue
 			}
-			// "" is a path crate of the same name and version, which the project builds itself.
-			sums := lock.sums[name+"@"+version]
-			if sums[sum] && !sums[""] && lockCoversDeps(lock, m.doc) && vendorDir(levels, path.Join(rootSlash, a)) == source {
+			if lock.Vendors(name, version, sum) && lockCoversDeps(lock, m.doc) && vendorDir(levels, path.Join(rootSlash, a)) == source {
 				hidden[p] = true
 				hidden[dir+"/Cargo.lock"] = true
 				break
@@ -459,7 +457,7 @@ func cargoPathRefs(doc map[string]any) (literals, globs []string, unsure bool) {
 }
 
 // lockCoversDeps reports whether the lock holds a release meeting each normal and build dependency doc turns on.
-func lockCoversDeps(lock lockedSet, doc map[string]any) bool {
+func lockCoversDeps(lock CargoLock, doc map[string]any) bool {
 	on := defaultFeatureDeps(doc)
 	tables := []any{doc["dependencies"], doc["build-dependencies"], doc["build_dependencies"]}
 	if targets, ok := doc["target"].(map[string]any); ok {
@@ -536,8 +534,8 @@ func defaultFeatureDeps(doc map[string]any) map[string]bool {
 }
 
 // projectLocks reads the Cargo.lock of each unmarked directory that also holds a Cargo.toml.
-func projectLocks(r file.Resolver, locks []file.Location, manifests map[string]cargoFile, marked map[string]file.Location, rootPrefix string) map[string]lockedSet {
-	out := map[string]lockedSet{}
+func projectLocks(r file.Resolver, locks []file.Location, manifests map[string]cargoFile, marked map[string]file.Location, rootPrefix string) map[string]CargoLock {
+	out := map[string]CargoLock{}
 	for _, l := range locks {
 		p := rootRel(l.RealPath, rootPrefix)
 		dir := path.Dir(p)
@@ -547,33 +545,53 @@ func projectLocks(r file.Resolver, locks []file.Location, manifests map[string]c
 		if _, ok := manifests[path.Join(dir, "Cargo.toml")]; !ok {
 			continue
 		}
-		var lock struct {
-			Package []struct {
-				Name     string `toml:"name"`
-				Version  string `toml:"version"`
-				Source   string `toml:"source"`
-				Checksum string `toml:"checksum"`
-			} `toml:"package"`
-		}
-		if _, err := decodeTOML(r, l, maxCargoProofBytes, &lock); err != nil {
+		data, err := readLocation(r, l, maxCargoProofBytes)
+		if err != nil {
 			continue
 		}
-		set := lockedSet{sums: map[string]map[string]bool{}, versions: map[string][]string{}}
-		for _, p := range lock.Package {
-			set.versions[p.Name] = append(set.versions[p.Name], p.Version)
-			// A git crate has a source but no checksum, and proves nothing either way.
-			if p.Checksum == "" && p.Source != "" {
-				continue
-			}
-			key := p.Name + "@" + p.Version
-			if set.sums[key] == nil {
-				set.sums[key] = map[string]bool{}
-			}
-			set.sums[key][p.Checksum] = true
+		if set, err := ParseCargoLock(data); err == nil {
+			out[dir] = set
 		}
-		out[dir] = set
 	}
 	return out
+}
+
+// ParseCargoLock reads a Cargo.lock as the vendor filter does, refusing one over its size bound.
+func ParseCargoLock(data []byte) (CargoLock, error) {
+	if len(data) > maxCargoProofBytes {
+		return CargoLock{}, fmt.Errorf("Cargo.lock is %d bytes, over the %d limit", len(data), maxCargoProofBytes)
+	}
+	var lock struct {
+		Package []struct {
+			Name     string `toml:"name"`
+			Version  string `toml:"version"`
+			Source   string `toml:"source"`
+			Checksum string `toml:"checksum"`
+		} `toml:"package"`
+	}
+	if _, err := toml.Decode(string(data), &lock); err != nil {
+		return CargoLock{}, err
+	}
+	set := CargoLock{sums: map[string]map[string]bool{}, versions: map[string][]string{}}
+	for _, p := range lock.Package {
+		set.versions[p.Name] = append(set.versions[p.Name], p.Version)
+		// A git crate has a source but no checksum, and proves nothing either way.
+		if p.Checksum == "" && p.Source != "" {
+			continue
+		}
+		key := p.Name + "@" + p.Version
+		if set.sums[key] == nil {
+			set.sums[key] = map[string]bool{}
+		}
+		set.sums[key][p.Checksum] = true
+	}
+	return set, nil
+}
+
+// Vendors reports whether the lock takes name@version from a registry at the .crate checksum sum and has no path crate of that name and version.
+func (l CargoLock) Vendors(name, version, sum string) bool {
+	sums := l.sums[name+"@"+version]
+	return sum != "" && sums[sum] && !sums[""]
 }
 
 func underMarked(p string, marked map[string]file.Location) bool {
@@ -591,13 +609,32 @@ func vendoredChecksum(r file.Resolver, mark file.Location) string {
 	if err != nil {
 		return ""
 	}
+	return CargoVendorChecksum(data)
+}
+
+// CargoVendorChecksum is the .crate checksum a `cargo vendor` marker records, or "".
+func CargoVendorChecksum(data []byte) string {
 	var marker struct {
 		Package string `json:"package"`
 	}
-	if json.Unmarshal(data, &marker) != nil {
+	if len(data) > maxCargoProofBytes || json.Unmarshal(data, &marker) != nil {
 		return ""
 	}
 	return marker.Package
+}
+
+// CargoPackageID is the [package] name and version a Cargo.toml states as strings, or "" for either it does not.
+func CargoPackageID(data []byte) (name, version string) {
+	var doc map[string]any
+	if len(data) > maxManifestBytes {
+		return "", ""
+	}
+	if _, err := toml.Decode(string(data), &doc); err != nil {
+		return "", ""
+	}
+	name, _ = tomlLookup(doc, "package", "name").(string)
+	version, _ = tomlLookup(doc, "package", "version").(string)
+	return name, version
 }
 
 func decodeTOML(r file.Resolver, loc file.Location, limit int64, v any) (toml.MetaData, error) {
