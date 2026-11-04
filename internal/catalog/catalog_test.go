@@ -540,7 +540,7 @@ func TestMergeVersionless(t *testing.T) {
 		{Name: "lonely", Version: "", Type: "pypi", Source: []string{"ossprey-pyproject-cataloger"}},
 	}
 
-	out := mergeVersionless(in, nil)
+	out := mergeVersionless(in, nil, nil)
 
 	byName := map[string]Package{}
 	for _, p := range out {
@@ -570,7 +570,7 @@ func TestMergeVersionless_CaseInsensitive(t *testing.T) {
 		{Name: "PyYAML", Version: "6.0", Type: "pypi", Source: []string{"python-package-cataloger"}},
 		{Name: "pyyaml", Version: "", Type: "pypi", Source: []string{"ossprey-pyproject-cataloger"}},
 	}
-	out := mergeVersionless(in, nil)
+	out := mergeVersionless(in, nil, nil)
 	if len(out) != 1 {
 		t.Fatalf("got %d, want 1 (case-insensitive merge): %v", len(out), out)
 	}

@@ -225,7 +225,8 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 	seenLocs := map[int]map[string]bool{}
 	locks := newNpmLockClassifier(absRoot)
 	pins := newRequirementPins(absRoot)
-	cargoRoots := map[string]string{} // Cargo.toml location -> its workspace root
+	cargoRoots := map[string]string{}  // Cargo.toml location -> its workspace root
+	cargoReqs := map[string][]string{} // Cargo.toml location and crate -> the requirements it declares
 	var out []Package
 	for _, c := range catalogers {
 		// Per-cataloger errors are non-fatal AND partial: syft's generic
@@ -288,6 +289,10 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 				if root, ok := l.Annotations[cargoRootAnnotation]; ok {
 					cargoRoots[l.RealPath] = root
 				}
+				if req, ok := l.Annotations[cargoReqAnnotation]; ok {
+					k := cargoReqKey(l.RealPath, p.Name)
+					cargoReqs[k] = append(cargoReqs[k], strings.Split(req, "\n")...)
+				}
 			}
 			for _, qualifiers := range marks {
 				key := dedupKey(t, p.Name, version) + qualifierKey(qualifiers)
@@ -319,7 +324,7 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 	if slices.ContainsFunc(out, isCratesIoCrate) && cargoSourceReplaced(resolver, absRoot) {
 		warn.Add(ctx, cargoReplacedEntry)
 	}
-	merged := mergeVersionless(out, cargoRoots)
+	merged := mergeVersionless(out, cargoRoots, cargoReqs)
 	markLocalPackages(merged, findLocalPackageNames(resolver, absRoot))
 	markTrustedPackages(merged, opts.Trust)
 	resolveVersionless(ctx, merged, opts)
@@ -494,8 +499,8 @@ func registryOf(p pkg.Package) string {
 // lower-fidelity view. Drop versionless entries when a versioned sibling of the
 // same (type, name) exists, folding their Source/Locations into the siblings so
 // no attribution is lost. Entries with no versioned sibling are kept as-is.
-// A crate folds per manifest, only into releases its workspace root's Cargo.lock locks (cargoRoots).
-func mergeVersionless(pkgs []Package, cargoRoots map[string]string) []Package {
+// A crate folds per manifest, only into releases its workspace root's Cargo.lock locks (cargoRoots) that meet its requirement there (cargoReqs).
+func mergeVersionless(pkgs []Package, cargoRoots map[string]string, cargoReqs map[string][]string) []Package {
 	gkey := func(p Package) string {
 		if p.Type == "pypi" {
 			// PEP 503: "typing_extensions" as written is uv's "typing-extensions".
@@ -553,11 +558,25 @@ func mergeVersionless(pkgs []Package, cargoRoots map[string]string) []Package {
 		var rest []string
 		into := map[int][]string{}
 		for _, l := range p.Locations {
-			locked := lockedFor(p, l)
-			for _, s := range locked {
-				into[s] = append(into[s], l)
+			reqs, ok := cargoReqs[cargoReqKey(l, p.Name)]
+			if !ok {
+				reqs = []string{""}
 			}
-			if len(locked) == 0 {
+			met := 0
+			for _, req := range reqs {
+				found := false
+				for _, s := range lockedFor(p, l) {
+					if cargoAllows(req, pkgs[s].Version) {
+						into[s] = append(into[s], l)
+						found = true
+					}
+				}
+				if found {
+					met++
+				}
+			}
+			// A requirement no locked release meets is a range the lock does not build, so it goes out on its own.
+			if met < len(reqs) {
 				rest = append(rest, l)
 			}
 		}
@@ -577,6 +596,18 @@ func mergeVersionless(pkgs []Package, cargoRoots map[string]string) []Package {
 		}
 	}
 	return out
+}
+
+// cargoReqKey keys a crate's requirements in one Cargo.toml.
+func cargoReqKey(manifest, name string) string { return manifest + "\x00" + normalizeName(name) }
+
+// cargoAllows reports whether a locked release meets a Cargo requirement; none at all is "*", and one it cannot read is not met.
+func cargoAllows(req, version string) bool {
+	if strings.TrimSpace(req) == "" {
+		return true
+	}
+	m, ok := registry.CargoSatisfies(req, version)
+	return ok && m
 }
 
 // appendUnseen appends the entries of add not yet in has, keeping a set per index so a component seen many times costs linear time.

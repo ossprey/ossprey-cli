@@ -168,7 +168,7 @@ func TestMergeVersionlessFoldsRegistries(t *testing.T) {
 	got := mergeVersionless([]Package{
 		{Name: "acme", Version: "1.0.0", Type: "pypi", Registries: []string{"https://internal/"}},
 		{Name: "Acme", Version: "", Type: "pypi", Registries: []string{"https://public/"}},
-	}, nil)
+	}, nil, nil)
 	if len(got) != 1 {
 		t.Fatalf("got %d packages, want 1: %+v", len(got), got)
 	}
@@ -185,6 +185,13 @@ func TestCatalogCargoRangeFoldsOnlyIntoItsWorkspaceLock(t *testing.T) {
 		return "version = 3\n\n[[package]]\nname = \"rand\"\nversion = \"" + version + "\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n"
 	}
 	crate := func(deps string) string { return "[package]\nname = \"app\"\nversion = \"0.1.0\"\n" + deps }
+	locks := func(name string, versions ...string) string {
+		out := "version = 3\n"
+		for _, v := range versions {
+			out += "\n[[package]]\nname = \"" + name + "\"\nversion = \"" + v + "\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n"
+		}
+		return out
+	}
 	cases := []struct {
 		name  string
 		files map[string]string
@@ -253,6 +260,47 @@ func TestCatalogCargoRangeFoldsOnlyIntoItsWorkspaceLock(t *testing.T) {
 				"Cargo.lock": lock("0.8.5"),
 			},
 			want: []string{"rand@0.8.5 Cargo.lock,Cargo.toml"},
+		},
+		{
+			name: "a locked release outside the range is not its release",
+			files: map[string]string{
+				"Cargo.toml": crate("[dependencies]\ntokio = \"1.38\"\n[dev-dependencies]\ntokio = \"=0.1.22\"\n"),
+				"Cargo.lock": locks("tokio", "0.1.22"),
+			},
+			want: []string{"tokio@0.1.22 Cargo.lock,Cargo.toml", "tokio@9.9.9 Cargo.toml"},
+		},
+		{
+			name: "a range folds only into the locked release it allows",
+			files: map[string]string{
+				"Cargo.toml": crate("[dependencies]\nrand = \"0.8\"\n"),
+				"Cargo.lock": locks("rand", "0.7.3", "0.8.5"),
+			},
+			want: []string{"rand@0.7.3 Cargo.lock", "rand@0.8.5 Cargo.lock,Cargo.toml"},
+		},
+		{
+			name: "a second requirement the lock does not meet still goes out",
+			files: map[string]string{
+				"Cargo.toml": crate("[dependencies]\nrand = \"0.8\"\nrand07 = { package = \"rand\", version = \"0.7\" }\n"),
+				"Cargo.lock": locks("rand", "0.8.5"),
+			},
+			want: []string{"rand@0.8.5 Cargo.lock,Cargo.toml", "rand@9.9.9 Cargo.toml"},
+		},
+		{
+			name: "an inherited range is held to the pool's requirement",
+			files: map[string]string{
+				"Cargo.toml":            "[workspace]\nmembers = [\"crates/app\"]\n[workspace.dependencies]\nrand = \"0.8\"\n",
+				"Cargo.lock":            locks("rand", "0.7.3"),
+				"crates/app/Cargo.toml": crate("[dependencies]\nrand = { workspace = true }\n"),
+			},
+			want: []string{"rand@0.7.3 Cargo.lock", "rand@9.9.9 crates/app/Cargo.toml"},
+		},
+		{
+			name: "two requirements the lock meets both fold",
+			files: map[string]string{
+				"Cargo.toml": crate("[dependencies]\nrand = \"0.8\"\nrand07 = { package = \"rand\", version = \"0.7\" }\n"),
+				"Cargo.lock": locks("rand", "0.7.3", "0.8.5"),
+			},
+			want: []string{"rand@0.7.3 Cargo.lock,Cargo.toml", "rand@0.8.5 Cargo.lock,Cargo.toml"},
 		},
 		{
 			name: "the workspace root's lock pins a member's range",

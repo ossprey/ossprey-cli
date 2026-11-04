@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -98,12 +99,17 @@ func parseCargoTomlFile(ctx context.Context, path string, loc file.Location, sca
 	emit := func(name, version string, metadata any) {
 		out = append(out, pkg.Package{Name: name, Version: version, Type: pkg.RustPkg, Locations: file.NewLocationSet(loc), Metadata: metadata})
 	}
+	reqs := map[string][]string{} // a range's crate -> every requirement this manifest declares for it
 	add := func(alias string, spec any) {
 		name, version, ok, why := cargoDep(alias, spec, pool)
 		if why != "" {
 			warn.Add(ctx, cargoDropEntry("cargotoml", why, alias))
 		}
 		if !ok || name == "" || name == m.Package.Name {
+			return
+		}
+		if version == "" {
+			reqs[name] = append(reqs[name], cargoRequirement(alias, spec, pool))
 			return
 		}
 		emit(name, version, nil)
@@ -118,6 +124,11 @@ func parseCargoTomlFile(ctx context.Context, path string, loc file.Location, sca
 		for n, spec := range table {
 			add(n, spec)
 		}
+	}
+	// mergeVersionless folds a range only into a locked release that meets it.
+	for _, name := range slices.Sorted(maps.Keys(reqs)) {
+		l := withAnnotation(loc, cargoReqAnnotation, strings.Join(reqs[name], "\n"))
+		out = append(out, pkg.Package{Name: name, Type: pkg.RustPkg, Locations: file.NewLocationSet(l)})
 	}
 	// Cargo reads [patch] and [replace] only at the workspace root, and a lock there already records their git sources.
 	if !member && !hasCargoLock(path) {
@@ -260,6 +271,15 @@ func covers(dir string, entries []string, manifestPath string) bool {
 // cargoRootAnnotation carries a manifest's workspace root to mergeVersionless.
 const cargoRootAnnotation = "ossprey-cargo-workspace-root"
 
+// cargoReqAnnotation carries a range's requirements in one manifest to mergeVersionless, one per line.
+const cargoReqAnnotation = "ossprey-cargo-requirement"
+
+// withAnnotation sets key on a copy of loc's annotations, which every package from one manifest shares.
+func withAnnotation(loc file.Location, key, value string) file.Location {
+	loc.Annotations = maps.Clone(loc.Annotations)
+	return loc.WithAnnotation(key, value)
+}
+
 // withCargoRoot annotates loc with its workspace root, spelled as the resolver spells loc so it compares with a Cargo.lock's location.
 func withCargoRoot(loc file.Location, manifestPath, rootDir string) file.Location {
 	rel, err := filepath.Rel(filepath.Dir(filepath.Clean(manifestPath)), rootDir)
@@ -308,6 +328,21 @@ func cargoDep(alias string, spec any, pool map[string]any) (name, version string
 		return vouched(name, cargoExactVersion(s))
 	}
 	return "", "", false, ""
+}
+
+// cargoRequirement returns the version requirement of a crates.io dependency entry cargoDep accepted, following workspace inheritance.
+func cargoRequirement(alias string, spec any, pool map[string]any) string {
+	switch v := spec.(type) {
+	case string:
+		return v
+	case map[string]any:
+		if inherit, _ := v["workspace"].(bool); inherit {
+			return cargoRequirement(alias, pool[alias], nil)
+		}
+		s, _ := v["version"].(string)
+		return s
+	}
+	return ""
 }
 
 // indexIsCratesIo reports whether a registry-index value names crates.io, read as the Cargo.lock source cargo records for it: sparse+ as given, any other under registry+.

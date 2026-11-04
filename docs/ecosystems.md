@@ -19,12 +19,12 @@ supply a lockfile for full transitive coverage. Rust has no resolver tier, so a
 crate with no `Cargo.lock` always catalogues direct dependencies only.
 
 A `Cargo.toml` range takes its version only from its own workspace's
-`Cargo.lock`: the one beside the nearest `Cargo.toml` at or above it, inside
-the scan, that has a `[workspace]` table, or the one beside the manifest itself
-when there is none. A lockfile anywhere else, or an exact `=` pin of the same
-crate in another manifest or another dependency table, does not set it, so
-that range is sent at the latest published release like any other unpinned
-dependency (below).
+`Cargo.lock`, the one beside its workspace root (chosen as described below) or
+beside the manifest itself when it has none, and only from a release there that
+the range allows. A lockfile anywhere else, a locked release outside the range,
+or an exact `=` pin of the same crate in another manifest or another dependency
+table does not set it, so that range is sent at the latest published release
+like any other unpinned dependency (below).
 
 Directories that hold installed or built packages rather than your project's
 own manifests are not read at all: `node_modules`, `bower_components`,
