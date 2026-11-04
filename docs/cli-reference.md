@@ -112,8 +112,8 @@ checked. `name@version` is accepted for every ecosystem, and pip's
 A crate's version must name one release, as `serde@1.0.228` or
 `serde@=1.0.228`. Cargo reads `1.0` and `^1.0` as ranges, so `check` refuses
 them with an error rather than guess which release you meant: give the exact
-release, or leave the version off to check the latest one. Which plans include
-Rust is on [supported ecosystems](ecosystems.md).
+release, or leave the version off to check the latest one. See
+[supported ecosystems](ecosystems.md) for the plans that include Rust.
 
 A crate is looked up on crates.io with or without a version, and checked under
 the name crates.io gives it, since crates.io reads `Serde_JSON` and
