@@ -333,6 +333,9 @@ func TestCatalogTrustsNoCrateUnderASourceReplacement(t *testing.T) {
 		"an unparseable config":             {files: map[string]string{"proj/.cargo/config.toml": "[source\n"}, warning: unread},
 		"an include in the scan":            {files: map[string]string{"proj/.cargo/config.toml": "include = [\"extra.toml\"]\n", "proj/.cargo/extra.toml": replace}, warning: included},
 		"an include in CARGO_HOME":          {files: map[string]string{"home/config.toml": "include = [{ path = \"extra.toml\" }]\n", "home/extra.toml": replace}, warning: included},
+		// The vendor filter's manifests above the root play no part in trust.
+		"an unparseable manifest above the root": {files: map[string]string{"Cargo.toml": "[package\n"}},
+		"an oversized manifest above the root":   {files: map[string]string{"Cargo.toml": "# " + strings.Repeat("x", maxManifestBytes) + "\n"}},
 		// A directory outside the scan that can be searched but not listed still has its configs opened by name.
 		"a replacement in an unlistable .cargo above the root": {files: map[string]string{".cargo/config.toml": replace}, modes: map[string]os.FileMode{".cargo": 0o311}, warning: replaced},
 		"a replacement in an unlistable CARGO_HOME":            {files: map[string]string{"home/config.toml": replace}, modes: map[string]os.FileMode{"home": 0o311}, warning: replaced},

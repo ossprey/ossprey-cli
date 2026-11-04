@@ -198,7 +198,8 @@ func cargoReplacement(r file.Resolver, root string) string {
 	if !ok {
 		return configUnread
 	}
-	_, above, ok := cargoFilesAbove(root)
+	// A manifest above the root names no source, so only configs decide trust.
+	_, above, ok := cargoFilesAbove(root, false)
 	if !ok {
 		return configUnread
 	}

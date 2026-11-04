@@ -92,7 +92,7 @@ func withoutCargoVendor(r file.Resolver, root string) file.Resolver {
 	if !ok {
 		return r
 	}
-	aboveManifests, aboveConfigs, ok := cargoFilesAbove(root)
+	aboveManifests, aboveConfigs, ok := cargoFilesAbove(root, true)
 	if !ok {
 		return r
 	}
@@ -214,17 +214,24 @@ func readCargoFiles(r file.Resolver, locs []file.Location, rootSlash string, up 
 	return out, true
 }
 
-// cargoFilesAbove reads the manifests and configs cargo run inside root also sees: every ancestor's, and CARGO_HOME's.
-func cargoFilesAbove(root string) (manifests, configs []cargoFile, ok bool) {
+// cargoFilesAbove reads the configs, and with withManifests the manifests, cargo run inside root also sees: every ancestor's, and CARGO_HOME's.
+func cargoFilesAbove(root string, withManifests bool) (manifests, configs []cargoFile, ok bool) {
+	exact := []string{".cargo"}
+	if withManifests {
+		exact = append(exact, "Cargo.toml")
+	}
 	seen := map[string]bool{}
 	for d := filepath.Dir(root); ; d = filepath.Dir(d) {
-		names, err := cargoDirNames(d, "Cargo.toml", ".cargo")
+		names, err := cargoDirNames(d, exact...)
 		if err != nil {
 			return nil, nil, false
 		}
 		for _, n := range names {
 			switch strings.ToLower(n) {
 			case "cargo.toml":
+				if !withManifests {
+					continue
+				}
 				m, ok := readCargoFileAt(filepath.Join(d, n), d)
 				if !ok {
 					return nil, nil, false
