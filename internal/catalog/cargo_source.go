@@ -168,10 +168,18 @@ func cargoRegistryOf(m pkg.RustCargoLockEntry) string {
 	}
 	clean := crateURLCleaner.Replace(trimC0(raw))
 	// Cargo's IDNA may read a non-ASCII host as crates.io or a host other than Go's, and Cargo reads a sparse source's '\' as userinfo.
-	if u, err := url.Parse(clean); err != nil || strings.ContainsFunc(u.Hostname(), nonASCII) || atPastSlash(clean) {
+	if u, err := url.Parse(clean); err != nil || strings.ContainsFunc(u.Hostname(), nonASCII) || atPastSlash(clean) || escapedPastHost(clean) {
 		return ""
 	}
 	return clean
+}
+
+// escapedPastHost reports a percent-escape after the host, which Cargo keeps inside a path segment where the trust policy decodes and cleans it.
+func escapedPastHost(clean string) bool {
+	_, rest, _ := strings.Cut(clean, ":")
+	rest = strings.TrimLeft(rest, "/")
+	i := strings.IndexAny(rest, "/?#")
+	return i >= 0 && strings.Contains(rest[i:], "%")
 }
 
 // atPastSlash reports an '@' after a '/' in the authority or path, where Go reads a password's tail as host or path.

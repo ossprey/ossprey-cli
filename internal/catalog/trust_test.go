@@ -227,6 +227,26 @@ source = "registry+https://gİt.corp.example/acme/crates-index.git"
 name = "acme-backslash"
 version = "1.0.0"
 source = "sparse+https://github.com\\@evil.example/acme/"
+
+[[package]]
+name = "acme-escaped-slash"
+version = "1.0.0"
+source = "sparse+https://crates.corp.example/public%2F..%2Finternal/"
+
+[[package]]
+name = "acme-escaped-lower"
+version = "1.0.0"
+source = "registry+https://git.corp.example/public%2f..%2facme/crates-index.git"
+
+[[package]]
+name = "acme-escaped-dots"
+version = "1.0.0"
+source = "sparse+https://crates.corp.example/public%2F%2E%2E%2Finternal/"
+
+[[package]]
+name = "acme-escaped-backslash"
+version = "1.0.0"
+source = "sparse+https://crates.corp.example/internal/..%5C..%5Cpublic/"
 `
 
 // Same acme-twin@1.0.0, but this project locks it from crates.io.
@@ -268,6 +288,11 @@ func TestCatalogTrustsCratesByTheirCargoLockIndex(t *testing.T) {
 	wantChecked := []string{
 		"cargo/acme-backslash?repository_url=https:///",                   // Cargo reads github.com\ as userinfo and fetches from evil.example
 		"cargo/acme-dotted?repository_url=https://g%C4%B0t.corp.example/", // Go folds İ to i, Cargo's IDNA does not
+		// Cargo keeps an escape inside its path segment where Go decodes and cleans it into the trusted prefix.
+		"cargo/acme-escaped-backslash?repository_url=https://crates.corp.example/",
+		"cargo/acme-escaped-dots?repository_url=https://crates.corp.example/",
+		"cargo/acme-escaped-lower?repository_url=https://git.corp.example/",
+		"cargo/acme-escaped-slash?repository_url=https://crates.corp.example/",
 		// Git is never a registry, even under a trusted prefix.
 		"cargo/acme-git?vcs_url=git+https://git.corp.example/acme/acme-git@0123456789abcdef0123456789abcdef01234567",
 		"cargo/acme-proxied?repository_url=https://crates.corp.example/", // same host, another registry
