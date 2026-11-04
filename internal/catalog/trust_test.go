@@ -321,6 +321,7 @@ func TestCatalogTrustsNoCrateUnderASourceReplacement(t *testing.T) {
 	const replaced, unread = "because a source replacement is configured", "because a cargo config could not be read"
 	for name, c := range map[string]struct {
 		files      map[string]string
+		links      map[string]string
 		unreadable string
 		warning    string
 	}{
@@ -330,6 +331,12 @@ func TestCatalogTrustsNoCrateUnderASourceReplacement(t *testing.T) {
 		"a replacement in CARGO_HOME":       {files: map[string]string{"home/config.toml": replace}, warning: replaced},
 		"an unreadable config":              {files: map[string]string{"proj/.cargo/config.toml": "[net]\nretry = 2\n"}, unreadable: "proj/.cargo/config.toml", warning: unread},
 		"an unparseable config":             {files: map[string]string{"proj/.cargo/config.toml": "[source\n"}, warning: unread},
+		// A glob reports a symlink by its target when both match, which hid each of these.
+		"a config symlinked to its sibling":               {files: map[string]string{"proj/.cargo/replace.toml": replace}, links: map[string]string{"proj/.cargo/config.toml": "replace.toml"}, warning: replaced},
+		"a config symlinked into another dot directory":   {files: map[string]string{"proj/.yarn/cargo.toml": replace}, links: map[string]string{"proj/.cargo/config.toml": "../.yarn/cargo.toml"}, warning: replaced},
+		"a symlinked config beside a plain one":           {files: map[string]string{"proj/.cargo/replace.toml": replace, "proj/.cargo/config.toml": "[net]\nretry = 2\n"}, links: map[string]string{"proj/.cargo/config": "replace.toml"}, warning: replaced},
+		"a symlinked config named in another case":        {files: map[string]string{"proj/.cargo/replace.toml": replace}, links: map[string]string{"proj/.cargo/Config.toml": "replace.toml"}, warning: replaced},
+		"a .cargo directory symlinked to a dot directory": {files: map[string]string{"proj/.yarn/config.toml": replace}, links: map[string]string{"proj/.cargo": ".yarn"}, warning: replaced},
 	} {
 		t.Run(name, func(t *testing.T) {
 			base := t.TempDir()
@@ -340,6 +347,19 @@ func TestCatalogTrustsNoCrateUnderASourceReplacement(t *testing.T) {
 				"proj/web/package-lock.json": trustPackageLock,
 			})
 			writeTree(t, base, c.files)
+			for link, target := range c.links {
+				// Symlinks need privileges on Windows, as in the other symlink tests.
+				if runtime.GOOS == "windows" {
+					t.Skip("symlinks need privileges on Windows")
+				}
+				p := filepath.Join(base, filepath.FromSlash(link))
+				if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, p); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+			}
 			if c.unreadable != "" {
 				if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 					t.Skip("file modes do not stop this user reading")

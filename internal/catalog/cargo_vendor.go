@@ -60,9 +60,15 @@ func withoutCargoVendor(r file.Resolver, root string) file.Resolver {
 	if err != nil {
 		return r
 	}
-	configLocs, err := cargoConfigLocs(r, rootPrefix)
+	dotted, err := r.FilesByGlob("**/.*/*")
 	if err != nil {
 		return r
+	}
+	var configLocs []file.Location
+	for _, l := range dotted {
+		if isCargoConfig(rootRel(l.AccessPath, rootPrefix)) || isCargoConfig(rootRel(l.RealPath, rootPrefix)) {
+			configLocs = append(configLocs, l)
+		}
 	}
 	lockLocs, err := r.FilesByGlob("**/Cargo.lock")
 	if err != nil {
@@ -166,21 +172,6 @@ func resolvedRoot(root string) string {
 	return root
 }
 
-// cargoConfigLocs lists the cargo configs in the scan, matched by access or real path.
-func cargoConfigLocs(r file.Resolver, rootPrefix string) ([]file.Location, error) {
-	dotted, err := r.FilesByGlob("**/.*/*")
-	if err != nil {
-		return nil, err
-	}
-	var locs []file.Location
-	for _, l := range dotted {
-		if isCargoConfig(rootRel(l.AccessPath, rootPrefix)) || isCargoConfig(rootRel(l.RealPath, rootPrefix)) {
-			locs = append(locs, l)
-		}
-	}
-	return locs, nil
-}
-
 // isCargoConfig matches .cargo/config(.toml) in any case, as cargo opens them on a case-insensitive filesystem.
 func isCargoConfig(p string) bool {
 	return isExactCargoConfig(strings.ToLower(p))
@@ -223,48 +214,23 @@ func readCargoFiles(r file.Resolver, locs []file.Location, rootSlash string, up 
 
 // cargoFilesAbove reads the manifests and configs cargo run inside root also sees: every ancestor's, and CARGO_HOME's.
 func cargoFilesAbove(root string) (manifests, configs []cargoFile, ok bool) {
-	read := func(p, base string) (cargoFile, bool) {
-		info, err := os.Stat(p)
-		if err != nil || info.Size() > maxManifestBytes {
-			return cargoFile{}, false
-		}
-		data, err := os.ReadFile(p)
-		if err != nil {
-			return cargoFile{}, false
-		}
-		f := cargoFile{bases: []string{filepath.ToSlash(base)}}
-		_, err = toml.Decode(string(data), &f.doc)
-		return f, err == nil
-	}
-	configsIn := func(dir, base string, inexact bool) bool {
-		entries, _ := os.ReadDir(dir)
-		for _, e := range entries {
-			if n := strings.ToLower(e.Name()); n == "config" || n == "config.toml" {
-				c, ok := read(filepath.Join(dir, e.Name()), base)
-				if !ok {
-					return false
-				}
-				c.inexact = inexact || n != e.Name()
-				configs = append(configs, c)
-			}
-		}
-		return true
-	}
 	seen := map[string]bool{}
 	for d := filepath.Dir(root); ; d = filepath.Dir(d) {
 		entries, _ := os.ReadDir(d)
 		for _, e := range entries {
 			switch strings.ToLower(e.Name()) {
 			case "cargo.toml":
-				m, ok := read(filepath.Join(d, e.Name()), d)
+				m, ok := readCargoFileAt(filepath.Join(d, e.Name()), d)
 				if !ok {
 					return nil, nil, false
 				}
 				manifests = append(manifests, m)
 			case ".cargo":
-				if !configsIn(filepath.Join(d, e.Name()), d, e.Name() != ".cargo") {
+				cs, ok := cargoConfigsIn(filepath.Join(d, e.Name()), d, e.Name() != ".cargo")
+				if !ok {
 					return nil, nil, false
 				}
+				configs = append(configs, cs...)
 				seen[foldPath(filepath.ToSlash(filepath.Join(d, e.Name())))] = true
 			}
 		}
@@ -278,10 +244,46 @@ func cargoFilesAbove(root string) (manifests, configs []cargoFile, ok bool) {
 			home = filepath.Join(h, ".cargo")
 		}
 	}
-	if home != "" && !seen[foldPath(filepath.ToSlash(home))] && !configsIn(home, filepath.Dir(home), false) {
-		return nil, nil, false
+	if home != "" && !seen[foldPath(filepath.ToSlash(home))] {
+		cs, ok := cargoConfigsIn(home, filepath.Dir(home), false)
+		if !ok {
+			return nil, nil, false
+		}
+		configs = append(configs, cs...)
 	}
 	return manifests, configs, true
+}
+
+// cargoConfigsIn reads config and config.toml in dir, in any case and through symlinks; false when one cannot be read.
+func cargoConfigsIn(dir, base string, inexact bool) ([]cargoFile, bool) {
+	entries, _ := os.ReadDir(dir)
+	var configs []cargoFile
+	for _, e := range entries {
+		if n := strings.ToLower(e.Name()); n == "config" || n == "config.toml" {
+			c, ok := readCargoFileAt(filepath.Join(dir, e.Name()), base)
+			if !ok {
+				return nil, false
+			}
+			c.inexact = inexact || n != e.Name()
+			configs = append(configs, c)
+		}
+	}
+	return configs, true
+}
+
+// readCargoFileAt parses the file at p on disk, through any symlink, resolving its paths against base.
+func readCargoFileAt(p, base string) (cargoFile, bool) {
+	info, err := os.Stat(p)
+	if err != nil || info.Size() > maxManifestBytes {
+		return cargoFile{}, false
+	}
+	data, err := os.ReadFile(p)
+	if err != nil {
+		return cargoFile{}, false
+	}
+	f := cargoFile{bases: []string{filepath.ToSlash(base)}}
+	_, err = toml.Decode(string(data), &f.doc)
+	return f, err == nil
 }
 
 // vendorDir is the folded directory cargo run in dir takes crates.io crates from, or "" when unreplaced or unclear.

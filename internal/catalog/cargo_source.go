@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"context"
 	"maps"
 	"net/url"
 	"path"
@@ -192,12 +193,7 @@ const (
 // cargoReplacement says why no crate is trusted by registry: a cargo config cargo may read for root replaces a source or cannot be read.
 func cargoReplacement(r file.Resolver, root string) string {
 	root = resolvedRoot(root)
-	rootSlash := filepath.ToSlash(root)
-	locs, err := cargoConfigLocs(r, rootSlash+"/")
-	if err != nil {
-		return configUnread
-	}
-	inScan, ok := readCargoFiles(r, locs, rootSlash, 2)
+	inScan, ok := cargoConfigsInScan(r, root)
 	if !ok {
 		return configUnread
 	}
@@ -205,7 +201,7 @@ func cargoReplacement(r file.Resolver, root string) string {
 	if !ok {
 		return configUnread
 	}
-	for _, c := range slices.Concat(above, slices.Collect(maps.Values(inScan))) {
+	for _, c := range slices.Concat(above, inScan) {
 		sources, _ := c.doc["source"].(map[string]any)
 		for _, s := range sources {
 			if tomlLookup(s, "replace-with") != nil {
@@ -214,6 +210,26 @@ func cargoReplacement(r file.Resolver, root string) string {
 		}
 	}
 	return ""
+}
+
+// cargoConfigsInScan reads every .cargo directory the scan indexes on disk, as a glob reports a symlinked config by its target.
+func cargoConfigsInScan(r file.Resolver, root string) ([]cargoFile, bool) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rootSlash := filepath.ToSlash(root)
+	var configs []cargoFile
+	for l := range r.AllLocations(ctx) {
+		dir := placeRef(rootSlash, rootRel(l.RealPath, rootSlash+"/"))
+		if strings.ToLower(path.Base(dir)) != ".cargo" {
+			continue
+		}
+		cs, ok := cargoConfigsIn(filepath.FromSlash(dir), filepath.FromSlash(path.Dir(dir)), false)
+		if !ok {
+			return nil, false
+		}
+		configs = append(configs, cs...)
+	}
+	return configs, true
 }
 
 // atPastSlash reports an '@' after a '/' in the authority or path, where Go reads a password's tail as host or path.
