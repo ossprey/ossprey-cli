@@ -265,6 +265,44 @@ func TestRun_ChecksFormulaAndDependencies(t *testing.T) {
 	}
 }
 
+// Quiet, a clean check prints the one verdict line, like every forwarder; a
+// check the platform scanned none of prints nothing and brew still runs.
+func TestRun_QuietVerdict(t *testing.T) {
+	t.Setenv("OSSPREY_VERBOSE", "")
+	fakeBrewAPI(t, map[string]string{"jq": "https://github.com/jqlang/jq/archive/v1.tar.gz"}, nil, "")
+	for _, tc := range []struct {
+		name      string
+		unscanned bool
+		want      string
+	}{
+		{"clean", false, "ossprey: no malware found in 1 package, forwarding to brew\n"},
+		{"nothing scanned", true, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := stub(t, false)
+			checkFn = func(_ context.Context, o check.Options) (*ossbom.SBOM, error) {
+				sbom := ossbom.New(ossbom.Environment{})
+				for _, s := range o.Specs {
+					sbom.AddComponent(ossbom.Component{Name: s.Name, Version: s.Version, Type: s.Ecosystem})
+					if tc.unscanned {
+						sbom.Findings = append(sbom.Findings, ossbom.Finding{Purl: "pkg:github/" + s.Name, Type: "NOT_FOUND"})
+					}
+				}
+				return sbom, nil
+			}
+			if err := Run(context.Background(), Options{Args: []string{"install", "jq"}}); err != nil {
+				t.Fatal(err)
+			}
+			if len(c.handoffs) != 1 {
+				t.Fatalf("handoffs = %v", c.handoffs)
+			}
+			if got := errOut.(*bytes.Buffer).String(); got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRun_MaliciousBlocksBrew(t *testing.T) {
 	fakeBrewAPI(t, map[string]string{"jq": "https://github.com/jqlang/jq/releases/download/jq-1/jq.tar.gz"}, nil, "")
 	c := stub(t, true)

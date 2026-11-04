@@ -27,9 +27,10 @@ $ npm install left-pad
 added 1 package in 412ms
 ```
 
-The check is silent when it passes: only npm's own output appears. ossprey
-speaks up for a block (the full malware report) or a platform error; set
-`OSSPREY_VERBOSE=1` to see the verdict and narration for every install.
+When the check passes ossprey prints one line, `ossprey: no malware found in
+N packages, forwarding to npm`, then npm's own output follows. It otherwise
+speaks up only for a block (the full malware report) or a platform error; set
+`OSSPREY_VERBOSE=1` to see the narration and warnings for every install.
 
 | Command | What it does |
 |---------|--------------|

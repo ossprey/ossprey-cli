@@ -184,7 +184,13 @@ func report(ctx context.Context, opts Options, sbom *ossbom.SBOM) error {
 		fmt.Fprintf(errOut, "ossprey: blocked `brew %s`\n", strings.Join(opts.Args, " "))
 		return forward.ErrBlocked
 	}
-	note("ossprey: no malware found, forwarding to brew\n")
+	// Printed even when quiet, like the package forwarders' clean line; a
+	// check the platform scanned none of gets no verdict.
+	if verdict, ok := forward.CleanVerdict(sbom, len(summary.Informational), ""); ok {
+		fmt.Fprintf(errOut, "ossprey: %s, forwarding to brew\n", verdict)
+	} else {
+		note("ossprey: the platform checked none of the formula sources; forwarding unchecked\n")
+	}
 	return handoffFn(ctx, "brew", opts.Args)
 }
 
