@@ -337,6 +337,7 @@ type cargoConfig struct {
 
 // withoutVendoredLocks drops the Cargo.lock `cargo vendor` copied with a crate, which no build of the project reads.
 func withoutVendoredLocks(ctx context.Context, repoDir string, paths []string) []string {
+	var files proofFiles
 	locks := map[string]*catalog.CargoLock{}
 	lockAt := func(dir string) *catalog.CargoLock {
 		if l, ok := locks[dir]; ok || len(locks) >= maxProofLocks {
@@ -344,9 +345,8 @@ func withoutVendoredLocks(ctx context.Context, repoDir string, paths []string) [
 		}
 		var l *catalog.CargoLock
 		// As in the scan's filter, only a lock beside its Cargo.toml in an unmarked directory is a project's.
-		_, manifestErr := gitShow(ctx, repoDir, ":"+path.Join(dir, "Cargo.toml"))
-		_, markerErr := gitShow(ctx, repoDir, ":"+path.Join(dir, ".cargo-checksum.json"))
-		if blob, err := gitShow(ctx, repoDir, ":"+path.Join(dir, "Cargo.lock")); err == nil && manifestErr == nil && markerErr != nil {
+		_, marked := files[path.Join(dir, ".cargo-checksum.json")]
+		if blob, ok := files.read(ctx, repoDir, path.Join(dir, "Cargo.lock")); ok && files[path.Join(dir, "Cargo.toml")] != "" && !marked {
 			if parsed, err := catalog.ParseCargoLock(blob); err == nil {
 				l = &parsed
 			}
@@ -358,7 +358,7 @@ func withoutVendoredLocks(ctx context.Context, repoDir string, paths []string) [
 	configAt := func(dir string) (map[string]any, bool) {
 		c, ok := configs[dir]
 		if !ok && len(configs) < maxProofLocks {
-			c = stagedCargoConfig(ctx, repoDir, dir)
+			c = stagedCargoConfig(ctx, repoDir, files, dir)
 			configs[dir] = c
 		}
 		return c.doc, c.ok
@@ -367,8 +367,11 @@ func withoutVendoredLocks(ctx context.Context, repoDir string, paths []string) [
 	out := make([]string, 0, len(paths))
 	for _, p := range paths {
 		if dir := path.Dir(p); path.Base(p) == "Cargo.lock" && dir != "." && tested < maxVendorProofs {
+			if files == nil {
+				files = listProofFiles(ctx, repoDir)
+			}
 			tested++
-			if vendoredCopy(ctx, repoDir, dir, lockAt, configAt) {
+			if vendoredCopy(ctx, repoDir, files, dir, lockAt, configAt) {
 				continue
 			}
 		}
@@ -377,13 +380,55 @@ func withoutVendoredLocks(ctx context.Context, repoDir string, paths []string) [
 	return out
 }
 
-// stagedCargoConfig reads dir's .cargo/config or .cargo/config.toml from the index, unclear when both exist or one does not parse.
-func stagedCargoConfig(ctx context.Context, repoDir, dir string) cargoConfig {
+// proofFiles maps each index path a vendor proof may read to its blob, "" for an entry that is not one regular file.
+type proofFiles map[string]string
+
+// listProofFiles lists every Cargo.lock, Cargo.toml, marker and cargo config in the index in one call.
+func listProofFiles(ctx context.Context, repoDir string) proofFiles {
+	files := proofFiles{}
+	out, err := gitOutput(ctx, repoDir, "ls-files", "-s", "-z", "--full-name", "--",
+		":(top,glob)**/Cargo.lock", ":(top,glob)**/Cargo.toml", ":(top,glob)**/.cargo-checksum.json",
+		":(top,glob)**/.cargo/config", ":(top,glob)**/.cargo/config.toml")
+	if err != nil {
+		return files
+	}
+	for _, entry := range strings.Split(string(out), "\x00") {
+		meta, p, ok := strings.Cut(entry, "\t")
+		f := strings.Fields(meta)
+		if !ok || len(f) != 3 {
+			continue
+		}
+		// A symlink's blob is its target text, which cargo never reads as the file, and a conflicted path has several.
+		_, seen := files[p]
+		if (f[0] == "100644" || f[0] == "100755") && f[2] == "0" && !seen {
+			files[p] = f[1]
+		} else {
+			files[p] = ""
+		}
+	}
+	return files
+}
+
+// read returns the regular file at p, false when it is absent, of another mode or unreadable.
+func (f proofFiles) read(ctx context.Context, repoDir, p string) ([]byte, bool) {
+	if f[p] == "" {
+		return nil, false
+	}
+	blob, err := gitOutput(ctx, repoDir, "cat-file", "blob", f[p])
+	return blob, err == nil
+}
+
+// stagedCargoConfig reads dir's .cargo/config or .cargo/config.toml from the index, unclear when both exist or one is not a regular file that parses.
+func stagedCargoConfig(ctx context.Context, repoDir string, files proofFiles, dir string) cargoConfig {
 	var c cargoConfig
 	for _, name := range []string{"config", "config.toml"} {
-		blob, err := gitShow(ctx, repoDir, ":"+path.Join(dir, ".cargo", name))
-		if err != nil {
+		p := path.Join(dir, ".cargo", name)
+		if _, listed := files[p]; !listed {
 			continue
+		}
+		blob, ok := files.read(ctx, repoDir, p)
+		if !ok {
+			return cargoConfig{}
 		}
 		doc, err := catalog.ParseCargoConfig(blob)
 		if err != nil || c.doc != nil {
@@ -396,17 +441,17 @@ func stagedCargoConfig(ctx context.Context, repoDir, dir string) cargoConfig {
 }
 
 // vendoredCopy reports whether a strict ancestor's staged Cargo.lock locks dir's crate at its marker's .crate checksum and its cargo config vendors crates.io into dir's parent.
-func vendoredCopy(ctx context.Context, repoDir, dir string, lockAt func(string) *catalog.CargoLock, configAt func(string) (map[string]any, bool)) bool {
-	marker, err := gitShow(ctx, repoDir, ":"+path.Join(dir, ".cargo-checksum.json"))
-	if err != nil {
+func vendoredCopy(ctx context.Context, repoDir string, files proofFiles, dir string, lockAt func(string) *catalog.CargoLock, configAt func(string) (map[string]any, bool)) bool {
+	marker, ok := files.read(ctx, repoDir, path.Join(dir, ".cargo-checksum.json"))
+	if !ok {
 		return false
 	}
 	sum := catalog.CargoVendorChecksum(marker)
 	if sum == "" {
 		return false
 	}
-	manifest, err := gitShow(ctx, repoDir, ":"+path.Join(dir, "Cargo.toml"))
-	if err != nil {
+	manifest, ok := files.read(ctx, repoDir, path.Join(dir, "Cargo.toml"))
+	if !ok {
 		return false
 	}
 	name, version := catalog.CargoPackageID(manifest)

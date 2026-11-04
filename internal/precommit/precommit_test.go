@@ -404,6 +404,18 @@ func vendorCrate(t *testing.T, repo, dir, name, version, sum, lock string) {
 // appManifest is the Cargo.toml of the project that vendors.
 const appManifest = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n"
 
+// stageSymlink stages p as a symlink whose target text is target.
+func stageSymlink(t *testing.T, dir, p, target string) {
+	t.Helper()
+	cmd := exec.Command("git", "-C", dir, "hash-object", "-w", "--stdin")
+	cmd.Stdin = strings.NewReader(target)
+	blob, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git hash-object: %v", err)
+	}
+	gitT(t, dir, "update-index", "--add", "--cacheinfo", "120000,"+strings.TrimSpace(string(blob))+","+p)
+}
+
 // vendorConfig is the .cargo/config.toml `cargo vendor` prints, replacing crates.io with dir.
 func vendorConfig(dir string) string {
 	return "[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.vendored-sources]\ndirectory = \"" + dir + "\"\n"
@@ -535,6 +547,14 @@ func TestStagedDeltaVendoredCrateLocks(t *testing.T) {
 				commitAll(t, dir)
 				vendorCrate(t, dir, "tools/x", "x", "1.0.0", sumSerde, evilLock)
 				gitT(t, dir, "add", "-A")
+			},
+			want: plantedEvil,
+		},
+		{
+			name: "a cargo config staged as a symlink proves nothing, though its target text vendors into tools",
+			setup: func(t *testing.T, dir string) {
+				plantedProject(t, dir)
+				stageSymlink(t, dir, ".cargo/config.toml", vendorConfig("tools"))
 			},
 			want: plantedEvil,
 		},
