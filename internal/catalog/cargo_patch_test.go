@@ -111,6 +111,18 @@ semver = "1"
 			"semver@1.0.26?vcs_url=git+https://git.example.com/acme/semver Cargo.toml",
 			"semver@9.9.9 Cargo.toml",
 		}},
+		// Cargo ignores a URL fragment, so it names no commit and does not hide rev.
+		{"fragment in the git url", map[string]string{"Cargo.toml": `[package]
+name = "app"
+version = "0.1.0"
+
+[patch.crates-io]
+itoa = { git = "https://github.com/evil/itoa#cafebabe" }
+serde = { git = "https://github.com/evil/serde#deadbeef12345", rev = "` + patchRev + `" }
+`}, []string{
+			"itoa@?vcs_url=git+https://github.com/evil/itoa Cargo.toml",
+			"serde@?vcs_url=git+https://github.com/evil/serde@" + patchRev + " Cargo.toml",
+		}},
 		// Cargo's parser refuses a core number past u64::MAX, so the spec names no version.
 		{"replace spec past u64", map[string]string{"Cargo.toml": `[package]
 name = "app"

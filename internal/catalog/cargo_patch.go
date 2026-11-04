@@ -52,6 +52,8 @@ func cargoGitTargets(m cargoManifest) []pkg.RustCargoLockEntry {
 // cargoGitSource spells a git dependency as Cargo.lock does, or returns "" for any other kind.
 func cargoGitSource(spec map[string]any) string {
 	git, _ := spec["git"].(string)
+	// Cargo ignores a fragment in the URL and builds rev, branch, tag or the default branch.
+	git, _, _ = strings.Cut(git, "#")
 	if git == "" {
 		return ""
 	}
