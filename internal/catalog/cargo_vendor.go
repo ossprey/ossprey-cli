@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -9,6 +10,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/BurntSushi/toml"
 	"github.com/anchore/syft/syft/file"
@@ -216,22 +218,25 @@ func readCargoFiles(r file.Resolver, locs []file.Location, rootSlash string, up 
 func cargoFilesAbove(root string) (manifests, configs []cargoFile, ok bool) {
 	seen := map[string]bool{}
 	for d := filepath.Dir(root); ; d = filepath.Dir(d) {
-		entries, _ := os.ReadDir(d)
-		for _, e := range entries {
-			switch strings.ToLower(e.Name()) {
+		names, err := cargoDirNames(d, "Cargo.toml", ".cargo")
+		if err != nil {
+			return nil, nil, false
+		}
+		for _, n := range names {
+			switch strings.ToLower(n) {
 			case "cargo.toml":
-				m, ok := readCargoFileAt(filepath.Join(d, e.Name()), d)
+				m, ok := readCargoFileAt(filepath.Join(d, n), d)
 				if !ok {
 					return nil, nil, false
 				}
 				manifests = append(manifests, m)
 			case ".cargo":
-				cs, ok := cargoConfigsIn(filepath.Join(d, e.Name()), d, e.Name() != ".cargo")
+				cs, ok := cargoConfigsIn(filepath.Join(d, n), d, n != ".cargo")
 				if !ok {
 					return nil, nil, false
 				}
 				configs = append(configs, cs...)
-				seen[foldPath(filepath.ToSlash(filepath.Join(d, e.Name())))] = true
+				seen[foldPath(filepath.ToSlash(filepath.Join(d, n)))] = true
 			}
 		}
 		if filepath.Dir(d) == d {
@@ -256,19 +261,45 @@ func cargoFilesAbove(root string) (manifests, configs []cargoFile, ok bool) {
 
 // cargoConfigsIn reads config and config.toml in dir, in any case and through symlinks; false when one cannot be read.
 func cargoConfigsIn(dir, base string, inexact bool) ([]cargoFile, bool) {
-	entries, _ := os.ReadDir(dir)
+	names, err := cargoDirNames(dir, "config", "config.toml")
+	if err != nil {
+		return nil, false
+	}
 	var configs []cargoFile
-	for _, e := range entries {
-		if n := strings.ToLower(e.Name()); n == "config" || n == "config.toml" {
-			c, ok := readCargoFileAt(filepath.Join(dir, e.Name()), base)
+	for _, name := range names {
+		if n := strings.ToLower(name); n == "config" || n == "config.toml" {
+			c, ok := readCargoFileAt(filepath.Join(dir, name), base)
 			if !ok {
 				return nil, false
 			}
-			c.inexact = inexact || n != e.Name()
+			c.inexact = inexact || n != name
 			configs = append(configs, c)
 		}
 	}
 	return configs, true
+}
+
+// cargoDirNames lists dir, or when it can be searched but not listed, which of exact it holds; a missing dir holds nothing.
+func cargoDirNames(dir string, exact ...string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+		return nil, nil
+	}
+	var names []string
+	if err == nil {
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		return names, nil
+	}
+	for _, n := range exact {
+		if _, err := os.Stat(filepath.Join(dir, n)); err == nil {
+			names = append(names, n)
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return nil, err
+		}
+	}
+	return names, nil
 }
 
 // readCargoFileAt parses the file at p on disk, through any symlink, resolving its paths against base.

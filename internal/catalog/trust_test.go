@@ -320,19 +320,23 @@ func TestCatalogTrustsNoCrateUnderASourceReplacement(t *testing.T) {
 	replace := "[source.corp]\nregistry = \"sparse+https://crates.corp.example/internal/\"\nreplace-with = \"elsewhere\"\n\n[source.elsewhere]\nregistry = \"sparse+https://crates.elsewhere.example/\"\n"
 	const replaced, included, unread = "because a source replacement is configured", "because a cargo config includes another file", "because a cargo config could not be read"
 	for name, c := range map[string]struct {
-		files      map[string]string
-		links      map[string]string
-		unreadable string
-		warning    string
+		files   map[string]string
+		links   map[string]string
+		modes   map[string]os.FileMode
+		warning string
 	}{
 		"no config":                         {},
 		"a replacement in the scan":         {files: map[string]string{"proj/.cargo/config.toml": replace}, warning: replaced},
 		"a replacement above the scan root": {files: map[string]string{".cargo/config.toml": replace}, warning: replaced},
 		"a replacement in CARGO_HOME":       {files: map[string]string{"home/config.toml": replace}, warning: replaced},
-		"an unreadable config":              {files: map[string]string{"proj/.cargo/config.toml": "[net]\nretry = 2\n"}, unreadable: "proj/.cargo/config.toml", warning: unread},
+		"an unreadable config":              {files: map[string]string{"proj/.cargo/config.toml": "[net]\nretry = 2\n"}, modes: map[string]os.FileMode{"proj/.cargo/config.toml": 0}, warning: unread},
 		"an unparseable config":             {files: map[string]string{"proj/.cargo/config.toml": "[source\n"}, warning: unread},
 		"an include in the scan":            {files: map[string]string{"proj/.cargo/config.toml": "include = [\"extra.toml\"]\n", "proj/.cargo/extra.toml": replace}, warning: included},
 		"an include in CARGO_HOME":          {files: map[string]string{"home/config.toml": "include = [{ path = \"extra.toml\" }]\n", "home/extra.toml": replace}, warning: included},
+		// A directory outside the scan that can be searched but not listed still has its configs opened by name.
+		"a replacement in an unlistable .cargo above the root": {files: map[string]string{".cargo/config.toml": replace}, modes: map[string]os.FileMode{".cargo": 0o311}, warning: replaced},
+		"a replacement in an unlistable CARGO_HOME":            {files: map[string]string{"home/config.toml": replace}, modes: map[string]os.FileMode{"home": 0o311}, warning: replaced},
+		"an unlistable directory above the scan root":          {modes: map[string]os.FileMode{".": 0o311}},
 		// A glob reports a symlink by its target when both match, which hid each of these.
 		"a config symlinked to its sibling":               {files: map[string]string{"proj/.cargo/replace.toml": replace}, links: map[string]string{"proj/.cargo/config.toml": "replace.toml"}, warning: replaced},
 		"a config symlinked into another dot directory":   {files: map[string]string{"proj/.yarn/cargo.toml": replace}, links: map[string]string{"proj/.cargo/config.toml": "../.yarn/cargo.toml"}, warning: replaced},
@@ -362,15 +366,15 @@ func TestCatalogTrustsNoCrateUnderASourceReplacement(t *testing.T) {
 					t.Skipf("symlinks unavailable: %v", err)
 				}
 			}
-			if c.unreadable != "" {
+			for rel, mode := range c.modes {
 				if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 					t.Skip("file modes do not stop this user reading")
 				}
-				p := filepath.Join(base, filepath.FromSlash(c.unreadable))
-				if err := os.Chmod(p, 0); err != nil {
+				p := filepath.Join(base, filepath.FromSlash(rel))
+				if err := os.Chmod(p, mode); err != nil {
 					t.Fatal(err)
 				}
-				t.Cleanup(func() { _ = os.Chmod(p, 0o644) })
+				t.Cleanup(func() { _ = os.Chmod(p, 0o755) })
 			}
 			ctx := warn.NewContext(context.Background(), false)
 			policy := testPolicy(t, []string{"https://crates.corp.example/internal/", npmInternal}, nil)
