@@ -81,7 +81,10 @@ or `[replace]` redirects to git is sent both ways: the git crate, marked, and th
 crates.io crate `Cargo.toml` declares. With a committed `Cargo.lock` the git
 crate comes from the lock at its locked commit. Without one it comes from your
 workspace root's `Cargo.toml`, with the commit when `rev` names a full one. A
-patch or replacement by `path` is your own code and is not sent. An exact `=`
+workspace member scanned on its own counts as its own workspace root, so its
+git patches are sent too, although Cargo ignores them when it builds the whole
+workspace. A patch or replacement by `path` is your own code and is not sent.
+An exact `=`
 pin in `Cargo.toml` that disagrees with `Cargo.lock` is sent at both versions,
 since Cargo rebuilds to the pin unless run with `--locked`.
 
@@ -101,7 +104,10 @@ in its own `package.workspace`. A `Cargo.toml` on the way up that cannot be
 read or parsed, or that has no `[package]` or `[workspace]` table, is passed
 over only for a higher `[workspace]` whose `members` list names the member. If
 no root is found inside the directory you scan, the inherited dependency is
-skipped with a warning. A dependency whose `registry-index` points at crates.io is read as a
+skipped with a warning. Past such a `Cargo.toml`, a crate that joins the
+workspace only as a path dependency of a listed member, without being named in
+`members` itself, also has its inherited dependency skipped with that warning.
+A dependency whose `registry-index` points at crates.io is read as a
 crates.io dependency. A `=` requirement is sent as a pinned version only when
 it is a valid semver release, with no leading zeros and no empty parts, and
 any build metadata after `+` is kept as written. Any other requirement is
