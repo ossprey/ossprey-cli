@@ -73,6 +73,18 @@ redirects to git is sent both ways when its `Cargo.lock` is committed: the git
 crate from the lock, and the crates.io crate `Cargo.toml` declares. Without the
 lock, the git crate is not seen and only the crates.io declaration is sent.
 
+A dependency a Cargo workspace member inherits with `{ workspace = true }`
+takes its version from the workspace root Cargo would use. That is the root
+the member's `package.workspace` names, or else the nearest `Cargo.toml` above
+the member with a `[workspace]` table whose `exclude` list leaves the member
+in. If that root is outside the directory you scan, or a `Cargo.toml` on the
+way up cannot be read or parsed, the inherited dependency is skipped with a
+warning. A dependency whose `registry-index` points at crates.io is read as a
+crates.io dependency. A `=` requirement is sent as a pinned version only when
+it is a valid semver release, with no leading zeros and no empty parts, and
+any build metadata after `+` is kept as written. Any other requirement is
+treated as a range.
+
 When a dependency's version can't be determined — an unpinned range in a
 manifest (`click = "^8"`, or a bare `requests` in a requirements file) with no
 lockfile or resolver to pin it against — the scan defaults that component to

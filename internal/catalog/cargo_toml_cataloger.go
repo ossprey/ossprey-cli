@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -44,7 +45,8 @@ func (c *CargoTomlCataloger) Catalog(ctx context.Context, resolver file.Resolver
 // into any, so the shape is inspected rather than declared.
 type cargoManifest struct {
 	Package struct {
-		Name string `toml:"name"`
+		Name      string `toml:"name"`
+		Workspace string `toml:"workspace"`
 	} `toml:"package"`
 	Dependencies      map[string]any `toml:"dependencies"`
 	DevDependencies   map[string]any `toml:"dev-dependencies"`
@@ -63,6 +65,8 @@ type cargoManifest struct {
 	} `toml:"target"`
 	Workspace struct {
 		Dependencies map[string]any `toml:"dependencies"`
+		Members      []string       `toml:"members"`
+		Exclude      []string       `toml:"exclude"`
 	} `toml:"workspace"`
 }
 
@@ -133,10 +137,7 @@ func readManifest(path string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
-// workspacePool returns the [workspace.dependencies] table governing this
-// manifest: its own when it declares one, else the nearest ancestor manifest
-// that does, since a workspace member conventionally holds only the opt-in.
-// Bounded by the scan root, so it never reads outside what was asked for.
+// workspacePool returns the [workspace.dependencies] table of the root cargo finds for this manifest, or nil when that root cannot be read inside the scan root.
 //
 // isRoot is whether this manifest declares [workspace] at all. Cargo roots a
 // workspace on that table, not on it having dependencies, so a nested workspace
@@ -146,7 +147,11 @@ func workspacePool(m cargoManifest, isRoot bool, manifestPath, scanRoot string) 
 		return m.Workspace.Dependencies
 	}
 	root := filepath.Clean(scanRoot)
-	dir := filepath.Dir(filepath.Clean(manifestPath))
+	manifestPath = filepath.Clean(manifestPath)
+	if m.Package.Workspace != "" {
+		return pointedPool(manifestPath, m.Package.Workspace, root)
+	}
+	dir := filepath.Dir(manifestPath)
 	for {
 		parent := filepath.Dir(dir)
 		if parent == dir || !withinRoot(parent, root) {
@@ -154,18 +159,23 @@ func workspacePool(m cargoManifest, isRoot bool, manifestPath, scanRoot string) 
 		}
 		dir = parent
 		ancestorPath := filepath.Join(dir, "Cargo.toml")
+		// Cargo climbs past a missing ancestor manifest but errors on one it cannot read or parse, so the walk stops there too.
+		if _, err := os.Stat(ancestorPath); err != nil {
+			continue
+		}
 		// The directory is inside the root, but the manifest itself can be a
 		// symlink pointing out of it, which would adopt a pool from elsewhere.
 		if !withinRoot(ancestorPath, root) {
-			continue
+			return nil
 		}
-		data, err := readManifest(ancestorPath)
-		if err != nil {
-			continue
-		}
-		var ancestor cargoManifest
-		if md, err := toml.Decode(string(data), &ancestor); err == nil && md.IsDefined("workspace") {
+		ancestor, ancestorIsRoot, err := readCargoManifest(ancestorPath)
+		switch {
+		case err != nil:
+			return nil
+		case ancestorIsRoot && !excludes(ancestor, dir, manifestPath):
 			return ancestor.Workspace.Dependencies
+		case !ancestorIsRoot && ancestor.Package.Workspace != "":
+			return pointedPool(ancestorPath, ancestor.Package.Workspace, root)
 		}
 	}
 }
@@ -185,6 +195,54 @@ func withinRoot(dir, root string) bool {
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
+// pointedPool returns the pool of the root a package.workspace path names, or nil when it cannot be read inside the scan root.
+func pointedPool(manifestPath, pointer, root string) map[string]any {
+	if !filepath.IsAbs(pointer) {
+		pointer = filepath.Join(filepath.Dir(manifestPath), pointer)
+	}
+	target := filepath.Join(pointer, "Cargo.toml")
+	if !withinRoot(target, root) {
+		return nil
+	}
+	m, _, err := readCargoManifest(target)
+	if err != nil {
+		return nil
+	}
+	return m.Workspace.Dependencies
+}
+
+// readCargoManifest reads and decodes a Cargo.toml, and reports whether it declares [workspace].
+func readCargoManifest(path string) (m cargoManifest, isRoot bool, err error) {
+	data, err := readManifest(path)
+	if err != nil {
+		return m, false, err
+	}
+	md, err := toml.Decode(string(data), &m)
+	return m, md.IsDefined("workspace"), err
+}
+
+// excludes reports whether the workspace rooted at dir leaves a member out, as cargo's is_excluded does: an exclude entry covers it and no members entry does.
+func excludes(ws cargoManifest, dir, manifestPath string) bool {
+	return covers(dir, ws.Workspace.Exclude, manifestPath) && !covers(dir, ws.Workspace.Members, manifestPath)
+}
+
+// covers reports whether manifestPath sits at or below dir joined with any entry, by whole components as Rust's Path::starts_with compares.
+func covers(dir string, entries []string, manifestPath string) bool {
+	for _, e := range entries {
+		// Rust keeps a ".." component, which no manifest path holds, where Join would resolve it.
+		if slices.Contains(strings.Split(filepath.ToSlash(e), "/"), "..") {
+			continue
+		}
+		if !filepath.IsAbs(e) {
+			e = filepath.Join(dir, e)
+		}
+		if rel, err := filepath.Rel(e, manifestPath); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
 // cargoDep resolves one dependency entry to the crate name and version to
 // submit, and whether to submit it at all.
 //
@@ -200,7 +258,7 @@ func cargoDep(alias string, spec any, pool map[string]any) (name, version string
 		for _, off := range []string{"path", "git", "registry", "registry-index"} {
 			// "crates-io" is Cargo's reserved name for the default registry, so
 			// naming it explicitly still means the public one.
-			if r, found := v[off]; found && !(off == "registry" && r == "crates-io") {
+			if r, found := v[off]; found && !(off == "registry" && r == "crates-io") && !(off == "registry-index" && indexIsCratesIo(r)) {
 				return "", "", false, ""
 			}
 		}
@@ -224,6 +282,20 @@ func cargoDep(alias string, spec any, pool map[string]any) (name, version string
 		return vouched(name, cargoExactVersion(s))
 	}
 	return "", "", false, ""
+}
+
+// indexIsCratesIo reports whether a registry-index value names crates.io, read as the Cargo.lock source cargo records for it: sparse+ as given, any other under registry+.
+func indexIsCratesIo(index any) bool {
+	s, _ := index.(string)
+	s = crateURLCleaner.Replace(trimC0(s))
+	if kind, rest, ok := strings.Cut(s, "+"); ok && strings.EqualFold(kind, "sparse") {
+		s = "sparse+" + rest
+	} else {
+		s = "registry+" + s
+	}
+	// Like a Cargo.lock crate, one whose host cargo's IDNA may map to crates.io goes out rather than vanish.
+	is, maybe := isCratesIo(s)
+	return is || maybe
 }
 
 // cargoName is the crates.io name shape, which the Ossprey API enforces too: one
@@ -266,9 +338,8 @@ func cargoDropEntry(file, why, alias string) warn.Entry {
 // maxCargoVersion mirrors the API's version cap; a longer one rejects the SBOM.
 const maxCargoVersion = 256
 
-// cargoRelease matches a concrete crates.io release, which is always full
-// three-component semver, so "=1.0" is a range rather than a pin.
-var cargoRelease = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.\-+]*)?$`)
+// cargoRelease matches a concrete crates.io release, which is always full three-component semver with no leading zero or empty identifier, so "=1.0" is a range rather than a pin.
+var cargoRelease = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$`)
 
 // cargoExactVersion returns the version only when the spec pins one exactly.
 // Cargo's bare "1.0" means caret, i.e. a range, so it resolves to nothing and
