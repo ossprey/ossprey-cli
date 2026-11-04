@@ -398,9 +398,9 @@ func indexIsCratesIo(index any) bool {
 	} else {
 		s = "registry+" + s
 	}
-	// Like a Cargo.lock crate, one whose host cargo's IDNA may map to crates.io goes out rather than vanish.
-	is, maybe := isCratesIo(s)
-	return is || maybe
+	// A host cargo's IDNA may map to crates.io or elsewhere is not definitely crates.io, so its crate is another registry's.
+	is, _ := isCratesIo(s)
+	return is
 }
 
 // cargoName is the crates.io name shape, which the Ossprey API enforces too: one

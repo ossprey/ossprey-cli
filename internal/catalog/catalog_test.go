@@ -1380,6 +1380,7 @@ rand = { version = "=0.8.5", registry-index = "https://github.com/rust-lang/crat
 sparse-index = { version = "=0.8.5", registry-index = "sparse+https://index.crates.io/" }
 cased-sparse-index = { version = "=0.8.5", registry-index = " SPARSE+https://index.crates.io/" }
 idna-index = { version = "=0.8.5", registry-index = "https://ｇithub.com/rust-lang/crates.io-index" }
+idna-foreign-index = { version = "=0.8.5", registry-index = "https://gİthub.com/rust-lang/crates.io-index" }
 private-index = { version = "=9.0.0", registry-index = "https://internal.example/index" }
 private-sparse-index = { version = "=9.0.0", registry-index = "sparse+https://internal.example/index/" }
 `)
@@ -1391,13 +1392,14 @@ private-sparse-index = { version = "=9.0.0", registry-index = "sparse+https://in
 	for _, p := range got {
 		byName[p.Name] = p
 	}
-	// A registry-index Cargo reads as crates.io is the public registry too, so its crate must not vanish.
+	// A registry-index that is definitely crates.io is the public registry too, so its crate must not vanish; a non-ASCII host IDNA may send elsewhere is another registry.
 	for name, want := range map[string]string{
 		"explicit-default":     "1.0.0",
 		"rand":                 "0.8.5",
 		"sparse-index":         "0.8.5",
 		"cased-sparse-index":   "0.8.5",
-		"idna-index":           "0.8.5",
+		"idna-index":           "",
+		"idna-foreign-index":   "",
 		"private":              "",
 		"private-index":        "",
 		"private-sparse-index": "",
