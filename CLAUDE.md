@@ -397,7 +397,9 @@ parent (`CargoVendorSource`: nearest config wins per key, a path is relative to
 the directory holding `.cargo`, and no config, an unclear one or a mismatch
 skips nothing). That leaves a vendored crate's own lock out of the lookup,
 never skips a `Cargo.toml`, and still checks in full a `vendor/` change staged
-without its `Cargo.lock`.
+without its `Cargo.lock`. `ParseCargoLock` refuses a lock nested more than
+`maxLockNesting` deep outside its strings and comments, since the TOML decoder
+recurses once per level and a few million levels overflow the stack.
 
 #### Why the npm resolve skips workspace members (OSS-1353)
 

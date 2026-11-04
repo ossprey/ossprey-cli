@@ -507,3 +507,25 @@ func sinkFixture(t *testing.T, root, rel, content string) {
 		t.Fatal(err)
 	}
 }
+
+// TestParseCargoLockRefusesDeepNesting: brackets in strings and comments neither count toward nor hide nesting.
+func TestParseCargoLockRefusesDeepNesting(t *testing.T) {
+	lock := "version = 4\n\n[[package]]\nname = \"a\"\nversion = \"1.0.0\"\n"
+	deep := strings.Repeat("[", 9) + strings.Repeat("]", 9)
+	for _, tc := range []struct {
+		name, extra string
+		deep        bool
+	}{
+		{"brackets in strings and comments", "# [[[[[[[[[\n" + `x = ['[[[[[[[[[', "\"[[[[[[[[[", '''[[[[[[[[['''', """[[[[[[[[[\""""]` + "\n", false},
+		{"nesting past the bound", "x = " + deep + "\n", true},
+		{"closers in strings between levels", "x = " + strings.Repeat(`["]]",`, 9) + strings.Repeat("]", 9) + "\n", true},
+		{"a multi-line string ending in extra quotes", `x = ["""a"""", ` + deep + "]\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseCargoLock([]byte(tc.extra + lock))
+			if (err != nil) != tc.deep {
+				t.Errorf("ParseCargoLock error = %v, want refused = %v", err, tc.deep)
+			}
+		})
+	}
+}

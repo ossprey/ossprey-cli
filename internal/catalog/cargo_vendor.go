@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -556,10 +557,16 @@ func projectLocks(r file.Resolver, locks []file.Location, manifests map[string]c
 	return out
 }
 
-// ParseCargoLock reads a Cargo.lock as the vendor filter does, refusing one over its size bound.
+// maxLockNesting bounds how deeply a Cargo.lock nests brackets; real ones reach 2, and the decoder recurses once per level.
+const maxLockNesting = 8
+
+// ParseCargoLock reads a Cargo.lock as the vendor filter does, refusing one over its size or nesting bound.
 func ParseCargoLock(data []byte) (CargoLock, error) {
 	if len(data) > maxCargoProofBytes {
 		return CargoLock{}, fmt.Errorf("Cargo.lock is %d bytes, over the %d limit", len(data), maxCargoProofBytes)
+	}
+	if tomlNestsPast(data, maxLockNesting) {
+		return CargoLock{}, fmt.Errorf("Cargo.lock nests brackets over %d deep", maxLockNesting)
 	}
 	var lock struct {
 		Package []struct {
@@ -586,6 +593,43 @@ func ParseCargoLock(data []byte) (CargoLock, error) {
 		set.sums[key][p.Checksum] = true
 	}
 	return set, nil
+}
+
+// tomlNestsPast reports whether data nests brackets or braces more than limit deep outside its strings and comments.
+func tomlNestsPast(data []byte, limit int) bool {
+	depth := 0
+	for i := 0; i < len(data); i++ {
+		switch c := data[i]; c {
+		case '#':
+			for i+1 < len(data) && data[i+1] != '\n' {
+				i++
+			}
+		case '"', '\'':
+			q := []byte{c}
+			if bytes.HasPrefix(data[i:], []byte{c, c, c}) {
+				q = []byte{c, c, c}
+			}
+			j := i + len(q)
+			for j < len(data) && !bytes.HasPrefix(data[j:], q) && (len(q) == 3 || data[j] != '\n') {
+				if c == '"' && data[j] == '\\' {
+					j++
+				}
+				j++
+			}
+			// A multi-line string may end in up to two more quotes.
+			for n := 0; len(q) == 3 && n < 2 && j+3 < len(data) && data[j+3] == c; n++ {
+				j++
+			}
+			i = j + len(q) - 1
+		case '[', '{':
+			if depth++; depth > limit {
+				return true
+			}
+		case ']', '}':
+			depth = max(depth-1, 0)
+		}
+	}
+	return false
 }
 
 // Vendors reports whether the lock takes name@version from a registry at the .crate checksum sum and has no path crate of that name and version.

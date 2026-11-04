@@ -472,6 +472,18 @@ func TestStagedDeltaVendoredCrateLocks(t *testing.T) {
 			want: plantedEvil,
 		},
 		{
+			name: "a project lock nested past the bound proves nothing and does not crash the hook",
+			setup: func(t *testing.T, dir string) {
+				deep := strings.Repeat("[", 4<<20) + strings.Repeat("]", 4<<20)
+				writeRepoFile(t, dir, ".cargo/config.toml", vendorConfig("vendor"))
+				writeRepoFile(t, dir, "Cargo.lock", "deep = "+deep+"\n"+lockedCrates([3]string{"serde", "1.0.229", sumSerde}))
+				commitAll(t, dir)
+				vendorCrate(t, dir, "vendor/serde", "serde", "1.0.229", sumSerde, devLock)
+				gitT(t, dir, "add", "-A")
+			},
+			want: []Package{criterion},
+		},
+		{
 			name: "a marker at the repo root does not hide the root lock, even with a config vendoring into the root",
 			setup: func(t *testing.T, dir string) {
 				writeRepoFile(t, dir, ".cargo/config.toml", vendorConfig("."))
