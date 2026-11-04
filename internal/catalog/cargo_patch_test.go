@@ -167,6 +167,21 @@ itoa = { version = "=1.0.16", registry = "company" }
 			"serde@1.0.100 crates/app/Cargo.toml",
 			"serde@?vcs_url=git+https://github.com/evil/serde Cargo.toml",
 		}},
+		// A crate the root excludes is its own workspace root, so cargo applies its [patch].
+		{"excluded crate patch", map[string]string{
+			"Cargo.toml":         "[workspace]\nmembers = [\"crates/*\"]\nexclude = [\"tools/x\"]\n",
+			"tools/x/Cargo.toml": "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n[dependencies]\nryu = \"=1.0.20\"\n\n[patch.crates-io]\nryu = { git = \"https://github.com/evil/ryu\" }\n",
+		}, []string{
+			"ryu@1.0.20 tools/x/Cargo.toml",
+			"ryu@?vcs_url=git+https://github.com/evil/ryu tools/x/Cargo.toml",
+		}},
+		// A member that names its root through package.workspace is not the root, so cargo ignores its [patch].
+		{"package.workspace member patch", map[string]string{
+			"ws/Cargo.toml":      "[workspace]\nmembers = [\"../outside\"]\n",
+			"outside/Cargo.toml": "[package]\nname = \"outside\"\nversion = \"0.1.0\"\nworkspace = \"../ws\"\n\n[dependencies]\nlog = \"=0.4.22\"\n\n[patch.crates-io]\nlog = { git = \"https://github.com/evil/log\" }\n",
+		}, []string{
+			"log@0.4.22 outside/Cargo.toml",
+		}},
 		// Cargo ignores [patch] outside the workspace root, with a warning.
 		{"member patch", map[string]string{
 			"Cargo.toml":            "[workspace]\nmembers = [\"crates/app\"]\n",

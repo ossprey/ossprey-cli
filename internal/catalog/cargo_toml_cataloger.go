@@ -94,6 +94,7 @@ func parseCargoTomlFile(ctx context.Context, path string, loc file.Location, sca
 	if rootOK {
 		loc = withCargoRoot(loc, path, rootDir)
 	}
+	// An excluded crate is its own root and a package.workspace member is not, as the resolved root says.
 	member := rootDir != filepath.Dir(filepath.Clean(path))
 	var out []pkg.Package
 	// catalogByGlob dedups what this returns, across every manifest.
