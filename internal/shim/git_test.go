@@ -50,3 +50,31 @@ func TestValidateManagersAcceptsGit(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestBrewIsOptIn(t *testing.T) {
+	requirePOSIX(t)
+	s := newSandbox(t)
+	writeExec(t, filepath.Join(s.realDir, "brew"), "#!/bin/sh\nexit 0\n")
+
+	res, err := Install(s.opts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contains(names(res.Done), "brew") {
+		t.Fatalf("default install shimmed brew: %v", names(res.Done))
+	}
+	o := s.opts()
+	o.Brew = true
+	if res, err = Install(o); err != nil {
+		t.Fatal(err)
+	}
+	if !contains(names(res.Done), "brew") || !contains(names(res.Done), "npm") {
+		t.Fatalf("--brew installed %v, want brew plus the defaults", names(res.Done))
+	}
+	if res, err = Install(s.opts()); err != nil {
+		t.Fatal(err)
+	}
+	if !contains(names(res.Done), "brew") {
+		t.Fatalf("re-run dropped brew: %v", names(res.Done))
+	}
+}

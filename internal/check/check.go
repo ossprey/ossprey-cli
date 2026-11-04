@@ -44,6 +44,8 @@ type Options struct {
 	// MonitorID routes a SubmitOnly send through a monitor's ingest token
 	// instead of the caller's own credential. Ignored unless SubmitOnly.
 	MonitorID string
+	// Extra components are submitted beside the specs (e.g. a repo's deps).
+	Extra []ossbom.Component
 }
 
 // Run builds a one-component-per-spec SBOM, submits it to the Ossprey API, and
@@ -76,6 +78,10 @@ func Run(ctx context.Context, opts Options) (*ossbom.SBOM, error) {
 			Type:    s.Ecosystem,
 			Source:  []string{"check"},
 		})
+	}
+
+	for _, c := range opts.Extra {
+		sbom.AddComponent(c) // dedupes by purl
 	}
 
 	switch {
