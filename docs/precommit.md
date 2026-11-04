@@ -76,9 +76,8 @@ framework manage both.
 - **Crates from git or a private registry.** A `Cargo.lock` crate that Cargo
   fetches from anywhere but crates.io is not the crates.io crate of that name,
   so it is left out of the lookup.
-- **Rust crates on plans without Rust scanning.** Rust (crates.io) scanning is
-  available on Teams and Enterprise plans; on other plans staged crates are not
-  looked up.
+- **Rust crates on plans without Rust scanning.** Staged crates are not looked
+  up; [supported ecosystems](ecosystems.md) says which plans include Rust.
 - **Packages already committed.** The hook diffs the staged manifests against
   `HEAD`, so it only sees what this commit introduces. Auditing what's already
   in the tree is `ossprey scan`'s job.

@@ -106,14 +106,14 @@ ossprey check -e cargo serde@1.0.228
 
 When a version is omitted, the latest published version is resolved from the
 registry (PyPI, npm, or crates.io, where it is the latest stable release) and
-checked. Both `name@version` and pip's `name==version` forms are accepted.
+checked. `name@version` is accepted for every ecosystem, and pip's
+`name==version` form for PyPI only.
 
 A crate's version must name one release, as `serde@1.0.228` or
 `serde@=1.0.228`. Cargo reads `1.0` and `^1.0` as ranges, so `check` refuses
 them with an error rather than guess which release you meant: give the exact
-release, or leave the version off to check the latest one. Rust (crates.io)
-scanning is available on Teams and Enterprise plans (see
-[supported ecosystems](ecosystems.md)).
+release, or leave the version off to check the latest one. Which plans include
+Rust is on [supported ecosystems](ecosystems.md).
 
 A crate is looked up on crates.io with or without a version, and checked under
 the name crates.io gives it, since crates.io reads `Serde_JSON` and
