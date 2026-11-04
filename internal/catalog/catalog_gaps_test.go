@@ -167,12 +167,129 @@ func TestMergeVersionlessFoldsRegistries(t *testing.T) {
 	got := mergeVersionless([]Package{
 		{Name: "acme", Version: "1.0.0", Type: "pypi", Registries: []string{"https://internal/"}},
 		{Name: "Acme", Version: "", Type: "pypi", Registries: []string{"https://public/"}},
-	})
+	}, nil)
 	if len(got) != 1 {
 		t.Fatalf("got %d packages, want 1: %+v", len(got), got)
 	}
 	if !slices.Equal(got[0].Registries, []string{"https://internal/", "https://public/"}) {
 		t.Errorf("Registries = %v, want both sightings", got[0].Registries)
+	}
+}
+
+// OSS-2099: a Cargo.toml range takes its release only from its workspace root's Cargo.lock, and every sighting keeps its location.
+func TestCatalogCargoRangeFoldsOnlyIntoItsWorkspaceLock(t *testing.T) {
+	t.Setenv("OSSPREY_RESOLVE_LATEST", "")
+	withResolveLatest(t, func(context.Context, string, string) (string, error) { return "9.9.9", nil })
+	lock := func(version string) string {
+		return "version = 3\n\n[[package]]\nname = \"rand\"\nversion = \"" + version + "\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n"
+	}
+	crate := func(deps string) string { return "[package]\nname = \"app\"\nversion = \"0.1.0\"\n" + deps }
+	cases := []struct {
+		name  string
+		files map[string]string
+		want  []string // sorted "name@version location,location"
+	}{
+		{
+			name:  "a dev-dependency's pin is not the runtime range's release",
+			files: map[string]string{"Cargo.toml": crate("[dependencies]\ntokio = \"1.38\"\n[dev-dependencies]\ntokio = \"=0.1.22\"\n")},
+			want:  []string{"tokio@0.1.22 Cargo.toml", "tokio@9.9.9 Cargo.toml"},
+		},
+		{
+			name: "another member's pin is not this member's release",
+			files: map[string]string{
+				"m1/Cargo.toml": crate("[dependencies]\nrand = \"=0.7.3\"\n"),
+				"m2/Cargo.toml": crate("[dependencies]\nrand = \"0.8\"\n"),
+			},
+			want: []string{"rand@0.7.3 m1/Cargo.toml", "rand@9.9.9 m2/Cargo.toml"},
+		},
+		{
+			name: "a lock in another directory is not this manifest's",
+			files: map[string]string{
+				"decoy/Cargo.lock": lock("0.3.0"),
+				"proj/Cargo.toml":  crate("[dependencies]\nrand = \"0.8\"\n"),
+			},
+			want: []string{"rand@0.3.0 decoy/Cargo.lock", "rand@9.9.9 proj/Cargo.toml"},
+		},
+		{
+			name: "a lock at the scan root is not a nested standalone crate's",
+			files: map[string]string{
+				"Cargo.toml":           crate("[dependencies]\nrand = \"0.8\"\n"),
+				"Cargo.lock":           lock("0.8.5"),
+				"tools/gen/Cargo.toml": crate("[dependencies]\nrand = \"0.8\"\n"),
+			},
+			want: []string{"rand@0.8.5 Cargo.lock,Cargo.toml", "rand@9.9.9 tools/gen/Cargo.toml"},
+		},
+		{
+			name: "a nested workspace is not locked by the outer one",
+			files: map[string]string{
+				"Cargo.toml":            "[workspace]\nmembers = [\"crates/app\"]\n",
+				"Cargo.lock":            lock("0.8.5"),
+				"crates/app/Cargo.toml": crate("[dependencies]\nrand = \"0.8\"\n"),
+				"tools/gen/Cargo.toml":  crate("[workspace]\n[dependencies]\nrand = \"0.8\"\n"),
+			},
+			want: []string{"rand@0.8.5 Cargo.lock,crates/app/Cargo.toml", "rand@9.9.9 tools/gen/Cargo.toml"},
+		},
+		{
+			name: "two members pinning one release are both its locations",
+			files: map[string]string{
+				"m1/Cargo.toml": crate("[dependencies]\nrand = \"=0.7.3\"\n"),
+				"m2/Cargo.toml": crate("[dependencies]\nrand = \"=0.7.3\"\n"),
+			},
+			want: []string{"rand@0.7.3 m1/Cargo.toml,m2/Cargo.toml"},
+		},
+		{
+			name: "a lock and a pin of one release are both its locations",
+			files: map[string]string{
+				"Cargo.toml": crate("[dependencies]\nrand = \"=0.8.5\"\n"),
+				"Cargo.lock": lock("0.8.5"),
+			},
+			want: []string{"rand@0.8.5 Cargo.lock,Cargo.toml"},
+		},
+		{
+			name: "the lock beside the manifest pins its range",
+			files: map[string]string{
+				"Cargo.toml": crate("[dependencies]\nrand = \"0.8\"\n"),
+				"Cargo.lock": lock("0.8.5"),
+			},
+			want: []string{"rand@0.8.5 Cargo.lock,Cargo.toml"},
+		},
+		{
+			name: "the workspace root's lock pins a member's range",
+			files: map[string]string{
+				"Cargo.toml":            "[workspace]\nmembers = [\"crates/app\"]\n",
+				"Cargo.lock":            lock("0.8.5"),
+				"crates/app/Cargo.toml": crate("[dependencies]\nrand = \"0.8\"\n"),
+			},
+			want: []string{"rand@0.8.5 Cargo.lock,crates/app/Cargo.toml"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeTree(t, dir, tc.files)
+			pkgs, err := Catalog(context.Background(), dir, Options{NoExec: true})
+			if err != nil {
+				t.Fatalf("Catalog: %v", err)
+			}
+			root, err := filepath.EvalSymlinks(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []string
+			for _, p := range pkgs {
+				var locs []string
+				for _, l := range p.Locations {
+					// RealPath is root-relative on Unix and absolute under the resolved root on Windows.
+					locs = append(locs, strings.TrimPrefix(strings.TrimPrefix(filepath.ToSlash(l), filepath.ToSlash(root)), "/"))
+				}
+				slices.Sort(locs)
+				got = append(got, p.Name+"@"+p.Version+" "+strings.Join(locs, ","))
+			}
+			slices.Sort(got)
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

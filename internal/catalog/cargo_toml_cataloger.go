@@ -84,7 +84,11 @@ func parseCargoTomlFile(ctx context.Context, path string, loc file.Location, sca
 		return nil, err
 	}
 
-	pool := workspacePool(m, md.IsDefined("workspace"), path, scanRoot)
+	pool, rootDir, rootOK := workspacePool(m, md.IsDefined("workspace"), path, scanRoot)
+	// A root that cannot be read governs nothing here, so no lock is known to pin this manifest.
+	if rootOK {
+		loc = withCargoRoot(loc, path, rootDir)
+	}
 	seen := make(map[string]struct{})
 	var out []pkg.Package
 	add := func(alias string, spec any) {
@@ -137,25 +141,26 @@ func readManifest(path string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
-// workspacePool returns the [workspace.dependencies] table of the root cargo finds for this manifest, or nil when that root cannot be read inside the scan root.
+// workspacePool returns the [workspace.dependencies] table of the root cargo finds for this manifest, that root's directory, and false when the root cannot be read inside the scan root.
 //
 // isRoot is whether this manifest declares [workspace] at all. Cargo roots a
 // workspace on that table, not on it having dependencies, so a nested workspace
 // that declares an empty one must not inherit an outer workspace's pool.
-func workspacePool(m cargoManifest, isRoot bool, manifestPath, scanRoot string) map[string]any {
+func workspacePool(m cargoManifest, isRoot bool, manifestPath, scanRoot string) (pool map[string]any, rootDir string, ok bool) {
+	manifestPath = filepath.Clean(manifestPath)
+	own := filepath.Dir(manifestPath)
 	if isRoot {
-		return m.Workspace.Dependencies
+		return m.Workspace.Dependencies, own, true
 	}
 	root := filepath.Clean(scanRoot)
-	manifestPath = filepath.Clean(manifestPath)
 	if m.Package.Workspace != "" {
 		return pointedPool(manifestPath, m.Package.Workspace, root)
 	}
-	dir := filepath.Dir(manifestPath)
+	dir := own
 	for {
 		parent := filepath.Dir(dir)
 		if parent == dir || !withinRoot(parent, root) {
-			return nil
+			return nil, own, true
 		}
 		dir = parent
 		ancestorPath := filepath.Join(dir, "Cargo.toml")
@@ -166,14 +171,14 @@ func workspacePool(m cargoManifest, isRoot bool, manifestPath, scanRoot string) 
 		// The directory is inside the root, but the manifest itself can be a
 		// symlink pointing out of it, which would adopt a pool from elsewhere.
 		if !withinRoot(ancestorPath, root) {
-			return nil
+			return nil, "", false
 		}
 		ancestor, ancestorIsRoot, err := readCargoManifest(ancestorPath)
 		switch {
 		case err != nil:
-			return nil
+			return nil, "", false
 		case ancestorIsRoot && !excludes(ancestor, dir, manifestPath):
-			return ancestor.Workspace.Dependencies
+			return ancestor.Workspace.Dependencies, dir, true
 		case !ancestorIsRoot && ancestor.Package.Workspace != "":
 			return pointedPool(ancestorPath, ancestor.Package.Workspace, root)
 		}
@@ -195,20 +200,21 @@ func withinRoot(dir, root string) bool {
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
-// pointedPool returns the pool of the root a package.workspace path names, or nil when it cannot be read inside the scan root.
-func pointedPool(manifestPath, pointer, root string) map[string]any {
+// pointedPool returns the pool and directory of the root a package.workspace path names, and false when it cannot be read inside the scan root.
+func pointedPool(manifestPath, pointer, root string) (map[string]any, string, bool) {
 	if !filepath.IsAbs(pointer) {
 		pointer = filepath.Join(filepath.Dir(manifestPath), pointer)
 	}
-	target := filepath.Join(pointer, "Cargo.toml")
+	dir := filepath.Clean(pointer)
+	target := filepath.Join(dir, "Cargo.toml")
 	if !withinRoot(target, root) {
-		return nil
+		return nil, dir, false
 	}
-	m, _, err := readCargoManifest(target)
-	if err != nil {
-		return nil
+	m, isRoot, err := readCargoManifest(target)
+	if err != nil || !isRoot {
+		return nil, dir, false
 	}
-	return m.Workspace.Dependencies
+	return m.Workspace.Dependencies, dir, true
 }
 
 // readCargoManifest reads and decodes a Cargo.toml, and reports whether it declares [workspace].
@@ -241,6 +247,18 @@ func covers(dir string, entries []string, manifestPath string) bool {
 		}
 	}
 	return false
+}
+
+// cargoRootAnnotation carries a manifest's workspace root to mergeVersionless.
+const cargoRootAnnotation = "ossprey-cargo-workspace-root"
+
+// withCargoRoot annotates loc with its workspace root, spelled as the resolver spells loc so it compares with a Cargo.lock's location.
+func withCargoRoot(loc file.Location, manifestPath, rootDir string) file.Location {
+	rel, err := filepath.Rel(filepath.Dir(filepath.Clean(manifestPath)), rootDir)
+	if err != nil {
+		return loc
+	}
+	return loc.WithAnnotation(cargoRootAnnotation, filepath.Join(filepath.Dir(loc.RealPath), rel))
 }
 
 // cargoDep resolves one dependency entry to the crate name and version to

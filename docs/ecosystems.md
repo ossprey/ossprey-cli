@@ -8,7 +8,7 @@ Python, JavaScript and Rust, via syft's static catalogers.
 |-----------|--------------|
 | Python | `requirements.txt` (and any `*requirements*.txt`, e.g. `requirements-dev.txt`), `Pipfile.lock`, `poetry.lock`, `uv.lock`, `pdm.lock`, `setup.py`, `pyproject.toml`, wheel / egg metadata |
 | JavaScript | `package.json`, `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml` |
-| Rust | `Cargo.lock`, and `Cargo.toml` direct dependencies (one a lockfile pins is sent at its locked version) |
+| Rust | `Cargo.lock`, and `Cargo.toml` direct dependencies (one its workspace's `Cargo.lock` pins is sent at that locked version) |
 
 The CLI never installs your dependencies. It does run a resolver — `npm install
 --package-lock-only` (in a temporary directory) or `uv pip compile` — when a
@@ -17,6 +17,14 @@ install would pull; nothing is installed and your project is not modified. When
 that resolver is missing from PATH or disabled, expect direct deps only —
 supply a lockfile for full transitive coverage. Rust has no resolver tier, so a
 crate with no `Cargo.lock` always catalogues direct dependencies only.
+
+A `Cargo.toml` range takes its version only from its own workspace's
+`Cargo.lock`: the one beside the nearest `Cargo.toml` at or above it, inside
+the scan, that has a `[workspace]` table, or the one beside the manifest itself
+when there is none. A lockfile anywhere else, or an exact `=` pin of the same
+crate in another manifest or another dependency table, does not set it, so
+that range is sent at the latest published release like any other unpinned
+dependency (below).
 
 Directories that hold installed or built packages rather than your project's
 own manifests are not read at all: `node_modules`, `bower_components`,

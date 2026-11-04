@@ -105,15 +105,17 @@ func catalogByGlob(ctx context.Context, resolver file.Resolver, root, glob, labe
 	_ = g.Wait() // workers never return non-nil; Wait is just the barrier
 
 	sort.Slice(results, func(a, b int) bool { return results[a].idx < results[b].idx })
-	seen := make(map[string]struct{})
+	seen := make(map[string]int)
 	var out []pkg.Package
 	for _, r := range results {
 		for _, p := range r.pkgs {
 			key := p.Name + "@" + p.Version
-			if _, ok := seen[key]; ok {
+			if i, ok := seen[key]; ok {
+				// Keep every file's location, in a fresh set since a parser may share one between packages.
+				out[i].Locations = file.NewLocationSet(append(out[i].Locations.ToSlice(), p.Locations.ToSlice()...)...)
 				continue
 			}
-			seen[key] = struct{}{}
+			seen[key] = len(out)
 			out = append(out, p)
 		}
 	}

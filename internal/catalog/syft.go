@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -223,6 +224,7 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 	seen := map[string]int{} // dedup key -> index in out
 	locks := newNpmLockClassifier(absRoot)
 	pins := newRequirementPins(absRoot)
+	cargoRoots := map[string]string{} // Cargo.toml location -> its workspace root
 	var out []Package
 	for _, c := range catalogers {
 		// Per-cataloger errors are non-fatal AND partial: syft's generic
@@ -281,6 +283,11 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 				warn.Add(ctx, cargoDropEntry("cargolock", why, p.Name))
 				continue
 			}
+			for _, l := range p.Locations.ToSlice() {
+				if root, ok := l.Annotations[cargoRootAnnotation]; ok {
+					cargoRoots[l.RealPath] = root
+				}
+			}
 			for _, qualifiers := range marks {
 				key := dedupKey(t, p.Name, version) + qualifierKey(qualifiers)
 				if i, ok := seen[key]; ok {
@@ -288,6 +295,7 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 					// first: one lockfile fetching it from the public index is
 					// enough to need a check.
 					out[i].Registries = mergeUnique(out[i].Registries, []string{registryOf(p)})
+					out[i].Locations = mergeUnique(out[i].Locations, locations(p))
 					continue
 				}
 				seen[key] = len(out)
@@ -304,7 +312,7 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 		}
 	}
 
-	merged := mergeVersionless(out)
+	merged := mergeVersionless(out, cargoRoots)
 	markLocalPackages(merged, findLocalPackageNames(resolver, absRoot))
 	markTrustedPackages(merged, opts.Trust)
 	resolveVersionless(ctx, merged, opts)
@@ -469,7 +477,8 @@ func registryOf(p pkg.Package) string {
 // lower-fidelity view. Drop versionless entries when a versioned sibling of the
 // same (type, name) exists, folding their Source/Locations into the siblings so
 // no attribution is lost. Entries with no versioned sibling are kept as-is.
-func mergeVersionless(pkgs []Package) []Package {
+// A crate folds per manifest, only into releases its workspace root's Cargo.lock locks (cargoRoots).
+func mergeVersionless(pkgs []Package, cargoRoots map[string]string) []Package {
 	gkey := func(p Package) string {
 		if p.Type == "pypi" {
 			// PEP 503: "typing_extensions" as written is uv's "typing-extensions".
@@ -480,35 +489,66 @@ func mergeVersionless(pkgs []Package) []Package {
 
 	// A source-marked crate is its own component: it neither absorbs a sighting nor folds into one.
 	versioned := func(p Package) bool { return p.Version != "" && len(p.Qualifiers) == 0 }
-	hasVersioned := map[string]bool{}
-	for _, p := range pkgs {
+	siblings := map[string][]int{}
+	for i, p := range pkgs {
 		if versioned(p) {
-			hasVersioned[gkey(p)] = true
+			siblings[gkey(p)] = append(siblings[gkey(p)], i)
 		}
 	}
-	folds := func(p Package) bool { return p.Version == "" && len(p.Qualifiers) == 0 && hasVersioned[gkey(p)] }
-
-	// Keep versioned entries and versionless ones with no versioned sibling;
-	// remember where each versioned group landed so we can fold sources into it.
-	var out []Package
-	groupIdx := map[string][]int{}
-	for _, p := range pkgs {
-		if folds(p) {
-			continue // folded below
+	// Another manifest's pin or another directory's lock says nothing about the release this manifest builds.
+	lockedFor := func(p Package, manifest string) []int {
+		root, ok := cargoRoots[manifest]
+		if !ok {
+			return nil
 		}
-		if versioned(p) {
-			groupIdx[gkey(p)] = append(groupIdx[gkey(p)], len(out))
-		}
-		out = append(out, p)
-	}
-
-	for _, p := range pkgs {
-		if folds(p) {
-			for _, i := range groupIdx[gkey(p)] {
-				out[i].Source = mergeUnique(out[i].Source, p.Source)
-				out[i].Locations = mergeUnique(out[i].Locations, p.Locations)
-				out[i].Registries = mergeUnique(out[i].Registries, p.Registries)
+		lock := filepath.Join(root, "Cargo.lock")
+		var locked []int
+		for _, i := range siblings[gkey(p)] {
+			if slices.ContainsFunc(pkgs[i].Locations, func(l string) bool { return filepath.Clean(l) == lock }) {
+				locked = append(locked, i)
 			}
+		}
+		return locked
+	}
+
+	work := slices.Clone(pkgs)
+	drop := make([]bool, len(pkgs))
+	fold := func(i int, p Package, locs []string) {
+		work[i].Source = mergeUnique(work[i].Source, p.Source)
+		work[i].Locations = mergeUnique(work[i].Locations, locs)
+		work[i].Registries = mergeUnique(work[i].Registries, p.Registries)
+	}
+	for i, p := range pkgs {
+		if p.Version != "" || len(p.Qualifiers) > 0 {
+			continue
+		}
+		if p.Type != "cargo" {
+			for _, s := range siblings[gkey(p)] {
+				fold(s, p, p.Locations)
+			}
+			drop[i] = len(siblings[gkey(p)]) > 0
+			continue
+		}
+		var rest []string
+		for _, l := range p.Locations {
+			locked := lockedFor(p, l)
+			for _, s := range locked {
+				fold(s, p, []string{l})
+			}
+			if len(locked) == 0 {
+				rest = append(rest, l)
+			}
+		}
+		if len(rest) < len(p.Locations) {
+			work[i].Locations = rest
+			drop[i] = len(rest) == 0
+		}
+	}
+
+	var out []Package
+	for i, p := range work {
+		if !drop[i] {
+			out = append(out, p)
 		}
 	}
 	return out
