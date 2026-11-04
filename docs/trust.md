@@ -52,16 +52,39 @@ crates.io is always checked, even under a rule such as `https://github.com/` or
 `https://index.crates.io/` that covers crates.io's index. So is a crate Cargo
 fetches from git, whatever rule covers its repository, and a crate whose index
 host has non-ASCII characters, since Cargo may read that host as another one,
-or whose index URL has a percent-escape such as `%2F` after the host. When a
-Cargo config in the project, in a directory above it or in `CARGO_HOME` sets
-`replace-with` for any source, has an `include`, or cannot be read, every crate
-is checked and the scan says so in one warning, because Cargo may then fetch a
-crate from somewhere other than the index its lock names. A config reached
-through a symlink counts like any other. Cargo's `--config` option,
-`CARGO_SOURCE_*_REPLACE_WITH` environment variables and `[http]` `proxy` or
-`cainfo` settings are not checked by a repository scan.
+or whose index URL has a percent-escape such as `%2F` after the host.
 A crate locked from your registry and the crates.io crate of the same name and
 version are different crates to Cargo, so trusting one never hides the other.
+
+Cargo configuration can make Cargo fetch a crate from somewhere other than the
+index its lock names. Whenever the scan cannot tell where Cargo will fetch
+crates from, every crate is checked and the scan says why in one warning. That
+happens when a Cargo config that Cargo may read for the project:
+
+- sets `replace-with` for any source;
+- has an `include`;
+- defines an alias that passes `--config`;
+- cannot be read, or is not a regular file.
+
+The scan reads the configs in the project, in every directory above it, in
+`CARGO_HOME`, and in the real path of each symlinked directory in the project
+and every directory above that, because Cargo reads the configs in and above
+the directory it really runs in. A config reached through a symlink counts like
+any other. If the symlinked directories lead to more than 4096 directories to
+read, every crate is checked.
+
+These are not checked:
+
+- How Cargo is run, which a repository scan cannot see: its `--config` option
+  typed on the command line, and environment variables such as
+  `CARGO_SOURCE_<name>_REPLACE_WITH` or `CARGO_HTTP_PROXY`.
+- `[http]` `proxy` and `cainfo` settings in a config.
+- A config that Cargo reads only when it runs inside a directory the scan
+  skips, such as `node_modules` or `target`, when no symlink in the project
+  leads there.
+- A `.cargo` directory inside the project that the user running the scan
+  cannot list. Git does not record directory permissions, so a checkout alone
+  cannot cause this.
 
 **A package whose source was not recorded is checked.** That covers
 `pnpm-lock.yaml` (it records no tarball URL), `Pipfile.lock` (it records an

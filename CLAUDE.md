@@ -225,13 +225,18 @@ Every rule is a hole in the scan by design, so the rules are narrow:
   crate counts at all when any config cargo may read (every `.cargo` directory
   the index holds, read on disk since a syft glob reports a symlink by its
   target, plus those above the root and `CARGO_HOME`, opened by name where a
-  directory cannot be listed; manifests above the root play no part) sets a
-  `replace-with`, has an `include` (stable since Cargo 1.94), or cannot be read
-  (`clearReplacedCrateRegistries`, one warning): cargo then fetches from the
+  directory cannot be listed, and those above the real path of every symlinked
+  directory, since cargo walks up from its physical cwd and a link can lead
+  into a sink or out of the scan, capped at `maxCargoLinkDirs`; manifests above
+  the root play no part) sets a `replace-with`, has an `include` (stable since
+  Cargo 1.94), has an alias passing `--config`, or cannot be read
+  (`clearReplacedCrateRegistries`, one warning; only a regular file is opened,
+  since a link to `/dev/zero` or a FIFO never ends): cargo then fetches from the
   replacement while the lock still names the trusted index, and a
-  repository-controlled lock can carry matching checksums. Not checked:
-  `--config`, `CARGO_SOURCE_*_REPLACE_WITH`, `[http]` `proxy`/`cainfo`, and a
-  `.cargo` inside a scanned directory syft cannot list. The crates.io twin of
+  repository-controlled lock can carry matching checksums. Not checked: a typed
+  `--config`, `CARGO_*` environment overrides, `[http]` `proxy`/`cainfo`, a
+  config only a build run from inside a sink would read, and a `.cargo` inside a
+  scanned directory syft cannot list. The crates.io twin of
   a trusted crate is its own bare component with no recorded source, so it
   stays checked. Trusted needs **every** recorded sighting trusted: dedup and
   `mergeVersionless` fold sightings' `Registries` together rather than keeping
