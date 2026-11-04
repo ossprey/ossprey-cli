@@ -7,9 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
+	"github.com/anchore/syft/syft/file"
 	"github.com/anchore/syft/syft/pkg"
 	"github.com/anchore/syft/syft/pkg/cataloger/javascript"
 	"github.com/anchore/syft/syft/pkg/cataloger/python"
@@ -306,6 +308,7 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 
 	merged := mergeVersionless(out)
 	markLocalPackages(merged, findLocalPackageNames(resolver, absRoot))
+	clearReplacedCrateRegistries(ctx, merged, opts.Trust, resolver, absRoot)
 	markTrustedPackages(merged, opts.Trust)
 	resolveVersionless(ctx, merged, opts)
 	return merged, nil
@@ -416,6 +419,28 @@ func markTrustedPackages(pkgs []Package, policy trust.Policy) {
 	for i := range pkgs {
 		pkgs[i].Trusted = policy.Trusts(pkgs[i].Type, pkgs[i].Name, pkgs[i].Registries)
 	}
+}
+
+// clearReplacedCrateRegistries drops every crate's registries when a cargo config may fetch crates from a source other than their lock's.
+func clearReplacedCrateRegistries(ctx context.Context, pkgs []Package, policy trust.Policy, r file.Resolver, root string) {
+	// Configs are read only when a crate would otherwise be trusted by registry.
+	if !slices.ContainsFunc(pkgs, func(p Package) bool { return p.Type == "cargo" && policy.Trusts(p.Type, p.Name, p.Registries) }) {
+		return
+	}
+	why := cargoReplacement(r, root)
+	if why == "" {
+		return
+	}
+	for i := range pkgs {
+		if pkgs[i].Type == "cargo" {
+			pkgs[i].Registries = nil
+		}
+	}
+	warn.Add(ctx, warn.Entry{
+		Class: "cargo:untrusted:" + why,
+		One:   "cargo: registry trust was not applied to crates because " + why,
+		Many:  "cargo: registry trust was not applied to crates in %d scans because " + why,
+	})
 }
 
 // registrySource is the metadata our own catalogers attach when the resolver

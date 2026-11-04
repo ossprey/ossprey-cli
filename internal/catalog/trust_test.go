@@ -2,6 +2,9 @@ package catalog
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -10,6 +13,7 @@ import (
 	"github.com/anchore/syft/syft/file"
 
 	"github.com/ossprey/ossprey-cli/internal/trust"
+	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
 const (
@@ -261,6 +265,7 @@ checksum = "eeee"
 
 // A crate is trusted by the private index its Cargo.lock names, never from crates.io, git or a host Go and Cargo read apart.
 func TestCatalogTrustsCratesByTheirCargoLockIndex(t *testing.T) {
+	t.Setenv("CARGO_HOME", t.TempDir())
 	root := t.TempDir()
 	writeTree(t, root, map[string]string{
 		"rustapp/Cargo.lock":  trustCargoLock,
@@ -307,6 +312,63 @@ func TestCatalogTrustsCratesByTheirCargoLockIndex(t *testing.T) {
 	}
 	if strings.Join(checked, " ") != strings.Join(wantChecked, " ") {
 		t.Errorf("checked = %v\nwant      %v", checked, wantChecked)
+	}
+}
+
+// A cargo config replacing any source lets Cargo fetch a crate elsewhere while its Cargo.lock still names the trusted index.
+func TestCatalogTrustsNoCrateUnderASourceReplacement(t *testing.T) {
+	replace := "[source.corp]\nregistry = \"sparse+https://crates.corp.example/internal/\"\nreplace-with = \"elsewhere\"\n\n[source.elsewhere]\nregistry = \"sparse+https://crates.elsewhere.example/\"\n"
+	const replaced, unread = "because a source replacement is configured", "because a cargo config could not be read"
+	for name, c := range map[string]struct {
+		files      map[string]string
+		unreadable string
+		warning    string
+	}{
+		"no config":                         {},
+		"a replacement in the scan":         {files: map[string]string{"proj/.cargo/config.toml": replace}, warning: replaced},
+		"a replacement above the scan root": {files: map[string]string{".cargo/config.toml": replace}, warning: replaced},
+		"a replacement in CARGO_HOME":       {files: map[string]string{"home/config.toml": replace}, warning: replaced},
+		"an unreadable config":              {files: map[string]string{"proj/.cargo/config.toml": "[net]\nretry = 2\n"}, unreadable: "proj/.cargo/config.toml", warning: unread},
+		"an unparseable config":             {files: map[string]string{"proj/.cargo/config.toml": "[source\n"}, warning: unread},
+	} {
+		t.Run(name, func(t *testing.T) {
+			base := t.TempDir()
+			t.Setenv("CARGO_HOME", filepath.Join(base, "home"))
+			writeTree(t, base, map[string]string{
+				"home/.keep":                 "",
+				"proj/Cargo.lock":            "version = 4\n\n[[package]]\nname = \"acme-sparse\"\nversion = \"1.0.0\"\nsource = \"sparse+https://crates.corp.example/internal/\"\nchecksum = \"aaaa\"\n",
+				"proj/web/package-lock.json": trustPackageLock,
+			})
+			writeTree(t, base, c.files)
+			if c.unreadable != "" {
+				if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+					t.Skip("file modes do not stop this user reading")
+				}
+				p := filepath.Join(base, filepath.FromSlash(c.unreadable))
+				if err := os.Chmod(p, 0); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(p, 0o644) })
+			}
+			ctx := warn.NewContext(context.Background(), false)
+			policy := testPolicy(t, []string{"https://crates.corp.example/internal/", npmInternal}, nil)
+
+			pkgs, err := Catalog(ctx, filepath.Join(base, "proj"), Options{NoExec: true, SkipVersionLookup: true, Trust: policy})
+			if err != nil {
+				t.Fatal(err)
+			}
+			trusted, _ := trustedNames(pkgs)
+			want := []string{"cargo/acme-sparse?repository_url=https://crates.corp.example/", "npm/acme-npm"}
+			if c.warning != "" {
+				want = want[1:]
+			}
+			if strings.Join(trusted, " ") != strings.Join(want, " ") {
+				t.Errorf("trusted = %v, want %v", trusted, want)
+			}
+			if got := warn.Drain(ctx); c.warning == "" && strings.Contains(got, "registry trust") || c.warning != "" && strings.Count(got, c.warning) != 1 {
+				t.Errorf("warnings = %q, want %q once", got, c.warning)
+			}
+		})
 	}
 }
 

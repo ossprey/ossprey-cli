@@ -4,12 +4,14 @@ import (
 	"maps"
 	"net/url"
 	"path"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"unicode"
 
+	"github.com/anchore/syft/syft/file"
 	"github.com/anchore/syft/syft/pkg"
 )
 
@@ -180,6 +182,38 @@ func escapedPastHost(clean string) bool {
 	rest = strings.TrimLeft(rest, "/")
 	i := strings.IndexAny(rest, "/?#")
 	return i >= 0 && strings.Contains(rest[i:], "%")
+}
+
+const (
+	sourceReplaced = "a source replacement is configured"
+	configUnread   = "a cargo config could not be read"
+)
+
+// cargoReplacement says why no crate is trusted by registry: a cargo config cargo may read for root replaces a source or cannot be read.
+func cargoReplacement(r file.Resolver, root string) string {
+	root = resolvedRoot(root)
+	rootSlash := filepath.ToSlash(root)
+	locs, err := cargoConfigLocs(r, rootSlash+"/")
+	if err != nil {
+		return configUnread
+	}
+	inScan, ok := readCargoFiles(r, locs, rootSlash, 2)
+	if !ok {
+		return configUnread
+	}
+	_, above, ok := cargoFilesAbove(root)
+	if !ok {
+		return configUnread
+	}
+	for _, c := range slices.Concat(above, slices.Collect(maps.Values(inScan))) {
+		sources, _ := c.doc["source"].(map[string]any)
+		for _, s := range sources {
+			if tomlLookup(s, "replace-with") != nil {
+				return sourceReplaced
+			}
+		}
+	}
+	return ""
 }
 
 // atPastSlash reports an '@' after a '/' in the authority or path, where Go reads a password's tail as host or path.

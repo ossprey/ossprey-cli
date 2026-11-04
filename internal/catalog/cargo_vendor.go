@@ -49,10 +49,7 @@ func withoutCargoVendor(r file.Resolver, root string) file.Resolver {
 	if err != nil || len(marks) == 0 {
 		return r
 	}
-	// RealPath is root-relative on POSIX but absolute under the resolved root on Windows.
-	if resolved, err := filepath.EvalSymlinks(root); err == nil {
-		root = resolved
-	}
+	root = resolvedRoot(root)
 	rootSlash := filepath.ToSlash(root)
 	rootPrefix := rootSlash + "/"
 	marked := map[string]file.Location{}
@@ -63,15 +60,9 @@ func withoutCargoVendor(r file.Resolver, root string) file.Resolver {
 	if err != nil {
 		return r
 	}
-	dotted, err := r.FilesByGlob("**/.*/*")
+	configLocs, err := cargoConfigLocs(r, rootPrefix)
 	if err != nil {
 		return r
-	}
-	var configLocs []file.Location
-	for _, l := range dotted {
-		if isCargoConfig(rootRel(l.AccessPath, rootPrefix)) || isCargoConfig(rootRel(l.RealPath, rootPrefix)) {
-			configLocs = append(configLocs, l)
-		}
 	}
 	lockLocs, err := r.FilesByGlob("**/Cargo.lock")
 	if err != nil {
@@ -165,6 +156,29 @@ func withoutCargoVendor(r file.Resolver, root string) file.Resolver {
 		return r
 	}
 	return cargoVendored{Resolver: r, rootPrefix: rootPrefix, hidden: hidden}
+}
+
+// resolvedRoot is root with its symlinks resolved, since RealPath is root-relative on POSIX but absolute under the resolved root on Windows.
+func resolvedRoot(root string) string {
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		return resolved
+	}
+	return root
+}
+
+// cargoConfigLocs lists the cargo configs in the scan, matched by access or real path.
+func cargoConfigLocs(r file.Resolver, rootPrefix string) ([]file.Location, error) {
+	dotted, err := r.FilesByGlob("**/.*/*")
+	if err != nil {
+		return nil, err
+	}
+	var locs []file.Location
+	for _, l := range dotted {
+		if isCargoConfig(rootRel(l.AccessPath, rootPrefix)) || isCargoConfig(rootRel(l.RealPath, rootPrefix)) {
+			locs = append(locs, l)
+		}
+	}
+	return locs, nil
 }
 
 // isCargoConfig matches .cargo/config(.toml) in any case, as cargo opens them on a case-insensitive filesystem.
