@@ -520,6 +520,7 @@ func TestParseCargoLockRefusesDeepNesting(t *testing.T) {
 		{"nesting past the bound", "x = " + deep + "\n", true},
 		{"closers in strings between levels", "x = " + strings.Repeat(`["]]",`, 9) + strings.Repeat("]", 9) + "\n", true},
 		{"a multi-line string ending in extra quotes", `x = ["""a"""", ` + deep + "]\n", true},
+		{"six closing quotes after an escaped backslash", `x = ["""a\\"""""", ` + deep + "]\n", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := ParseCargoLock([]byte(tc.extra + lock))

@@ -3,6 +3,7 @@ package catalog
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -565,8 +566,8 @@ func ParseCargoLock(data []byte) (CargoLock, error) {
 	if len(data) > maxCargoProofBytes {
 		return CargoLock{}, fmt.Errorf("Cargo.lock is %d bytes, over the %d limit", len(data), maxCargoProofBytes)
 	}
-	if tomlNestsPast(data, maxLockNesting) {
-		return CargoLock{}, fmt.Errorf("Cargo.lock nests brackets over %d deep", maxLockNesting)
+	if err := proofTOMLError(data); err != nil {
+		return CargoLock{}, fmt.Errorf("Cargo.lock %w", err)
 	}
 	var lock struct {
 		Package []struct {
@@ -593,6 +594,23 @@ func ParseCargoLock(data []byte) (CargoLock, error) {
 		set.sums[key][p.Checksum] = true
 	}
 	return set, nil
+}
+
+// proofTOMLError refuses a proof file nested too deep for the decoder, or one the nesting scan could misread.
+func proofTOMLError(data []byte) error {
+	quotes := 0
+	for _, c := range data {
+		if quotes++; c != '"' && c != '\'' {
+			quotes = 0
+		} else if quotes >= 6 {
+			// The decoder can close a multi-line string later in a run of six quotes than the scan does.
+			return errors.New("holds six quotes in a row")
+		}
+	}
+	if tomlNestsPast(data, maxLockNesting) {
+		return fmt.Errorf("nests brackets over %d deep", maxLockNesting)
+	}
+	return nil
 }
 
 // tomlNestsPast reports whether data nests brackets or braces more than limit deep outside its strings and comments.
