@@ -59,29 +59,29 @@ version are different crates to Cargo, so trusting one never hides the other.
 Cargo configuration can make Cargo fetch a crate from somewhere other than the
 index its lock names. Whenever the scan cannot tell where Cargo will fetch
 crates from, every crate is checked and the scan says why in one warning. That
-happens when a Cargo config that Cargo may read for the project:
+happens when:
 
-- sets `replace-with` for any source;
-- has an `include`;
-- defines an alias that passes `--config`;
-- cannot be read, or is not a regular file.
+- the project holds a symlinked directory, a symlinked `.cargo` directory or
+  Cargo config, or a symlink that leads out of the project or to nothing.
+  Cargo reads the configs in and above the directory it really runs in, and
+  such a link could lead it to a config the scan never sees. A symlink to
+  another file in the project, such as a shared `LICENSE`, is fine;
+- a Cargo config that Cargo may read for the project sets `replace-with` for
+  any source, has an `include`, defines an alias that passes `--config`, or
+  cannot be read or is not a regular file.
 
-The scan reads the configs in the project, in every directory above it, in
-`CARGO_HOME`, and in the real path of each symlinked directory in the project
-and every directory above that, because Cargo reads the configs in and above
-the directory it really runs in. A config reached through a symlink counts like
-any other. If the symlinked directories lead to more than 4096 directories to
-read, every crate is checked.
+The scan reads the configs in the project, in every directory above it and in
+`CARGO_HOME`. A symlinked `.cargo` directory or config above the project or in
+`CARGO_HOME` is not followed, and counts as a config that cannot be read.
 
 These are not checked:
 
 - How Cargo is run, which a repository scan cannot see: its `--config` option
   typed on the command line, and environment variables such as
-  `CARGO_SOURCE_<name>_REPLACE_WITH` or `CARGO_HTTP_PROXY`.
+  `CARGO_HTTP_PROXY` and `CARGO_HTTP_CAINFO`.
 - `[http]` `proxy` and `cainfo` settings in a config.
 - A config that Cargo reads only when it runs inside a directory the scan
-  skips, such as `node_modules` or `target`, when no symlink in the project
-  leads there.
+  skips, such as `node_modules` or `target`.
 - A `.cargo` directory inside the project that the user running the scan
   cannot list. Git does not record directory permissions, so a checkout alone
   cannot cause this.
