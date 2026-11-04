@@ -419,7 +419,8 @@ configs are read, so an ancestor `Cargo.toml` that cannot be parsed hides
 nothing, while a config there that cannot be parsed hides the others, as cargo
 stops on it too; the vendor filter still reads the manifests and proves
 nothing when one fails. It judges the replacement in effect where cargo
-would run, at the scan root and at each directory in the scan holding a config
+would run, at each directory in the scan holding a `Cargo.toml` or a config, so
+at the scan root only when it holds one of them
 (`cratesIoReplacement`: the nearest level that sets `replace-with`, as
 `vendorDir` walks, then `CARGO_HOME`'s, which cargo reads last), and stays
 quiet only where that is a vendor directory the filter proved
@@ -428,7 +429,9 @@ though the files cargo checks against `.cargo-checksum.json` are not compared
 with the release. Judging each config at its own directory missed a nested
 config that redirects the vendored source without restating `replace-with`,
 and warned about a `CARGO_HOME` mirror that the project's own vendor config
-overrides everywhere in the project. It runs only when a
+overrides everywhere in the project; judging a scan root holding neither file
+warned about that mirror in a monorepo whose Rust project, in a subdirectory,
+builds from a proven vendor tree. It runs only when a
 crate goes out unmarked, so a scan with no Rust never mentions cargo.
 
 #### Why the npm resolve skips workspace members (OSS-1353)

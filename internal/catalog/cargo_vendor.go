@@ -327,13 +327,17 @@ func cargoConfigLevels(configLocs []file.Location, configs map[string]cargoFile,
 	return levels
 }
 
-// cargoSourceReplaced reports whether cargo run at the scan root or beside a config in it takes crates.io from anything but a vendor directory the filter proved.
+// cargoSourceReplaced reports whether cargo run beside a manifest or a config in the scan takes crates.io from anything but a vendor directory the filter proved.
 func cargoSourceReplaced(r file.Resolver, root string) bool {
 	vendored, _ := r.(cargoVendored)
 	root = resolvedRoot(root)
 	rootSlash := filepath.ToSlash(root)
 	// syft answers a plain basename from its index, where the vendor filter's "**/.*/*" walks every file.
 	configLocs, err := cargoConfigLocs(r, rootSlash+"/", "**/config", "**/config.toml")
+	if err != nil {
+		return false
+	}
+	manifestLocs, err := r.FilesByGlob("**/Cargo.toml")
 	if err != nil {
 		return false
 	}
@@ -347,14 +351,21 @@ func cargoSourceReplaced(r file.Resolver, root string) bool {
 	// A manifest above the scan names no source, so only configs are read there; one that cannot be read stops cargo too.
 	_, aboveConfigs, _ := cargoFilesAbove(root, false)
 	levels := cargoConfigLevels(configLocs, configs, aboveConfigs, rootSlash)
-	// Configs above the scan and CARGO_HOME's count by their effect at the scan root, not at their own directory.
-	dirs := []string{rootSlash}
-	for _, cs := range levels {
-		if base := cs[0].bases[0]; strings.HasPrefix(foldPath(base)+"/", foldPath(rootSlash+"/")) {
-			dirs = append(dirs, base)
+	// cargo runs beside a manifest or a config, so configs above the scan and CARGO_HOME's count by their effect there, never at a bare scan root.
+	dirs := map[string]bool{}
+	for _, l := range manifestLocs {
+		for _, p := range []string{rootRel(l.AccessPath, rootSlash+"/"), rootRel(l.RealPath, rootSlash+"/")} {
+			if !outsideRoot(p) {
+				dirs[path.Join(rootSlash, path.Dir(p))] = true
+			}
 		}
 	}
-	for _, d := range dirs {
+	for _, cs := range levels {
+		if base := cs[0].bases[0]; strings.HasPrefix(foldPath(base)+"/", foldPath(rootSlash+"/")) {
+			dirs[base] = true
+		}
+	}
+	for d := range dirs {
 		if cratesIoReplacement(levels, d) != "" && !vendored.vendors[vendorDir(levels, d)] {
 			return true
 		}

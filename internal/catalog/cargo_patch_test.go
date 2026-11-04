@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"context"
+	"os"
 	"path"
 	"path/filepath"
 	"slices"
@@ -256,6 +257,16 @@ func TestCatalogWarnsWhenCargoReplacesCratesIo(t *testing.T) {
 		{name: "vendored source redirected below the root", tree: cargoVendorFixture, files: map[string]string{"tools/.cargo/config.toml": "[source.vendored-sources]\ndirectory = \"../mirror-vendor\"\n"}, want: 1},
 		// Every cargo run in the project takes the project's proven vendor tree, so CARGO_HOME's mirror is never in effect.
 		{name: "CARGO_HOME mirror under a proven vendor tree", tree: cargoVendorFixture, home: mirrorConfig, want: 0},
+		// A scan root holding no Cargo.toml or config is not judged, so CARGO_HOME's mirror is judged only where the subdirectory's vendor tree overrides it.
+		{name: "CARGO_HOME mirror over a subdirectory's proven vendor tree", tree: func(t *testing.T) string {
+			mono := t.TempDir()
+			if err := os.Rename(cargoVendorFixture(t), filepath.Join(mono, "rust")); err != nil {
+				t.Fatal(err)
+			}
+			return mono
+		}, files: map[string]string{"web/package.json": `{"name":"web","dependencies":{"left-pad":"^1.3.0"}}`}, home: mirrorConfig, want: 0},
+		{name: "CARGO_HOME mirror over a subdirectory", files: map[string]string{"rust/Cargo.toml": project, "web/package.json": `{"name":"web"}`}, home: mirrorConfig, want: 1},
+		{name: "mirror at a root holding no manifest", files: map[string]string{"rust/Cargo.toml": project, ".cargo/config.toml": mirrorConfig}, want: 1},
 		{name: "not replaced", files: map[string]string{"Cargo.toml": project, ".cargo/config.toml": "[net]\ngit-fetch-with-cli = true\n"}, want: 0},
 		{name: "no crates", files: map[string]string{"package.json": `{"name":"web","dependencies":{"left-pad":"^1.3.0"}}`, ".cargo/config.toml": mirrorConfig}, want: 0},
 	} {
