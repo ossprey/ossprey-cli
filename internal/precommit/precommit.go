@@ -109,6 +109,18 @@ func StagedDelta(ctx context.Context, repoDir string, policy trust.Policy) (Delt
 		}
 	}
 
+	// A member's `workspace = true` pins live in a workspace root the commit may not touch.
+	for _, a := range cargoAncestors(paths) {
+		if err := writeWorkspaceRoot(ctx, repoDir, ":"+a, stagedRoot, a); err != nil {
+			return Delta{}, err
+		}
+		if hasHead {
+			if err := writeWorkspaceRoot(ctx, repoDir, "HEAD:"+a, headRoot, a); err != nil {
+				return Delta{}, err
+			}
+		}
+	}
+
 	// No-exec + no version lookup: a pre-commit hook must be fast, offline,
 	// and must never run npm/uv against a synthetic tree.
 	opts := catalog.Options{SkipVersionLookup: true, NoExec: true, Trust: policy}
@@ -301,6 +313,38 @@ func isManifestPath(p string) bool {
 // dependency tree is skipped.
 func isVendoredPath(p string) bool {
 	return strings.Contains(filepath.ToSlash(p), "node_modules/")
+}
+
+// cargoAncestors lists the unstaged Cargo.toml paths above each staged one, up to the repo root.
+func cargoAncestors(paths []string) []string {
+	seen := make(map[string]bool, len(paths))
+	for _, p := range paths {
+		seen[p] = true
+	}
+	var out []string
+	for _, p := range paths {
+		if path.Base(p) != "Cargo.toml" {
+			continue
+		}
+		for dir := path.Dir(p); dir != "."; {
+			dir = path.Dir(dir)
+			a := path.Join(dir, "Cargo.toml")
+			if !seen[a] {
+				seen[a] = true
+				out = append(out, a)
+			}
+		}
+	}
+	return out
+}
+
+// writeWorkspaceRoot writes the Cargo.toml at spec into root when it exists and declares [workspace].
+func writeWorkspaceRoot(ctx context.Context, repoDir, spec, root, repoRelPath string) error {
+	blob, err := gitShow(ctx, repoDir, spec)
+	if err != nil || !catalog.DeclaresCargoWorkspace(blob) {
+		return nil
+	}
+	return writeTreeFile(root, repoRelPath, blob)
 }
 
 // writeTreeFile writes blob at root/<repoRelPath>, creating parent dirs.

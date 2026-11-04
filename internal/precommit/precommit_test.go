@@ -12,6 +12,7 @@ import (
 
 	"github.com/ossprey/ossprey-cli/internal/catalog"
 	"github.com/ossprey/ossprey-cli/internal/trust"
+	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
 // --- git scratch-repo helpers ---
@@ -278,6 +279,29 @@ func TestStagedDeltaSubdirectoryPathPreserved(t *testing.T) {
 	want := []Package{{Type: "npm", Name: "is-odd", Version: "3.0.1", Path: "web/package-lock.json"}}
 	if !reflect.DeepEqual(got.Packages, want) {
 		t.Errorf("delta mismatch:\n got: %+v\nwant: %+v", got.Packages, want)
+	}
+}
+
+func TestStagedDeltaReadsAnUnstagedCargoWorkspaceRoot(t *testing.T) {
+	dir := initRepo(t)
+	writeRepoFile(t, dir, "Cargo.toml", "[workspace]\nmembers = [\"crates/*\"]\n\n[workspace.dependencies]\nserde = \"=1.0.228\"\nrand = \"=0.8.5\"\n")
+	member := "[package]\nname = \"core\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = { workspace = true }\n"
+	writeRepoFile(t, dir, "crates/core/Cargo.toml", member)
+	commitAll(t, dir)
+	writeRepoFile(t, dir, "crates/core/Cargo.toml", member+"rand = { workspace = true }\n")
+	gitT(t, dir, "add", "crates/core/Cargo.toml")
+
+	ctx := warn.NewContext(context.Background(), false)
+	got, err := StagedDelta(ctx, dir, trust.Policy{})
+	if err != nil {
+		t.Fatalf("StagedDelta: %v", err)
+	}
+	want := []Package{{Type: "cargo", Name: "rand", Version: "0.8.5", Path: "crates/core/Cargo.toml"}}
+	if !reflect.DeepEqual(got.Packages, want) {
+		t.Errorf("delta mismatch:\n got: %+v\nwant: %+v", got.Packages, want)
+	}
+	if out := warn.Drain(ctx); out != "" {
+		t.Errorf("a commit touching only a member warned:\n%s", out)
 	}
 }
 

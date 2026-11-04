@@ -170,6 +170,16 @@ func workspacePool(m cargoManifest, isRoot bool, manifestPath, scanRoot string) 
 	}
 }
 
+// DeclaresCargoWorkspace reports whether a Cargo.toml roots a workspace, as workspacePool reads one.
+func DeclaresCargoWorkspace(data []byte) bool {
+	if len(data) > maxManifestBytes {
+		return false
+	}
+	var m cargoManifest
+	md, err := toml.Decode(string(data), &m)
+	return err == nil && md.IsDefined("workspace")
+}
+
 // withinRoot reports whether dir is root or sits inside it, resolving symlinks
 // first so a linked directory cannot walk the read outside the scan root.
 func withinRoot(dir, root string) bool {
