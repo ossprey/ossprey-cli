@@ -501,7 +501,6 @@ func registryOf(p pkg.Package) string {
 // lower-fidelity view. Drop versionless entries when a versioned sibling of the
 // same (type, name) exists, folding their Source/Locations into the siblings so
 // no attribution is lost. Entries with no versioned sibling are kept as-is.
-// A crate folds per manifest, only into releases its workspace root's Cargo.lock locks (cargoRoots) that meet its requirement there (cargoReqs).
 func mergeVersionless(pkgs []Package, cargoRoots map[string]string, cargoReqs map[string][]string) []Package {
 	gkey := func(p Package) string {
 		if p.Type == "pypi" {
@@ -557,6 +556,7 @@ func mergeVersionless(pkgs []Package, cargoRoots map[string]string, cargoReqs ma
 			drop[i] = len(siblings[gkey(p)]) > 0
 			continue
 		}
+		// A crate folds per manifest, only into a release its workspace root's Cargo.lock locks (cargoRoots) that meets its requirement there (cargoReqs).
 		var rest []string
 		into := map[int][]string{}
 		for _, l := range p.Locations {
