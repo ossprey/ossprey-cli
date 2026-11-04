@@ -6,7 +6,9 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/ossprey/ossprey-cli/internal/check"
@@ -151,7 +153,8 @@ type calls struct {
 
 func stub(t *testing.T, malicious bool) *calls {
 	c := &calls{}
-	oldExec, oldHandoff, oldCheck, oldErr, oldProg := execFn, handoffFn, checkFn, errOut, progressOut
+	oldExec, oldHandoff, oldCheck, oldErr, oldProg, oldRepo := execFn, handoffFn, checkFn, errOut, progressOut, repoSBOMFn
+	repoSBOMFn = func(context.Context, Options, string) ([]ossbom.Component, error) { return nil, nil }
 	execFn = func(_ context.Context, bin string, args []string) error {
 		c.execs = append(c.execs, append([]string{bin}, args...))
 		return nil
@@ -175,7 +178,7 @@ func stub(t *testing.T, malicious bool) *calls {
 	}
 	errOut, progressOut = &bytes.Buffer{}, &bytes.Buffer{}
 	t.Cleanup(func() {
-		execFn, handoffFn, checkFn, errOut, progressOut = oldExec, oldHandoff, oldCheck, oldErr, oldProg
+		execFn, handoffFn, checkFn, errOut, progressOut, repoSBOMFn = oldExec, oldHandoff, oldCheck, oldErr, oldProg, oldRepo
 	})
 	return c
 }
@@ -280,5 +283,50 @@ func TestRun_PassiveSubmitsAfterBrew(t *testing.T) {
 	}
 	if strings.Join(order, ",") != "brew,submit" || !c.checks[0].SubmitOnly {
 		t.Errorf("order = %v", order)
+	}
+}
+
+func TestRun_RepoDependenciesAreChecked(t *testing.T) {
+	fakeBrewAPI(t, map[string]string{
+		"ripgrep": "https://github.com/BurntSushi/ripgrep/archive/refs/tags/15.2.0.tar.gz",
+		"jq":      "https://github.com/jqlang/jq/archive/v1.tar.gz",
+	}, nil, "")
+	c := stub(t, false)
+	var asked []string
+	var mu sync.Mutex
+	repoSBOMFn = func(_ context.Context, _ Options, purl string) ([]ossbom.Component, error) {
+		mu.Lock()
+		asked = append(asked, purl)
+		mu.Unlock()
+		if strings.Contains(purl, "jq") {
+			return nil, errors.New("timeout")
+		}
+		return []ossbom.Component{{Name: "regex", Version: "1.11.0", Type: "cargo"}}, nil
+	}
+	if err := Run(context.Background(), Options{Args: []string{"install", "ripgrep", "jq"}}); err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(asked)
+	if want := "pkg:github/BurntSushi/ripgrep@" + sha + ",pkg:github/jqlang/jq@" + sha; strings.Join(asked, ",") != want {
+		t.Errorf("asked %v", asked)
+	}
+	o := c.checks[0]
+	if len(o.Specs) != 2 || len(o.Extra) != 1 || o.Extra[0].Name != "regex" {
+		t.Errorf("specs=%v extra=%v", o.Specs, o.Extra)
+	}
+	if !strings.Contains(errOut.(*bytes.Buffer).String(), "1 of 2 repositories") {
+		t.Errorf("failed expansion was silent: %q", errOut)
+	}
+}
+
+func TestRun_MonitorPassiveSkipsExpansion(t *testing.T) {
+	fakeBrewAPI(t, map[string]string{"jq": "https://github.com/jqlang/jq/archive/v1.tar.gz"}, nil, "")
+	stub(t, false)
+	repoSBOMFn = func(context.Context, Options, string) ([]ossbom.Component, error) {
+		t.Error("monitor id has no tools route; expansion must be skipped")
+		return nil, nil
+	}
+	if err := Run(context.Background(), Options{Args: []string{"install", "jq"}, Passive: true, MonitorID: "ospi_x"}); err != nil {
+		t.Fatal(err)
 	}
 }

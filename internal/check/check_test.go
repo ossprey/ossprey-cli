@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/ossprey/ossprey-cli/internal/ossbom"
 )
 
 func TestParseSpec(t *testing.T) {
@@ -174,5 +176,19 @@ func TestRun_SubmitOnly_PostsWithoutVerdict(t *testing.T) {
 	}
 	if len(sbom.Vulnerabilities) != 0 {
 		t.Errorf("SubmitOnly must not apply a verdict; got %d vulnerabilities", len(sbom.Vulnerabilities))
+	}
+}
+
+func TestRunAddsExtraComponents(t *testing.T) {
+	sbom, err := Run(context.Background(), Options{
+		Specs:      []Spec{{Ecosystem: "github", Name: "o/r", Version: "abc"}},
+		Extra:      []ossbom.Component{{Name: "regex", Version: "1.0", Type: "cargo"}, {Name: "o/r", Version: "abc", Type: "github"}},
+		DryRunSafe: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sbom.Components) != 2 {
+		t.Errorf("components = %v, want the spec plus regex (duplicate dropped)", sbom.Components)
 	}
 }

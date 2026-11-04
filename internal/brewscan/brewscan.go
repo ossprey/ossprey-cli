@@ -31,6 +31,7 @@ import (
 	"github.com/ossprey/ossprey-cli/internal/scan"
 	"github.com/ossprey/ossprey-cli/internal/severity"
 	"github.com/ossprey/ossprey-cli/internal/shim"
+	"github.com/ossprey/ossprey-cli/internal/submit"
 	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
@@ -40,6 +41,7 @@ var (
 	handoffFn               = forward.Handoff
 	checkFn                 = check.Run
 	lsRemoteFn              = lsRemote
+	repoSBOMFn              = repoSBOM
 	formulaAPIURL           = "https://formulae.brew.sh/api/formula/"
 	HTTP                    = &http.Client{Timeout: 10 * time.Second}
 	errOut        io.Writer = os.Stderr
@@ -53,6 +55,9 @@ var (
 const (
 	maxFormulae = 300
 	workers     = 8
+	// repoSBOMBudget caps the whole dependency expansion; each server-side
+	// call can take up to 30s (the API's ceiling).
+	repoSBOMBudget = 60 * time.Second
 )
 
 // Options configures a Run.
@@ -118,6 +123,9 @@ func Run(ctx context.Context, opts Options) error {
 	if opts.Passive {
 		flushWarnings(ctx)
 		execErr := execFn(ctx, "brew", opts.Args)
+		if opts.MonitorID == "" {
+			copts.Extra = expand(ctx, opts, specs)
+		}
 		copts.SubmitOnly = true
 		stop := progress.Submit(progressTo(), len(specs))
 		_, err := checkFn(ctx, copts)
@@ -128,7 +136,8 @@ func Run(ctx context.Context, opts Options) error {
 		return execErr
 	}
 
-	stop := progress.Scan(progressTo(), len(specs))
+	copts.Extra = expand(ctx, opts, specs)
+	stop := progress.Scan(progressTo(), len(specs)+len(copts.Extra))
 	sbom, err := checkFn(ctx, copts)
 	stop()
 	if err != nil {
@@ -157,6 +166,54 @@ func report(ctx context.Context, opts Options, sbom *ossbom.SBOM) error {
 	}
 	note("ossprey: no malware found, forwarding to brew\n")
 	return handoffFn(ctx, "brew", opts.Args)
+}
+
+// expand asks the API for each repo's SBOM (its own lockfiles: crates, Go
+// modules, npm...), since those are built into the bottle. A repo that fails
+// is still checked on its own; the failure is said out loud.
+func expand(ctx context.Context, opts Options, specs []check.Spec) []ossbom.Component {
+	ctx, cancel := context.WithTimeout(ctx, repoSBOMBudget)
+	defer cancel()
+	stop := progress.Start(progressTo(), fmt.Sprintf("reading dependencies of %d repositories...", len(specs)))
+	defer stop()
+
+	out := make([][]ossbom.Component, len(specs))
+	errs := make([]error, len(specs))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, workers)
+	for i, s := range specs {
+		wg.Add(1)
+		go func(i int, purl string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			out[i], errs[i] = repoSBOMFn(ctx, opts, purl)
+		}(i, "pkg:github/"+s.Name+"@"+s.Version)
+	}
+	wg.Wait()
+
+	var comps []ossbom.Component
+	failed := 0
+	for i := range specs {
+		if errs[i] != nil {
+			failed++
+			note("ossprey: could not read dependencies of %s (%v)\n", specs[i].Name, errs[i])
+			continue
+		}
+		comps = append(comps, out[i]...)
+	}
+	if failed > 0 {
+		fmt.Fprintf(errOut, "ossprey: warning: could not read the dependencies of %d of %d repositories; checking those repositories alone\n", failed, len(specs))
+	}
+	return comps
+}
+
+func repoSBOM(ctx context.Context, opts Options, purl string) ([]ossbom.Component, error) {
+	c, err := submit.NewClient(ctx, opts.APIURL, opts.APIKey)
+	if err != nil {
+		return nil, err
+	}
+	return c.RepoSBOM(ctx, purl)
 }
 
 // targets returns the core formulae an install names, and whether --HEAD was

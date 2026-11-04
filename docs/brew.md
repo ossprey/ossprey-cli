@@ -26,12 +26,20 @@ A plain `ossprey shim install` keeps an installed brew shim. Remove it with
 |---------|---------|
 | `brew install\|reinstall\|upgrade <formula>...` | each formula and its runtime dependencies (recursively, up to 300) |
 | `... --HEAD <formula>` | the named formula's `head` repo at its branch |
+| each repo above | its own dependencies (lockfiles: crates, Go modules, npm, PyPI…) |
 
 - Formulae are looked up in the Homebrew API (`formulae.brew.sh`).
 - The stable source URL is mapped to `pkg:github/<owner>/<repo>@<sha>`:
   `archive/<ref>`, `archive/refs/tags/<tag>`, `releases/download/<tag>/…`,
   `codeload.github.com`, and git URLs with a `tag`/`revision`.
 - Tags resolve to a commit with `git ls-remote` (no GitHub API quota).
+- Each repo's dependencies come from the Ossprey API (`/tools/sbom`), which
+  checks the repo out at that commit and catalogues it. These are what a
+  bottle compiles in. All of it goes in one scan.
+- Reading those dependencies is capped at 60s per install. A repo that times
+  out or fails is still checked by itself, with a warning.
+- A monitor id cannot read repo dependencies (submit-only), so a monitor
+  shim reports the repos alone.
 
 ## What is not checked
 
