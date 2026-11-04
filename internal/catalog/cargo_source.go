@@ -2,8 +2,10 @@ package catalog
 
 import (
 	"context"
+	"io/fs"
 	"maps"
 	"net/url"
+	"os"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -225,22 +227,73 @@ func cargoReplacement(r file.Resolver, root string) string {
 	return ""
 }
 
+// maxCargoLinkDirs caps the directories read above symlinked directories, past which no crate is trusted.
+const maxCargoLinkDirs = 4096
+
 // cargoConfigsInScan reads every .cargo directory the scan indexes on disk, as a glob reports a symlinked config by its target.
 func cargoConfigsInScan(r file.Resolver, root string) ([]cargoFile, bool) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	rootSlash := filepath.ToSlash(root)
+	// The root's own .cargo is indexed and those above it are read by cargoFilesAbove.
+	done := map[string]bool{}
+	for d := root; !done[d]; d = filepath.Dir(d) {
+		done[d] = true
+	}
+	visited := 0
 	var configs []cargoFile
 	for l := range r.AllLocations(ctx) {
 		dir := placeRef(rootSlash, rootRel(l.RealPath, rootSlash+"/"))
-		if strings.ToLower(path.Base(dir)) != ".cargo" {
+		if strings.ToLower(path.Base(dir)) == ".cargo" {
+			cs, ok := cargoConfigsIn(filepath.FromSlash(dir), filepath.FromSlash(path.Dir(dir)), false)
+			if !ok {
+				return nil, false
+			}
+			configs = append(configs, cs...)
+		}
+		// cargo reads .cargo above its physical cwd, which a symlinked directory can put in a sink or outside the scan.
+		m, err := r.FileMetadataByLocation(l)
+		if err != nil || m.FileInfo == nil || m.Mode()&fs.ModeSymlink == 0 {
 			continue
 		}
-		cs, ok := cargoConfigsIn(filepath.FromSlash(dir), filepath.FromSlash(path.Dir(dir)), false)
-		if !ok {
+		// A link that cannot be followed to a directory is never a cwd.
+		if info, err := os.Stat(filepath.FromSlash(dir)); err != nil || !info.IsDir() {
+			continue
+		}
+		real, err := filepath.EvalSymlinks(filepath.FromSlash(dir))
+		if err != nil {
 			return nil, false
 		}
-		configs = append(configs, cs...)
+		for d := real; !done[d]; d = filepath.Dir(d) {
+			done[d] = true
+			if visited++; visited > maxCargoLinkDirs {
+				return nil, false
+			}
+			cs, ok := cargoConfigsBeside(d)
+			if !ok {
+				return nil, false
+			}
+			configs = append(configs, cs...)
+		}
+	}
+	return configs, true
+}
+
+// cargoConfigsBeside reads the configs in every entry of d whose name folds to .cargo.
+func cargoConfigsBeside(d string) ([]cargoFile, bool) {
+	names, err := cargoDirNames(d, ".cargo")
+	if err != nil {
+		return nil, false
+	}
+	var configs []cargoFile
+	for _, n := range names {
+		if strings.ToLower(n) == ".cargo" {
+			cs, ok := cargoConfigsIn(filepath.Join(d, n), d, n != ".cargo")
+			if !ok {
+				return nil, false
+			}
+			configs = append(configs, cs...)
+		}
 	}
 	return configs, true
 }

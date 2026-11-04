@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -319,6 +320,13 @@ func TestCatalogTrustsCratesByTheirCargoLockIndex(t *testing.T) {
 func TestCatalogTrustsNoCrateUnderASourceReplacement(t *testing.T) {
 	replace := "[source.corp]\nregistry = \"sparse+https://crates.corp.example/internal/\"\nreplace-with = \"elsewhere\"\n\n[source.elsewhere]\nregistry = \"sparse+https://crates.elsewhere.example/\"\n"
 	const replaced, included, unread, aliased = "because a source replacement is configured", "because a cargo config includes another file", "because a cargo config could not be read", "because a cargo alias passes --config"
+	// Each link leads 41 directories deep into a sink, so together they pass the cap on directories read.
+	deep := strings.Repeat("/a", 40)
+	manyDirs, manyLinks := map[string]string{}, map[string]string{}
+	for i := 0; i <= maxCargoLinkDirs/41; i++ {
+		manyDirs[fmt.Sprintf("proj/.yarn/d%d%s/.keep", i, deep)] = ""
+		manyLinks[fmt.Sprintf("proj/l%d", i)] = fmt.Sprintf(".yarn/d%d%s", i, deep)
+	}
 	for name, c := range map[string]struct {
 		files   map[string]string
 		links   map[string]string
@@ -350,6 +358,13 @@ func TestCatalogTrustsNoCrateUnderASourceReplacement(t *testing.T) {
 		"an alias passing --config":                 {files: map[string]string{"proj/.cargo/config.toml": "[alias]\nxtask = \"run --config xtask/replace.toml --package xtask --\"\n"}, warning: aliased},
 		"an alias passing --config= above the root": {files: map[string]string{".cargo/config.toml": "[alias]\nb = [\"build\", \"--config=source.corp.replace-with='elsewhere'\"]\n"}, warning: aliased},
 		"an alias without --config":                 {files: map[string]string{"proj/.cargo/config.toml": "[alias]\nxtask = \"run --package xtask --\"\n"}},
+		// cargo reads .cargo above its physical cwd, so a build in a symlinked directory reads configs the index never holds.
+		"a replacement above a symlinked directory in a package sink": {files: map[string]string{"proj/.yarn/pkg/.cargo/config.toml": replace, "proj/.yarn/pkg/app/.keep": ""}, links: map[string]string{"proj/app": ".yarn/pkg/app"}, warning: replaced},
+		"a replacement above a symlinked directory outside the scan":  {files: map[string]string{"elsewhere/pkg/.cargo/config.toml": replace, "elsewhere/pkg/app/.keep": ""}, links: map[string]string{"proj/app": "../elsewhere/pkg/app"}, warning: replaced},
+		"an include above a symlinked directory in a package sink":    {files: map[string]string{"proj/target/.cargo/config": "include = \"extra.toml\"\n", "proj/target/app/.keep": ""}, links: map[string]string{"proj/app": "target/app"}, warning: included},
+		"a plain config above a symlinked directory":                  {files: map[string]string{"proj/.yarn/pkg/.cargo/config.toml": "[net]\nretry = 2\n", "proj/.yarn/pkg/app/.keep": ""}, links: map[string]string{"proj/app": ".yarn/pkg/app"}},
+		"a dangling directory symlink":                                {links: map[string]string{"proj/app": ".yarn/missing"}},
+		"symlinked directories leading past the cap":                  {files: manyDirs, links: manyLinks, warning: unread},
 		// A device reports no size and never ends, so only a regular file is read.
 		"a config symlinked to a device": {links: map[string]string{"proj/.cargo/config.toml": "/dev/zero"}, warning: unread},
 		"an oversized config":            {files: map[string]string{"proj/.cargo/config.toml": "# " + strings.Repeat("x", maxManifestBytes) + "\n"}, warning: unread},
