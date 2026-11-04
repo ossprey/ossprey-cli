@@ -106,6 +106,7 @@ func catalogByGlob(ctx context.Context, resolver file.Resolver, root, glob, labe
 
 	sort.Slice(results, func(a, b int) bool { return results[a].idx < results[b].idx })
 	seen := make(map[string]int)
+	copied := make(map[int]bool)
 	var out []pkg.Package
 	for _, r := range results {
 		for _, p := range r.pkgs {
@@ -115,9 +116,13 @@ func catalogByGlob(ctx context.Context, resolver file.Resolver, root, glob, labe
 				key += "#" + e.Source
 			}
 			if i, ok := seen[key]; ok {
-				// mergeVersionless folds a crate per manifest, so a crate keeps every file's location, in a fresh set since a parser may share one.
+				// mergeVersionless folds a crate per manifest, so a crate keeps every file's location, in a set copied once since a parser may share one.
 				if p.Type == pkg.RustPkg {
-					out[i].Locations = file.NewLocationSet(append(out[i].Locations.ToSlice(), p.Locations.ToSlice()...)...)
+					if !copied[i] {
+						out[i].Locations = file.NewLocationSet(out[i].Locations.ToUnorderedSlice()...)
+						copied[i] = true
+					}
+					out[i].Locations.Add(p.Locations.ToUnorderedSlice()...)
 				}
 				continue
 			}

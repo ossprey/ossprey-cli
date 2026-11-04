@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -328,6 +329,52 @@ func TestCatalogMergesLocationsOnlyForCargo(t *testing.T) {
 	}
 	for k := range want {
 		t.Errorf("%s not catalogued", k)
+	}
+}
+
+// Merging a crate's locations must stay linear in its sightings: quadrupling the manifests and locks that share crates must not do much more than quadruple the bytes Catalog allocates.
+func TestCatalogLocationMergeIsLinear(t *testing.T) {
+	t.Setenv("OSSPREY_RESOLVE_LATEST", "")
+	withResolveLatest(t, func(context.Context, string, string) (string, error) { return "9.9.9", nil })
+	var manifest, lock strings.Builder
+	manifest.WriteString("[package]\nname = \"m\"\n[dependencies]\n")
+	lock.WriteString("version = 3\n")
+	for i := range 10 {
+		// Pins dedup by glob and by Catalog; ranges fold per manifest into the workspace lock.
+		fmt.Fprintf(&manifest, "c%d = \"=1.0.0\"\nr%d = \"1\"\n", i, i)
+		for _, name := range []string{"c", "r"} {
+			fmt.Fprintf(&lock, "\n[[package]]\nname = \"%s%d\"\nversion = \"1.0.0\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n", name, i)
+		}
+	}
+	allocated := func(n int) uint64 {
+		files := map[string]string{"Cargo.toml": "[workspace]\nmembers = [\"m/*\"]\n", "Cargo.lock": lock.String()}
+		for i := range n {
+			files[fmt.Sprintf("m/%d/Cargo.toml", i)] = manifest.String()
+			files[fmt.Sprintf("l/%d/Cargo.lock", i)] = lock.String()
+		}
+		dir := t.TempDir()
+		writeTree(t, dir, files)
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		got, err := Catalog(context.Background(), dir, Options{NoExec: true})
+		runtime.ReadMemStats(&after)
+		if err != nil {
+			t.Fatalf("Catalog: %v", err)
+		}
+		if len(got) != 20 {
+			t.Fatalf("got %d crates, want 20", len(got))
+		}
+		for _, p := range got {
+			if p.Version != "1.0.0" || len(p.Locations) != 2*n+1 {
+				t.Fatalf("%s@%s at %d locations, want 1.0.0 at %d", p.Name, p.Version, len(p.Locations), 2*n+1)
+			}
+		}
+		return after.TotalAlloc - before.TotalAlloc
+	}
+	small, large := allocated(100), allocated(400)
+	if ratio := float64(large) / float64(small); ratio > 5.5 {
+		t.Errorf("4x the sightings allocated %.1fx the bytes (%d vs %d), want about 4x", ratio, large, small)
 	}
 }
 

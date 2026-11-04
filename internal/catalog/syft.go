@@ -222,6 +222,7 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 	catalogers = append(catalogers, NewCargoTomlCataloger(absRoot))
 
 	seen := map[string]int{} // dedup key -> index in out
+	seenLocs := map[int]map[string]bool{}
 	locks := newNpmLockClassifier(absRoot)
 	pins := newRequirementPins(absRoot)
 	cargoRoots := map[string]string{} // Cargo.toml location -> its workspace root
@@ -297,7 +298,7 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 					out[i].Registries = mergeUnique(out[i].Registries, []string{registryOf(p)})
 					// Only a crate's fold needs every manifest; other ecosystems keep the first, so an SBOM does not grow with its lockfile count.
 					if t == "cargo" {
-						out[i].Locations = mergeUnique(out[i].Locations, locations(p))
+						out[i].Locations = appendUnseen(seenLocs, i, out[i].Locations, locations(p))
 					}
 					continue
 				}
@@ -512,19 +513,23 @@ func mergeVersionless(pkgs []Package, cargoRoots map[string]string) []Package {
 		}
 	}
 	// Another manifest's pin or another directory's lock says nothing about the release this manifest builds.
+	locks := map[string][]int{}
+	for i, p := range pkgs {
+		if p.Type == "cargo" && versioned(p) {
+			for _, l := range p.Locations {
+				if filepath.Base(l) == "Cargo.lock" {
+					k := gkey(p) + "\x00" + filepath.Clean(l)
+					locks[k] = append(locks[k], i)
+				}
+			}
+		}
+	}
 	lockedFor := func(p Package, manifest string) []int {
 		root, ok := cargoRoots[manifest]
 		if !ok {
 			return nil
 		}
-		lock := filepath.Join(root, "Cargo.lock")
-		var locked []int
-		for _, i := range siblings[gkey(p)] {
-			if slices.ContainsFunc(pkgs[i].Locations, func(l string) bool { return filepath.Clean(l) == lock }) {
-				locked = append(locked, i)
-			}
-		}
-		return locked
+		return locks[gkey(p)+"\x00"+filepath.Join(root, "Cargo.lock")]
 	}
 
 	work := slices.Clone(pkgs)
@@ -546,14 +551,18 @@ func mergeVersionless(pkgs []Package, cargoRoots map[string]string) []Package {
 			continue
 		}
 		var rest []string
+		into := map[int][]string{}
 		for _, l := range p.Locations {
 			locked := lockedFor(p, l)
 			for _, s := range locked {
-				fold(s, p, []string{l})
+				into[s] = append(into[s], l)
 			}
 			if len(locked) == 0 {
 				rest = append(rest, l)
 			}
+		}
+		for s, locs := range into {
+			fold(s, p, locs)
 		}
 		if len(rest) < len(p.Locations) {
 			work[i].Locations = rest
@@ -568,6 +577,25 @@ func mergeVersionless(pkgs []Package, cargoRoots map[string]string) []Package {
 		}
 	}
 	return out
+}
+
+// appendUnseen appends the entries of add not yet in has, keeping a set per index so a component seen many times costs linear time.
+func appendUnseen(seen map[int]map[string]bool, i int, has, add []string) []string {
+	set, ok := seen[i]
+	if !ok {
+		set = make(map[string]bool, len(has))
+		for _, v := range has {
+			set[v] = true
+		}
+		seen[i] = set
+	}
+	for _, v := range add {
+		if v != "" && !set[v] {
+			set[v] = true
+			has = append(has, v)
+		}
+	}
+	return has
 }
 
 // mergeUnique returns a ∪ b preserving order, dropping duplicates and empties.
