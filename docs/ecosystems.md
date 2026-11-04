@@ -93,12 +93,15 @@ source serves. When the scan finds such a replacement it says so once, unless
 the replacement is a `cargo vendor` directory it verified as described above.
 
 A dependency a Cargo workspace member inherits with `{ workspace = true }`
-takes its version from the workspace root Cargo would use. That is the root
-the member's `package.workspace` names, or else the nearest `Cargo.toml` above
-the member with a `[workspace]` table whose `exclude` list leaves the member
-in. If that root is outside the directory you scan, or a `Cargo.toml` on the
-way up cannot be read or parsed, the inherited dependency is skipped with a
-warning. A dependency whose `registry-index` points at crates.io is read as a
+takes its version from the member's workspace root. That is the root the
+member's `package.workspace` names. Otherwise it is the first `Cargo.toml` on
+the way up from the member that has a `[workspace]` table whose `exclude` list
+leaves the member in, or the root that a package manifest on the way up names
+in its own `package.workspace`. A `Cargo.toml` on the way up that cannot be
+read or parsed, or that has no `[package]` or `[workspace]` table, is passed
+over only for a higher `[workspace]` whose `members` list names the member. If
+no root is found inside the directory you scan, the inherited dependency is
+skipped with a warning. A dependency whose `registry-index` points at crates.io is read as a
 crates.io dependency. A `=` requirement is sent as a pinned version only when
 it is a valid semver release, with no leading zeros and no empty parts, and
 any build metadata after `+` is kept as written. Any other requirement is
