@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/BurntSushi/toml"
 	"github.com/anchore/syft/syft/file"
 	"github.com/ossprey/ossprey-cli/internal/registry"
 	"golang.org/x/text/unicode/norm"
@@ -192,7 +191,7 @@ func readCargoFiles(r file.Resolver, locs []file.Location, rootSlash string, up 
 		real := rootRel(l.RealPath, rootSlash+"/")
 		f, ok := out[real]
 		if !ok {
-			if _, err := decodeTOML(r, l, maxManifestBytes, &f.doc); err != nil {
+			if err := decodeTOMLAt(r, l, maxManifestBytes, &f.doc); err != nil {
 				return nil, false
 			}
 		}
@@ -210,16 +209,12 @@ func readCargoFiles(r file.Resolver, locs []file.Location, rootSlash string, up 
 // cargoFilesAbove reads the manifests and configs cargo run inside root also sees: every ancestor's, and CARGO_HOME's.
 func cargoFilesAbove(root string) (manifests, configs []cargoFile, ok bool) {
 	read := func(p, base string) (cargoFile, bool) {
-		info, err := os.Stat(p)
-		if err != nil || info.Size() > maxManifestBytes {
-			return cargoFile{}, false
-		}
-		data, err := os.ReadFile(p)
+		data, err := readTOML(p)
 		if err != nil {
 			return cargoFile{}, false
 		}
 		f := cargoFile{bases: []string{filepath.ToSlash(base)}}
-		_, err = toml.Decode(string(data), &f.doc)
+		_, err = decodeTOML(data, &f.doc)
 		return f, err == nil
 	}
 	configsIn := func(dir, base string, inexact bool) bool {
@@ -555,7 +550,7 @@ func projectLocks(r file.Resolver, locks []file.Location, manifests map[string]c
 				Checksum string `toml:"checksum"`
 			} `toml:"package"`
 		}
-		if _, err := decodeTOML(r, l, maxCargoProofBytes, &lock); err != nil {
+		if err := decodeTOMLAt(r, l, maxCargoProofBytes, &lock); err != nil {
 			continue
 		}
 		set := lockedSet{sums: map[string]map[string]bool{}, versions: map[string][]string{}}
@@ -600,12 +595,13 @@ func vendoredChecksum(r file.Resolver, mark file.Location) string {
 	return marker.Package
 }
 
-func decodeTOML(r file.Resolver, loc file.Location, limit int64, v any) (toml.MetaData, error) {
+func decodeTOMLAt(r file.Resolver, loc file.Location, limit int64, v any) error {
 	data, err := readLocation(r, loc, limit)
 	if err != nil {
-		return toml.MetaData{}, err
+		return err
 	}
-	return toml.Decode(string(data), v)
+	_, err = decodeTOML(data, v)
+	return err
 }
 
 // readLocation refuses a file over limit, since a truncated one could drop a reference.

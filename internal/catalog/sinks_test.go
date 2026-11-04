@@ -466,6 +466,35 @@ func TestCatalogHidesNothingWhenAPathCannotBePlaced(t *testing.T) {
 	}
 }
 
+// OSS-2098: a Cargo file the filter parses is refused past maxTOMLDepth, so it neither exhausts memory nor hides a crate.
+func TestCatalogRefusesCargoFilesNestedTooDeepForTheFilter(t *testing.T) {
+	// One file per read: the scan's manifests and configs, its lockfiles, and the files above the scan.
+	for name, rel := range map[string]string{
+		"a config in the scan":      "proj/tools/.cargo/config.toml",
+		"the project's lockfile":    "proj/Cargo.lock",
+		"a manifest above the scan": "Cargo.toml",
+	} {
+		t.Run(name, func(t *testing.T) {
+			base := t.TempDir()
+			proj := filepath.Join(base, "proj")
+			vendoredCrate(t, proj, "vendor/serde", "1.0.228", "cccc", "[dev-dependencies]\nserde_derive = \"=1.0.228\"\n")
+			vendoringRoot(t, proj, "", "", lockEntry("serde", "1.0.228", "cccc"))
+			sinkFixture(t, base, rel, deepTOMLKey(4000))
+
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
+			got := catalogNames(t, proj)
+			runtime.ReadMemStats(&after)
+			if got["serde_derive"] != "1.0.228" {
+				t.Errorf("serde_derive@1.0.228 hidden although the filter could not read every file, got %v", got)
+			}
+			if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 16<<20 {
+				t.Errorf("Catalog allocated %d MB", alloc>>20)
+			}
+		})
+	}
+}
+
 // TestCatalogReadsAVendoredCrateScannedDirectly: scanning a vendored crate asks for that crate.
 func TestCatalogReadsAVendoredCrateScannedDirectly(t *testing.T) {
 	proj := cargoVendorFixture(t)

@@ -376,7 +376,7 @@ or outside the root, a `path-bases` `base`, a config `include`, an alias running
 `cargo vendor`, which ignores source replacement, or passing `--config`, two
 configs or one named in
 another case at a level, a file reached through a symlink out of the root, an
-unreadable or over-limit file) turns the filter off, and a hidden file reached
+unreadable, over-limit or too deeply nested file) turns the filter off, and a hidden file reached
 through a symlink stays visible. Out of reach: `--config`, `CARGO_*` environment
 overrides and CI steps, which no manifest scan sees, and configs and `path`
 dependencies inside package sinks, which the index never holds and which only a
