@@ -529,3 +529,29 @@ func TestParseCargoLockRefusesDeepNesting(t *testing.T) {
 		})
 	}
 }
+
+// TestCargoVendorSourceRefusesDotDotAfterAName: cargo resolves ".." after symlinks, so only a leading one is placed.
+func TestCargoVendorSourceRefusesDotDotAfterAName(t *testing.T) {
+	for directory, want := range map[string]string{
+		"vendor":            "app/vendor",
+		"./vendor":          "app/vendor",
+		"../app/vendor":     "app/vendor",
+		"vendor/../tools":   "",
+		"./vendor/../tools": "",
+		`vendor\..\tools`:   "",
+	} {
+		config := map[string]any{"source": map[string]any{
+			"crates-io":        map[string]any{"replace-with": "vendored-sources"},
+			"vendored-sources": map[string]any{"directory": directory},
+		}}
+		configAt := func(dir string) (map[string]any, bool) {
+			if dir == "app" {
+				return config, true
+			}
+			return nil, true
+		}
+		if got := CargoVendorSource("app", configAt); got != want {
+			t.Errorf("CargoVendorSource with directory %q = %q, want %q", directory, got, want)
+		}
+	}
+}

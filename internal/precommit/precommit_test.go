@@ -559,6 +559,14 @@ func TestStagedDeltaVendoredCrateLocks(t *testing.T) {
 			want: plantedEvil,
 		},
 		{
+			name: "a vendor directory with .. after a named directory proves nothing",
+			setup: func(t *testing.T, dir string) {
+				writeRepoFile(t, dir, ".cargo/config.toml", vendorConfig("vendor/../tools"))
+				plantedProject(t, dir)
+			},
+			want: plantedEvil,
+		},
+		{
 			name: "an exact pin hand-added to a vendored manifest is still checked",
 			setup: func(t *testing.T, dir string) {
 				writeRepoFile(t, dir, ".cargo/config.toml", vendorConfig("vendor"))

@@ -722,6 +722,14 @@ func CargoVendorSource(dir string, configAt func(dir string) (doc map[string]any
 	if !ok || directory == "" || path.IsAbs(directory) || filepath.VolumeName(directory) != "" {
 		return ""
 	}
+	// cargo resolves ".." after following symlinks, so one after a named directory may lead somewhere else.
+	named := false
+	for _, seg := range strings.FieldsFunc(directory, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if seg == ".." && named {
+			return ""
+		}
+		named = named || seg != "." && seg != ".."
+	}
 	return path.Join(base, directory)
 }
 
