@@ -234,8 +234,15 @@ func splitNpm(token string) (s Spec, ok bool) {
 // cargoName is the crates.io name shape the API enforces, as in internal/catalog.
 var cargoName = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
-// cargoExact is one crates.io release, always full three-part semver, with Cargo's optional "=".
-var cargoExact = regexp.MustCompile(`^=?\s*([0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.+-]*)?)$`)
+// semverNum is a SemVer 2.0 numeric identifier, which takes no leading zero.
+const semverNum = `(?:0|[1-9][0-9]*)`
+
+// semverPre is one SemVer 2.0 pre-release identifier: numeric, or alphanumeric with a letter or '-'.
+const semverPre = `(?:` + semverNum + `|[0-9]*[A-Za-z-][0-9A-Za-z-]*)`
+
+// cargoExact is one crates.io release in the full SemVer 2.0 grammar, with Cargo's optional "=".
+var cargoExact = regexp.MustCompile(`^=?\s*(` + semverNum + `\.` + semverNum + `\.` + semverNum +
+	`(?:-` + semverPre + `(?:\.` + semverPre + `)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)$`)
 
 // maxCargoVersion is the API's version length cap.
 const maxCargoVersion = 256
