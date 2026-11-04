@@ -1,6 +1,12 @@
 package ossbom
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"maps"
+	"net/url"
+	"slices"
+	"strings"
+)
 
 // MiniBOM = OSSBOM compressed for API submission. Each component swapped for
 // `{purl, source, env, location}`. Top-level fields unchanged.
@@ -39,7 +45,7 @@ func (s *SBOM) ToMiniBOM() MiniBOM {
 	}
 	for _, c := range s.Components {
 		out.Components = append(out.Components, MiniComponent{
-			Purl:     componentPurl(c),
+			Purl:     c.Purl(),
 			Source:   c.Source,
 			Env:      c.Env,
 			Location: c.Location,
@@ -48,13 +54,36 @@ func (s *SBOM) ToMiniBOM() MiniBOM {
 	return out
 }
 
-func componentPurl(c Component) string {
-	return "pkg:" + c.Type + "/" + c.Name + "@" + c.Version
+// Purl is pkg:<type>/<name>@<version>, plus any qualifiers in key order.
+func (c Component) Purl() string {
+	return "pkg:" + c.Type + "/" + c.Name + "@" + c.Version + c.qualifierString()
 }
 
-// ApplyAPIResponse copies vulnerabilities and findings from a MiniBOM-shaped
-// API response into this SBOM. Returns nil on parse failure with an error context.
-// Findings name the components the scan did not check.
+// qualifierString is the purl's "?k=v&..." part, empty when there are none.
+func (c Component) qualifierString() string {
+	var b strings.Builder
+	sep := "?"
+	for _, k := range slices.Sorted(maps.Keys(c.Qualifiers)) {
+		if v := c.Qualifiers[k]; v != "" {
+			b.WriteString(sep + k + "=" + escapeQualifier(v))
+			sep = "&"
+		}
+	}
+	return b.String()
+}
+
+// escapeQualifier percent-encodes all but alphanumerics, ".-_~" and ":", as ECMA-427 5.4 requires.
+func escapeQualifier(v string) string {
+	return strings.NewReplacer("%3A", ":", "+", "%20").Replace(url.QueryEscape(v))
+}
+
+// ApplyAPIResponse copies the vulnerabilities from a MiniBOM-shaped API response
+// into this SBOM.
+//
+// Deliberately not the failing severity floor: that is a property of the scan,
+// not of the document, so it travels on the response envelope and submit.Validate
+// sets it. An SBOM other formats have to be able to carry is the wrong place to
+// put a per-account policy value.
 func (s *SBOM) ApplyAPIResponse(raw json.RawMessage) error {
 	var resp struct {
 		Vulnerabilities []Vulnerability `json:"vulnerabilities"`

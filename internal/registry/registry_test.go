@@ -164,3 +164,61 @@ func TestResolveLatestCargoPrereleaseOnly(t *testing.T) {
 		t.Errorf("version: got %q, want the pre-release fallback", v)
 	}
 }
+
+// crates.io's body for a crate whose every release is yanked, with a placeholder 0.0.0.
+const allYankedCrate = `{"crate":{"yanked":true,"max_stable_version":null,"max_version":"0.0.0","newest_version":"0.0.0"}}`
+
+func serveCrate(t *testing.T, body string) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, body)
+	}))
+	t.Cleanup(srv.Close)
+	pointAt(t, srv)
+}
+
+func TestResolveLatestCargoAllYanked(t *testing.T) {
+	serveCrate(t, allYankedCrate)
+
+	v, err := ResolveLatest(context.Background(), "cargo", "acme-yanked")
+	if v != "" {
+		t.Errorf("version: got %q, want none for an all-yanked crate", v)
+	}
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("error = %v, want ErrNotFound so the crate stays versionless", err)
+	}
+}
+
+func TestResolveLatestCargoReleasedZero(t *testing.T) {
+	// 0.0.0 is publishable, so only the yanked flag may turn it away.
+	serveCrate(t, `{"crate":{"yanked":false,"max_stable_version":"0.0.0","max_version":"0.0.0","newest_version":"0.0.0"}}`)
+
+	v, err := ResolveLatest(context.Background(), "cargo", "acme-zero")
+	if err != nil {
+		t.Fatalf("ResolveLatest: %v", err)
+	}
+	if v != "0.0.0" {
+		t.Errorf("version: got %q, want the released 0.0.0", v)
+	}
+}
+
+func TestUnresolvedEntryAllYanked(t *testing.T) {
+	serveCrate(t, allYankedCrate)
+	_, err := ResolveLatest(context.Background(), "cargo", "acme-retired")
+
+	yanked := UnresolvedEntry("cargo", "acme-retired", err, "left unversioned")
+	missing := UnresolvedEntry("cargo", "acme-private", ErrNotFound, "left unversioned")
+	down := UnresolvedEntry("cargo", "acme-retired", errors.New("registry returned status 503"), "left unversioned")
+	if yanked.Class == missing.Class || yanked.Class == down.Class {
+		t.Errorf("all-yanked graded as %q, want a class apart from %q and %q", yanked.Class, missing.Class, down.Class)
+	}
+	if !strings.Contains(yanked.One, "yanked") || strings.Contains(yanked.One, "not on the public registry") {
+		t.Errorf("headline: got %q, want it to say yanked rather than not on the registry", yanked.One)
+	}
+	if !strings.Contains(yanked.Item, "cargo/acme-retired") || strings.Contains(yanked.Item, "404") {
+		t.Errorf("item: got %q, want the crate without a 404", yanked.Item)
+	}
+	if !strings.Contains(missing.Item, "(404)") {
+		t.Errorf("plain not-found item: got %q, want (404)", missing.Item)
+	}
+}

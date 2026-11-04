@@ -34,6 +34,7 @@ import (
 // Test seams.
 var (
 	execFn                  = forward.Exec
+	handoffFn               = forward.Handoff
 	checkFn                 = check.Run
 	gitOutFn                = gitOutput
 	githubAPIURL            = "https://api.github.com/"
@@ -98,7 +99,7 @@ func progressTo() io.Writer {
 func Run(ctx context.Context, opts Options) error {
 	forwardTo := func() error {
 		flushWarnings(ctx)
-		return execFn(ctx, "git", opts.Args)
+		return handoffFn(ctx, "git", opts.Args)
 	}
 
 	repo, ok := target(opts.Args)
@@ -125,7 +126,8 @@ func Run(ctx context.Context, opts Options) error {
 	copts := check.Options{Specs: []check.Spec{spec}, APIURL: opts.APIURL, APIKey: opts.APIKey, MonitorID: opts.MonitorID}
 
 	if opts.Passive {
-		execErr := forwardTo()
+		flushWarnings(ctx)
+		execErr := execFn(ctx, "git", opts.Args)
 		copts.SubmitOnly = true
 		stop := progress.Submit(progressTo(), 1)
 		_, err := checkFn(ctx, copts)
@@ -169,7 +171,7 @@ func report(ctx context.Context, opts Options, repo Repo, sbom *ossbom.SBOM) err
 		return forward.ErrBlocked
 	}
 	note("ossprey: no malware found in %s, forwarding to git\n", repo)
-	return execFn(ctx, "git", opts.Args)
+	return handoffFn(ctx, "git", opts.Args)
 }
 
 // globalValueFlags are git options before the verb that take a separate value.

@@ -62,8 +62,8 @@ func TestNamedNpmInstallBlocksOnAMaliciousDependency(t *testing.T) {
 }
 
 // pip's dry run (or uv, where the host has one) resolves what `pip install`
-// brings in. The forwarded pip is itself run with --dry-run so the test
-// installs nothing into the host's Python.
+// brings in. The forwarded pip runs with --dry-run and --target, so it installs
+// nothing into the host's Python and PEP 668's marker does not apply.
 func TestNamedPipInstallChecksItsDependencies(t *testing.T) {
 	if _, err := exec.LookPath("pip"); err != nil {
 		t.Skip("pip not installed; skipping the pip forwarder end-to-end test")
@@ -71,7 +71,7 @@ func TestNamedPipInstallChecksItsDependencies(t *testing.T) {
 	api := newFakeAPI(t, "")
 	dir := t.TempDir()
 
-	res := runForwardVerbose(t, dir, api.URL, "pip", "install", "--dry-run", "requests==2.32.3")
+	res := runForwardVerbose(t, dir, api.URL, "pip", "install", "--dry-run", "--target", "site", "requests==2.32.3")
 	if res.exitCode != 0 {
 		t.Fatalf("exit %d\nstdout: %s\nstderr: %s", res.exitCode, res.stdout, res.stderr)
 	}

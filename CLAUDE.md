@@ -41,13 +41,16 @@ make tidy          # go mod tidy  (run first time / after dep changes)
 Run a single test: `go test ./internal/catalog/ -run TestName -v`.
 Smoke tests live behind the `smoke` build tag: `go test -tags smoke -run TestName -v ./test/smoke/...`.
 
-CI (`.github/workflows/ci.yml`) gates on `gofmt -l` being empty, `go vet`,
-`go test`, and `go test -race`, on ubuntu and windows. Keep code gofmt-clean.
-Requires Go 1.25+.
+CI (`.github/workflows/ci.yml`) gates on `gofmt -l` being empty and `go vet`
+(with and without `-tags smoke`) on ubuntu, and on `go test` and `go test -race`
+on ubuntu and windows. Keep code gofmt-clean. Requires Go 1.25+.
 
-One smoke job also runs in CI: `pnpm-smoke` runs `-run TestPnpm` against a real
-pnpm on both OSes, because that path can only be verified with the real binary
-(pnpm on Windows is a `.cmd`, as are the shims). Tests that need the shim
+The `smoke` job also runs the whole tagged suite on both OSes, because the
+forwarders and shims can only be verified with the real binaries (pnpm on
+Windows is a `.cmd`, as are the shims). It pins Python 3.12 with `setup-python`:
+the Python fixtures pin numpy releases whose wheels stop at 3.12, and on the
+26.04 image's newer Python pip builds them from source, so every scan of them
+waits out `OSSPREY_RESOLVE_TIMEOUT` and the suite misses its 15m budget. Tests that need the shim
 directory must ask `ossprey shim dir` rather than assuming `~/.ossprey/shims` —
 Windows resolves it under `%LOCALAPPDATA%`.
 
@@ -146,6 +149,8 @@ Windows resolves it under `%LOCALAPPDATA%`.
 5. **`git`** (`internal/gitscan`) — before `git clone`/`git pull` of a **public** GitHub repo, checks the repo itself as `pkg:github/<owner>/<repo>@<sha>` via `check.Run` (ecosystem `github`), not its deps. **Opt-in**: git is in `shim.optInManagers`, not `DefaultManagers()`, so `shim install` only writes it with `--git` or `--managers git`; a flagless re-run re-points an existing git shim, and `shim status` lists git only once shimmed. Why opt-in: it puts a GitHub API round trip in front of every pull. "Public" = unauthenticated `GET /repos/o/r` returns 200 with `private:false`; never send a token, or a private repo would read as checkable. It **fails open** on any GitHub/API error (unlike the package forwarders) because breaking `git pull` in an outage gets the shim ripped out. `pull` resolves remote/ref by running the *real* git (`shim.LookPathReal` + `OSSPREY_SHIM_BYPASS=1`), never PATH `git`, for the same recursion reason as `lookTool`. Value-flag tables carry the forwarder's asymmetry: a boolean wrongly listed swallows the URL and skips the check.
 
    **Forwarders are silent by default.** A forwarder sits in front of every install a developer, script or agent runs, so without `OSSPREY_VERBOSE` a clean install prints nothing of ossprey's at all — only the manager's own output. It speaks only for a platform error (main's `error:` line, or a passive `could not post scan` / git `could not look up` / named-install `could not resolve the dependencies` warning — fail-open must never also be silent) and for a block, which always gets the full malware report (alert box, `Error: WARNING:` lines, blocked line) — a one-line block was tried and rejected, because that is the outcome a developer must not scroll past. Everything else — the clean verdict, why an install went unchecked, scan narration, collected warnings, informational findings, the update notice — is verbose-only. Smoke tests prove a silent check ran through the fake API's submitted purls, not a stderr line. The real manager's output is never touched (it inherits stdio). Three rules: route narration through `note`, never `Fprintf(errOut, ...)`; drain through `flushWarnings`, which **still drains** when quiet, or main's safety-net drain prints the warnings anyway; and draw progress through `progressTo()`, which keeps the self-erasing terminal animation but drops the plain line a pipe or CI log would keep. `gitscan` follows the same rules. `TestQuietForwarder_*` pins the contract; smoke tests that assert on narration use `runForwardVerbose`.
+
+**The forwarder replaces itself with the manager where nothing follows** (`forward.Handoff`, `syscall.Exec`), so `npm run start` shows as npm in `ps` and to parent-PID checks rather than as `ossprey`. Anything after the exec never runs, including defers: drain warnings and remove temp dirs first (`forwardTo` flushes; the `reqFilesDir` cleanups run before `finish`). A failed `syscall.Exec` falls back to the child-process `Exec`. Passive installs (`passiveAfterInstall`, `passiveAlongside`) must outlive the manager, so they keep the fork and the `ossprey` name; Windows has no exec(2) and does the same. `TestPassThroughReplacesTheProcess` pins it.
 
 ### Passive modes and monitor ids
 
@@ -313,9 +318,11 @@ range or wildcard is left to syft's guess, and shapes syft drops outright (a bar
 `>2.0`, an epoch `==1!2.0.0`) stay missing for the resolver-backed catalogers to
 cover.
 
-Output is deduped by `(type, name, version)`. `mergeVersionless` then collapses
+Output is deduped by `(type, name, version)` plus a Cargo source mark. `mergeVersionless` then collapses
 a package emitted both versionless (direct-deps fallback) and pinned (uv-resolved)
 into the pinned one. Vendored paths (`node_modules/`) are skipped (`isVendoredPath`). Lockfile entries for the project's own code are dropped: yarn by resolution protocol (`workspace:`/`portal:`/`link:`/`file:`), npm when `resolved` is a scheme-less relative path (a workspace link). Otherwise the project's own name went to the API and was looked up on public npm.
+
+A `Cargo.lock` crate from git or a non-crates.io registry is **sent, marked** (`cargoSourceMarks`, OSS-2484) as `vcs_url=git+<url>@<commit>` or `repository_url=<origin>/`, never with userinfo, query, fragment or a registry path, any of which can hold a token; a source Go cannot parse or the API cannot fit falls back to its origin, then its scheme, so a crate Cargo builds is never dropped or sent bare. `isCratesIo` folds at least what Cargo's WHATWG parser and `CanonicalUrl` fold (padding, case, a default port, `./`, escapes, backslashes, `http://`, a trailing `/` or `.git`, each checked for `registry+` with a real `cargo metadata --locked`); `sparse+` spellings fold further than Cargo, which reads them as another source, but one on crates.io's own host. A non-ASCII path stays foreign, tested before `ToLower`, which maps `İ` to `i`; a non-ASCII `registry+` host goes out marked **and** bare, because Cargo's IDNA step maps `ｇithub.com` or a soft hyphen to github.com but `gİthub.com` elsewhere. A marked crate is its own component: never version-resolved, never folded, never absorbing a sighting. The accepted over-report: a crate `[patch.crates-io]` redirects to git also goes out as its `Cargo.toml` declaration, so one unused crates.io crate gets checked; folding it meant guessing which lock owns a manifest, and each guess let a forged or nearby lock hide a declared crates.io dependency.
 
 **Package sinks are excluded from the syft index itself** (`packageSinks`,
 `newDirectorySource`). Filtering `node_modules` packages after cataloguing was
@@ -328,6 +335,57 @@ components). Two traps: syft **rewrites the exclusion slice in place**, so
 root is `EvalSymlinks`ed first or no exclusion matches under macOS `/var`.
 `TestDirectorySourceSkipsPackageSinks` asserts on the index, not on catalog
 output, because catalog output was already clean before the fix.
+
+**`cargo vendor` crates are hidden by marker, not by name** (`withoutCargoVendor`,
+OSS-2561). Every crate it writes holds a `.cargo-checksum.json`, and the vendor
+directory's name is configurable, so a `vendor` sink would miss
+`third_party/rust` and drop a path dependency kept under `vendor/`. A published
+crate ships its own `Cargo.lock` (anyhow 1.0.100's names 59 crates, its dev
+tree), which syft's `**/Cargo.lock` glob read as the project's. An exclusion glob
+cannot say "a directory holding this file", so the filter wraps the resolver
+every cataloger reads instead of the index. A crate at the scan root is exempt,
+since that scan asked for it.
+
+**The marker is repository content, so it proves nothing alone.** Review broke
+two earlier rules. Hiding every file under a marked directory let a marker
+beside a `package-lock.json` hide it, and accepting any lockfile as proof let a
+decoy `Cargo.lock` naming a standalone project hide that project's own lock. So
+the proof is now what cargo itself would do. The vendoring project is a strict
+ancestor whose `Cargo.lock` (beside its `Cargo.toml`) locks the crate's
+name@version from a registry with the marker's checksum, has no path entry of
+that name@version, and holds a release meeting every normal and build
+dependency the crate's manifest turns on, non-optional or enabled by its default
+features (so an edited vendored manifest stays visible). The nearest cargo
+config for that project replaces `crates-io` with a `directory` source equal to
+the crate's parent, and that source is not replaced again. cargo reads config
+from where it runs, and an alias or `--manifest-path` reaches any crate from any
+directory, so every committed config level in the scan must also resolve
+`crates-io` to some directory source.
+Under that replacement cargo can take a crates.io dependency only from the
+vendor tree, so a hidden manifest cannot pull one from the network. A crate any
+manifest or config builds by path is never hidden (`path`, `workspace`,
+`members` and `paths` keys, read from every file in the scan, every ancestor of
+the scan root and `CARGO_HOME`), nor is one whose manifest has `[workspace]`,
+which `cargo publish` strips. References are resolved from both the path a file
+was reached by and its real path, through symlinks, with case and Unicode
+folded, both backslash readings, and a suffix match for one that leaves the
+root; member globs are expanded on disk against a literal base, and a config
+counts at the directory cargo reads it from, symlink or not. An alias's `--manifest-path`
+counts as a reference. Anything it cannot place (a member glob with `[` or `**`
+or outside the root, a `path-bases` `base`, a config `include`, an alias running
+`cargo vendor`, which ignores source replacement, or passing `--config`, two
+configs or one named in
+another case at a level, a file reached through a symlink out of the root, an
+unreadable or over-limit file) turns the filter off, and a hidden file reached
+through a symlink stays visible. Out of reach: `--config`, `CARGO_*` environment
+overrides and CI steps, which no manifest scan sees, and configs and `path`
+dependencies inside package sinks, which the index never holds and which only a
+command run from inside a build or install directory would use.
+`TestCatalogDoesNotLetACargoMarkerHideOtherFiles`,
+`TestCatalogReadsAProjectCrateThatLooksVendored`,
+`TestCatalogReadsACrateAProjectAboveTheScanBuilds` and
+`TestCatalogHidesNothingWhenAPathCannotBePlaced` pin one case per guard; each
+of the 35 fails with its guard removed.
 
 #### Why the npm resolve skips workspace members (OSS-1353)
 
@@ -450,7 +508,8 @@ packages, and now report the rest.
 
 `SBOM` is the rich internal model. `MiniBOM` (`minibom.go`) is the compressed
 wire format sent to the API — each component becomes `{purl, source, env, location}`
-with `purl = pkg:<type>/<name>@<version>`. The Go model mirrors the Python
+with `purl = pkg:<type>/<name>@<version>`, plus a `vcs_url`/`repository_url`
+qualifier for a git or private-registry crate (OSS-2484). The Go model mirrors the Python
 `ossbom` library referenced in comments; keep them in sync when the API contract
 changes.
 
@@ -491,7 +550,7 @@ told a user with an expired key nothing about how to recover.
 ## Conventions worth knowing
 
 - **Exit codes:** `0` = clean / informational-only / `--local` dump / quota-skipped; `1` = malware found, and nothing else; `2` = scan errored (any error returned to cobra) or panic (recovered in main). Errors used to share `1` with malware, so a network blip in CI read as a detection; keep `1` reserved for a verdict. "Clean" and "skipped" still share `0` — that is what `--report` is for (below). Forwarders still pass the real manager's own exit code through, which may itself be `1`.
-- **Severity** (`internal/severity`) grades a finding `Info < Low < Medium < High < Critical`, and `FailingFloor` is `Info` (#69): everything fails by default, and passing a finding is a choice an account makes. `--fail-on-informational` on `scan`/`check` sets the floor to `Info`, so it no longer changes anything; it is kept for pipelines that set it. Below-floor findings print as a `Note:` line, go in `--report`'s `informational`, and exit 0 (OSS-1432). The floor can only ever be lowered — there is no flag to raise it, since that would let a real detection pass. The forwarders parse no flags of their own (`DisableFlagParsing`), so they always use the default floor. Parsing is deliberately **fail-closed** — an empty or unrecognised grade is `Unknown`, and `Unknown.Fails()` is true, so an older API that sends no severity and an OSV-sourced finding that carries none both behave exactly as they did before. Never invert that default for convenience; it is the one thing standing between "we could not grade it" and "we passed it".
+- **Severity** (`internal/severity`) grades a finding `Info < Low < Medium < High < Critical`. A finding below the floor is printed as a `Note:` line and the scan still exits 0 (OSS-1432). The floor is **the account's**, served on the scan response as `failing_severity_floor` and decoded in `ossbom.ApplyAPIResponse` (OSS-1994); `FailingFloor` (`Info`) is only the fallback when a response carries none, and it is the bottom of the scale, so nothing passes until an account raises its floor. `--fail-on <level>` on `scan`/`check` overrides it for one run **in either direction** — most specific wins, not strictest, so do not take the minimum of the two. Whichever floor wins drives the exit code and the `--report` split together, so the file cannot disagree with the exit status. The forwarders parse no flags of their own (`DisableFlagParsing`), so they take the account's floor with no override. Parsing is deliberately **fail-closed** — an empty or unrecognised *grade* is `Unknown` and `Unknown` fails at every floor, including a raised one; an unreadable *floor* falls back to `FailingFloor` (`severity.ParseFloor`) rather than failing everything. Those two directions are opposite on purpose. Never invert the grade default for convenience; it is the one thing standing between "we could not grade it" and "we passed it".
 - **`--report <file>`** (`internal/scan/report.go`, on `scan` and `check`) writes the machine-readable verdict — `clean` / `malware` / `informational` / `skipped` plus per-finding name, version, ecosystem, severity and description — for CI to act on. `findings` holds only what **fails**, so a consumer counting it to say "N malicious packages" stays correct without knowing what a severity is; anything below the failing floor goes in `informational`, which is omitted when empty; `ossprey/gh-action` renders its PR comment from it. Three rules hold it together. It never touches **stdout**, which `--local` owns for the OSSBOM (the two flags are rejected together, because `--local` returns before any verdict exists). It is written **before** the `os.Exit(1)`, since a malware run is the one CI most needs it on. And `skipped` is its own verdict, not a flavour of clean: a quota-exhausted scan checked nothing, and a consumer that renders it as "no malware found" is lying. `informational` exists for the same reason: that scan *did* find something and said so, so folding it into `clean` would hide a finding we deliberately surfaced. A consumer that only knows the older three should treat it as non-failing. The JSON keys are a contract with the action — `test/smoke/report_smoke_test.go` redeclares the struct so a rename breaks a test instead of the action.
 - **Where the CLI stops.** `--report` states the verdict; that is the whole of what the CLI owes CI. Rendering it (Markdown tables, pull-request comments, job summaries, `::error::` annotations) belongs in the consumer — `ossprey/gh-action` does its own, in bash. Do not move that back here, even when a `--report-format markdown` or a `render` subcommand would delete a hundred lines of someone's shell: every such feature is dead weight to the users installing this CLI for `scan`, `check` and the forwarders, and it makes the CLI's release cadence a dependency of one CI vendor's UI. The test for a new flag is whether a GitLab or Jenkins user would reach for it too.
 - **Warnings are collected, not printed inline** (`internal/warn`): repeated

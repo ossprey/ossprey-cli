@@ -3,3 +3,5 @@ bin/
 *.out
 *.log
 node_modules/
+
+.serena/

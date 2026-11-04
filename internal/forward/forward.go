@@ -43,6 +43,7 @@ import (
 // without a real package manager on PATH or a live API.
 var (
 	execFn        = Exec
+	handoffFn     = Handoff
 	checkFn       = check.Run
 	scanProjectFn = scanProject
 )
@@ -459,7 +460,7 @@ func Run(ctx context.Context, opts Options) error {
 	// here is either buried or lost outright (OSS-2001).
 	forwardTo := func() error {
 		flushWarnings(ctx)
-		return execFn(ctx, m.Bin, opts.Args)
+		return handoffFn(ctx, m.Bin, opts.Args)
 	}
 
 	// coverage is what a named install's verdict covered, for the verbose
@@ -590,6 +591,7 @@ func Run(ctx context.Context, opts Options) error {
 		defer cleanup()
 		req.Dir = dir
 		sbom, err := scanProjectFn(ctx, req)
+		cleanup()
 		stop()
 		return finish(sbom, err)
 
@@ -669,6 +671,7 @@ func Run(ctx context.Context, opts Options) error {
 			Dir: dir, APIURL: opts.APIURL, APIKey: opts.APIKey, MonitorID: opts.MonitorID,
 			Trust: opts.Trust,
 		})
+		cleanup()
 		stop()
 		return finish(sbom, err)
 
@@ -734,8 +737,9 @@ func reportAndForward(ctx context.Context, m *Manager, opts Options, sbom *ossbo
 	flushWarnings(ctx)
 
 	// The forwarders parse no flags of their own (DisableFlagParsing), so there
-	// is nowhere to opt into a stricter floor; the default applies.
-	summary, hasMalware := scan.MalwareReports(sbom, severity.FailingFloor)
+	// is nowhere to override the floor for one install; the account's setting
+	// applies, and the compiled-in default where the API served no usable one.
+	summary, hasMalware := scan.MalwareReports(sbom, severity.ParseFloor(sbom.FailingSeverityFloor))
 	for _, msg := range summary.Informational {
 		note("ossprey: %s\n", msg)
 	}
@@ -767,7 +771,7 @@ func reportAndForward(ctx context.Context, m *Manager, opts Options, sbom *ossbo
 			countPackages(n), coverage, m.Bin)
 	}
 	// Already drained at the top of this function, ahead of the verdict.
-	return execFn(ctx, m.Bin, opts.Args)
+	return handoffFn(ctx, m.Bin, opts.Args)
 }
 
 func countPackages(n int) string {

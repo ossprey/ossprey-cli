@@ -107,15 +107,20 @@ func fakeGitHub(t *testing.T) {
 }
 
 type calls struct {
-	execs  [][]string
-	checks []check.Options
+	execs    [][]string
+	handoffs [][]string
+	checks   []check.Options
 }
 
 func stub(t *testing.T, malicious bool) *calls {
 	c := &calls{}
-	oldExec, oldCheck, oldErr, oldProg := execFn, checkFn, errOut, progressOut
+	oldExec, oldHandoff, oldCheck, oldErr, oldProg := execFn, handoffFn, checkFn, errOut, progressOut
 	execFn = func(_ context.Context, bin string, args []string) error {
 		c.execs = append(c.execs, append([]string{bin}, args...))
+		return nil
+	}
+	handoffFn = func(_ context.Context, bin string, args []string) error {
+		c.handoffs = append(c.handoffs, append([]string{bin}, args...))
 		return nil
 	}
 	checkFn = func(_ context.Context, o check.Options) (*ossbom.SBOM, error) {
@@ -132,7 +137,9 @@ func stub(t *testing.T, malicious bool) *calls {
 		return sbom, nil
 	}
 	errOut, progressOut = &bytes.Buffer{}, &bytes.Buffer{}
-	t.Cleanup(func() { execFn, checkFn, errOut, progressOut = oldExec, oldCheck, oldErr, oldProg })
+	t.Cleanup(func() {
+		execFn, handoffFn, checkFn, errOut, progressOut = oldExec, oldHandoff, oldCheck, oldErr, oldProg
+	})
 	return c
 }
 
@@ -149,8 +156,8 @@ func TestRun_PublicCloneIsCheckedThenForwarded(t *testing.T) {
 	if got.Ecosystem != "github" || got.Name != "o/pub" || got.Version != sha {
 		t.Errorf("spec = %+v", got)
 	}
-	if len(c.execs) != 1 || c.execs[0][0] != "git" {
-		t.Errorf("execs = %v, want git forwarded once", c.execs)
+	if len(c.handoffs) != 1 || c.handoffs[0][0] != "git" {
+		t.Errorf("handoffs = %v, want git handed off once", c.handoffs)
 	}
 }
 
@@ -161,8 +168,8 @@ func TestRun_MaliciousRepoBlocksGit(t *testing.T) {
 	if !errors.Is(err, forward.ErrBlocked) {
 		t.Fatalf("err = %v, want ErrBlocked", err)
 	}
-	if len(c.execs) != 0 {
-		t.Errorf("git ran despite malware: %v", c.execs)
+	if len(c.execs) != 0 || len(c.handoffs) != 0 {
+		t.Errorf("git ran despite malware: execs=%v handoffs=%v", c.execs, c.handoffs)
 	}
 }
 
@@ -177,8 +184,8 @@ func TestRun_PrivateAndUnknownReposAreNotChecked(t *testing.T) {
 	if len(c.checks) != 0 {
 		t.Errorf("checked non-public repos: %v", c.checks)
 	}
-	if len(c.execs) != 3 {
-		t.Errorf("execs = %d, want 3", len(c.execs))
+	if len(c.handoffs) != 3 {
+		t.Errorf("handoffs = %d, want 3", len(c.handoffs))
 	}
 }
 
@@ -187,8 +194,8 @@ func TestRun_OtherVerbsPassThrough(t *testing.T) {
 	if err := Run(context.Background(), Options{Args: []string{"status"}}); err != nil {
 		t.Fatal(err)
 	}
-	if len(c.checks) != 0 || len(c.execs) != 1 {
-		t.Errorf("checks=%d execs=%d", len(c.checks), len(c.execs))
+	if len(c.checks) != 0 || len(c.handoffs) != 1 {
+		t.Errorf("checks=%d handoffs=%d", len(c.checks), len(c.handoffs))
 	}
 }
 
@@ -199,7 +206,7 @@ func TestRun_CheckErrorFailsOpen(t *testing.T) {
 	if err := Run(context.Background(), Options{Args: []string{"clone", "https://github.com/o/pub"}}); err != nil {
 		t.Fatal(err)
 	}
-	if len(c.execs) != 1 {
+	if len(c.handoffs) != 1 {
 		t.Errorf("git not forwarded on API error")
 	}
 }
@@ -208,7 +215,11 @@ func TestRun_PassiveSubmitsAfterGit(t *testing.T) {
 	fakeGitHub(t)
 	c := stub(t, true)
 	var order []string
-	execFn = func(context.Context, string, []string) error { order = append(order, "git"); return nil }
+	execFn = func(_ context.Context, bin string, args []string) error {
+		order = append(order, "git")
+		c.execs = append(c.execs, append([]string{bin}, args...))
+		return nil
+	}
 	inner := checkFn
 	checkFn = func(ctx context.Context, o check.Options) (*ossbom.SBOM, error) {
 		order = append(order, "submit")
@@ -217,7 +228,7 @@ func TestRun_PassiveSubmitsAfterGit(t *testing.T) {
 	if err := Run(context.Background(), Options{Args: []string{"clone", "https://github.com/o/pub"}, Passive: true}); err != nil {
 		t.Fatalf("passive must never block: %v", err)
 	}
-	if strings.Join(order, ",") != "git,submit" || !c.checks[0].SubmitOnly {
+	if strings.Join(order, ",") != "git,submit" || len(c.execs) != 1 || len(c.handoffs) != 0 || !c.checks[0].SubmitOnly {
 		t.Errorf("order = %v, submitOnly = %v", order, c.checks[0].SubmitOnly)
 	}
 }

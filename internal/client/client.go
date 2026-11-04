@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -240,21 +241,28 @@ type submitResponse struct {
 	ScanID string `json:"scan_id"`
 }
 
-// skipMessage names why the API skipped a scan. It reports the reason under
-// output.reason, so a top-level message alone cannot tell quota apart from an
-// SBOM holding nothing scannable. The API's own error_message is deliberately
-// not surfaced: it enumerates the ecosystems it skipped, which is the platform's
-// business and not something to print over a customer's build.
+// skipMessage explains a skip from output; Rust is the only ecosystem it names.
 func skipMessage(output json.RawMessage) string {
-	const quota = "Scan skipped due to quota exhaustion"
+	const quota = "Quota exhausted"
 	var o struct {
-		Reason string `json:"reason"`
+		Reason            string    `json:"reason"`
+		SkippedEcosystems []*string `json:"skipped_ecosystems"`
 	}
-	if err := json.Unmarshal(output, &o); err != nil {
+	// A field of the wrong type still leaves the reason decoded.
+	var te *json.UnmarshalTypeError
+	err := json.Unmarshal(output, &o)
+	if err != nil && !errors.As(err, &te) {
 		return quota
 	}
+	// A list that failed part way, or holds a null, is not trusted.
+	if err != nil || slices.Contains(o.SkippedEcosystems, nil) {
+		o.SkippedEcosystems = nil
+	}
 	if o.Reason == "no_scannable_components" {
-		return "Scan skipped: nothing in this project is in an ecosystem Ossprey scans"
+		if slices.ContainsFunc(o.SkippedEcosystems, func(e *string) bool { return *e == "cargo" }) {
+			return "Rust (crates.io) scanning is available on Teams and Enterprise plans"
+		}
+		return "Nothing in this project is in an ecosystem Ossprey scans"
 	}
 	return quota
 }
@@ -264,6 +272,10 @@ type statusResponse struct {
 	Output  json.RawMessage `json:"output"`
 	Message string          `json:"message"`
 	ResetAt string          `json:"reset_at"`
+	// The floor this scan was graded at. Beside the SBOM rather than inside it:
+	// it is a property of the scan, not of the document, and the document is an
+	// SBOM that other formats have to be able to carry.
+	FailingSeverityFloor string `json:"failing_severity_floor"`
 }
 
 // ErrIngestSubmitOnly is returned when a verdict is asked of a monitor id.
@@ -271,7 +283,7 @@ type statusResponse struct {
 // dashboard.
 var ErrIngestSubmitOnly = errors.New("a monitor id can submit scans but cannot fetch a verdict; results appear in the Ossprey dashboard")
 
-// ErrSkipped indicates the scan was skipped (quota exhausted).
+// ErrSkipped indicates the scan was skipped, for quota or because nothing in it was scannable.
 type ErrSkipped struct {
 	Message string
 	ResetAt string
@@ -280,25 +292,33 @@ type ErrSkipped struct {
 func (e *ErrSkipped) Error() string { return "scan skipped: " + e.Message }
 
 // Validate submits the MiniBOM and returns the result OSSBOM payload (the API
-// echoes a MiniBOM with vulnerabilities populated). Callers decode into a
-// MiniBOM, then re-hydrate.
-func (c *Client) Validate(ctx context.Context, mb ossbom.MiniBOM) (json.RawMessage, error) {
+// echoes a MiniBOM with vulnerabilities populated) plus the failing severity
+// floor the scan was graded at. Callers decode the payload into a MiniBOM, then
+// re-hydrate.
+//
+// The floor comes back separately because it is not part of the SBOM: it is a
+// property of this scan, resolved per account when the scan was read, and the
+// document itself has to stay an SBOM that other formats can carry. Empty when
+// the API served none, which is what an older server looks like.
+func (c *Client) Validate(ctx context.Context, mb ossbom.MiniBOM) (json.RawMessage, string, error) {
 	// The ingest mount deliberately has no status endpoint: a monitor id is a
 	// submit-only credential. Refuse here so the caller gets this instead of a
 	// 404 from a route that was never meant to exist.
 	if c.IngestToken != "" {
-		return nil, ErrIngestSubmitOnly
+		return nil, "", ErrIngestSubmitOnly
 	}
 	status, respBody, err := c.postScan(ctx, mb)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if status == http.StatusOK {
-		return respBody, nil
+		// The documented 200 is a bare SBOM with no components and no envelope,
+		// so it carries no floor. Nothing was found, so there is nothing to grade.
+		return respBody, "", nil
 	}
 	var sr submitResponse
 	if err := json.Unmarshal(respBody, &sr); err != nil {
-		return nil, fmt.Errorf("decode 202 body: %w", err)
+		return nil, "", fmt.Errorf("decode 202 body: %w", err)
 	}
 	return c.waitForCompletion(ctx, sr.SBOMID, sr.ScanID)
 }
@@ -448,10 +468,12 @@ func (c *Client) doPoll(req *http.Request) (int, []byte, error) {
 	return resp.StatusCode, body, nil
 }
 
-func (c *Client) waitForCompletion(ctx context.Context, sbomID, scanID string) (json.RawMessage, error) {
+// waitForCompletion polls until the scan settles, returning the SBOM payload and
+// the floor the API graded it at.
+func (c *Client) waitForCompletion(ctx context.Context, sbomID, scanID string) (json.RawMessage, string, error) {
 	endpoint, err := url.JoinPath(c.BaseURL, c.mount(), "scans/status")
 	if err != nil {
-		return nil, fmt.Errorf("build status url: %w", err)
+		return nil, "", fmt.Errorf("build status url: %w", err)
 	}
 
 	backoff := c.PollBackoff
@@ -466,13 +488,13 @@ func (c *Client) waitForCompletion(ctx context.Context, sbomID, scanID string) (
 	for i := 1; i <= maxPollAttempts; i++ {
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, "", ctx.Err()
 		case <-time.After(backoff(i)):
 		}
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		req.Header.Set("Content-Type", "application/json")
 		c.authenticate(req)
@@ -487,15 +509,15 @@ func (c *Client) waitForCompletion(ctx context.Context, sbomID, scanID string) (
 		// either way, so a blip here should cost a poll, not the verdict.
 		status, body, err := c.doPoll(req)
 		if status == http.StatusUnauthorized || status == http.StatusForbidden {
-			return nil, c.authError(status)
+			return nil, "", c.authError(status)
 		}
 		if err != nil {
 			if ctx.Err() != nil {
-				return nil, err
+				return nil, "", err
 			}
 			lastErr = err
 			if transient++; transient >= maxTransientPolls {
-				return nil, lastErr
+				return nil, "", lastErr
 			}
 			continue
 		}
@@ -503,11 +525,11 @@ func (c *Client) waitForCompletion(ctx context.Context, sbomID, scanID string) (
 		if status != http.StatusOK && status != http.StatusAccepted {
 			err := fmt.Errorf("status poll failed (%d): %s", status, truncate(string(body), 500))
 			if !retryable(status) {
-				return nil, err
+				return nil, "", err
 			}
 			lastErr = err
 			if transient++; transient >= maxTransientPolls {
-				return nil, lastErr
+				return nil, "", lastErr
 			}
 			continue
 		}
@@ -515,35 +537,35 @@ func (c *Client) waitForCompletion(ctx context.Context, sbomID, scanID string) (
 
 		var sr statusResponse
 		if err := json.Unmarshal(body, &sr); err != nil {
-			return nil, fmt.Errorf("decode status body: %w", err)
+			return nil, "", fmt.Errorf("decode status body: %w", err)
 		}
 
 		switch sr.Status {
 		case "SUCCEEDED":
 			if len(sr.Output) == 0 {
-				return nil, errors.New("scan succeeded but returned no SBOM")
+				return nil, "", errors.New("scan succeeded but returned no SBOM")
 			}
-			return sr.Output, nil
+			return sr.Output, sr.FailingSeverityFloor, nil
 		case "SKIPPED":
 			msg := sr.Message
 			if msg == "" {
 				msg = skipMessage(sr.Output)
 			}
-			return nil, &ErrSkipped{Message: msg, ResetAt: sr.ResetAt}
+			return nil, "", &ErrSkipped{Message: msg, ResetAt: sr.ResetAt}
 		case "FAILED":
 			msg := sr.Message
 			if msg == "" {
 				msg = "Scan failed"
 			}
-			return nil, errors.New(msg)
+			return nil, "", errors.New(msg)
 		case "RUNNING", "QUEUED", "PENDING":
 			continue
 		default:
-			return nil, fmt.Errorf("unknown scan status: %q", sr.Status)
+			return nil, "", fmt.Errorf("unknown scan status: %q", sr.Status)
 		}
 	}
 
-	return nil, errors.New("scan took too long to complete")
+	return nil, "", errors.New("scan took too long to complete")
 }
 
 func truncate(s string, n int) string {
