@@ -376,16 +376,18 @@ or outside the root, a `path-bases` `base`, a config `include`, an alias running
 `cargo vendor`, which ignores source replacement, or passing `--config`, two
 configs or one named in
 another case at a level, a file reached through a symlink out of the root, an
-unreadable, over-limit or too deeply nested file) turns the filter off, and a hidden file reached
+unreadable, over-limit or too deeply nested manifest or config) turns the filter
+off, a refused `Cargo.lock` only proves nothing, and a hidden file reached
 through a symlink stays visible. Out of reach: `--config`, `CARGO_*` environment
 overrides and CI steps, which no manifest scan sees, and configs and `path`
 dependencies inside package sinks, which the index never holds and which only a
 command run from inside a build or install directory would use.
 `TestCatalogDoesNotLetACargoMarkerHideOtherFiles`,
 `TestCatalogReadsAProjectCrateThatLooksVendored`,
-`TestCatalogReadsACrateAProjectAboveTheScanBuilds` and
-`TestCatalogHidesNothingWhenAPathCannotBePlaced` pin one case per guard; each
-of the 35 fails with its guard removed.
+`TestCatalogReadsACrateAProjectAboveTheScanBuilds`,
+`TestCatalogHidesNothingWhenAPathCannotBePlaced` and
+`TestCatalogRefusesCargoFilesNestedTooDeepForTheFilter` pin one case per guard;
+each of the 38 fails with its guard removed.
 
 #### Why the npm resolve skips workspace members (OSS-1353)
 
