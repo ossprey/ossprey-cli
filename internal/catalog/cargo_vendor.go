@@ -222,11 +222,12 @@ func cargoFilesAbove(root string, withManifests bool) (manifests, configs []carg
 	}
 	seen := map[string]bool{}
 	for d := filepath.Dir(root); ; d = filepath.Dir(d) {
-		names, err := cargoDirNames(d, exact...)
+		entries, err := cargoDirEntries(d, exact...)
 		if err != nil {
 			return nil, nil, false
 		}
-		for _, n := range names {
+		for _, e := range entries {
+			n := e.Name()
 			switch strings.ToLower(n) {
 			case "cargo.toml":
 				if !withManifests {
@@ -238,6 +239,10 @@ func cargoFilesAbove(root string, withManifests bool) (manifests, configs []carg
 				}
 				manifests = append(manifests, m)
 			case ".cargo":
+				// A link may lead cargo somewhere else than the scan, so it is never followed.
+				if e.Type()&fs.ModeSymlink != 0 {
+					return nil, nil, false
+				}
 				cs, ok := cargoConfigsIn(filepath.Join(d, n), d, n != ".cargo")
 				if !ok {
 					return nil, nil, false
@@ -266,15 +271,19 @@ func cargoFilesAbove(root string, withManifests bool) (manifests, configs []carg
 	return manifests, configs, true
 }
 
-// cargoConfigsIn reads config and config.toml in dir, in any case and through symlinks; false when one cannot be read.
+// cargoConfigsIn reads config and config.toml in dir in any case; false when one is a symlink or cannot be read.
 func cargoConfigsIn(dir, base string, inexact bool) ([]cargoFile, bool) {
-	names, err := cargoDirNames(dir, "config", "config.toml")
+	entries, err := cargoDirEntries(dir, "config", "config.toml")
 	if err != nil {
 		return nil, false
 	}
 	var configs []cargoFile
-	for _, name := range names {
+	for _, e := range entries {
+		name := e.Name()
 		if n := strings.ToLower(name); n == "config" || n == "config.toml" {
+			if e.Type()&fs.ModeSymlink != 0 {
+				return nil, false
+			}
 			c, ok := readCargoFileAt(filepath.Join(dir, name), base)
 			if !ok {
 				return nil, false
@@ -286,32 +295,26 @@ func cargoConfigsIn(dir, base string, inexact bool) ([]cargoFile, bool) {
 	return configs, true
 }
 
-// cargoDirNames lists dir, or when it can be searched but not listed, which of exact it holds; a missing dir holds nothing.
-func cargoDirNames(dir string, exact ...string) ([]string, error) {
+// cargoDirEntries lists dir without following links, or when it can be searched but not listed, which of exact it holds; a missing dir holds nothing.
+func cargoDirEntries(dir string, exact ...string) ([]fs.DirEntry, error) {
 	entries, err := os.ReadDir(dir)
-	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
-		return nil, nil
+	if err == nil || errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+		return entries, nil
 	}
-	var names []string
-	if err == nil {
-		for _, e := range entries {
-			names = append(names, e.Name())
-		}
-		return names, nil
-	}
+	var found []fs.DirEntry
 	for _, n := range exact {
-		if _, err := os.Stat(filepath.Join(dir, n)); err == nil {
-			names = append(names, n)
+		if info, err := os.Lstat(filepath.Join(dir, n)); err == nil {
+			found = append(found, fs.FileInfoToDirEntry(info))
 		} else if !errors.Is(err, fs.ErrNotExist) {
 			return nil, err
 		}
 	}
-	return names, nil
+	return found, nil
 }
 
-// readCargoFileAt parses the regular file at p on disk, through any symlink, resolving its paths against base.
+// readCargoFileAt parses the regular file at p on disk, resolving its paths against base.
 func readCargoFileAt(p, base string) (cargoFile, bool) {
-	// A link to a device or FIFO may never end, so only a regular file is opened, and read no further than the limit.
+	// A device or FIFO may never end, so only a regular file is opened, and read no further than the limit.
 	if info, err := os.Stat(p); err != nil || !info.Mode().IsRegular() {
 		return cargoFile{}, false
 	}

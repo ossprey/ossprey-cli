@@ -5,7 +5,6 @@ import (
 	"io/fs"
 	"maps"
 	"net/url"
-	"os"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -192,14 +191,15 @@ const (
 	configIncluded = "a cargo config includes another file"
 	configUnread   = "a cargo config could not be read"
 	aliasConfig    = "a cargo alias passes --config"
+	configLinked   = "a symlink in the scan could point cargo at another config"
 )
 
-// cargoReplacement says why no crate is trusted by registry: a cargo config cargo may read for root replaces a source, includes a file, has an alias passing --config or cannot be read.
+// cargoReplacement says why no crate is trusted by registry: a symlink in the scan, or a cargo config cargo may read for root that replaces a source, includes a file, has an alias passing --config or cannot be read.
 func cargoReplacement(r file.Resolver, root string) string {
 	root = resolvedRoot(root)
-	inScan, ok := cargoConfigsInScan(r, root)
-	if !ok {
-		return configUnread
+	inScan, why := cargoConfigsInScan(r, root)
+	if why != "" {
+		return why
 	}
 	// A manifest above the root names no source, so only configs decide trust.
 	_, above, ok := cargoFilesAbove(root, false)
@@ -227,75 +227,48 @@ func cargoReplacement(r file.Resolver, root string) string {
 	return ""
 }
 
-// maxCargoLinkDirs caps the directories read above symlinked directories, past which no crate is trusted.
-const maxCargoLinkDirs = 4096
-
-// cargoConfigsInScan reads every .cargo directory the scan indexes on disk, as a glob reports a symlinked config by its target.
-func cargoConfigsInScan(r file.Resolver, root string) ([]cargoFile, bool) {
+// cargoConfigsInScan reads every .cargo directory the index holds, or says why not.
+func cargoConfigsInScan(r file.Resolver, root string) ([]cargoFile, string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	rootSlash := filepath.ToSlash(root)
-	// The root's own .cargo is indexed and those above it are read by cargoFilesAbove.
-	done := map[string]bool{}
-	for d := root; !done[d]; d = filepath.Dir(d) {
-		done[d] = true
-	}
-	visited := 0
-	var configs []cargoFile
+	var dirs []string
 	for l := range r.AllLocations(ctx) {
-		dir := placeRef(rootSlash, rootRel(l.RealPath, rootSlash+"/"))
-		if strings.ToLower(path.Base(dir)) == ".cargo" {
-			cs, ok := cargoConfigsIn(filepath.FromSlash(dir), filepath.FromSlash(path.Dir(dir)), false)
-			if !ok {
-				return nil, false
-			}
-			configs = append(configs, cs...)
-		}
-		// cargo reads .cargo above its physical cwd, which a symlinked directory can put in a sink or outside the scan.
+		rel := rootRel(l.RealPath, rootSlash+"/")
 		m, err := r.FileMetadataByLocation(l)
-		if err != nil || m.FileInfo == nil || m.Mode()&fs.ModeSymlink == 0 {
+		if err != nil || m.FileInfo == nil {
+			return nil, configUnread
+		}
+		isCargoDir := strings.ToLower(path.Base(rel)) == ".cargo"
+		// cargo walks up from its physical cwd, which a link can move per process, so only a link to a file in the scan is allowed.
+		if m.Mode()&fs.ModeSymlink != 0 {
+			if isCargoDir || isCargoConfig(rel) || !linksToScannedFile(r, l, m.LinkDestination, rootSlash+"/") {
+				return nil, configLinked
+			}
 			continue
 		}
-		// A link that cannot be followed to a directory is never a cwd.
-		if info, err := os.Stat(filepath.FromSlash(dir)); err != nil || !info.IsDir() {
-			continue
-		}
-		real, err := filepath.EvalSymlinks(filepath.FromSlash(dir))
-		if err != nil {
-			return nil, false
-		}
-		for d := real; !done[d]; d = filepath.Dir(d) {
-			done[d] = true
-			if visited++; visited > maxCargoLinkDirs {
-				return nil, false
-			}
-			cs, ok := cargoConfigsBeside(d)
-			if !ok {
-				return nil, false
-			}
-			configs = append(configs, cs...)
+		if isCargoDir && m.IsDir() {
+			dirs = append(dirs, placeRef(rootSlash, rel))
 		}
 	}
-	return configs, true
+	var configs []cargoFile
+	for _, d := range dirs {
+		cs, ok := cargoConfigsIn(filepath.FromSlash(d), filepath.FromSlash(path.Dir(d)), false)
+		if !ok {
+			return nil, configUnread
+		}
+		configs = append(configs, cs...)
+	}
+	return configs, ""
 }
 
-// cargoConfigsBeside reads the configs in every entry of d whose name folds to .cargo.
-func cargoConfigsBeside(d string) ([]cargoFile, bool) {
-	names, err := cargoDirNames(d, ".cargo")
-	if err != nil {
-		return nil, false
+// linksToScannedFile reports a link that points into the scan and resolves through the index to a regular file there.
+func linksToScannedFile(r file.Resolver, l file.Location, dest, rootPrefix string) bool {
+	if outsideRoot(rootRel(dest, rootPrefix)) {
+		return false
 	}
-	var configs []cargoFile
-	for _, n := range names {
-		if strings.ToLower(n) == ".cargo" {
-			cs, ok := cargoConfigsIn(filepath.Join(d, n), d, n != ".cargo")
-			if !ok {
-				return nil, false
-			}
-			configs = append(configs, cs...)
-		}
-	}
-	return configs, true
+	locs, err := r.FilesByPath(l.RealPath)
+	return err == nil && len(locs) == 1 && !outsideRoot(rootRel(locs[0].RealPath, rootPrefix))
 }
 
 // atPastSlash reports an '@' after a '/' in the authority or path, where Go reads a password's tail as host or path.
