@@ -76,10 +76,6 @@ framework manage both.
 - **Crates from git or a private registry.** A `Cargo.lock` crate that Cargo
   fetches from anywhere but crates.io is not the crates.io crate of that name,
   so it is left out of the lookup.
-- **Members past the first 100 of a Cargo workspace.** A pin changed in a
-  workspace root's `[workspace.dependencies]` is checked through the member
-  manifests that inherit it, and the hook reads up to 100 of them per
-  workspace. When a workspace has more, it warns and the rest are not read.
 - **Rust crates on plans without Rust scanning.** Rust (crates.io) scanning is
   available on Teams and Enterprise plans; on other plans staged crates are not
   looked up.

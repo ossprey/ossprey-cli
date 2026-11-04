@@ -180,23 +180,6 @@ func DeclaresCargoWorkspace(data []byte) bool {
 	return err == nil && md.IsDefined("workspace")
 }
 
-// CargoWorkspaceMembers returns the members and exclude lists of a Cargo.toml that roots a workspace, and false for any other.
-func CargoWorkspaceMembers(data []byte) (members, exclude []string, ok bool) {
-	if !DeclaresCargoWorkspace(data) {
-		return nil, nil, false
-	}
-	var m struct {
-		Workspace struct {
-			Members []string `toml:"members"`
-			Exclude []string `toml:"exclude"`
-		} `toml:"workspace"`
-	}
-	if _, err := toml.Decode(string(data), &m); err != nil {
-		return nil, nil, true
-	}
-	return m.Workspace.Members, m.Workspace.Exclude, true
-}
-
 // withinRoot reports whether dir is root or sits inside it, resolving symlinks
 // first so a linked directory cannot walk the read outside the scan root.
 func withinRoot(dir, root string) bool {
