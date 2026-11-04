@@ -421,6 +421,55 @@ func TestCatalogTrustsNoCrateUnderASourceReplacement(t *testing.T) {
 	}
 }
 
+// A dotfile manager's linked cargo config is read through by the vendor filter, but counts as unreadable for registry trust.
+func TestCatalogReadsALinkedCargoConfigForVendoringOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks need privileges on Windows")
+	}
+	for name, link := range map[string][2]string{
+		"a config symlinked in CARGO_HOME":            {"home/config.toml", "dotfiles/cargo/config.toml"},
+		"a .cargo directory symlinked above the root": {".cargo", "dotfiles/cargo"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			base := t.TempDir()
+			t.Setenv("CARGO_HOME", filepath.Join(base, "home"))
+			writeTree(t, base, map[string]string{
+				"home/.keep":                 "",
+				"dotfiles/cargo/config.toml": "[net]\nretry = 2\n",
+				"trusted/Cargo.lock":         "version = 4\n\n[[package]]\nname = \"acme-sparse\"\nversion = \"1.0.0\"\nsource = \"sparse+https://crates.corp.example/internal/\"\nchecksum = \"aaaa\"\n",
+			})
+			if err := os.Symlink(filepath.Join(base, link[1]), filepath.Join(base, link[0])); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+			proj := filepath.Join(base, "vendoring")
+			vendoredCrate(t, proj, "vendor/serde", "1.0.228", "cccc", "[dev-dependencies]\nserde_derive = \"=1.0.228\"\n")
+			vendoringRoot(t, proj, "", "", lockEntry("serde", "1.0.228", "cccc"))
+
+			pkgs, err := Catalog(context.Background(), proj, Options{NoExec: true, SkipVersionLookup: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, p := range pkgs {
+				if p.Name == "serde_derive" {
+					t.Errorf("serde_derive came from a proven vendored crate, so the filter never ran")
+				}
+			}
+
+			ctx := warn.NewContext(context.Background(), false)
+			policy := testPolicy(t, []string{"https://crates.corp.example/internal/"}, nil)
+			if pkgs, err = Catalog(ctx, filepath.Join(base, "trusted"), Options{NoExec: true, SkipVersionLookup: true, Trust: policy}); err != nil {
+				t.Fatal(err)
+			}
+			if trusted, _ := trustedNames(pkgs); len(trusted) != 0 {
+				t.Errorf("trusted = %v, want none", trusted)
+			}
+			if got := warn.Drain(ctx); strings.Count(got, "because a cargo config could not be read") != 1 {
+				t.Errorf("warnings = %q, want the unread config once", got)
+			}
+		})
+	}
+}
+
 func TestCatalogWithoutPolicyTrustsNothing(t *testing.T) {
 	pkgs, err := Catalog(context.Background(), trustFixture(t), Options{NoExec: true, SkipVersionLookup: true})
 	if err != nil {

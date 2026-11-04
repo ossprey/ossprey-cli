@@ -92,7 +92,7 @@ func withoutCargoVendor(r file.Resolver, root string) file.Resolver {
 	if !ok {
 		return r
 	}
-	aboveManifests, aboveConfigs, ok := cargoFilesAbove(root, true)
+	aboveManifests, aboveConfigs, ok := cargoFilesAbove(root, true, false)
 	if !ok {
 		return r
 	}
@@ -214,8 +214,8 @@ func readCargoFiles(r file.Resolver, locs []file.Location, rootSlash string, up 
 	return out, true
 }
 
-// cargoFilesAbove reads the configs, and with withManifests the manifests, cargo run inside root also sees: every ancestor's, and CARGO_HOME's.
-func cargoFilesAbove(root string, withManifests bool) (manifests, configs []cargoFile, ok bool) {
+// cargoFilesAbove reads the configs, and with withManifests the manifests, cargo run inside root also sees: every ancestor's, and CARGO_HOME's; noLinks fails on a symlinked .cargo or config.
+func cargoFilesAbove(root string, withManifests, noLinks bool) (manifests, configs []cargoFile, ok bool) {
 	exact := []string{".cargo"}
 	if withManifests {
 		exact = append(exact, "Cargo.toml")
@@ -239,11 +239,10 @@ func cargoFilesAbove(root string, withManifests bool) (manifests, configs []carg
 				}
 				manifests = append(manifests, m)
 			case ".cargo":
-				// A link may lead cargo somewhere else than the scan, so it is never followed.
-				if e.Type()&fs.ModeSymlink != 0 {
+				if noLinks && e.Type()&fs.ModeSymlink != 0 {
 					return nil, nil, false
 				}
-				cs, ok := cargoConfigsIn(filepath.Join(d, n), d, n != ".cargo")
+				cs, ok := cargoConfigsIn(filepath.Join(d, n), d, n != ".cargo", noLinks)
 				if !ok {
 					return nil, nil, false
 				}
@@ -262,7 +261,7 @@ func cargoFilesAbove(root string, withManifests bool) (manifests, configs []carg
 		}
 	}
 	if home != "" && !seen[foldPath(filepath.ToSlash(home))] {
-		cs, ok := cargoConfigsIn(home, filepath.Dir(home), false)
+		cs, ok := cargoConfigsIn(home, filepath.Dir(home), false, noLinks)
 		if !ok {
 			return nil, nil, false
 		}
@@ -271,8 +270,8 @@ func cargoFilesAbove(root string, withManifests bool) (manifests, configs []carg
 	return manifests, configs, true
 }
 
-// cargoConfigsIn reads config and config.toml in dir in any case; false when one is a symlink or cannot be read.
-func cargoConfigsIn(dir, base string, inexact bool) ([]cargoFile, bool) {
+// cargoConfigsIn reads config and config.toml in dir in any case; false when one cannot be read, or with noLinks is a symlink.
+func cargoConfigsIn(dir, base string, inexact, noLinks bool) ([]cargoFile, bool) {
 	entries, err := cargoDirEntries(dir, "config", "config.toml")
 	if err != nil {
 		return nil, false
@@ -281,7 +280,7 @@ func cargoConfigsIn(dir, base string, inexact bool) ([]cargoFile, bool) {
 	for _, e := range entries {
 		name := e.Name()
 		if n := strings.ToLower(name); n == "config" || n == "config.toml" {
-			if e.Type()&fs.ModeSymlink != 0 {
+			if noLinks && e.Type()&fs.ModeSymlink != 0 {
 				return nil, false
 			}
 			c, ok := readCargoFileAt(filepath.Join(dir, name), base)

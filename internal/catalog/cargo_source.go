@@ -202,7 +202,7 @@ func cargoReplacement(r file.Resolver, root string) string {
 		return why
 	}
 	// A manifest above the root names no source, so only configs decide trust.
-	_, above, ok := cargoFilesAbove(root, false)
+	_, above, ok := cargoFilesAbove(root, false, true)
 	if !ok {
 		return configUnread
 	}
@@ -253,7 +253,7 @@ func cargoConfigsInScan(r file.Resolver, root string) ([]cargoFile, string) {
 	}
 	var configs []cargoFile
 	for _, d := range dirs {
-		cs, ok := cargoConfigsIn(filepath.FromSlash(d), filepath.FromSlash(path.Dir(d)), false)
+		cs, ok := cargoConfigsIn(filepath.FromSlash(d), filepath.FromSlash(path.Dir(d)), false, true)
 		if !ok {
 			return nil, configUnread
 		}
