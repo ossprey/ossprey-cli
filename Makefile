@@ -6,7 +6,7 @@ PKG := ./cmd/ossprey
 LDFLAGS := -s -w
 BUILDFLAGS := -trimpath -ldflags="$(LDFLAGS)"
 
-.PHONY: build build-debug test test-race test-smoke test-smoke-short fmt vet tidy clean
+.PHONY: build build-debug test test-race test-smoke test-smoke-short bench-fallthrough fmt vet tidy clean
 
 build:
 	mkdir -p bin
@@ -29,6 +29,13 @@ test-smoke:
 # Smoke tests minus slow/network (skips GitHub clone tests).
 test-smoke-short:
 	go test -tags smoke -short -v ./test/smoke/...
+
+# Time each package manager directly vs. through the ossprey forwarder, for
+# commands it passes straight through. Managers not on PATH are skipped.
+# BENCHTIME=20x make bench-fallthrough for steadier numbers.
+BENCHTIME ?= 10x
+bench-fallthrough:
+	go test -tags smoke -run '^$$' -bench FallThrough -benchtime $(BENCHTIME) ./test/smoke/
 
 fmt:
 	go fmt ./...
