@@ -329,6 +329,8 @@ A `Cargo.lock` crate from git or a non-crates.io registry is **sent, marked** (`
 
 A versionless crate folds per manifest, and only into a release the `Cargo.lock` at that manifest's workspace root locks (`workspacePool` returns the root, carried on the location as `cargoRootAnnotation`). Folding on the name alone let one member's `=` pin swallow another member's range, a dev-dependency's pin replace the runtime range, and a decoy lock anywhere in the tree set a lockless crate's version, so none of those ranges reached the registry (OSS-2099). Any lock above the manifest is not enough either: a scan-root `Cargo.lock` says nothing about a nested crate with no `[workspace]` over it. The cost is an over-report: a path dependency outside any workspace, which its parent's lock does cover, also goes out at its latest release.
 
+**Without a `Cargo.lock`, a git `[patch]` or `[replace]` target is read from the manifest** (`cargoGitTargets`, OSS-2099). Cargo honours both tables only in the workspace root, so a member's are skipped (a manifest whose `workspacePool` root is not its own directory), and a root with a lock beside it adds nothing, since syft reads the same git source from the lock. Each target is carried as a `pkg.RustCargoLockEntry` whose source is spelled as the lock would spell it, `git+<url>` plus `#<rev>` only for a full 40 or 64 hex commit (a short rev is not what a lock records), so `cargoSourceMarks` strips credentials and falls back exactly as it does for a lock. `catalogByGlob` keys its dedup on that source too, or a versionless git target and its versionless crates.io twin collapse into one. A `path` target is the project's own code and is not sent; the crates.io twin stays, as above. Two more behaviours are kept by decision: an exact `Cargo.toml` pin that disagrees with `Cargo.lock` goes out at both versions, since cargo rebuilds to the pin unless run `--locked`, which fails instead, so neither file alone says what builds; and an exact pin keeps its build metadata as written (`=1.0.0+abc`), since the service fetches the `.crate` by that exact string and a crate published with metadata carries it in its file name.
+
 **Package sinks are excluded from the syft index itself** (`packageSinks`,
 `newDirectorySource`). Filtering `node_modules` packages after cataloguing was
 not enough: syft's directory resolver opens every file it indexes, and a
@@ -391,6 +393,22 @@ command run from inside a build or install directory would use.
 `TestCatalogReadsACrateAProjectAboveTheScanBuilds` and
 `TestCatalogHidesNothingWhenAPathCannotBePlaced` pin one case per guard; each
 of the 35 fails with its guard removed.
+
+**Source replacement is warned about, not marked** (`cargoSourceReplaced`,
+OSS-2099). A `[source.crates-io] replace-with` in a cargo config leaves
+crates.io in `Cargo.lock` while cargo builds whatever the replacement serves (a
+mirror, a git repository, a directory), so the scan checks crates.io releases
+that may not be the code built. Nothing in the scan records what the replacement
+served, so there is nothing to mark, and dropping the crates would only check
+less; one warning a scan says so, which is the decision for now. It finds
+configs with the vendor filter's own discovery (`cargoConfigLocations`,
+`cargoConfigLevels`, `cargoFilesAbove`: the scan, every ancestor and
+`CARGO_HOME`), reading each file on its own so one that cannot be parsed does
+not hide another's replacement. It stays quiet for a directory the vendor
+filter proved (`cargoVendored.vendors`), whose crates the lock pins to
+crates.io checksums, though the files cargo checks against
+`.cargo-checksum.json` are not compared with the release. It runs only when a
+crate goes out unmarked, so a scan with no Rust never mentions cargo.
 
 #### Why the npm resolve skips workspace members (OSS-1353)
 

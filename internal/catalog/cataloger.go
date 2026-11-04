@@ -110,6 +110,10 @@ func catalogByGlob(ctx context.Context, resolver file.Resolver, root, glob, labe
 	for _, r := range results {
 		for _, p := range r.pkgs {
 			key := p.Name + "@" + p.Version
+			// A crate Cargo builds from git is not the crates.io crate of its name.
+			if e, ok := p.Metadata.(pkg.RustCargoLockEntry); ok {
+				key += "#" + e.Source
+			}
 			if i, ok := seen[key]; ok {
 				// Keep every file's location, in a fresh set since a parser may share one between packages.
 				out[i].Locations = file.NewLocationSet(append(out[i].Locations.ToSlice(), p.Locations.ToSlice()...)...)

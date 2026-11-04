@@ -312,11 +312,24 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 		}
 	}
 
+	if slices.ContainsFunc(out, isCratesIoCrate) && cargoSourceReplaced(resolver, absRoot) {
+		warn.Add(ctx, cargoReplacedEntry)
+	}
 	merged := mergeVersionless(out, cargoRoots)
 	markLocalPackages(merged, findLocalPackageNames(resolver, absRoot))
 	markTrustedPackages(merged, opts.Trust)
 	resolveVersionless(ctx, merged, opts)
 	return merged, nil
+}
+
+// isCratesIoCrate reports a crate sent as the crates.io release of its name.
+func isCratesIoCrate(p Package) bool { return p.Type == "cargo" && len(p.Qualifiers) == 0 }
+
+// cargoReplacedEntry says once per scan that cargo may build crates.io crates from another source.
+var cargoReplacedEntry = warn.Entry{
+	Class: "cargo:source-replaced",
+	One:   "a cargo config replaces crates.io with another source, so crates are checked as their crates.io releases",
+	Many:  "cargo configs replace crates.io with another source in %d scanned trees, so crates are checked as their crates.io releases",
 }
 
 // resolveLatestFn resolves the latest published version of a package from its

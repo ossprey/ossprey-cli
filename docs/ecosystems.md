@@ -76,10 +76,21 @@ purl qualifier with credentials removed (a registry by its origin only, and a
 source too long to send by its origin or scheme), so the platform can tell it
 apart from the crates.io crate of that name. A crate from a registry host
 spelled with non-ASCII characters is sent both marked and as the crates.io
-crate, since Cargo reads some such hosts as crates.io. A dependency that `[patch.crates-io]`
-redirects to git is sent both ways when its `Cargo.lock` is committed: the git
-crate from the lock, and the crates.io crate `Cargo.toml` declares. Without the
-lock, the git crate is not seen and only the crates.io declaration is sent.
+crate, since Cargo reads some such hosts as crates.io. A dependency that `[patch]`
+or `[replace]` redirects to git is sent both ways: the git crate, marked, and the
+crates.io crate `Cargo.toml` declares. With a committed `Cargo.lock` the git
+crate comes from the lock at its locked commit. Without one it comes from your
+workspace root's `Cargo.toml`, with the commit when `rev` names a full one. A
+patch or replacement by `path` is your own code and is not sent. An exact `=`
+pin in `Cargo.toml` that disagrees with `Cargo.lock` is sent at both versions,
+since Cargo rebuilds to the pin unless run with `--locked`.
+
+A cargo config (`.cargo/config.toml` in your project or a directory above it,
+or the one in `CARGO_HOME`) can replace crates.io with another source, such as
+a mirror, a git repository or a vendor directory. `Cargo.lock` still names
+crates.io releases, and those are what the scan checks, not the code that
+source serves. When the scan finds such a replacement it says so once, unless
+the replacement is a `cargo vendor` directory it verified as described above.
 
 A dependency a Cargo workspace member inherits with `{ workspace = true }`
 takes its version from the workspace root Cargo would use. That is the root

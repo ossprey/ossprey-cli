@@ -68,6 +68,9 @@ type cargoManifest struct {
 		Members      []string       `toml:"members"`
 		Exclude      []string       `toml:"exclude"`
 	} `toml:"workspace"`
+	// Cargo builds these in place of the crates they name, but only from the workspace root.
+	Patch   map[string]any `toml:"patch"`
+	Replace map[string]any `toml:"replace"`
 }
 
 func parseCargoTomlFile(ctx context.Context, path string, loc file.Location, scanRoot string) ([]pkg.Package, error) {
@@ -89,8 +92,12 @@ func parseCargoTomlFile(ctx context.Context, path string, loc file.Location, sca
 	if rootOK {
 		loc = withCargoRoot(loc, path, rootDir)
 	}
-	seen := make(map[string]struct{})
+	member := rootDir != filepath.Dir(filepath.Clean(path))
 	var out []pkg.Package
+	// catalogByGlob dedups what this returns, across every manifest.
+	emit := func(name, version string, metadata any) {
+		out = append(out, pkg.Package{Name: name, Version: version, Type: pkg.RustPkg, Locations: file.NewLocationSet(loc), Metadata: metadata})
+	}
 	add := func(alias string, spec any) {
 		name, version, ok, why := cargoDep(alias, spec, pool)
 		if why != "" {
@@ -99,17 +106,7 @@ func parseCargoTomlFile(ctx context.Context, path string, loc file.Location, sca
 		if !ok || name == "" || name == m.Package.Name {
 			return
 		}
-		key := name + "@" + version
-		if _, ok := seen[key]; ok {
-			return
-		}
-		seen[key] = struct{}{}
-		out = append(out, pkg.Package{
-			Name:      name,
-			Version:   version,
-			Type:      pkg.RustPkg,
-			Locations: file.NewLocationSet(loc),
-		})
+		emit(name, version, nil)
 	}
 	tables := []map[string]any{m.Dependencies, m.DevDependencies, m.BuildDependencies, m.DevDependenciesUS, m.BuildDependenciesUS}
 	for _, t := range m.Target {
@@ -120,6 +117,17 @@ func parseCargoTomlFile(ctx context.Context, path string, loc file.Location, sca
 	for _, table := range tables {
 		for n, spec := range table {
 			add(n, spec)
+		}
+	}
+	// Cargo reads [patch] and [replace] only at the workspace root, and a lock there already records their git sources.
+	if !member && !hasCargoLock(path) {
+		for _, t := range cargoGitTargets(m) {
+			if _, _, ok, why := vouched(t.Name, ""); !ok {
+				warn.Add(ctx, cargoDropEntry("cargotoml", why, t.Name))
+				continue
+			}
+			// Carried as a Cargo.lock git entry, so cargoSourceMarks marks it the same way.
+			emit(t.Name, t.Version, t)
 		}
 	}
 	return out, nil
