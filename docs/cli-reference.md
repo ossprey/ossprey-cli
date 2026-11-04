@@ -6,7 +6,7 @@ Every command, flag and credential the CLI understands.
 |---------|--------------|
 | [`ossprey init [path]`](init.md) | Set up a project: log in, create an API key, scan with it. |
 | [`ossprey scan [path]`](#scan) | Catalogue a directory, submit the OSSBOM, fail on malware. `path` defaults to `.`. |
-| [`ossprey check -e <pypi\|npm> <pkg>...`](#check--scan-named-packages) | Check packages by name, no project needed. |
+| [`ossprey check -e <pypi\|npm\|cargo> <pkg>...`](#check--scan-named-packages) | Check packages by name, no project needed. |
 | [`ossprey npm\|npx\|pnpm\|yarn\|bun\|bunx\|pip\|pip3\|poetry\|uv\|uvx ...`](forwarder.md) | Check, then run the real package manager. Blocks the install on malware. |
 | [`ossprey git clone\|pull ...`](git.md) | Check a public GitHub repo, then run git. Blocks on malware. |
 | [`ossprey shim install`](shims.md) | Put shims on `PATH` so installs are checked without the `ossprey` prefix. |
@@ -95,21 +95,29 @@ ossprey scan [path] [flags]
 Scan one or more packages by name without a project on disk:
 
 ```
-ossprey check --eco-system <pypi|npm> <name[@version]>...
+ossprey check --eco-system <pypi|npm|cargo> <name[@version]>...
 ```
 
 ```sh
 ossprey check -e pypi requests@2.31.0
 ossprey check -e npm lodash@4.17.21 react@18.2.0
+ossprey check -e cargo serde@1.0.228
 ```
 
 When a version is omitted, the latest published version is resolved from the
-registry (PyPI / npm) and checked. Both `name@version` and pip's
-`name==version` forms are accepted.
+registry (PyPI, npm, or crates.io, where it is the latest stable release) and
+checked. Both `name@version` and pip's `name==version` forms are accepted.
+
+A crate's version must name one release, as `serde@1.0.228` or
+`serde@=1.0.228`. Cargo reads `1.0` and `^1.0` as ranges, so `check` refuses
+them with an error rather than guess which release you meant: give the exact
+release, or leave the version off to check the latest one. Rust (crates.io)
+scanning is available on Teams and Enterprise plans (see
+[supported ecosystems](ecosystems.md)).
 
 | Flag | Description |
 |------|-------------|
-| `-e, --eco-system <pypi\|npm>` | Package ecosystem (required). |
+| `-e, --eco-system <pypi\|npm\|cargo>` | Package ecosystem (required). |
 | `--url <url>` | Override the Ossprey API URL. |
 | `--api-key <key>` | API key (or env var). |
 | `--dry-run-safe` | Skip the API; report an empty vulnerability list. |

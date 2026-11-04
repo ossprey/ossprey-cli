@@ -30,7 +30,11 @@ func TestParseSpec(t *testing.T) {
 		{name: "pypi @ url is not a registry package", ecosystem: "pypi", token: "mypkg@git+https://x/y", wantErr: true},
 		{name: "pypi alias pip", ecosystem: "pip", token: "flask==3.0", wantEco: "pypi", wantName: "flask", wantVersion: "3.0"},
 		{name: "npm alias yarn", ecosystem: "yarn", token: "react@18.2.0", wantEco: "npm", wantName: "react", wantVersion: "18.2.0"},
-		{name: "bad ecosystem", ecosystem: "cargo", token: "serde", wantErr: true},
+		{name: "cargo name@version", ecosystem: "cargo", token: "serde@1.0.228", wantEco: "cargo", wantName: "serde", wantVersion: "1.0.228"},
+		{name: "cargo bare", ecosystem: "cargo", token: "serde", wantEco: "cargo", wantName: "serde", wantVersion: ""},
+		{name: "cargo alias rust", ecosystem: "rust", token: "serde", wantEco: "cargo", wantName: "serde", wantVersion: ""},
+		{name: "cargo alias crates.io", ecosystem: "crates.io", token: "serde", wantEco: "cargo", wantName: "serde", wantVersion: ""},
+		{name: "bad ecosystem", ecosystem: "maven", token: "serde", wantErr: true},
 	}
 
 	for _, tt := range tests {
@@ -132,7 +136,7 @@ func TestRun_Errors(t *testing.T) {
 	}{
 		{name: "no specs", opts: Options{DryRunSafe: true}},
 		{name: "missing version", opts: Options{Specs: []Spec{{Ecosystem: "npm", Name: "lodash"}}, DryRunSafe: true}},
-		{name: "bad ecosystem", opts: Options{Specs: []Spec{{Ecosystem: "cargo", Name: "serde", Version: "1.0"}}, DryRunSafe: true}},
+		{name: "bad ecosystem", opts: Options{Specs: []Spec{{Ecosystem: "maven", Name: "serde", Version: "1.0"}}, DryRunSafe: true}},
 		{name: "empty name", opts: Options{Specs: []Spec{{Ecosystem: "npm", Version: "1.0"}}, DryRunSafe: true}},
 	}
 	for _, tt := range tests {

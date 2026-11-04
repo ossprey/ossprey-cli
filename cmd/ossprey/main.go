@@ -373,12 +373,12 @@ func newCheckCmd() *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:   "check --eco-system <pypi|npm> <name[@version]>...",
+		Use:   "check --eco-system <pypi|npm|cargo> <name[@version]>...",
 		Short: "Check named packages for malware without a project directory",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if ecosystem == "" {
-				return errors.New("--eco-system is required (pypi or npm)")
+				return errors.New("--eco-system is required (pypi, npm or cargo)")
 			}
 
 			override, err := parseFloorOverride(failOn)
@@ -445,7 +445,7 @@ func newCheckCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVarP(&ecosystem, "eco-system", "e", "", "package ecosystem: pypi or npm (required)")
+	cmd.Flags().StringVarP(&ecosystem, "eco-system", "e", "", "package ecosystem: pypi, npm or cargo (required)")
 	cmd.Flags().StringVar(&reportPath, "report", "", "write a JSON verdict report (verdict + findings) to file")
 	cmd.Flags().StringVar(&apiURL, "url", defaultAPIURL, "Ossprey API URL")
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "Ossprey API key (or OSSPREY_API_KEY / API_KEY env var; optional after `ossprey login`)")

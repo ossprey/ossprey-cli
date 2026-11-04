@@ -1,6 +1,6 @@
 // Package registry resolves the latest published version of a package from its
-// upstream registry (npm registry, PyPI). Used to fill in a version when the
-// user names a package without pinning one (e.g. `ossprey npm install lodash`).
+// upstream registry (npm registry, PyPI, crates.io). Used to fill in a version
+// when the user names a package without pinning one (e.g. `ossprey npm install lodash`).
 package registry
 
 import (
@@ -41,7 +41,7 @@ func CanResolve(ecosystem string) bool {
 }
 
 // ResolveLatest returns the latest version string for name in the given
-// ecosystem ("npm" or "pypi").
+// ecosystem ("npm", "pypi" or "cargo").
 func ResolveLatest(ctx context.Context, ecosystem, name string) (string, error) {
 	switch ecosystem {
 	case "npm":
@@ -147,7 +147,7 @@ var ErrNotFound = errors.New("not on the public registry")
 // errAllYanked is a not-found: a crate with every release yanked has nothing to pin.
 var errAllYanked = fmt.Errorf("%w (every release is yanked)", ErrNotFound)
 
-// resolveCargo reads the crate's latest stable release for a Cargo.toml range no lockfile pins.
+// resolveCargo reads the crate's latest stable release, for a Cargo.toml range no lockfile pins or a crate `check` names bare.
 func resolveCargo(ctx context.Context, name string) (string, error) {
 	endpoint := cratesBaseURL + url.PathEscape(name)
 	var body struct {

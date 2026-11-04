@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -240,6 +241,43 @@ func TestParseSpec_NonRegistrySpecsAreErrors(t *testing.T) {
 	} {
 		if s, err := ParseSpec(tc.eco, tc.token); err == nil {
 			t.Errorf("ParseSpec(%q, %q) = %+v, want an error", tc.eco, tc.token, s)
+		}
+	}
+}
+
+// A cargo version is one exact release; a range names no release to check, so it errors and says what works.
+func TestParseSpec_CargoTakesOnlyAnExactRelease(t *testing.T) {
+	for _, tc := range []struct{ token, version string }{
+		{"serde@=1.0.228", "1.0.228"},
+		{"tokio-macros@2.0.0-rc.1", "2.0.0-rc.1"},
+		{"some_crate@1.2.3+build.7", "1.2.3+build.7"},
+	} {
+		s, err := ParseSpec("cargo", tc.token)
+		if err != nil || s.Version != tc.version || s.Constraint != "" {
+			t.Errorf("ParseSpec(cargo, %q) = %+v, %v; want version %q", tc.token, s, err, tc.version)
+		}
+	}
+	long := strings.Repeat("a", 65)
+	for _, tc := range []struct{ token, wantErr string }{
+		{"serde@^1.0", "exact release"},
+		{"serde@~1.2", "exact release"},
+		{"serde@1.0", "exact release"},
+		{"serde@1", "exact release"},
+		{"serde@1.*", "exact release"},
+		{"serde@*", "exact release"},
+		{"serde@>=1, <2", "exact release"},
+		{"serde@latest", "exact release"},
+		{"serde@git+https://github.com/serde-rs/serde", "exact release"},
+		{"serde@1.0.0-" + strings.Repeat("a", 260), "exact release"},
+		{"https://github.com/serde-rs/serde", "not a crates.io crate name"},
+		{"./crates/serde", "not a crates.io crate name"},
+		{"serde-rs/serde", "not a crates.io crate name"},
+		{"serde.json", "not a crates.io crate name"},
+		{long, "not a crates.io crate name"},
+	} {
+		s, err := ParseSpec("cargo", tc.token)
+		if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+			t.Errorf("ParseSpec(cargo, %q) = %+v, %v; want an error containing %q", tc.token, s, err, tc.wantErr)
 		}
 	}
 }

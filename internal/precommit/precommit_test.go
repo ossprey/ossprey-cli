@@ -2,6 +2,7 @@ package precommit
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -91,6 +92,22 @@ func pyproject(deps ...string) string {
 	b.WriteString("]\n")
 	return b.String()
 }
+
+// cargoLock renders a v4 Cargo.lock: the project's own root crate, then one entry per {name, version, source}.
+func cargoLock(crates ...[3]string) string {
+	var b strings.Builder
+	b.WriteString("version = 4\n\n[[package]]\nname = \"app\"\nversion = \"0.1.0\"\n")
+	for _, c := range crates {
+		fmt.Fprintf(&b, "\n[[package]]\nname = %q\nversion = %q\nsource = %q\n", c[0], c[1], c[2])
+	}
+	return b.String()
+}
+
+const (
+	cratesIoSource = "registry+https://github.com/rust-lang/crates.io-index"
+	forkCommit     = "0123456789abcdef0123456789abcdef01234567"
+	forkSource     = "git+https://git.example.com/acme/forked-crate?branch=main#" + forkCommit
+)
 
 // --- tests ---
 
@@ -202,6 +219,33 @@ func TestStagedDelta(t *testing.T) {
 				writeRepoFile(t, dir, "package-lock.json", npmLock(map[string]string{"left-pad": "1.3.0", "sneaky-pkg": "9.9.9"}))
 			},
 			want: []Package{{Type: "npm", Name: "is-odd", Version: "3.0.1", Path: "package-lock.json"}},
+		},
+		{
+			name: "new Cargo.lock: crates pinned, a git crate marked, the root crate left out",
+			setup: func(t *testing.T, dir string) {
+				writeRepoFile(t, dir, "README.md", "# hi\n")
+				commitAll(t, dir)
+				writeRepoFile(t, dir, "Cargo.lock", cargoLock(
+					[3]string{"serde", "1.0.228", cratesIoSource},
+					[3]string{"forked-crate", "2.0.0", forkSource},
+				))
+				gitT(t, dir, "add", "Cargo.lock")
+			},
+			want: []Package{
+				{Type: "cargo", Name: "forked-crate", Version: "2.0.0", Path: "Cargo.lock",
+					Qualifiers: map[string]string{"vcs_url": "git+https://git.example.com/acme/forked-crate@" + forkCommit}},
+				{Type: "cargo", Name: "serde", Version: "1.0.228", Path: "Cargo.lock"},
+			},
+		},
+		{
+			name: "a crate moved from git to crates.io at the same version is new",
+			setup: func(t *testing.T, dir string) {
+				writeRepoFile(t, dir, "Cargo.lock", cargoLock([3]string{"forked-crate", "2.0.0", forkSource}))
+				commitAll(t, dir)
+				writeRepoFile(t, dir, "Cargo.lock", cargoLock([3]string{"forked-crate", "2.0.0", cratesIoSource}))
+				gitT(t, dir, "add", "Cargo.lock")
+			},
+			want: []Package{{Type: "cargo", Name: "forked-crate", Version: "2.0.0", Path: "Cargo.lock"}},
 		},
 	}
 
@@ -337,6 +381,9 @@ func TestIsManifestPath(t *testing.T) {
 		{"README.md", false},
 		{"main.go", false},
 		{"requirements.in", false},
+		{"Cargo.toml", true},
+		{"crates/core/Cargo.lock", true},
+		{"Cargo.toml.orig", false}, // cargo package's copy of the manifest, which no cataloger reads
 	}
 	for _, tc := range cases {
 		if got := isManifestPath(tc.p); got != tc.want {

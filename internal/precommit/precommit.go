@@ -14,10 +14,12 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -29,7 +31,7 @@ import (
 // diff — enough for a caller to build a purl (pkg:<type>/<name>@<version>)
 // and report "package X (from package-lock.json)".
 type Package struct {
-	// Type is the OSSBOM ecosystem: "npm" or "pypi".
+	// Type is the OSSBOM ecosystem: "npm", "pypi" or "cargo".
 	Type string
 	// Name is the package name as cataloged.
 	Name string
@@ -39,6 +41,8 @@ type Package struct {
 	// Path is the repo-relative manifest/lockfile the package was parsed
 	// from, slash-separated (e.g. "web/package-lock.json").
 	Path string
+	// Qualifiers mark a git or private-registry crate, which is not the crates.io crate of that name.
+	Qualifiers map[string]string
 }
 
 // Delta is the set of packages present in the staged (index) manifest set
@@ -134,8 +138,8 @@ func diffPackages(staged, head []catalog.Package, stagedRoot string, repoPaths [
 	exact := make(map[string]struct{}, len(head))
 	names := make(map[string]struct{}, len(head))
 	for _, p := range head {
-		exact[pkgKey(p.Type, p.Name, p.Version)] = struct{}{}
-		names[nameKey(p.Type, p.Name)] = struct{}{}
+		exact[pkgKey(p)] = struct{}{}
+		names[nameKey(p)] = struct{}{}
 	}
 
 	var out []Package
@@ -145,15 +149,15 @@ func diffPackages(staged, head []catalog.Package, stagedRoot string, repoPaths [
 		if p.Local {
 			continue // the repo's own path/workspace code, never a registry package
 		}
-		if _, ok := exact[pkgKey(p.Type, p.Name, p.Version)]; ok {
+		key := pkgKey(p)
+		if _, ok := exact[key]; ok {
 			continue
 		}
 		if p.Version == "" {
-			if _, ok := names[nameKey(p.Type, p.Name)]; ok {
+			if _, ok := names[nameKey(p)]; ok {
 				continue
 			}
 		}
-		key := pkgKey(p.Type, p.Name, p.Version)
 		if _, ok := seen[key]; ok {
 			continue
 		}
@@ -163,10 +167,11 @@ func diffPackages(staged, head []catalog.Package, stagedRoot string, repoPaths [
 			continue
 		}
 		out = append(out, Package{
-			Type:    p.Type,
-			Name:    p.Name,
-			Version: p.Version,
-			Path:    repoRelLocation(p.Locations, stagedRoot, known),
+			Type:       p.Type,
+			Name:       p.Name,
+			Version:    p.Version,
+			Path:       repoRelLocation(p.Locations, stagedRoot, known),
+			Qualifiers: p.Qualifiers,
 		})
 	}
 
@@ -182,13 +187,18 @@ func diffPackages(staged, head []catalog.Package, stagedRoot string, repoPaths [
 	return Delta{Packages: out, Trusted: trusted}
 }
 
-// pkgKey matches catalog's dedup identity: (type, normalized name, version).
-func pkgKey(t, name, version string) string {
-	return nameKey(t, name) + "@" + version
+// pkgKey matches catalog's dedup identity: (type, normalized name, version) plus any source qualifiers.
+func pkgKey(p catalog.Package) string {
+	return nameKey(p) + "@" + p.Version
 }
 
-func nameKey(t, name string) string {
-	return t + "@" + strings.ToLower(strings.TrimSpace(name))
+// nameKey keeps a source-marked crate apart from the crates.io crate of that name, as catalog does.
+func nameKey(p catalog.Package) string {
+	key := p.Type + "@" + strings.ToLower(strings.TrimSpace(p.Name))
+	for _, k := range slices.Sorted(maps.Keys(p.Qualifiers)) {
+		key += "?" + k + "=" + p.Qualifiers[k]
+	}
+	return key
 }
 
 // repoRelLocation maps a cataloged location back to its repo-relative path.
@@ -272,14 +282,15 @@ func stagedManifestPaths(ctx context.Context, repoDir string, hasHead bool) ([]s
 // parse without shelling out. Mirrors catalog's coverage — syft's python
 // cataloger (**/*requirements*.txt, poetry.lock, Pipfile.lock, setup.py,
 // uv.lock, pdm.lock), syft's JS lock cataloger (package-lock.json, yarn.lock,
-// pnpm-lock.yaml), and our pyproject/package.json direct-deps parsers. A bare
-// Pipfile is deliberately absent: no cataloger parses it.
+// pnpm-lock.yaml), syft's Cargo.lock cataloger, and our pyproject/package.json/
+// Cargo.toml direct-deps parsers. A bare Pipfile is deliberately absent: no
+// cataloger parses it.
 func isManifestPath(p string) bool {
 	base := path.Base(p)
 	switch base {
 	case "package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
 		"pyproject.toml", "poetry.lock", "Pipfile.lock", "uv.lock",
-		"pdm.lock", "setup.py":
+		"pdm.lock", "setup.py", "Cargo.toml", "Cargo.lock":
 		return true
 	}
 	// Matches syft's "**/*requirements*.txt" glob.

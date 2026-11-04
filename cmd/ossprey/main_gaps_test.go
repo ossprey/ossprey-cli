@@ -22,6 +22,7 @@ import (
 
 	"github.com/ossprey/ossprey-cli/internal/auth"
 	"github.com/ossprey/ossprey-cli/internal/client"
+	"github.com/ossprey/ossprey-cli/internal/registry"
 	"github.com/ossprey/ossprey-cli/internal/scan"
 	"github.com/ossprey/ossprey-cli/internal/update"
 )
@@ -241,6 +242,60 @@ func TestMainExitCodes(t *testing.T) {
 				t.Errorf("stderr missing %q:\n%s", tc.wantStderr, res.stderr)
 			}
 		})
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// A bare crate name is checked at the latest stable release crates.io reports.
+func TestCheckCargoBareNameIsCheckedAtItsLatestRelease(t *testing.T) {
+	var asked []string
+	old := registry.DefaultHTTP
+	registry.DefaultHTTP = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		asked = append(asked, r.URL.Host+r.URL.Path)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"crate":{"max_stable_version":"1.0.228"}}`)),
+			Request:    r,
+		}, nil
+	})}
+	t.Cleanup(func() { registry.DefaultHTTP = old })
+
+	var mu sync.Mutex
+	var sent []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			SBOM struct {
+				Components []struct {
+					Purl string `json:"purl"`
+				} `json:"components"`
+			} `json:"sbom"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode body: %v", err)
+		}
+		mu.Lock()
+		for _, c := range body.SBOM.Components {
+			sent = append(sent, c.Purl)
+		}
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"components":[],"vulnerabilities":[]}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	if err := runCheck(t, "-e", "cargo", "serde", "--url", srv.URL, "--api-key", "k"); err != nil {
+		t.Fatalf("check: %v", err)
+	}
+	if len(asked) != 1 || asked[0] != "crates.io/api/v1/crates/serde" {
+		t.Errorf("registry lookups = %v, want crates.io's serde", asked)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(sent) != 1 || sent[0] != "pkg:cargo/serde@1.0.228" {
+		t.Errorf("purls sent = %v, want pkg:cargo/serde@1.0.228", sent)
 	}
 }
 

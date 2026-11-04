@@ -18,8 +18,8 @@ import (
 )
 
 // Spec identifies one package to check. Ecosystem is the OSSBOM component type
-// ("pypi" or "npm"). Version may be empty; callers resolve a concrete version
-// (e.g. via internal/registry) before calling Run.
+// ("pypi", "npm", "cargo" or "github"). Version may be empty; callers resolve a
+// concrete version (e.g. via internal/registry) before calling Run.
 type Spec struct {
 	Ecosystem string
 	Name      string
@@ -116,7 +116,7 @@ func scanName(specs []Spec) string {
 
 func (s Spec) validate() error {
 	if normalizeEcosystem(s.Ecosystem) == "" {
-		return fmt.Errorf("unsupported ecosystem %q (want pypi, npm or github)", s.Ecosystem)
+		return fmt.Errorf("unsupported ecosystem %q (want pypi, npm, cargo or github)", s.Ecosystem)
 	}
 	if s.Name == "" {
 		return errors.New("package name is required")
@@ -135,6 +135,8 @@ func normalizeEcosystem(eco string) string {
 		return "pypi"
 	case "npm", "node", "javascript", "js", "yarn":
 		return "npm"
+	case "cargo", "rust", "crates.io":
+		return "cargo"
 	case "github":
 		return "github"
 	default:
@@ -147,11 +149,12 @@ func normalizeEcosystem(eco string) string {
 // only when the token pins exactly one release; a range, a tag or a wildcard
 // leaves it empty (npm keeps the range or tag in Constraint) and the caller
 // resolves a concrete version. A token naming no registry package (a URL, a
-// git or file spec) is an error.
+// git or file spec) is an error, and so is a cargo version that is not one
+// exact release.
 func ParseSpec(ecosystem, token string) (Spec, error) {
 	eco := normalizeEcosystem(ecosystem)
 	if eco == "" {
-		return Spec{}, fmt.Errorf("unsupported ecosystem %q (want pypi, npm or github)", ecosystem)
+		return Spec{}, fmt.Errorf("unsupported ecosystem %q (want pypi, npm, cargo or github)", ecosystem)
 	}
 
 	var s Spec
@@ -163,6 +166,11 @@ func ParseSpec(ecosystem, token string) (Spec, error) {
 		s.Name, s.Version = splitLastAt(token)
 	case "pypi":
 		s, ok = splitPyPI(token)
+	case "cargo":
+		var err error
+		if s, err = splitCargo(token); err != nil {
+			return Spec{}, err
+		}
 	}
 	if !ok || s.Name == "" {
 		return Spec{}, fmt.Errorf("cannot parse package token %q", token)
@@ -221,6 +229,31 @@ func splitNpm(token string) (s Spec, ok bool) {
 		s.Constraint = spec
 	}
 	return s, true
+}
+
+// cargoName is the crates.io name shape the API enforces, as in internal/catalog.
+var cargoName = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+// cargoExact is one crates.io release, always full three-part semver, with Cargo's optional "=".
+var cargoExact = regexp.MustCompile(`^=?\s*([0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.+-]*)?)$`)
+
+// maxCargoVersion is the API's version length cap.
+const maxCargoVersion = 256
+
+// splitCargo parses "name" or "name@version", refusing a range (Cargo reads a bare "1.0" as one) rather than guess a release.
+func splitCargo(token string) (Spec, error) {
+	name, version, pinned := strings.Cut(token, "@")
+	if !cargoName.MatchString(name) {
+		return Spec{}, fmt.Errorf("cannot parse package token %q: %q is not a crates.io crate name", token, name)
+	}
+	if !pinned {
+		return Spec{Name: name}, nil
+	}
+	m := cargoExact.FindStringSubmatch(strings.TrimSpace(version))
+	if m == nil || len(m[1]) > maxCargoVersion {
+		return Spec{}, fmt.Errorf("cannot check %q: cargo needs an exact release (%s@1.2.3), or the bare name %s for its latest release", token, name, name)
+	}
+	return Spec{Name: name, Version: m[1]}, nil
 }
 
 // pypiName is the leading project name of a requirement (PEP 508).

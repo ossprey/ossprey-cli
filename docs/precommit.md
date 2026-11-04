@@ -3,8 +3,8 @@
 Block a commit that adds a known-malicious package, before it reaches CI.
 
 `ossprey precommit` checks the dependencies a commit **adds or version-bumps**
-— staged changes to `package.json`, lockfiles, `requirements.txt`,
-`pyproject.toml` and friends — against Ossprey's database of already-confirmed
+(staged changes to `package.json`, `Cargo.toml`, lockfiles,
+`requirements.txt`, `pyproject.toml` and friends) against Ossprey's database of already-confirmed
 malware. It runs no new scans: parsing the staged diff is local and typically
 takes well under 100 ms, plus one small HTTP request (per 100 packages) for
 the lookup. A clean
@@ -73,6 +73,12 @@ framework manage both.
   dependencies only.
 - **Packages from [trusted sources](trust.md).** They are left out of the
   lookup; `-v` reports how many.
+- **Crates from git or a private registry.** A `Cargo.lock` crate that Cargo
+  fetches from anywhere but crates.io is not the crates.io crate of that name,
+  so it is left out of the lookup.
+- **Rust crates on plans without Rust scanning.** Rust (crates.io) scanning is
+  available on Teams and Enterprise plans; on other plans staged crates are not
+  looked up.
 - **Packages already committed.** The hook diffs the staged manifests against
   `HEAD`, so it only sees what this commit introduces. Auditing what's already
   in the tree is `ossprey scan`'s job.
