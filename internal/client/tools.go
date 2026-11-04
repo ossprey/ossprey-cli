@@ -11,6 +11,7 @@ import (
 
 	"github.com/anchore/packageurl-go"
 
+	"github.com/ossprey/ossprey-cli/internal/apitext"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
 )
 
@@ -42,7 +43,7 @@ func (c *Client) RepoSBOM(ctx context.Context, purl string) ([]ossbom.Component,
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
 		return nil, c.authError(resp.StatusCode)
 	case resp.StatusCode != http.StatusOK:
-		return nil, fmt.Errorf("repo sbom failed (status %d): %s", resp.StatusCode, truncate(apiErrorMessage(body), 200))
+		return nil, fmt.Errorf("repo sbom failed (status %d): %s", resp.StatusCode, truncate(apitext.OneLine(apiErrorMessage(body)), 200))
 	}
 	var out struct {
 		Components []struct {

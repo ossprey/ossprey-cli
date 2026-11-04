@@ -112,32 +112,21 @@ func Run(ctx context.Context, opts Options) error {
 		return forwardTo()
 	}
 
-	specs, err := resolve(ctx, req)
-	if err != nil {
-		// Fail open: a Homebrew API outage must not break brew.
-		fmt.Fprintf(errOut, "ossprey: warning: could not look up formulae (%v); checking what resolved\n", err)
+	if opts.Passive {
+		// Passive blocks nothing, so the lookups wait until brew is done.
+		flushWarnings(ctx)
+		execErr := execFn(ctx, "brew", opts.Args)
+		passive(ctx, opts, req)
+		return execErr
 	}
+
+	specs := resolveOrWarn(ctx, req)
 	if len(specs) == 0 {
 		note("ossprey: no formula sources on GitHub; forwarding unchecked\n")
 		return forwardTo()
 	}
 
 	copts := check.Options{Specs: specs, APIURL: opts.APIURL, APIKey: opts.APIKey, MonitorID: opts.MonitorID}
-	if opts.Passive {
-		flushWarnings(ctx)
-		execErr := execFn(ctx, "brew", opts.Args)
-		if opts.MonitorID == "" {
-			copts.Extra = expand(ctx, opts, specs)
-		}
-		copts.SubmitOnly = true
-		stop := progress.Submit(progressTo(), len(specs))
-		_, err := checkFn(ctx, copts)
-		stop()
-		if err != nil {
-			fmt.Fprintf(errOut, "ossprey: warning: could not post scan (%v)\n", err)
-		}
-		return execErr
-	}
 
 	copts.Extra = expand(ctx, opts, specs)
 	stop := progress.Scan(progressTo(), len(specs)+len(copts.Extra))
@@ -148,6 +137,34 @@ func Run(ctx context.Context, opts Options) error {
 		return forwardTo()
 	}
 	return report(ctx, opts, sbom)
+}
+
+// resolveOrWarn resolves sources, failing open out loud on a lookup error.
+func resolveOrWarn(ctx context.Context, req request) []check.Spec {
+	specs, err := resolve(ctx, req)
+	if err != nil {
+		fmt.Fprintf(errOut, "ossprey: warning: could not look up formulae (%v); checking what resolved\n", err)
+	}
+	return specs
+}
+
+// passive submits what an install fetched, after brew has run.
+func passive(ctx context.Context, opts Options, req request) {
+	defer flushWarnings(ctx)
+	specs := resolveOrWarn(ctx, req)
+	if len(specs) == 0 {
+		return
+	}
+	copts := check.Options{Specs: specs, APIURL: opts.APIURL, APIKey: opts.APIKey, MonitorID: opts.MonitorID, SubmitOnly: true}
+	if opts.MonitorID == "" {
+		copts.Extra = expand(ctx, opts, specs)
+	}
+	stop := progress.Submit(progressTo(), len(specs)+len(copts.Extra))
+	_, err := checkFn(ctx, copts)
+	stop()
+	if err != nil {
+		fmt.Fprintf(errOut, "ossprey: warning: could not post scan (%v)\n", err)
+	}
 }
 
 func report(ctx context.Context, opts Options, sbom *ossbom.SBOM) error {

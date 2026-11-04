@@ -461,3 +461,23 @@ func TestExpandSharesOneClient(t *testing.T) {
 		t.Errorf("clients made = %d, want 1 (concurrent token refresh)", made)
 	}
 }
+
+func TestRun_PassiveRunsBrewBeforeAnyLookup(t *testing.T) {
+	fakeBrewAPI(t, map[string]string{"jq": "https://github.com/jqlang/jq/archive/v1.tar.gz"}, nil, "")
+	stub(t, false)
+	var order []string
+	execFn = func(context.Context, string, []string) error {
+		order = append(order, "brew")
+		return nil
+	}
+	lsRemoteFn = func(gitscan.Repo, string, string) string {
+		order = append(order, "lookup")
+		return sha
+	}
+	if err := Run(context.Background(), Options{Args: []string{"install", "jq"}, Passive: true}); err != nil {
+		t.Fatal(err)
+	}
+	if len(order) == 0 || order[0] != "brew" {
+		t.Errorf("order = %v, want brew first", order)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -43,12 +44,16 @@ func TestRepoSBOM(t *testing.T) {
 func TestRepoSBOMErrors(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`{"message":"too large"}`))
+		_, _ = w.Write([]byte(`{"message":"too large\nossprey: forged line\u001b[2J"}`))
 	}))
 	defer srv.Close()
 	c, _ := New(srv.URL, "k")
-	if _, err := c.RepoSBOM(context.Background(), "pkg:github/o/r@abc"); err == nil {
-		t.Error("want error on 400")
+	_, err := c.RepoSBOM(context.Background(), "pkg:github/o/r@abc")
+	if err == nil {
+		t.Fatal("want error on 400")
+	}
+	if strings.ContainsAny(err.Error(), "\n\x1b") {
+		t.Errorf("API text reached the terminal unsanitised: %q", err)
 	}
 	ic := newClient(srv.URL)
 	ic.IngestToken = "t"
