@@ -87,8 +87,10 @@ ossprey: (end of uv output)
 
 `OSSPREY_VERBOSE` works on every path, including the forwarders and shims,
 which parse no flags of their own. Without it the forwarders print no
-warnings at all, and a clean or unchecked install is silent; a malware block
-still gets the full report, and platform errors are still shown.
+warnings at all: a clean install prints one verdict line (`ossprey: no malware
+found in 65 packages (1 requested + 64 dependencies), forwarding to npm`), an
+unchecked install prints nothing, a malware block still gets the full report,
+and platform errors are still shown.
 
 A package left unversioned is still submitted and still checked against what
 the registry knows; one dropped by a forwarder (`skipping its check`) is not

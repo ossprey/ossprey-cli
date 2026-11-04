@@ -140,7 +140,8 @@ func TestRun_NamedInstall_ExpansionFailsOpenOutLoud(t *testing.T) {
 	if !ex.called {
 		t.Error("install was not forwarded")
 	}
-	want := "ossprey: warning: could not resolve the dependencies of express (npm: timed out after 2m0s); checking the named packages only\n"
+	want := "ossprey: warning: could not resolve the dependencies of express (npm: timed out after 2m0s); checking the named packages only\n" +
+		"ossprey: no malware found in 1 package (1 requested; dependencies not resolved), forwarding to npm\n"
 	if out != want {
 		t.Errorf("got %q, want %q", out, want)
 	}

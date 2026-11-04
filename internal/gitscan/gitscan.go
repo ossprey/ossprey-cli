@@ -170,7 +170,9 @@ func report(ctx context.Context, opts Options, repo Repo, sbom *ossbom.SBOM) err
 		fmt.Fprintf(errOut, "ossprey: blocked `git %s`\n", strings.Join(opts.Args, " "))
 		return forward.ErrBlocked
 	}
-	note("ossprey: no malware found in %s, forwarding to git\n", repo)
+	// Printed even when quiet, like the package forwarders' clean line: a
+	// check that passed says so.
+	fmt.Fprintf(errOut, "ossprey: no malware found in %s, forwarding to git\n", repo)
 	return handoffFn(ctx, "git", opts.Args)
 }
 

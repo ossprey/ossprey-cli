@@ -60,11 +60,11 @@ var errOut io.Writer = os.Stderr
 // animation; both default to stderr.
 var progressOut io.Writer = os.Stderr
 
-// A forwarder sits in front of every install, so by default it is silent: the
-// only things it prints are a malware block (the full report) and a platform
-// error. Everything else — a clean verdict, why it did not check, what it is
-// scanning, collected warnings, informational findings — is narration, and
-// only OSSPREY_VERBOSE shows it. The forwarders parse no flags of their own, so
+// A forwarder sits in front of every install, so by default it is quiet: the
+// only things it prints are a malware block (the full report), a platform
+// error, and one clean-verdict line when a check passed. Everything else — why
+// it did not check, what it is scanning, collected warnings, informational
+// findings — is narration, and only OSSPREY_VERBOSE shows it. The forwarders parse no flags of their own, so
 // the env var is the only switch. The real manager's own output is never
 // touched: it inherits our stdio.
 
@@ -766,8 +766,12 @@ func reportAndForward(ctx context.Context, m *Manager, opts Options, sbom *ossbo
 	} else {
 		// The count is load-bearing: "no malware found" alone read the same
 		// whether 40 packages were checked or none were — and whether the
-		// named package's dependencies were among them.
-		note("ossprey: no malware found in %s%s, forwarding to %s\n",
+		// named package's dependencies were among them. Printed even when
+		// quiet: a check that passed says so in one line, the last of ours
+		// before the manager's own output, so silence never has to stand in
+		// for a verdict. The zero-component case above stays narration, since
+		// nothing was verified there.
+		fmt.Fprintf(errOut, "ossprey: no malware found in %s%s, forwarding to %s\n",
 			countPackages(n), coverage, m.Bin)
 	}
 	// Already drained at the top of this function, ahead of the verdict.

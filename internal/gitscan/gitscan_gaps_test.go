@@ -165,16 +165,17 @@ func TestRun_SkipCIMakesNoLookup(t *testing.T) {
 	}
 }
 
-// A clean check prints nothing of ossprey's by default.
-func TestRun_CleanCheckIsSilent(t *testing.T) {
+// A clean check prints exactly one line of ossprey's by default: the verdict.
+func TestRun_CleanCheckPrintsOnlyTheVerdict(t *testing.T) {
 	t.Setenv("OSSPREY_VERBOSE", "")
 	fakeGitHub(t)
 	stub(t, false)
 	if err := Run(context.Background(), Options{Args: []string{"clone", "https://github.com/o/pub"}}); err != nil {
 		t.Fatal(err)
 	}
-	if s := errOut.(*bytes.Buffer).String(); s != "" {
-		t.Fatalf("quiet clean run printed %q", s)
+	want := "ossprey: no malware found in o/pub, forwarding to git\n"
+	if s := errOut.(*bytes.Buffer).String(); s != want {
+		t.Fatalf("quiet clean run printed %q, want %q", s, want)
 	}
 }
 

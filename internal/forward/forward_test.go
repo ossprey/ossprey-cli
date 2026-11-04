@@ -1158,12 +1158,12 @@ func warnedResolve(_ context.Context, _, name string) (string, error) {
 	return "1.0.0", nil
 }
 
-// Quiet, a clean install prints nothing from ossprey — no verdict, no progress
-// line, no warnings — and the manager still runs.
+// Quiet, a clean install prints one line from ossprey — the verdict — and no
+// progress line or warnings, and the manager still runs.
 //
 // Genuinely clean rather than carrying an Info finding: the forwarder grades at
 // the compiled-in floor, now Info, so no finding is below it to be noted.
-func TestQuietForwarder_CleanInstallIsSilent(t *testing.T) {
+func TestQuietForwarder_CleanInstallPrintsOnlyTheVerdict(t *testing.T) {
 	ex := &stubExec{}
 	swap(t, ex.fn, func(context.Context, check.Options) (*ossbom.SBOM, error) {
 		s := ossbom.New(ossbom.Environment{})
@@ -1181,8 +1181,8 @@ func TestQuietForwarder_CleanInstallIsSilent(t *testing.T) {
 	if !ex.called {
 		t.Fatal("install was not forwarded")
 	}
-	if out != "" {
-		t.Errorf("a clean quiet install must print nothing, got:\n%s", out)
+	if want := "ossprey: no malware found in 1 package (1 requested + 0 dependencies), forwarding to npm\n"; out != want {
+		t.Errorf("a clean quiet install must print only the verdict, got:\n%s", out)
 	}
 }
 
@@ -1242,8 +1242,9 @@ func TestQuietForwarder_MalwareKeepsTheFullReport(t *testing.T) {
 	}
 }
 
-// Quiet, a bare install's project scan does not announce itself either.
-func TestQuietForwarder_ManifestInstallIsSilent(t *testing.T) {
+// Quiet, a bare install's project scan does not announce itself either; only
+// the verdict is printed.
+func TestQuietForwarder_ManifestInstallPrintsOnlyTheVerdict(t *testing.T) {
 	ex := &stubExec{}
 	swap(t, ex.fn, cleanSBOM)
 	swapScan(t, func(context.Context, scanRequest) (*ossbom.SBOM, error) {
@@ -1257,8 +1258,8 @@ func TestQuietForwarder_ManifestInstallIsSilent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if out != "" {
-		t.Errorf("want silence, got:\n%s", out)
+	if want := "ossprey: no malware found in 2 packages, forwarding to npm\n"; out != want {
+		t.Errorf("want only the verdict, got:\n%s", out)
 	}
 }
 

@@ -173,8 +173,8 @@ always checked). A bare install applies both rules, from the lockfile.
   installed tool environments), since that is what the tool may run when
   today's resolution fails, and the line then says `checking the named
   packages and N dependencies from an earlier run`. The forwarder never
-  blocks an install because it could not predict it. With `OSSPREY_VERBOSE=1`
-  the clean verdict reports the coverage: `no malware found in 65 packages (1
+  blocks an install because it could not predict it. The clean verdict
+  reports the coverage: `no malware found in 65 packages (1
   requested + 64 dependencies)`, or `(1 requested; dependencies not resolved)`.
 
   Without the dry run, only an exact pin is taken as the version: `foo@1.2.3`
@@ -289,16 +289,22 @@ there the same failure is a warning and the install proceeds.)
 To check they took, run `type npm`. Non-install commands (`npm run build`, `pip
 list`, `poetry run pytest`) go straight through untouched, so an
 ordinary-looking `npm --version` means the handoff works. A clean install
-prints nothing of its own: stdout and stderr carry only the manager's output,
-exactly as they would without Ossprey:
+prints one line of its own, the verdict, on stderr, and then the manager's
+output exactly as it would appear without Ossprey:
 
 ```console
 $ npm install left-pad
+ossprey: no malware found in 1 package (1 requested + 0 dependencies), forwarding to npm
 
 added 1 package in 525ms
 ```
 
-By default a forwarder speaks only for a malware block (below) or a platform
+The verdict is ossprey's last line, not the terminal's: the forwarder replaces
+itself with the manager once the check passes, so it cannot print after the
+manager finishes. An install that was not checked (no dependencies found,
+`skip-ci`, a passive scan) prints no verdict, since there is none to give.
+
+Otherwise a forwarder speaks only for a malware block (below) or a platform
 error — the API refusing a credential, a passive scan that could not be
 posted — each reported on stderr. While the check runs, a terminal gets a live
 `ossprey: scan in progress... 4s` indicator that erases itself once the
@@ -309,9 +315,7 @@ alert box, an `Error: WARNING:` line per finding, and a blocked line naming
 the command (see [Output](output.md)) — and an exit code of `1`. The real
 manager never starts.
 
-Set `OSSPREY_VERBOSE=1` for everything else: the clean verdict
-(`ossprey: no malware found in 65 packages (1 requested + 64 dependencies),
-forwarding to npm`), why an install
+Set `OSSPREY_VERBOSE=1` for everything else: why an install
 was not checked (`skip-ci set`, `found no dependencies to check`, a passive
 `scan posted`), what is being scanned, collected warnings (packages that could not be resolved, trusted packages
 left out), informational findings, the progress line in a CI log, and the
