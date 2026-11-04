@@ -336,6 +336,57 @@ root is `EvalSymlinks`ed first or no exclusion matches under macOS `/var`.
 `TestDirectorySourceSkipsPackageSinks` asserts on the index, not on catalog
 output, because catalog output was already clean before the fix.
 
+**`cargo vendor` crates are hidden by marker, not by name** (`withoutCargoVendor`,
+OSS-2561). Every crate it writes holds a `.cargo-checksum.json`, and the vendor
+directory's name is configurable, so a `vendor` sink would miss
+`third_party/rust` and drop a path dependency kept under `vendor/`. A published
+crate ships its own `Cargo.lock` (anyhow 1.0.100's names 59 crates, its dev
+tree), which syft's `**/Cargo.lock` glob read as the project's. An exclusion glob
+cannot say "a directory holding this file", so the filter wraps the resolver
+every cataloger reads instead of the index. A crate at the scan root is exempt,
+since that scan asked for it.
+
+**The marker is repository content, so it proves nothing alone.** Review broke
+two earlier rules. Hiding every file under a marked directory let a marker
+beside a `package-lock.json` hide it, and accepting any lockfile as proof let a
+decoy `Cargo.lock` naming a standalone project hide that project's own lock. So
+the proof is now what cargo itself would do. The vendoring project is a strict
+ancestor whose `Cargo.lock` (beside its `Cargo.toml`) locks the crate's
+name@version from a registry with the marker's checksum, has no path entry of
+that name@version, and holds a release meeting every normal and build
+dependency the crate's manifest turns on, non-optional or enabled by its default
+features (so an edited vendored manifest stays visible). The nearest cargo
+config for that project replaces `crates-io` with a `directory` source equal to
+the crate's parent, and that source is not replaced again. cargo reads config
+from where it runs, and an alias or `--manifest-path` reaches any crate from any
+directory, so every committed config level in the scan must also resolve
+`crates-io` to some directory source.
+Under that replacement cargo can take a crates.io dependency only from the
+vendor tree, so a hidden manifest cannot pull one from the network. A crate any
+manifest or config builds by path is never hidden (`path`, `workspace`,
+`members` and `paths` keys, read from every file in the scan, every ancestor of
+the scan root and `CARGO_HOME`), nor is one whose manifest has `[workspace]`,
+which `cargo publish` strips. References are resolved from both the path a file
+was reached by and its real path, through symlinks, with case and Unicode
+folded, both backslash readings, and a suffix match for one that leaves the
+root; member globs are expanded on disk against a literal base, and a config
+counts at the directory cargo reads it from, symlink or not. An alias's `--manifest-path`
+counts as a reference. Anything it cannot place (a member glob with `[` or `**`
+or outside the root, a `path-bases` `base`, a config `include`, an alias running
+`cargo vendor`, which ignores source replacement, or passing `--config`, two
+configs or one named in
+another case at a level, a file reached through a symlink out of the root, an
+unreadable or over-limit file) turns the filter off, and a hidden file reached
+through a symlink stays visible. Out of reach: `--config`, `CARGO_*` environment
+overrides and CI steps, which no manifest scan sees, and configs and `path`
+dependencies inside package sinks, which the index never holds and which only a
+command run from inside a build or install directory would use.
+`TestCatalogDoesNotLetACargoMarkerHideOtherFiles`,
+`TestCatalogReadsAProjectCrateThatLooksVendored`,
+`TestCatalogReadsACrateAProjectAboveTheScanBuilds` and
+`TestCatalogHidesNothingWhenAPathCannotBePlaced` pin one case per guard; each
+of the 35 fails with its guard removed.
+
 #### Why the npm resolve skips workspace members (OSS-1353)
 
 `NpmResolveCataloger` stands down for a manifest whose own dir ships a lockfile,

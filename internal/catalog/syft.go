@@ -162,6 +162,7 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 	if err != nil {
 		return nil, fmt.Errorf("syft resolver: %w", err)
 	}
+	resolver = withoutCargoVendor(resolver, absRoot)
 
 	pyCfg := python.DefaultCatalogerConfig().WithGuessUnpinnedRequirements(true)
 	jsCfg := javascript.DefaultCatalogerConfig().WithIncludeDevDependencies(true)
