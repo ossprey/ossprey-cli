@@ -56,6 +56,7 @@ a `verdict`, only when the scan actually reached one.
 | `OSSPREY_MONITOR_ID` | `--monitor` | Submit through a monitor id. Implies passive. |
 | `OSSPREY_SCAN_TIMEOUT` | `--timeout` | Cap the whole catalogue; emit what resolved. |
 | `OSSPREY_RESOLVE_TIMEOUT` | — | Cap one uv/npm resolver invocation (default `2m`). |
+| `OSSPREY_VERDICT_TIMEOUT` | — | How long to wait for the API's verdict after submitting (default `15m`). On expiry the scan keeps running server-side; the error names the scan id and its result appears in the dashboard. |
 | `OSSPREY_SCAN_CONCURRENCY` | — | How many catalogers run at once (default `8`). |
 | `OSSPREY_RESOLVE_LATEST=0` | `--no-version-lookup` | Don't resolve unpinned versions from the registry. |
 | `OSSPREY_CONFIG_DIR` | — | Where the stored login and `trust.json` live. |
