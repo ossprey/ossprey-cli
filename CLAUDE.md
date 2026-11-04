@@ -221,21 +221,30 @@ Every rule is a hole in the scan by design, so the rules are narrow:
   maps `İ` to `i` where Cargo's IDNA does not, `sparse+` is a non-special
   scheme to Cargo, so `host\@evil` is userinfo to it and a path to us, and
   Cargo keeps `%2F` inside a segment where `canonicalURL` decodes and cleans
-  `public%2F..%2Finternal` to `/internal/` (npm and PyPI still decode). No
-  crate counts at all when the index holds a symlink that is a `.cargo` entry
-  or cargo config, or that does not resolve through the index to a file in the
-  scan (`cargoConfigsInScan`, one pass over syft's metadata). Links are never
-  followed: cargo walks up from its physical cwd, so a directory link can lead
-  it into a sink or out of the scan, and a chain through `/proc/self/cwd` or
-  `/dev/fd` resolves per process. Nor does any crate count when a config cargo
-  may read (every `.cargo` directory the index holds, read on disk, plus those
-  above the root and `CARGO_HOME`, opened by name where a directory cannot be
-  listed and unreadable when symlinked; manifests above the root play no part)
-  sets a `replace-with`, has an `include` (stable since Cargo 1.94), has an
-  alias passing `--config`, or cannot be read (`clearReplacedCrateRegistries`,
+  `public%2F..%2Finternal` to `/internal/` (npm and PyPI still decode). A
+  symlink anywhere in the scanned tree (outside the directories the scan
+  skips) keeps every crate checked (`cargoConfigsInScan`, one pass over syft's
+  metadata, about 0.1s on 100k files with no link and tens of ms at most once
+  one ends it). Links are never followed or judged one by one: cargo walks up
+  from its physical cwd, so a directory link can lead it into a sink or out of
+  the scan, a chain through `/proc/self/cwd` or `/dev/fd` resolves per
+  process, and syft cleans a target's `..` before resolving it, so `app ->
+  node_modules/../y` past an unindexed `node_modules -> target/a/b` reads as a
+  file in the scan while the kernel lands in `target`. Nor does any crate
+  count when a config cargo may read (every `.cargo` directory the index
+  holds, read on disk, plus those above the root and `CARGO_HOME`, opened by
+  name where a directory cannot be listed; manifests above the root play no
+  part) sets a `replace-with`, has an `include` (stable since Cargo 1.94), has
+  an alias passing `--config`, or cannot be read (`clearReplacedCrateRegistries`,
   one warning; only a regular file is opened, since a device or FIFO may never
   end): cargo then fetches from the replacement while the lock still names the
   trusted index, and a repository-controlled lock can carry matching checksums.
+  For trust only (`noLinks`), a symlinked config inside `CARGO_HOME`, or a
+  symlinked `.cargo` or config above the root, counts as unreadable; the vendor
+  filter reads through them as before, since a dotfile manager links
+  `~/.cargo/config.toml`. `CARGO_HOME` itself is followed, being the scanning
+  user's environment, unless the walk above the root reaches it first as an
+  ancestor's `.cargo`.
   Not checked: a typed `--config`, environment such as `CARGO_HTTP_PROXY` and
   `CARGO_HTTP_CAINFO` (cargo has no environment form for `[source]` keys),
   `[http]` `proxy`/`cainfo`, a config only a build run from inside a sink would

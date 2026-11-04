@@ -61,18 +61,21 @@ index its lock names. Whenever the scan cannot tell where Cargo will fetch
 crates from, every crate is checked and the scan says why in one warning. That
 happens when:
 
-- the project holds a symlinked directory, a symlinked `.cargo` directory or
-  Cargo config, or a symlink that leads out of the project or to nothing.
-  Cargo reads the configs in and above the directory it really runs in, and
-  such a link could lead it to a config the scan never sees. A symlink to
-  another file in the project, such as a shared `LICENSE`, is fine;
+- the project holds a symlink. A symlink anywhere in the scanned tree
+  (outside the directories the scan skips) keeps every crate checked, even one
+  to another file in the project such as a shared `LICENSE`. Cargo reads the
+  configs in and above the directory it really runs in, and a link could lead
+  it to a config the scan never sees;
 - a Cargo config that Cargo may read for the project sets `replace-with` for
   any source, has an `include`, defines an alias that passes `--config`, or
   cannot be read or is not a regular file.
 
 The scan reads the configs in the project, in every directory above it and in
-`CARGO_HOME`. A symlinked `.cargo` directory or config above the project or in
-`CARGO_HOME` is not followed, and counts as a config that cannot be read.
+`CARGO_HOME`. For registry trust, a symlinked config inside `CARGO_HOME`, or a
+symlinked `.cargo` directory or config above the project, counts as a config
+that cannot be read. `CARGO_HOME` itself may be a symlink and is followed,
+unless it is also the `.cargo` directory of a directory above the project, as
+`~/.cargo` is for a project under your home directory.
 
 These are not checked:
 
