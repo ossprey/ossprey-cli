@@ -54,6 +54,25 @@ func TestCatalogCargoInheritsFromTheRootCargoFinds(t *testing.T) {
 			want: "1.0.100",
 		},
 		{
+			name: "a legacy [project] table's workspace path names the root",
+			files: map[string]string{
+				"Cargo.toml":       pool("members = [\"a/b/m\"]\n", "1.0.100"),
+				"a/Cargo.toml":     pool("", "1.0.200"),
+				"a/b/m/Cargo.toml": "[project]\nname = \"m\"\nworkspace = \"../../..\"\n[dependencies]\nserde = { workspace = true }\n",
+			},
+			want: "1.0.100",
+		},
+		{
+			name: "an ancestor [project]'s workspace path is followed",
+			files: map[string]string{
+				"Cargo.toml":       pool("members = [\"x/a\", \"x/a/m\"]\n", "1.0.100"),
+				"x/Cargo.toml":     pool("", "1.0.200"),
+				"x/a/Cargo.toml":   "[project]\nname = \"a\"\nworkspace = \"../..\"\n",
+				"x/a/m/Cargo.toml": member,
+			},
+			want: "1.0.100",
+		},
+		{
 			name: "package.workspace naming a manifest without [workspace] finds no root",
 			files: map[string]string{
 				"Cargo.toml":     pool("", "1.0.200"),

@@ -46,10 +46,9 @@ func (c *CargoTomlCataloger) Catalog(ctx context.Context, resolver file.Resolver
 // A dependency is either a bare version string or a table. toml decodes both
 // into any, so the shape is inspected rather than declared.
 type cargoManifest struct {
-	Package struct {
-		Name      string `toml:"name"`
-		Workspace string `toml:"workspace"`
-	} `toml:"package"`
+	Package cargoPackage `toml:"package"`
+	// Cargo reads the legacy [project] table as [package] before the 2024 edition.
+	Project           cargoPackage   `toml:"project"`
 	Dependencies      map[string]any `toml:"dependencies"`
 	DevDependencies   map[string]any `toml:"dev-dependencies"`
 	BuildDependencies map[string]any `toml:"build-dependencies"`
@@ -75,6 +74,21 @@ type cargoManifest struct {
 	Replace map[string]any `toml:"replace"`
 }
 
+type cargoPackage struct {
+	Name      string `toml:"name"`
+	Workspace string `toml:"workspace"`
+}
+
+// decodeCargoManifest decodes a Cargo.toml, reading a [project] table as [package] when there is no [package].
+func decodeCargoManifest(data []byte) (cargoManifest, toml.MetaData, error) {
+	var m cargoManifest
+	md, err := toml.Decode(string(data), &m)
+	if err == nil && !md.IsDefined("package") {
+		m.Package = m.Project
+	}
+	return m, md, err
+}
+
 func parseCargoTomlFile(ctx context.Context, path string, loc file.Location, scanRoot string) ([]pkg.Package, error) {
 	data, err := readManifest(path)
 	if err != nil {
@@ -83,8 +97,7 @@ func parseCargoTomlFile(ctx context.Context, path string, loc file.Location, sca
 		}
 		return nil, err
 	}
-	var m cargoManifest
-	md, err := toml.Decode(string(data), &m)
+	m, md, err := decodeCargoManifest(data)
 	if err != nil {
 		return nil, err
 	}
@@ -270,7 +283,7 @@ func readCargoManifest(path string) (m cargoManifest, isRoot bool, err error) {
 	if err != nil {
 		return m, false, err
 	}
-	md, err := toml.Decode(string(data), &m)
+	m, md, err := decodeCargoManifest(data)
 	if err == nil && !md.IsDefined("package") && !md.IsDefined("project") && !md.IsDefined("workspace") {
 		err = errNotAManifest
 	}
