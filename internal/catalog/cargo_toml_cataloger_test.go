@@ -141,6 +141,17 @@ func TestCatalogCargoInheritsFromTheRootCargoFinds(t *testing.T) {
 			want:  "1.0.200",
 		},
 		{
+			name: "past a malformed ancestor, an absolute members entry spelled by real path lists a member scanned through a link",
+			scan: "alias",
+			files: map[string]string{
+				"real/Cargo.toml":           pool("members = ['{root}/real/inner/a/m']\n", "1.0.200"),
+				"real/inner/Cargo.toml":     "[workspace\nmembers = [\"a/m\"]\n",
+				"real/inner/a/m/Cargo.toml": member,
+			},
+			links: map[string]string{"alias": "real"},
+			want:  "1.0.200",
+		},
+		{
 			name: "past an empty ancestor, an outer root listing the member is its root",
 			files: map[string]string{
 				"Cargo.toml":           pool("members = [\"inner/a/m\"]\n", "1.0.200"),
@@ -184,6 +195,7 @@ func TestCatalogCargoInheritsFromTheRootCargoFinds(t *testing.T) {
 			want: "1.0.100",
 		},
 		{
+			// On a Windows runner t.TempDir is an 8.3 short name while the scan reports the long one.
 			name: "an absolute exclude is not joined to the root",
 			files: map[string]string{
 				"Cargo.toml":      pool("members = [\"ws/m\"]\n", "1.0.100"),
@@ -191,6 +203,17 @@ func TestCatalogCargoInheritsFromTheRootCargoFinds(t *testing.T) {
 				"ws/m/Cargo.toml": member,
 			},
 			want: "1.0.100",
+		},
+		{
+			name: "an absolute exclude spelled by real path covers a member scanned through a link",
+			scan: "alias",
+			files: map[string]string{
+				"real/Cargo.toml":      pool("members = [\"ws/m\"]\n", "1.0.100"),
+				"real/ws/Cargo.toml":   pool("exclude = ['{root}/real/ws/m']\n", "1.0.200"),
+				"real/ws/m/Cargo.toml": member,
+			},
+			links: map[string]string{"alias": "real"},
+			want:  "1.0.100",
 		},
 		{
 			name: "a members entry overrides the same root's exclude",
@@ -267,6 +290,43 @@ func TestCatalogCargoInheritsFromTheRootCargoFinds(t *testing.T) {
 			}
 			if !slices.Equal(serde, []string{tc.want}) {
 				t.Errorf("serde = %v, want [%s] from the root Cargo finds", serde, tc.want)
+			}
+		})
+	}
+}
+
+// A package.workspace path naming the root through a symlink, or spelled otherwise than the scan spells it, folds into that root's Cargo.lock (OSS-2099).
+func TestCatalogCargoPointedRootLockPinsTheMember(t *testing.T) {
+	t.Setenv("OSSPREY_RESOLVE_LATEST", "")
+	withResolveLatest(t, func(context.Context, string, string) (string, error) { return "9.9.9", nil })
+	const lock = "version = 3\n\n[[package]]\nname = \"serde\"\nversion = \"1.0.100\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n"
+	for _, tc := range []struct {
+		name, pointer string
+		alias         bool
+	}{
+		{name: "a symlink alias of the root", pointer: "../ws-alias", alias: true},
+		{name: "an absolute path", pointer: "{root}/ws"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeTree(t, dir, map[string]string{
+				"ws/Cargo.toml": "[workspace]\nmembers = [\"../m\"]\n",
+				"ws/Cargo.lock": lock,
+				"m/Cargo.toml":  "[package]\nname = \"m\"\nversion = \"0.1.0\"\nworkspace = '" + strings.ReplaceAll(tc.pointer, "{root}", dir) + "'\n\n[dependencies]\nserde = \"1\"\n",
+			})
+			if tc.alias {
+				if err := os.Symlink(filepath.Join(dir, "ws"), filepath.Join(dir, "ws-alias")); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+			}
+			got, err := Catalog(context.Background(), dir, Options{NoExec: true})
+			if err != nil {
+				t.Fatalf("Catalog: %v", err)
+			}
+			// The member's range folds into the locked release instead of going out at latest.
+			gotC := cargoComponents(t, got, dir)
+			if len(gotC) != 1 || !strings.HasPrefix(gotC[0], "serde@1.0.100 ") || !strings.Contains(gotC[0], "m/Cargo.toml") {
+				t.Errorf("crates = %q, want serde@1.0.100 at ws/Cargo.lock and m/Cargo.toml", gotC)
 			}
 		})
 	}

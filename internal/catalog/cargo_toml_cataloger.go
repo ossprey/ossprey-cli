@@ -231,7 +231,8 @@ func pointedPool(manifestPath, pointer, root string) (map[string]any, string, bo
 	if !filepath.IsAbs(pointer) {
 		pointer = filepath.Join(filepath.Dir(manifestPath), pointer)
 	}
-	dir := filepath.Clean(pointer)
+	// The root's Cargo.lock is found by real path, so a symlink alias of the root is spelled as the manifest spells it.
+	dir := respell(filepath.Dir(manifestPath), filepath.Clean(pointer))
 	target := filepath.Join(dir, "Cargo.toml")
 	if !withinRoot(target, root) {
 		return nil, dir, false
@@ -245,6 +246,23 @@ func pointedPool(manifestPath, pointer, root string) (map[string]any, string, bo
 
 // errNotAManifest is a Cargo.toml with no [package], [project] or [workspace], which cargo rejects as a workspace manifest.
 var errNotAManifest = errors.New("Cargo.toml declares no package or workspace")
+
+// respell returns p as reached from base by real paths, so a symlink alias or a Windows short name of a directory takes the spelling base uses.
+func respell(base, p string) string {
+	realBase, err := filepath.EvalSymlinks(base)
+	if err != nil {
+		return p
+	}
+	realP, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		return p
+	}
+	rel, err := filepath.Rel(realBase, realP)
+	if err != nil {
+		return p
+	}
+	return filepath.Join(base, rel)
+}
 
 // readCargoManifest reads and decodes a Cargo.toml, and reports whether it declares [workspace].
 func readCargoManifest(path string) (m cargoManifest, isRoot bool, err error) {
@@ -268,7 +286,7 @@ func listsMember(ws cargoManifest, dir, manifestPath string) bool {
 	want := strings.Split(filepath.ToSlash(rel), "/")
 	for _, e := range ws.Workspace.Members {
 		if filepath.IsAbs(e) {
-			if e, err = filepath.Rel(dir, e); err != nil {
+			if e, err = filepath.Rel(dir, respell(dir, e)); err != nil {
 				continue
 			}
 		}
@@ -304,7 +322,10 @@ func covers(dir string, entries []string, manifestPath string) bool {
 		if slices.Contains(strings.Split(filepath.ToSlash(e), "/"), "..") {
 			continue
 		}
-		if !filepath.IsAbs(e) {
+		// An absolute entry may spell the scan root otherwise than the manifest path does.
+		if filepath.IsAbs(e) {
+			e = respell(dir, e)
+		} else {
 			e = filepath.Join(dir, e)
 		}
 		if rel, err := filepath.Rel(e, manifestPath); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
