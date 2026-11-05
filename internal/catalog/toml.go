@@ -119,7 +119,7 @@ type boundedLocks struct {
 	refused map[string]bool
 }
 
-// withBoundedLocks refuses each lockfile syft would parse over maxLockBytes or deeper than maxLockDepth, warning once for each.
+// withBoundedLocks refuses each lockfile syft would parse over maxLockBytes or deeper than maxLockDepth, warning once for each, and once ctx ends hides the rest unread.
 func withBoundedLocks(ctx context.Context, r file.Resolver, root string) file.Resolver {
 	checked, refused := map[string]bool{}, map[string]bool{}
 	for _, glob := range syftTOMLLocks {
@@ -132,6 +132,11 @@ func withBoundedLocks(ctx context.Context, r file.Resolver, root string) file.Re
 				continue
 			}
 			checked[l.RealPath] = true
+			// Past the deadline the scan is ending: a lock not yet checked is hidden unread, and scan.Run reports the timeout once.
+			if ctx.Err() != nil {
+				refused[l.RealPath] = true
+				continue
+			}
 			if _, err := readLock(r, l); err != nil {
 				refused[l.RealPath] = true
 				err = relToRoot(root, err)

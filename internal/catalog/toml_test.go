@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -203,6 +204,70 @@ func TestBoundedLocksRefuseWhatTheOldCapsLetThrough(t *testing.T) {
 			}
 			if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 3*maxLockBytes || took > 5*time.Second {
 				t.Errorf("refusing it took %v and allocated %d MB", took, alloc>>20)
+			}
+		})
+	}
+}
+
+// readCounter counts the file reads through a resolver and runs onRead before each.
+type readCounter struct {
+	file.Resolver
+	reads  int
+	onRead func()
+}
+
+func (r *readCounter) FileContentsByLocation(l file.Location) (io.ReadCloser, error) {
+	r.reads++
+	if r.onRead != nil {
+		r.onRead()
+	}
+	return r.Resolver.FileContentsByLocation(l)
+}
+
+// Once the scan's context ends, no lockfile is read any more and every one not yet checked stays hidden from syft.
+func TestBoundedLocksStopReadingOnceTheContextEnds(t *testing.T) {
+	locks := []string{"a/poetry.lock", "b/uv.lock", "c/Cargo.lock"}
+	for name, c := range map[string]struct {
+		cancelAfter int
+		visible     []string
+	}{
+		"cancelled before":           {cancelAfter: 0},
+		"cancelled during the first": {cancelAfter: 1, visible: locks[:1]},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeTree(t, dir, map[string]string{locks[0]: "[metadata]\nlock-version = \"2.0\"\n", locks[1]: "version = 1\n", locks[2]: "version = 3\n"})
+			ctx, cancel := context.WithCancel(warn.NewContext(context.Background(), false))
+			defer cancel()
+			r := &readCounter{Resolver: dirResolver(t, dir)}
+			if c.cancelAfter == 0 {
+				cancel()
+			} else {
+				r.onRead = func() {
+					if r.reads == c.cancelAfter {
+						cancel()
+					}
+				}
+			}
+			bounded := withBoundedLocks(ctx, r, dir)
+			if r.reads != c.cancelAfter {
+				t.Errorf("read %d lockfiles, want %d", r.reads, c.cancelAfter)
+			}
+			var visible []string
+			for _, glob := range syftTOMLLocks {
+				locs, err := bounded.FilesByGlob(glob)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, l := range locs {
+					visible = append(visible, l.RealPath)
+				}
+			}
+			if fmt.Sprint(visible) != fmt.Sprint(c.visible) {
+				t.Errorf("visible lockfiles = %v, want %v", visible, c.visible)
+			}
+			if drained := warn.Drain(ctx); drained != "" {
+				t.Errorf("warnings = %q, want none past the deadline", drained)
 			}
 		})
 	}

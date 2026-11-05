@@ -399,8 +399,11 @@ one crafted just inside 32 MiB and 64 levels still cost syft tens of seconds and
 gigabytes. Cost grows with size more than depth (8 MiB of 4-level inline tables
 takes BurntSushi about 3 s and 1.3 GB at peak), so the size cap is what bounds a
 crafted lockfile. The `cargo vendor` filter reads `Cargo.lock` within the same
-caps (`readLock`), since it runs before this wrapper. syft parses no
-`pyproject.toml`, so that one needs no wrapper.
+caps (`readLock`), since it runs before this wrapper. Past the `--timeout`
+deadline the wrapper reads no more lockfiles and hides every one it has not
+checked, without a warning each: the scan is ending, `scan.Run` says so once,
+and a lockfile left visible would reach syft's parsers unguarded. syft parses
+no `pyproject.toml`, so that one needs no wrapper.
 
 **`cargo vendor` crates are hidden by marker, not by name** (`withoutCargoVendor`,
 OSS-2561). Every crate it writes holds a `.cargo-checksum.json`, and the vendor
