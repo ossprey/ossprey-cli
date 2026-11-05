@@ -872,8 +872,8 @@ func resolveWithUV(ctx context.Context, uv, dir string, specs, flags []string) (
 // merged as uv merges them (field by field, the user's winning; arrays
 // joined, the user's entries first) — is
 // written into scratch without that table and named by --config-file. A
-// run with --no-config reads none; a file uv cannot parse is left for uv
-// to report, as the run would. A relative UV_CONFIG_FILE is read against
+// run with --no-config reads none; a file that exists but cannot be read
+// or parsed here fails the resolve, so the names are checked alone. A relative UV_CONFIG_FILE is read against
 // the directory uv runs in, which for the resolver is scratch, so it is
 // named by its absolute path whether or not it has the table. With no file
 // named, the discovered configuration is always written and named, even
@@ -923,7 +923,8 @@ func uvToolRunConfig(flags []string, scratch string) ([]string, error) {
 		}
 		var cfg map[string]any
 		if _, err := decodeTOML(data, &cfg); err != nil {
-			return flags, nil
+			// Skipped, the file would still reach `uv pip compile`, which applies the [pip] table uvx ignores.
+			return nil, &fs.PathError{Op: "parse", Path: source, Err: err}
 		}
 		anchorUVConfigPaths(cfg, filepath.Dir(source))
 		mergeTOML(merged, cfg)
