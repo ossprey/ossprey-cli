@@ -1,7 +1,12 @@
 package catalog
 
 import (
+	"context"
+	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
 func TestCanonicalPackageName(t *testing.T) {
@@ -157,4 +162,32 @@ func keysOf(m map[string]struct{}) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// A pyproject.toml that cannot be read for local sources is named once, since a path package it declares goes to PyPI unmarked.
+func TestCatalogWarnsWhenLocalSourcesCannotBeRead(t *testing.T) {
+	sources := "[project]\nname = \"app\"\ndependencies = [\"mylib\"]\n\n[tool.uv.sources]\nmylib = { path = \"libs/mylib\" }\n"
+	for name, body := range map[string]string{
+		"over the cap":    sources + "# " + strings.Repeat("x", maxManifestBytes) + "\n",
+		"nested too deep": sources + deepTOMLKey(maxTOMLDepth+1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeTree(t, dir, map[string]string{"app/pyproject.toml": body})
+			ctx := warn.NewContext(context.Background(), false)
+			if _, err := Catalog(ctx, dir, Options{SkipVersionLookup: true, NoExec: true}); err != nil {
+				t.Fatalf("Catalog: %v", err)
+			}
+			var lines []string
+			drained := warn.Drain(ctx)
+			for _, l := range strings.Split(drained, "\n") {
+				if strings.Contains(l, "local sources") {
+					lines = append(lines, l)
+				}
+			}
+			if len(lines) != 1 || !strings.Contains(lines[0], " "+filepath.Join("app", "pyproject.toml")+":") {
+				t.Errorf("warnings = %q, want one local-sources warning naming app/pyproject.toml", drained)
+			}
+		})
+	}
 }

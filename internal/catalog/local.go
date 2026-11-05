@@ -1,10 +1,16 @@
 package catalog
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"io/fs"
 	"regexp"
 	"strings"
 
 	"github.com/anchore/syft/syft/file"
+
+	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
 // localPyProject captures only the tables that declare where a dependency comes
@@ -34,33 +40,51 @@ func canonicalPackageName(s string) string {
 // findLocalPackageNames walks every pyproject.toml under root and returns the
 // canonicalised names of packages declared as local (uv path/workspace sources
 // or poetry path dependencies). Vendored trees are skipped, matching the
-// cataloguers. Best-effort: unreadable or malformed manifests are ignored so a
+// cataloguers. Best-effort: unreadable or malformed manifests are skipped so a
 // stray file never fails the scan.
-func findLocalPackageNames(resolver file.Resolver, root string) map[string]struct{} {
+func findLocalPackageNames(ctx context.Context, resolver file.Resolver, root string) map[string]struct{} {
 	names := map[string]struct{}{}
 	locs, err := resolver.FilesByGlob("**/pyproject.toml")
 	if err != nil {
 		return names
 	}
+	seen := map[string]bool{}
 	for _, loc := range locs {
-		if isVendoredPath(loc.RealPath) {
+		if isVendoredPath(loc.RealPath) || seen[loc.RealPath] {
 			continue
 		}
-		data, err := readTOML(hostPath(root, loc.RealPath))
-		if err != nil {
-			continue
+		seen[loc.RealPath] = true
+		path := hostPath(root, loc.RealPath)
+		data, err := readTOML(path)
+		if err == nil {
+			if err = collectLocalNames(data, names); err != nil {
+				err = &fs.PathError{Op: "parse", Path: path, Err: err}
+			}
 		}
-		collectLocalNames(data, names)
+		// The packages it declares local are then looked up publicly, so say which file went unread.
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			warn.Add(ctx, localSourcesEntry(relToRoot(root, err)))
+		}
 	}
 	return names
 }
 
+// localSourcesEntry reports a pyproject.toml whose local sources could not be read.
+func localSourcesEntry(err error) warn.Entry {
+	return warn.Entry{
+		Class: "pyproject:local-sources",
+		One:   fmt.Sprintf("pyproject: local sources not read (%v); any path or workspace package it declares is looked up on PyPI", err),
+		Many:  "pyproject: local sources not read in %d files; any path or workspace package they declare is looked up on PyPI",
+		Item:  err.Error(),
+	}
+}
+
 // collectLocalNames parses one pyproject.toml and adds the canonical name of
 // every locally-sourced package to out.
-func collectLocalNames(data []byte, out map[string]struct{}) {
+func collectLocalNames(data []byte, out map[string]struct{}) error {
 	var pp localPyProject
 	if _, err := decodeTOML(data, &pp); err != nil {
-		return
+		return err
 	}
 	for name, src := range pp.Tool.Uv.Sources {
 		if isLocalUVSource(src) {
@@ -75,6 +99,7 @@ func collectLocalNames(data []byte, out map[string]struct{}) {
 			out[canonicalPackageName(name)] = struct{}{}
 		}
 	}
+	return nil
 }
 
 // isLocalUVSource reports whether a [tool.uv.sources] entry points at local
