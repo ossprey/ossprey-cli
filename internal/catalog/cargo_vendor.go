@@ -316,17 +316,8 @@ func cargoDirEntries(dir string, exact ...string) ([]fs.DirEntry, error) {
 
 // readCargoFileAt parses the regular file at p on disk, resolving its paths against base.
 func readCargoFileAt(p, base string) (cargoFile, bool) {
-	// A device or FIFO may never end, so only a regular file is opened, and read no further than the limit.
-	if info, err := os.Stat(p); err != nil || !info.Mode().IsRegular() {
-		return cargoFile{}, false
-	}
-	fh, err := os.Open(p)
+	data, err := readTOML(p)
 	if err != nil {
-		return cargoFile{}, false
-	}
-	defer fh.Close()
-	data, err := io.ReadAll(io.LimitReader(fh, maxManifestBytes+1))
-	if err != nil || len(data) > maxManifestBytes {
 		return cargoFile{}, false
 	}
 	f := cargoFile{bases: []string{filepath.ToSlash(base)}}

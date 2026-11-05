@@ -39,6 +39,8 @@ func TestReadTOMLRefusesAFIFOSwappedInAfterTheStat(t *testing.T) {
 	}
 	for name, refused := range map[string]func(string) bool{
 		"readTOML": func(p string) bool { _, err := readTOML(p); return errors.Is(err, errNotRegular) },
+		// The vendor filter's reads above the scan share the one reader, so they cannot drift from it.
+		"readCargoFileAt": func(p string) bool { _, ok := readCargoFileAt(p, filepath.Dir(p)); return !ok },
 	} {
 		t.Run(name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "Cargo.toml")
