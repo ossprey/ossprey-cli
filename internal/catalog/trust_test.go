@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/anchore/syft/syft/file"
+	"github.com/anchore/syft/syft/source"
 
 	"github.com/ossprey/ossprey-cli/internal/trust"
 	"github.com/ossprey/ossprey-cli/internal/warn"
@@ -449,6 +450,47 @@ func TestCatalogTrustsNoCrateUnderASourceReplacement(t *testing.T) {
 			}
 			if got := warn.Drain(ctx); c.warning == "" && strings.Contains(got, "registry trust") || c.warning != "" && strings.Count(got, c.warning) != 1 {
 				t.Errorf("warnings = %q, want %q once", got, c.warning)
+			}
+		})
+	}
+}
+
+// A cancelled scan may close the walk before a link or config, so no crate is trusted by registry.
+func TestCatalogTrustsNoCrateWhenTheConfigWalkIsCancelled(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("CARGO_HOME", filepath.Join(base, "home"))
+	writeTree(t, base, map[string]string{
+		"home/.keep":       "",
+		"proj/Cargo.lock":  "version = 4\n\n[[package]]\nname = \"acme-sparse\"\nversion = \"1.0.0\"\nsource = \"sparse+https://crates.corp.example/internal/\"\nchecksum = \"aaaa\"\n",
+		"proj/src/main.rs": "fn main() {}\n",
+	})
+	root := filepath.Join(base, "proj")
+	src, err := newDirectorySource(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	r, err := src.FileResolver(source.SquashedScope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const index = "https://crates.corp.example/internal/"
+	policy := testPolicy(t, []string{index}, nil)
+	for name, cancelled := range map[string]bool{"a live scan": false, "a cancelled scan": true} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(warn.NewContext(context.Background(), false))
+			defer cancel()
+			if cancelled {
+				cancel()
+			}
+			pkgs := []Package{{Name: "acme-sparse", Version: "1.0.0", Type: "cargo", Registries: []string{index}}}
+			clearReplacedCrateRegistries(ctx, pkgs, policy, r, root)
+			markTrustedPackages(pkgs, policy)
+			if pkgs[0].Trusted == cancelled {
+				t.Errorf("trusted = %v, want %v", pkgs[0].Trusted, !cancelled)
+			}
+			if got := warn.Drain(ctx); cancelled && strings.Count(got, "because a cargo config could not be read") != 1 || !cancelled && got != "" {
+				t.Errorf("warnings = %q", got)
 			}
 		})
 	}

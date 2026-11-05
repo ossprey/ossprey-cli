@@ -217,9 +217,9 @@ const (
 )
 
 // cargoReplacement says why no crate is trusted by registry: a symlink in the scan, or a cargo config cargo may read for root that replaces a source, includes a file, has an alias passing --config or cannot be read.
-func cargoReplacement(r file.Resolver, root string) string {
+func cargoReplacement(ctx context.Context, r file.Resolver, root string) string {
 	root = resolvedRoot(root)
-	inScan, why := cargoConfigsInScan(r, root)
+	inScan, why := cargoConfigsInScan(ctx, r, root)
 	if why != "" {
 		return why
 	}
@@ -273,8 +273,8 @@ func aliasIndeterminate(doc map[string]any) bool {
 }
 
 // cargoConfigsInScan reads every .cargo directory the index holds, or says why not.
-func cargoConfigsInScan(r file.Resolver, root string) ([]cargoFile, string) {
-	ctx, cancel := context.WithCancel(context.Background())
+func cargoConfigsInScan(ctx context.Context, r file.Resolver, root string) ([]cargoFile, string) {
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	rootSlash := filepath.ToSlash(root)
 	var dirs []string
@@ -290,6 +290,10 @@ func cargoConfigsInScan(r file.Resolver, root string) ([]cargoFile, string) {
 		if rel := rootRel(l.RealPath, rootSlash+"/"); m.IsDir() && strings.ToLower(path.Base(rel)) == ".cargo" {
 			dirs = append(dirs, placeRef(rootSlash, rel))
 		}
+	}
+	// A cancelled scan closes the walk early, so the links and configs it never reached may still be there.
+	if ctx.Err() != nil {
+		return nil, configUnread
 	}
 	var configs []cargoFile
 	for _, d := range dirs {

@@ -433,7 +433,7 @@ func clearReplacedCrateRegistries(ctx context.Context, pkgs []Package, policy tr
 	if !slices.ContainsFunc(pkgs, func(p Package) bool { return p.Type == "cargo" && policy.Trusts(p.Type, p.Name, p.Registries) }) {
 		return
 	}
-	why := cargoReplacement(r, root)
+	why := cargoReplacement(ctx, r, root)
 	if why == "" {
 		return
 	}
