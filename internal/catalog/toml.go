@@ -22,6 +22,9 @@ var (
 	errNotRegular  = errors.New("not a regular file")
 )
 
+// openTOML opens a manifest that passed the stat; a var so a test can swap the file in between.
+var openTOML = openRegular
+
 // readTOML reads a TOML manifest, refusing one too large to be genuine; its errors name path as given.
 func readTOML(path string) ([]byte, error) {
 	// A FIFO or device can block the open or never end, so only a regular file is opened.
@@ -30,18 +33,11 @@ func readTOML(path string) ([]byte, error) {
 	} else if !info.Mode().IsRegular() {
 		return nil, &fs.PathError{Op: "read", Path: path, Err: errNotRegular}
 	}
-	f, err := os.Open(path)
+	f, err := openTOML(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	info, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-	if info.Size() > maxManifestBytes {
-		return nil, &fs.PathError{Op: "read", Path: path, Err: fmt.Errorf("%d bytes, over the %d byte limit", info.Size(), maxManifestBytes)}
-	}
 	// The size is only a hint: a device or a file still growing reads past it, so the read is bounded too.
 	data, err := io.ReadAll(io.LimitReader(f, maxManifestBytes+1))
 	if err != nil {
@@ -51,6 +47,25 @@ func readTOML(path string) ([]byte, error) {
 		return nil, &fs.PathError{Op: "read", Path: path, Err: fmt.Errorf("over the %d byte limit", maxManifestBytes)}
 	}
 	return data, nil
+}
+
+// openRegular opens path without blocking on a FIFO swapped in since a stat, then refuses all but a regular file within the cap.
+func openRegular(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|oNonblock, 0)
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err == nil && !info.Mode().IsRegular() {
+		err = &fs.PathError{Op: "read", Path: path, Err: errNotRegular}
+	} else if err == nil && info.Size() > maxManifestBytes {
+		err = &fs.PathError{Op: "read", Path: path, Err: fmt.Errorf("%d bytes, over the %d byte limit", info.Size(), maxManifestBytes)}
+	}
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
 }
 
 // relToRoot names the file in a path error relative to the scan root, so a warning points at one manifest in a monorepo.
