@@ -6,6 +6,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -67,6 +69,60 @@ func TestReadTOMLRefusesAFIFOSwappedInAfterTheStat(t *testing.T) {
 				}
 			case <-time.After(10 * time.Second):
 				t.Fatal("blocked on a FIFO swapped in after the stat")
+			}
+		})
+	}
+}
+
+// A uv config the user names may be a pipe, as `uvx --config-file <(...)` gives, and is read within the byte cap.
+func TestUVToolRunConfigReadsANamedPipe(t *testing.T) {
+	for name, c := range map[string]struct {
+		body    string
+		refused bool
+	}{
+		"a config":              {body: "index-url = \"https://top.example/simple\"\n\n[pip]\nindex-url = \"https://pip.example/simple\"\n"},
+		"a config over the cap": {body: strings.Repeat("#", maxManifestBytes+1), refused: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fifo := filepath.Join(t.TempDir(), "config.toml")
+			if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+				t.Skipf("mkfifo: %v", err)
+			}
+			t.Setenv("UV_CONFIG_FILE", "")
+			go func() {
+				if w, err := os.OpenFile(fifo, os.O_WRONLY, 0); err == nil {
+					w.WriteString(c.body)
+					w.Close()
+				}
+			}()
+			scratch := t.TempDir()
+			type result struct {
+				flags []string
+				err   error
+			}
+			done := make(chan result, 1)
+			go func() {
+				flags, err := uvToolRunConfig([]string{"--config-file", fifo}, scratch)
+				done <- result{flags, err}
+			}()
+			var got result
+			select {
+			case got = <-done:
+			case <-time.After(10 * time.Second):
+				t.Fatal("uvToolRunConfig() blocked on a named pipe")
+			}
+			if c.refused {
+				if got.err == nil || !strings.Contains(got.err.Error(), fifo) {
+					t.Errorf("uvToolRunConfig() = %v, %v, want a refusal naming %s", got.flags, got.err, fifo)
+				}
+				return
+			}
+			stripped := filepath.Join(scratch, "uv.toml")
+			if got.err != nil || !reflect.DeepEqual(got.flags, []string{"--config-file", stripped}) {
+				t.Fatalf("uvToolRunConfig() = %v, %v, want the stripped copy named", got.flags, got.err)
+			}
+			if data, _ := os.ReadFile(stripped); !strings.Contains(string(data), "top.example") || strings.Contains(string(data), "pip") {
+				t.Errorf("stripped copy:\n%s", data)
 			}
 		})
 	}

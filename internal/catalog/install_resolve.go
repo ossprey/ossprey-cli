@@ -906,10 +906,15 @@ func uvToolRunConfig(flags []string, scratch string) ([]string, error) {
 	if discovered {
 		sources = uvConfigSources()
 	}
+	// A file the user names is their own input and may be a pipe; a discovered one is opened only when regular.
+	read := readUserTOML
+	if discovered {
+		read = readTOML
+	}
 	merged := map[string]any{}
 	found := false
 	for _, source := range sources {
-		data, err := readTOML(source)
+		data, err := read(source)
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				continue
