@@ -24,6 +24,12 @@ const cargoVendorMarker = ".cargo-checksum.json"
 // maxCargoProofBytes bounds a lockfile or marker read; real ones are a few MB at most.
 const maxCargoProofBytes = 32 << 20
 
+// CargoProofLimit bounds a lock or marker and CargoManifestLimit a manifest or cargo config, as the parsers here refuse them.
+const (
+	CargoProofLimit    = maxCargoProofBytes
+	CargoManifestLimit = maxManifestBytes
+)
+
 // cargoVendored hides the Cargo.toml and Cargo.lock of proven vendored crates; it never hides any other file.
 type cargoVendored struct {
 	file.Resolver

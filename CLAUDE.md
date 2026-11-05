@@ -401,7 +401,11 @@ after a named directory, because cargo resolves `..` after following symlinks
 and a lexical join can name another directory. Every proof file comes from one
 `git ls-files -s` listing and is read by its blob only when its entry is a
 regular file: a symlink's blob is its target text, which cargo never reads as
-the file. That leaves a vendored crate's own lock out of the lookup,
+the file. One `git cat-file --batch-check` then sizes every listed blob, and a
+blob over the bound its parser enforces (`CargoProofLimit` for a lock or
+marker, `CargoManifestLimit` for a manifest or config) proves nothing and is
+never read, since the parsers refused it only after the hook had buffered all
+of it; `readBlob` also stops git at that bound. That leaves a vendored crate's own lock out of the lookup,
 never skips a `Cargo.toml`, and still checks in full a `vendor/` change staged
 without its `Cargo.lock`. `ParseCargoLock`, `ParseCargoConfig` and
 `CargoPackageID` run `proofTOMLError` before decoding. It refuses a file nested

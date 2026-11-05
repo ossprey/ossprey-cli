@@ -595,6 +595,70 @@ func TestStagedDeltaVendoredCrateLocks(t *testing.T) {
 	}
 }
 
+func TestStagedDeltaNeverReadsAProofLockOverItsBound(t *testing.T) {
+	ctx := context.Background()
+	sum := strings.Repeat("b", 64)
+	dir := initRepo(t)
+	writeRepoFile(t, dir, ".cargo/config.toml", vendorConfig("vendor"))
+	writeRepoFile(t, dir, "Cargo.toml", appManifest)
+	// Comment lines pad a lock that would otherwise prove the vendored copy to one byte over the bound.
+	lock := lockedCrates([3]string{"serde", "1.0.229", sum})
+	line := "#" + strings.Repeat(" ", 1022) + "\n"
+	pad := catalog.CargoProofLimit + 1 - len(lock)
+	lock += strings.Repeat(line, pad/len(line))
+	if r := pad % len(line); r > 0 {
+		lock += "#" + strings.Repeat(" ", r-1)
+	}
+	if len(lock) != catalog.CargoProofLimit+1 {
+		t.Fatalf("padded lock is %d bytes, want %d", len(lock), catalog.CargoProofLimit+1)
+	}
+	writeRepoFile(t, dir, "Cargo.lock", lock)
+	commitAll(t, dir)
+	vendorCrate(t, dir, "vendor/serde", "serde", "1.0.229", sum, lockedCrates([3]string{"criterion", "0.5.1", strings.Repeat("d", 64)}))
+	gitT(t, dir, "add", "-A")
+	oid, err := gitOutput(ctx, dir, "rev-parse", ":Cargo.lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	trace := filepath.Join(t.TempDir(), "trace")
+	t.Setenv("GIT_TRACE", trace)
+	got, err := StagedDelta(ctx, dir, trust.Policy{})
+	if err != nil {
+		t.Fatalf("StagedDelta: %v", err)
+	}
+	want := []Package{{Type: "cargo", Name: "criterion", Version: "0.5.1", Path: "vendor/serde/Cargo.lock"}}
+	if !reflect.DeepEqual(got.Packages, want) {
+		t.Errorf("delta mismatch:\n got: %+v\nwant: %+v", got.Packages, want)
+	}
+	log, err := os.ReadFile(trace)
+	if err != nil || !strings.Contains(string(log), "cat-file blob") {
+		t.Fatalf("git trace holds no blob read (%v):\n%s", err, log)
+	}
+	if strings.Contains(string(log), strings.TrimSpace(string(oid))) {
+		t.Errorf("the hook read the lock over the bound:\n%s", log)
+	}
+}
+
+func TestReadBlobStopsAtItsLimit(t *testing.T) {
+	ctx := context.Background()
+	dir := initRepo(t)
+	// Larger than a pipe's buffer, so git is still writing when the read stops.
+	content := strings.Repeat("x", 1<<20)
+	writeRepoFile(t, dir, "f", content)
+	gitT(t, dir, "add", "f")
+	oid, err := gitOutput(ctx, dir, "rev-parse", ":f")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := strings.TrimSpace(string(oid))
+	if _, ok := readBlob(ctx, dir, id, int64(len(content))-1); ok {
+		t.Error("read a blob one byte over its limit")
+	}
+	if blob, ok := readBlob(ctx, dir, id, int64(len(content))); !ok || string(blob) != content {
+		t.Errorf("refused a blob at its limit (ok %v, %d bytes)", ok, len(blob))
+	}
+}
+
 // TestRepoRelLocation exercises every location spelling the resolvers are
 // known to produce, on every platform — including the Windows-only forms that
 // broke on CI (OSS-1564): the function is pure string work, so the

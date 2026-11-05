@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"os/exec"
@@ -21,6 +22,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/ossprey/ossprey-cli/internal/catalog"
@@ -346,7 +348,7 @@ func withoutVendoredLocks(ctx context.Context, repoDir string, paths []string) [
 		var l *catalog.CargoLock
 		// As in the scan's filter, only a lock beside its Cargo.toml in an unmarked directory is a project's.
 		_, marked := files[path.Join(dir, ".cargo-checksum.json")]
-		if blob, ok := files.read(ctx, repoDir, path.Join(dir, "Cargo.lock")); ok && files[path.Join(dir, "Cargo.toml")] != "" && !marked {
+		if blob, ok := files.read(ctx, repoDir, path.Join(dir, "Cargo.lock"), catalog.CargoProofLimit); ok && files[path.Join(dir, "Cargo.toml")].oid != "" && !marked {
 			if parsed, err := catalog.ParseCargoLock(blob); err == nil {
 				l = &parsed
 			}
@@ -380,10 +382,16 @@ func withoutVendoredLocks(ctx context.Context, repoDir string, paths []string) [
 	return out
 }
 
-// proofFiles maps each index path a vendor proof may read to its blob, "" for an entry that is not one regular file.
-type proofFiles map[string]string
+// proofBlob is an index entry's blob and size, with no blob for an entry that is not one regular file of known size.
+type proofBlob struct {
+	oid  string
+	size int64
+}
 
-// listProofFiles lists every Cargo.lock, Cargo.toml, marker and cargo config in the index in one call.
+// proofFiles maps each index path a vendor proof may read to its blob.
+type proofFiles map[string]proofBlob
+
+// listProofFiles lists every Cargo.lock, Cargo.toml, marker and cargo config in the index, then their blob sizes, in two calls.
 func listProofFiles(ctx context.Context, repoDir string) proofFiles {
 	files := proofFiles{}
 	out, err := gitOutput(ctx, repoDir, "ls-files", "-s", "-z", "--full-name", "--",
@@ -392,6 +400,7 @@ func listProofFiles(ctx context.Context, repoDir string) proofFiles {
 	if err != nil {
 		return files
 	}
+	var oids []string
 	for _, entry := range strings.Split(string(out), "\x00") {
 		meta, p, ok := strings.Cut(entry, "\t")
 		f := strings.Fields(meta)
@@ -401,21 +410,77 @@ func listProofFiles(ctx context.Context, repoDir string) proofFiles {
 		// A symlink's blob is its target text, which cargo never reads as the file, and a conflicted path has several.
 		_, seen := files[p]
 		if (f[0] == "100644" || f[0] == "100755") && f[2] == "0" && !seen {
-			files[p] = f[1]
+			files[p] = proofBlob{oid: f[1]}
+			oids = append(oids, f[1])
 		} else {
-			files[p] = ""
+			files[p] = proofBlob{}
+		}
+	}
+	sizes, err := blobSizes(ctx, repoDir, oids)
+	if err != nil {
+		return proofFiles{}
+	}
+	for p, b := range files {
+		if size, ok := sizes[b.oid]; ok {
+			files[p] = proofBlob{oid: b.oid, size: size}
+		} else {
+			files[p] = proofBlob{}
 		}
 	}
 	return files
 }
 
-// read returns the regular file at p, false when it is absent, of another mode or unreadable.
-func (f proofFiles) read(ctx context.Context, repoDir, p string) ([]byte, bool) {
-	if f[p] == "" {
+// blobSizes asks git for each blob's size in one call, reading none of them.
+func blobSizes(ctx context.Context, repoDir string, oids []string) (map[string]int64, error) {
+	sizes := map[string]int64{}
+	if len(oids) == 0 {
+		return sizes, nil
+	}
+	cmd := exec.CommandContext(ctx, "git", "-C", repoDir, "cat-file", "--batch-check")
+	cmd.Stdin = strings.NewReader(strings.Join(oids, "\n") + "\n")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		// Each line is "<oid> blob <size>", or "<oid> missing".
+		if f := strings.Fields(line); len(f) == 3 && f[1] == "blob" {
+			if n, err := strconv.ParseInt(f[2], 10, 64); err == nil {
+				sizes[f[0]] = n
+			}
+		}
+	}
+	return sizes, nil
+}
+
+// read returns the regular file at p, false when it is absent, of another mode, over limit bytes or unreadable.
+func (f proofFiles) read(ctx context.Context, repoDir, p string, limit int64) ([]byte, bool) {
+	// The object's own size refuses an oversized file before any of it is read.
+	if b := f[p]; b.oid != "" && b.size <= limit {
+		return readBlob(ctx, repoDir, b.oid, limit)
+	}
+	return nil, false
+}
+
+// readBlob reads the blob oid, false when git fails or the blob passes limit bytes, where it stops git.
+func readBlob(ctx context.Context, repoDir, oid string, limit int64) ([]byte, bool) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", repoDir, "cat-file", "blob", oid)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
 		return nil, false
 	}
-	blob, err := gitOutput(ctx, repoDir, "cat-file", "blob", f[p])
-	return blob, err == nil
+	if err := cmd.Start(); err != nil {
+		return nil, false
+	}
+	blob, err := io.ReadAll(io.LimitReader(stdout, limit+1))
+	if err != nil || int64(len(blob)) > limit {
+		cancel()
+		_ = cmd.Wait()
+		return nil, false
+	}
+	return blob, cmd.Wait() == nil
 }
 
 // stagedCargoConfig reads dir's .cargo/config or .cargo/config.toml from the index, unclear when both exist or one is not a regular file that parses.
@@ -426,7 +491,7 @@ func stagedCargoConfig(ctx context.Context, repoDir string, files proofFiles, di
 		if _, listed := files[p]; !listed {
 			continue
 		}
-		blob, ok := files.read(ctx, repoDir, p)
+		blob, ok := files.read(ctx, repoDir, p, catalog.CargoManifestLimit)
 		if !ok {
 			return cargoConfig{}
 		}
@@ -442,7 +507,7 @@ func stagedCargoConfig(ctx context.Context, repoDir string, files proofFiles, di
 
 // vendoredCopy reports whether a strict ancestor's staged Cargo.lock locks dir's crate at its marker's .crate checksum and its cargo config vendors crates.io into dir's parent.
 func vendoredCopy(ctx context.Context, repoDir string, files proofFiles, dir string, lockAt func(string) *catalog.CargoLock, configAt func(string) (map[string]any, bool)) bool {
-	marker, ok := files.read(ctx, repoDir, path.Join(dir, ".cargo-checksum.json"))
+	marker, ok := files.read(ctx, repoDir, path.Join(dir, ".cargo-checksum.json"), catalog.CargoProofLimit)
 	if !ok {
 		return false
 	}
@@ -450,7 +515,7 @@ func vendoredCopy(ctx context.Context, repoDir string, files proofFiles, dir str
 	if sum == "" {
 		return false
 	}
-	manifest, ok := files.read(ctx, repoDir, path.Join(dir, "Cargo.toml"))
+	manifest, ok := files.read(ctx, repoDir, path.Join(dir, "Cargo.toml"), catalog.CargoManifestLimit)
 	if !ok {
 		return false
 	}
