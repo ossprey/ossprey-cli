@@ -32,6 +32,9 @@ const otherRev = "89abcdef0123456789abcdef0123456789abcdef"
 
 const registrySerde = "[[package]]\nname = \"serde\"\nversion = \"1.0.100\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n"
 
+// unusedSerde records the evil fork's serde 1.0.200 as a patch the lock leaves unused.
+const unusedSerde = "[[patch.unused]]\nname = \"serde\"\nversion = \"1.0.200\"\nsource = \"git+https://github.com/evil/serde#" + patchRev + "\"\n"
+
 // gitSerde is a Cargo.lock entry for serde 1.0.100 from the evil fork, its source ending in suffix.
 func gitSerde(suffix string) string {
 	return "[[package]]\nname = \"serde\"\nversion = \"1.0.100\"\nsource = \"git+https://github.com/evil/serde" + suffix + "\"\n"
@@ -237,11 +240,22 @@ source = "git+https://github.com/evil/serde#` + patchRev + `"
 			"serde@1.0.100 Cargo.lock,Cargo.toml",
 			"serde@?vcs_url=git+https://github.com/evil/serde Cargo.toml",
 		}},
+		// An unused patch is not a package the lock sends, so it does not hide the manifest's target.
 		{"lock recording the patch as unused", map[string]string{
 			"Cargo.toml": lockless7,
-			"Cargo.lock": appLock(registrySerde, "[[patch.unused]]\nname = \"serde\"\nversion = \"1.0.200\"\nsource = \"git+https://github.com/evil/serde#"+patchRev+"\"\n"),
+			"Cargo.lock": appLock(registrySerde, unusedSerde),
 		}, []string{
 			"serde@1.0.100 Cargo.lock,Cargo.toml",
+			"serde@?vcs_url=git+https://github.com/evil/serde Cargo.toml",
+		}},
+		// cargo 1.99 builds the fork once a changed requirement activates the unused patch, so its target goes out.
+		{"requirement activating an unused patch", map[string]string{
+			"Cargo.toml": strings.Replace(lockless7, `"=1.0.100"`, `"=1.0.200"`, 1),
+			"Cargo.lock": appLock(registrySerde, unusedSerde),
+		}, []string{
+			"serde@1.0.100 Cargo.lock",
+			"serde@1.0.200 Cargo.toml",
+			"serde@?vcs_url=git+https://github.com/evil/serde Cargo.toml",
 		}},
 		{"lock recording a branch patch", map[string]string{
 			"Cargo.toml": patchedSerde(`, branch = "main"`),

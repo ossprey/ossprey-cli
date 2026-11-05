@@ -19,7 +19,7 @@ type cargoLockGit struct {
 	encoded bool
 }
 
-// cargoLockGitSources reads the git sources the Cargo.lock beside manifestPath records, as a package or an unused patch, or none without a readable lock.
+// cargoLockGitSources reads the git sources the Cargo.lock beside manifestPath records as packages, or none without a readable lock.
 func cargoLockGitSources(manifestPath string) cargoLockGit {
 	// A FIFO or device named Cargo.lock may never end, so only a regular file is read, and only up to the limit.
 	data, ok := readRegularFile(filepath.Join(filepath.Dir(manifestPath), "Cargo.lock"), maxCargoProofBytes)
@@ -33,16 +33,14 @@ func cargoLockGitSources(manifestPath string) cargoLockGit {
 	var lock struct {
 		Version int     `toml:"version"`
 		Package []entry `toml:"package"`
-		Patch   struct {
-			Unused []entry `toml:"unused"`
-		} `toml:"patch"`
 	}
 	if _, err := toml.Decode(string(data), &lock); err != nil {
 		return cargoLockGit{}
 	}
 	// Cargo writes the query form-encoded from lock version 4 and as written before it.
 	out := cargoLockGit{sources: map[string][]string{}, encoded: lock.Version >= 4}
-	for _, e := range append(lock.Package, lock.Patch.Unused...) {
+	// A [[patch.unused]] entry is never sent, yet cargo builds it once a changed requirement reaches its version, so it records nothing.
+	for _, e := range lock.Package {
 		if strings.HasPrefix(e.Source, "git+") {
 			out.sources[e.Name] = append(out.sources[e.Name], e.Source)
 		}
