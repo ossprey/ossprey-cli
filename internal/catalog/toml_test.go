@@ -253,6 +253,8 @@ func TestBoundedLocksStopReadingOnceTheContextEnds(t *testing.T) {
 			if r.reads != c.cancelAfter {
 				t.Errorf("read %d lockfiles, want %d", r.reads, c.cancelAfter)
 			}
+			// RealPath is root-relative on Unix but absolute on Windows, so both are compared from the root.
+			rootPrefix := filepath.ToSlash(resolvedRoot(dir)) + "/"
 			var visible []string
 			for _, glob := range syftTOMLLocks {
 				locs, err := bounded.FilesByGlob(glob)
@@ -260,7 +262,7 @@ func TestBoundedLocksStopReadingOnceTheContextEnds(t *testing.T) {
 					t.Fatal(err)
 				}
 				for _, l := range locs {
-					visible = append(visible, l.RealPath)
+					visible = append(visible, strings.TrimPrefix(rootRel(l.RealPath, rootPrefix), "/"))
 				}
 			}
 			if fmt.Sprint(visible) != fmt.Sprint(c.visible) {
