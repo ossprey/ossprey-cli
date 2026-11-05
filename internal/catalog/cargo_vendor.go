@@ -309,22 +309,31 @@ func cargoDirEntries(dir string, exact ...string) ([]fs.DirEntry, error) {
 
 // readCargoFileAt parses the regular file at p on disk, resolving its paths against base.
 func readCargoFileAt(p, base string) (cargoFile, bool) {
-	// A device or FIFO may never end, so only a regular file is opened, and read no further than the limit.
-	if info, err := os.Stat(p); err != nil || !info.Mode().IsRegular() {
-		return cargoFile{}, false
-	}
-	fh, err := os.Open(p)
-	if err != nil {
-		return cargoFile{}, false
-	}
-	defer fh.Close()
-	data, err := io.ReadAll(io.LimitReader(fh, maxManifestBytes+1))
-	if err != nil || len(data) > maxManifestBytes {
+	data, ok := readRegularFile(p, maxManifestBytes)
+	if !ok {
 		return cargoFile{}, false
 	}
 	f := cargoFile{bases: []string{filepath.ToSlash(base)}}
-	_, err = toml.Decode(string(data), &f.doc)
+	_, err := toml.Decode(string(data), &f.doc)
 	return f, err == nil
+}
+
+// readRegularFile reads the file at p on disk, or false when it is not a regular file or holds more than limit bytes.
+func readRegularFile(p string, limit int64) ([]byte, bool) {
+	// A device or FIFO may never end, so only a regular file is opened, and read no further than the limit.
+	if info, err := os.Stat(p); err != nil || !info.Mode().IsRegular() {
+		return nil, false
+	}
+	fh, err := os.Open(p)
+	if err != nil {
+		return nil, false
+	}
+	defer fh.Close()
+	data, err := io.ReadAll(io.LimitReader(fh, limit+1))
+	if err != nil || int64(len(data)) > limit {
+		return nil, false
+	}
+	return data, true
 }
 
 // vendorDir is the folded directory cargo run in dir takes crates.io crates from, or "" when unreplaced or unclear.

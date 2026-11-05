@@ -1,7 +1,6 @@
 package catalog
 
 import (
-	"os"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -15,12 +14,9 @@ import (
 
 // cargoLockGitSources maps each crate name to the git sources the Cargo.lock beside manifestPath records, as a package or an unused patch, or nil without a readable lock.
 func cargoLockGitSources(manifestPath string) map[string][]string {
-	lockPath := filepath.Join(filepath.Dir(manifestPath), "Cargo.lock")
-	if info, err := os.Stat(lockPath); err != nil || info.Size() > maxCargoProofBytes {
-		return nil
-	}
-	data, err := os.ReadFile(lockPath)
-	if err != nil {
+	// A FIFO or device named Cargo.lock may never end, so only a regular file is read, and only up to the limit.
+	data, ok := readRegularFile(filepath.Join(filepath.Dir(manifestPath), "Cargo.lock"), maxCargoProofBytes)
+	if !ok {
 		return nil
 	}
 	type entry struct {
