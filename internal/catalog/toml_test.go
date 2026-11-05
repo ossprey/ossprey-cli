@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	"github.com/anchore/syft/syft/file"
 	"github.com/anchore/syft/syft/source"
 
@@ -204,6 +205,50 @@ func TestBoundedLocksRefuseWhatTheOldCapsLetThrough(t *testing.T) {
 			}
 			if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 64<<20 || took > 5*time.Second {
 				t.Errorf("refusing it took %v and allocated %d MB", took, alloc>>20)
+			}
+		})
+	}
+}
+
+// The worst shapes just inside the lockfile caps are kept for syft, and one decode of each as syft's lock parsers do it stays bounded.
+func TestBoundedLocksKeepOnlyWhatSyftParsesWithinBounds(t *testing.T) {
+	d := maxLockDepth
+	for name, line := range map[string]func(i int) string{
+		"nested inline tables": func(i int) string {
+			return fmt.Sprintf("k%d = %s1%s\n", i, strings.Repeat("{a=", d), strings.Repeat("}", d))
+		},
+		"dotted keys": func(i int) string { return fmt.Sprintf("k%d%s = 1\n", i, strings.Repeat(".a", d)) },
+		"headers":     func(i int) string { return fmt.Sprintf("[k%d%s]\nx = 1\n", i, strings.Repeat(".a", d)) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			var b strings.Builder
+			for i := 0; ; i++ {
+				l := line(i)
+				if b.Len()+len(l) > maxLockBytes {
+					break
+				}
+				b.WriteString(l)
+			}
+			dir := t.TempDir()
+			writeTree(t, dir, map[string]string{"app/uv.lock": b.String()})
+			ctx := warn.NewContext(context.Background(), false)
+			if locs, err := withBoundedLocks(ctx, dirResolver(t, dir), dir).FilesByGlob("**/uv.lock"); err != nil || len(locs) != 1 {
+				t.Fatalf("FilesByGlob() = %v, %v with warnings %q, want the lock kept for syft", locs, err, warn.Drain(ctx))
+			}
+
+			var v struct {
+				Version int `toml:"version"`
+			}
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
+			_, err := toml.NewDecoder(strings.NewReader(b.String())).Decode(&v)
+			runtime.ReadMemStats(&after)
+			if err != nil {
+				t.Fatalf("Decode: %v", err)
+			}
+			// The worst, nested inline tables, allocates 1.4 GiB a decode here and 5.6 GiB at the old 8 MiB cap.
+			if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 2<<30 {
+				t.Errorf("decoding %d bytes allocated %d MB", b.Len(), alloc>>20)
 			}
 		})
 	}

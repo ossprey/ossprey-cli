@@ -21,7 +21,7 @@ crate with no `Cargo.lock` always catalogues direct dependencies only.
 A TOML file too large or nested too deeply to be genuine is skipped with a
 warning naming it, so a crafted file cannot exhaust the scan's memory: a
 `Cargo.toml` or `pyproject.toml` over 1 MiB or nested more than 64 levels deep,
-and a `Cargo.lock`, `poetry.lock`, `uv.lock` or `pdm.lock` over 8 MiB or nested
+and a `Cargo.lock`, `poetry.lock`, `uv.lock` or `pdm.lock` over 2 MiB or nested
 more than 16 levels deep. When a skipped `pyproject.toml` declares a path or
 workspace source in the part that can be read, the same line says so: such a
 package is then looked up on PyPI rather than treated as the project's own.

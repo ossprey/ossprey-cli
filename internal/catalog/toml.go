@@ -18,8 +18,8 @@ import (
 // maxManifestBytes bounds a TOML manifest to a size no genuine one reaches.
 const maxManifestBytes = 1 << 20
 
-// maxLockBytes bounds a TOML lockfile at over ten times the largest real one swept (650 KB), since parse cost grows with size.
-const maxLockBytes = 8 << 20
+// maxLockBytes bounds a TOML lockfile at three times the largest real one swept (650 KB), since parse cost grows with size.
+const maxLockBytes = 2 << 20
 
 // maxTOMLDepth bounds nesting, since the toml parser allocates quadratically in it (OSS-2098).
 const maxTOMLDepth = 64

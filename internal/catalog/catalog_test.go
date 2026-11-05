@@ -1613,7 +1613,7 @@ func TestCatalogRefusesLockfilesSyftWouldParseUnbounded(t *testing.T) {
 			if drained := warn.Drain(ctx); strings.Count(drained, "\n") != 1 || !strings.Contains(drained, c.why) || !strings.Contains(drained, " "+filepath.Join("refused", c.lock)+":") {
 				t.Errorf("warnings = %q, want one naming refused/%s", drained, c.lock)
 			}
-			// The cap case reads its 32 MB once to refuse it, so only the depth cases bound the allocation.
+			// The cap case reads its 2 MiB once to refuse it, so only the depth cases bound the allocation.
 			if alloc := after.TotalAlloc - before.TotalAlloc; c.why != "byte limit" && alloc > 16<<20 {
 				t.Errorf("Catalog allocated %d MB", alloc>>20)
 			}
