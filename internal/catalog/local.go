@@ -82,7 +82,7 @@ func declaresLocalSources(data []byte) bool {
 			table = bare.Replace(strings.Trim(line, "[]"))
 			key = table
 		} else if k, _, ok := strings.Cut(line, "="); ok {
-			key = strings.TrimPrefix(table+"."+bare.Replace(k), ".")
+			key = dottedKey(table, bare.Replace(k))
 		}
 		under := func(t string) bool { return key == t || strings.HasPrefix(key, t+".") }
 		if under("tool.uv.workspace") || (under("tool.uv.sources") || under("tool.poetry.dependencies")) && localSourceEntry.MatchString(line) {
@@ -90,6 +90,14 @@ func declaresLocalSources(data []byte) bool {
 		}
 	}
 	return false
+}
+
+// dottedKey is table.k, or just the table once it is longer than every table declaresLocalSources matches, so a long header is never copied per key.
+func dottedKey(table, k string) string {
+	if t := strings.TrimPrefix(table, "."); len(t) > len("tool.poetry.dependencies") {
+		return t
+	}
+	return strings.TrimPrefix(table+"."+k, ".")
 }
 
 // collectLocalNames parses one pyproject.toml and adds the canonical name of

@@ -3,6 +3,7 @@ package catalog
 import (
 	"context"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -201,6 +202,47 @@ func TestCatalogNamesAnUnreadablePyprojectOnce(t *testing.T) {
 			}
 			if len(lines) != 1 || strings.Contains(lines[0], "looked up on PyPI") != c.pypi {
 				t.Errorf("warnings = %q, want one line naming app/pyproject.toml that mentions PyPI = %v", drained, c.pypi)
+			}
+		})
+	}
+}
+
+// A refused pyproject.toml with a 512 KiB dotted header over 131 thousand short keys is checked for local sources without copying the header per key.
+func TestCatalogChecksALongHeaderForLocalSourcesInBoundedMemory(t *testing.T) {
+	header := "[tool.uv.sources.mylib" + strings.Repeat(".a", 256<<10) + "]\n"
+	path := "path = \"../mylib\"\n"
+	keys := strings.Repeat("v=1\n", (maxManifestBytes-len(header)-len(path))/4)
+	for name, c := range map[string]struct {
+		body string
+		pypi bool
+	}{
+		"a path source last": {header + keys + path, true},
+		"no local source":    {header + keys, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeTree(t, dir, map[string]string{"app/pyproject.toml": c.body})
+			ctx := warn.NewContext(context.Background(), false)
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
+			_, err := Catalog(ctx, dir, Options{SkipVersionLookup: true, NoExec: true})
+			runtime.ReadMemStats(&after)
+			if err != nil {
+				t.Fatalf("Catalog: %v", err)
+			}
+			drained := warn.Drain(ctx)
+			var lines []string
+			for _, l := range strings.Split(drained, "\n") {
+				if strings.Contains(l, filepath.Join("app", "pyproject.toml")) {
+					lines = append(lines, l)
+				}
+			}
+			if len(lines) != 1 || !strings.Contains(lines[0], "nested deeper than") || strings.Contains(lines[0], "looked up on PyPI") != c.pypi {
+				t.Errorf("warnings = %q, want one depth line naming app/pyproject.toml that mentions PyPI = %v", drained, c.pypi)
+			}
+			// Joining the header to every key allocated 65 GiB here.
+			if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 64<<20 {
+				t.Errorf("Catalog allocated %d MB", alloc>>20)
 			}
 		})
 	}
