@@ -158,7 +158,7 @@ func parseCargoTomlFile(ctx context.Context, path string, loc file.Location, sca
 				continue
 			}
 			// Carried as a Cargo.lock git entry, so cargoSourceMarks marks it the same way.
-			emit(t.Name, t.Version, t)
+			emit(t.Name, t.Version, t.RustCargoLockEntry)
 		}
 	}
 	return out, nil

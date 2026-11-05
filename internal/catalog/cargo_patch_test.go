@@ -258,6 +258,95 @@ source = "git+https://github.com/evil/serde#` + patchRev + `"
 			"serde@1.0.100?vcs_url=git+https://github.com/evil/serde@" + otherRev + " Cargo.lock",
 			"serde@?vcs_url=git+https://github.com/evil/serde@" + patchRev + " Cargo.toml",
 		}},
+		// Cargo matches a lock entry only on the same branch, tag or rev as written, so a changed one is fetched afresh.
+		{"lock recording another branch", map[string]string{
+			"Cargo.toml": patchedSerde(`, branch = "main"`),
+			"Cargo.lock": appLock(gitSerde("?branch=develop#" + patchRev)),
+		}, []string{
+			"serde@1.0.100 Cargo.toml",
+			"serde@1.0.100?vcs_url=git+https://github.com/evil/serde@" + patchRev + " Cargo.lock",
+			"serde@?vcs_url=git+https://github.com/evil/serde Cargo.toml",
+		}},
+		{"lock recording the default branch", map[string]string{
+			"Cargo.toml": patchedSerde(`, branch = "main"`),
+			"Cargo.lock": appLock(gitSerde("#" + patchRev)),
+		}, []string{
+			"serde@1.0.100 Cargo.toml",
+			"serde@1.0.100?vcs_url=git+https://github.com/evil/serde@" + patchRev + " Cargo.lock",
+			"serde@?vcs_url=git+https://github.com/evil/serde Cargo.toml",
+		}},
+		{"lock recording another tag", map[string]string{
+			"Cargo.toml": patchedSerde(`, tag = "v2"`),
+			"Cargo.lock": appLock(gitSerde("?tag=v1#" + patchRev)),
+		}, []string{
+			"serde@1.0.100 Cargo.toml",
+			"serde@1.0.100?vcs_url=git+https://github.com/evil/serde@" + patchRev + " Cargo.lock",
+			"serde@?vcs_url=git+https://github.com/evil/serde Cargo.toml",
+		}},
+		{"lock recording another rev", map[string]string{
+			"Cargo.toml": patchedSerde(`, rev = "89abcde"`),
+			"Cargo.lock": appLock(gitSerde("?rev=0123456#" + patchRev)),
+		}, []string{
+			"serde@1.0.100 Cargo.toml",
+			"serde@1.0.100?vcs_url=git+https://github.com/evil/serde@" + patchRev + " Cargo.lock",
+			"serde@?vcs_url=git+https://github.com/evil/serde Cargo.toml",
+		}},
+		// cargo 1.99 rewrites the lock for a longer prefix of the same commit, so it is not the locked rev.
+		{"lock recording a shorter prefix of the rev", map[string]string{
+			"Cargo.toml": patchedSerde(`, rev = "0123456789ab"`),
+			"Cargo.lock": appLock(gitSerde("?rev=0123456#" + patchRev)),
+		}, []string{
+			"serde@1.0.100 Cargo.toml",
+			"serde@1.0.100?vcs_url=git+https://github.com/evil/serde@" + patchRev + " Cargo.lock",
+			"serde@?vcs_url=git+https://github.com/evil/serde Cargo.toml",
+		}},
+		{"lock recording a tag patch", map[string]string{
+			"Cargo.toml": patchedSerde(`, tag = "v1"`),
+			"Cargo.lock": appLock(gitSerde("?tag=v1#" + patchRev)),
+		}, []string{
+			"serde@1.0.100 Cargo.toml",
+			"serde@1.0.100?vcs_url=git+https://github.com/evil/serde@" + patchRev + " Cargo.lock",
+		}},
+		{"lock recording a short rev patch", map[string]string{
+			"Cargo.toml": patchedSerde(`, rev = "0123456"`),
+			"Cargo.lock": appLock(gitSerde("?rev=0123456#" + patchRev)),
+		}, []string{
+			"serde@1.0.100 Cargo.toml",
+			"serde@1.0.100?vcs_url=git+https://github.com/evil/serde@" + patchRev + " Cargo.lock",
+		}},
+		// Version 4 form-encodes the branch and version 3 writes it as is, and Cargo decodes both.
+		{"version 4 lock encoding the branch", map[string]string{
+			"Cargo.toml": patchedSerde(`, branch = "feat/a+b"`),
+			"Cargo.lock": appLock(gitSerde("?branch=feat%2Fa%2Bb#" + patchRev)),
+		}, []string{
+			"serde@1.0.100 Cargo.toml",
+			"serde@1.0.100?vcs_url=git+https://github.com/evil/serde@" + patchRev + " Cargo.lock",
+		}},
+		{"version 3 lock writing the branch as is", map[string]string{
+			"Cargo.toml": patchedSerde(`, branch = "feat/a+b"`),
+			"Cargo.lock": strings.Replace(appLock(gitSerde("?branch=feat/a+b#"+patchRev)), "version = 4", "version = 3", 1),
+		}, []string{
+			"serde@1.0.100 Cargo.toml",
+			"serde@1.0.100?vcs_url=git+https://github.com/evil/serde@" + patchRev + " Cargo.lock",
+		}},
+		// cargo 1.99 takes a lock as current for a git URL with a query even after its branch changed, so no lock records it.
+		{"lock recording a git url with a query", map[string]string{
+			"Cargo.toml": strings.Replace(patchedSerde(`, branch = "main"`), "evil/serde\"", "evil/serde?x=1\"", 1),
+			"Cargo.lock": appLock(gitSerde("?x=1?branch=main#" + patchRev)),
+		}, []string{
+			"serde@1.0.100 Cargo.toml",
+			"serde@1.0.100?vcs_url=git+https://github.com/evil/serde@" + patchRev + " Cargo.lock",
+			"serde@?vcs_url=git+https://github.com/evil/serde Cargo.toml",
+		}},
+		// A version 4 lock's '+' is a space, so it records another branch.
+		{"version 4 lock with a raw plus", map[string]string{
+			"Cargo.toml": patchedSerde(`, branch = "a+b"`),
+			"Cargo.lock": appLock(gitSerde("?branch=a+b#" + patchRev)),
+		}, []string{
+			"serde@1.0.100 Cargo.toml",
+			"serde@1.0.100?vcs_url=git+https://github.com/evil/serde@" + patchRev + " Cargo.lock",
+			"serde@?vcs_url=git+https://github.com/evil/serde Cargo.toml",
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
