@@ -52,8 +52,9 @@ crates.io is always checked, even under a rule such as `https://github.com/` or
 `https://index.crates.io/` that covers crates.io's index. So is a crate Cargo
 fetches from git, whatever rule covers its repository, and a crate whose index
 Cargo may read as another one: an index URL that is not plain printable ASCII,
-or that holds a backslash or a percent-escape, or that has an empty, `.` or
-`..` path segment, such as `public//../internal`. If one
+or that holds a backslash or a percent-escape, or that has an IP-literal host
+such as `[::1]`, or an empty, `.` or `..` path segment, such as
+`public//../internal`. If one
 lockfile locks a crate from such an index URL on your registry's host and
 another locks the same version from your registry, it is checked.
 A crate locked from your registry and the crates.io crate of the same name and

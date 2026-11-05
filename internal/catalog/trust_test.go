@@ -312,6 +312,11 @@ source = "sparse+https://crates.corp.example/internal/cr\u00e4tes/"
 name = "acme-plain"
 version = "1.0.0"
 source = "sparse+https://crates.corp.example/internal/team-a_b.c~d/"
+
+[[package]]
+name = "acme-ipv6"
+version = "1.0.0"
+source = "sparse+https://[::1]:8443/internal/"
 `
 
 // Same acme-twin@1.0.0, but this project locks it from crates.io.
@@ -337,6 +342,7 @@ func TestCatalogTrustsCratesByTheirCargoLockIndex(t *testing.T) {
 		"https://git.corp.example/acme/",
 		"https://github.com/",
 		"https://index.crates.io/",
+		"https://[::1]:8443/internal/",
 	}, nil)
 
 	pkgs, err := Catalog(context.Background(), root, Options{NoExec: true, SkipVersionLookup: true, Trust: policy})
@@ -365,6 +371,7 @@ func TestCatalogTrustsCratesByTheirCargoLockIndex(t *testing.T) {
 		"cargo/acme-escaped-slash?repository_url=https://crates.corp.example/",
 		// Git is never a registry, even under a trusted prefix.
 		"cargo/acme-git?vcs_url=git+https://git.corp.example/acme/acme-git@0123456789abcdef0123456789abcdef01234567",
+		"cargo/acme-ipv6?repository_url=https://[::1]:8443/",                    // Go keeps an IP literal as written where Cargo serialises it
 		"cargo/acme-leading-nbsp?repository_url=https://crates.corp.example/",   // Go trims the NBSP, Cargo reads no sparse+ kind
 		"cargo/acme-non-ascii-path?repository_url=https://crates.corp.example/", // only printable ASCII counts
 		"cargo/acme-proxied?repository_url=https://crates.corp.example/",        // same host, another registry

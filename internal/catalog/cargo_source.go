@@ -173,10 +173,20 @@ func cargoRegistryOf(m pkg.RustCargoLockEntry) string {
 	if is, _ := isCratesIo(m.Source); is || kind != "registry" && kind != "sparse" {
 		return ""
 	}
-	if _, err := url.Parse(raw); err != nil || atPastSlash(raw) || dotOrEmptySegment(raw) {
+	if _, err := url.Parse(raw); err != nil || atPastSlash(raw) || dotOrEmptySegment(raw) || bracketedHost(raw) {
 		return ""
 	}
 	return raw
+}
+
+// bracketedHost reports an IP-literal host, which Go keeps as written where Cargo's URL parser serialises the address.
+func bracketedHost(clean string) bool {
+	_, rest, _ := strings.Cut(clean, ":")
+	rest = strings.TrimLeft(rest, "/")
+	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
+		rest = rest[:i]
+	}
+	return strings.HasPrefix(rest[strings.LastIndex(rest, "@")+1:], "[")
 }
 
 // unplainURLByte reports whitespace, a control, non-ASCII, '\' or '%', any of which Go and Cargo may read apart.

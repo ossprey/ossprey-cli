@@ -218,7 +218,8 @@ Every rule is a hole in the scan by design, so the rules are narrow:
   Unrecorded means checked. A crate's source is never a git or crates.io one
   (OSS-2581 decides how git crates may count later), nor an index URL that is
   not plain printable ASCII, or that holds a backslash or a percent-escape,
-  nor one with an `@` past a `/` or an empty, `.` or `..` path segment. The
+  nor one with an `@` past a `/`, an IP-literal host, or an empty, `.` or
+  `..` path segment. The
   first is an allow-list (bytes `!` to `~` bar `\` and `%`, tested before
   anything is trimmed), because each spelling found outside it was another
   place Go and Cargo part: Go's `ToLower` maps `İ` to `i` where Cargo's IDNA
