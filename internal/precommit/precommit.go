@@ -113,12 +113,22 @@ func StagedDelta(ctx context.Context, repoDir string, policy trust.Policy) (Delt
 	}
 
 	// A member's `workspace = true` pins live in a workspace root the commit may not touch.
-	for _, a := range cargoAncestors(paths) {
-		if err := writeWorkspaceRoot(ctx, repoDir, ":"+a, stagedRoot, a); err != nil {
+	ancestors := cargoAncestors(paths)
+	var specs []string
+	for _, a := range ancestors {
+		specs = append(specs, ":"+a)
+		if hasHead {
+			specs = append(specs, "HEAD:"+a)
+		}
+	}
+	// A root git cannot size reads as unreadable.
+	roots, _ := blobSizes(ctx, repoDir, specs)
+	for _, a := range ancestors {
+		if err := writeWorkspaceRoot(ctx, repoDir, roots, ":"+a, stagedRoot, a); err != nil {
 			return Delta{}, err
 		}
 		if hasHead {
-			if err := writeWorkspaceRoot(ctx, repoDir, "HEAD:"+a, headRoot, a); err != nil {
+			if err := writeWorkspaceRoot(ctx, repoDir, roots, "HEAD:"+a, headRoot, a); err != nil {
 				return Delta{}, err
 			}
 		}
@@ -382,13 +392,13 @@ func withoutVendoredLocks(ctx context.Context, repoDir string, paths []string) [
 	return out
 }
 
-// proofBlob is an index entry's blob and size, with no blob for an entry that is not one regular file of known size.
+// proofBlob is a blob and its size, with no blob for an entry the hook must not read or could not size.
 type proofBlob struct {
 	oid  string
 	size int64
 }
 
-// proofFiles maps each index path a vendor proof may read to its blob.
+// proofFiles maps each index path a vendor proof may read, or each rev:path spec of a workspace root, to its blob.
 type proofFiles map[string]proofBlob
 
 // listProofFiles lists every Cargo.lock, Cargo.toml, marker and cargo config in the index, then their blob sizes, in two calls.
@@ -421,39 +431,46 @@ func listProofFiles(ctx context.Context, repoDir string) proofFiles {
 		return proofFiles{}
 	}
 	for p, b := range files {
-		if size, ok := sizes[b.oid]; ok {
-			files[p] = proofBlob{oid: b.oid, size: size}
-		} else {
-			files[p] = proofBlob{}
-		}
+		files[p] = sizes[b.oid]
 	}
 	return files
 }
 
-// blobSizes asks git for each blob's size in one call, reading none of them.
-func blobSizes(ctx context.Context, repoDir string, oids []string) (map[string]int64, error) {
-	sizes := map[string]int64{}
-	if len(oids) == 0 {
-		return sizes, nil
+// blobSizes asks git for the blob each object name resolves to and its size in one call, reading none of them.
+func blobSizes(ctx context.Context, repoDir string, names []string) (proofFiles, error) {
+	blobs := proofFiles{}
+	var asked []string
+	for _, n := range names {
+		// cat-file reads one name per line, so a name holding a newline is never asked and has no blob.
+		if !strings.Contains(n, "\n") {
+			asked = append(asked, n)
+		}
+	}
+	if len(asked) == 0 {
+		return blobs, nil
 	}
 	cmd := exec.CommandContext(ctx, "git", "-C", repoDir, "cat-file", "--batch-check")
-	cmd.Stdin = strings.NewReader(strings.Join(oids, "\n") + "\n")
+	cmd.Stdin = strings.NewReader(strings.Join(asked, "\n") + "\n")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, err
 	}
-	for _, line := range strings.Split(string(out), "\n") {
-		// Each line is "<oid> blob <size>", or "<oid> missing".
+	lines := strings.Split(strings.TrimSuffix(string(out), "\n"), "\n")
+	if len(lines) != len(asked) {
+		return nil, fmt.Errorf("git cat-file --batch-check: %d answers for %d names", len(lines), len(asked))
+	}
+	for i, line := range lines {
+		// Each line is "<oid> blob <size>", or "<name> missing" and the like.
 		if f := strings.Fields(line); len(f) == 3 && f[1] == "blob" {
 			if n, err := strconv.ParseInt(f[2], 10, 64); err == nil {
-				sizes[f[0]] = n
+				blobs[asked[i]] = proofBlob{oid: f[0], size: n}
 			}
 		}
 	}
-	return sizes, nil
+	return blobs, nil
 }
 
-// read returns the regular file at p, false when it is absent, of another mode, over limit bytes or unreadable.
+// read returns the blob at p, false when p has none, it is over limit bytes or unreadable.
 func (f proofFiles) read(ctx context.Context, repoDir, p string, limit int64) ([]byte, bool) {
 	// The object's own size refuses an oversized file before any of it is read.
 	if b := f[p]; b.oid != "" && b.size <= limit {
@@ -556,10 +573,10 @@ func cargoAncestors(paths []string) []string {
 	return out
 }
 
-// writeWorkspaceRoot writes the Cargo.toml at spec into root when it exists and declares [workspace].
-func writeWorkspaceRoot(ctx context.Context, repoDir, spec, root, repoRelPath string) error {
-	blob, err := gitShow(ctx, repoDir, spec)
-	if err != nil || !catalog.DeclaresCargoWorkspace(blob) {
+// writeWorkspaceRoot writes the Cargo.toml at spec into root when it is within the manifest bound and declares [workspace].
+func writeWorkspaceRoot(ctx context.Context, repoDir string, roots proofFiles, spec, root, repoRelPath string) error {
+	blob, ok := roots.read(ctx, repoDir, spec, catalog.CargoManifestLimit)
+	if !ok || !catalog.DeclaresCargoWorkspace(blob) {
 		return nil
 	}
 	return writeTreeFile(root, repoRelPath, blob)
@@ -567,11 +584,11 @@ func writeWorkspaceRoot(ctx context.Context, repoDir, spec, root, repoRelPath st
 
 // workspacePinChanges returns the exact crates.io pins in the staged [workspace.dependencies] of the Cargo.toml at p that its HEAD copy lacks.
 func workspacePinChanges(stagedRoot, headRoot, p string) []catalog.Package {
-	staged, err := os.ReadFile(filepath.Join(stagedRoot, filepath.FromSlash(p)))
-	if err != nil {
+	staged, ok := readTreeManifest(stagedRoot, p)
+	if !ok {
 		return nil
 	}
-	head, _ := os.ReadFile(filepath.Join(headRoot, filepath.FromSlash(p)))
+	head, _ := readTreeManifest(headRoot, p)
 	old := map[string]bool{}
 	for _, q := range catalog.CargoWorkspacePins(head) {
 		old[pkgKey(q)] = true
@@ -584,6 +601,21 @@ func workspacePinChanges(stagedRoot, headRoot, p string) []catalog.Package {
 		}
 	}
 	return out
+}
+
+// readTreeManifest reads a temp tree's copy of the Cargo.toml at p, false when it is absent or over the manifest bound.
+func readTreeManifest(root, p string) ([]byte, bool) {
+	f, err := os.Open(filepath.Join(root, filepath.FromSlash(p)))
+	if err != nil {
+		return nil, false
+	}
+	defer f.Close()
+	// As for a blob, the size refuses an oversized copy before any of it is read.
+	if info, err := f.Stat(); err != nil || info.Size() > catalog.CargoManifestLimit {
+		return nil, false
+	}
+	data, err := io.ReadAll(io.LimitReader(f, catalog.CargoManifestLimit+1))
+	return data, err == nil && len(data) <= catalog.CargoManifestLimit
 }
 
 // writeTreeFile writes blob at root/<repoRelPath>, creating parent dirs.

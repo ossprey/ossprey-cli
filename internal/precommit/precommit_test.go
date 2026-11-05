@@ -614,18 +614,8 @@ func TestStagedDeltaNeverReadsAProofLockOverItsBound(t *testing.T) {
 	dir := initRepo(t)
 	writeRepoFile(t, dir, ".cargo/config.toml", vendorConfig("vendor"))
 	writeRepoFile(t, dir, "Cargo.toml", appManifest)
-	// Comment lines pad a lock that would otherwise prove the vendored copy to one byte over the bound.
-	lock := lockedCrates([3]string{"serde", "1.0.229", sum})
-	line := "#" + strings.Repeat(" ", 1022) + "\n"
-	pad := catalog.CargoProofLimit + 1 - len(lock)
-	lock += strings.Repeat(line, pad/len(line))
-	if r := pad % len(line); r > 0 {
-		lock += "#" + strings.Repeat(" ", r-1)
-	}
-	if len(lock) != catalog.CargoProofLimit+1 {
-		t.Fatalf("padded lock is %d bytes, want %d", len(lock), catalog.CargoProofLimit+1)
-	}
-	writeRepoFile(t, dir, "Cargo.lock", lock)
+	// A lock that would otherwise prove the vendored copy, one byte over the bound.
+	writeRepoFile(t, dir, "Cargo.lock", padTOML(t, lockedCrates([3]string{"serde", "1.0.229", sum}), catalog.CargoProofLimit+1))
 	commitAll(t, dir)
 	vendorCrate(t, dir, "vendor/serde", "serde", "1.0.229", sum, lockedCrates([3]string{"criterion", "0.5.1", strings.Repeat("d", 64)}))
 	gitT(t, dir, "add", "-A")
@@ -649,6 +639,61 @@ func TestStagedDeltaNeverReadsAProofLockOverItsBound(t *testing.T) {
 	}
 	if strings.Contains(string(log), strings.TrimSpace(string(oid))) {
 		t.Errorf("the hook read the lock over the bound:\n%s", log)
+	}
+}
+
+// padTOML pads s with comment lines to exactly n bytes.
+func padTOML(t *testing.T, s string, n int) string {
+	t.Helper()
+	line := "#" + strings.Repeat(" ", 1022) + "\n"
+	pad := n - len(s)
+	s += strings.Repeat(line, pad/len(line))
+	if r := pad % len(line); r > 0 {
+		s += "#" + strings.Repeat(" ", r-1)
+	}
+	if len(s) != n {
+		t.Fatalf("padded file is %d bytes, want %d", len(s), n)
+	}
+	return s
+}
+
+func TestStagedDeltaNeverReadsAWorkspaceRootOverItsBound(t *testing.T) {
+	dir := initRepo(t)
+	// A committed root whose pool the member inherits, one byte over the manifest bound.
+	root := "[workspace]\nmembers = [\"crates/*\"]\n\n[workspace.dependencies]\nserde = \"=1.0.228\"\n"
+	writeRepoFile(t, dir, "Cargo.toml", padTOML(t, root, catalog.CargoManifestLimit+1))
+	member := "[package]\nname = \"core\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = { workspace = true }\n"
+	writeRepoFile(t, dir, "crates/core/Cargo.toml", member)
+	commitAll(t, dir)
+	writeRepoFile(t, dir, "crates/core/Cargo.toml", member+"tokio = \"=1.40.0\"\n")
+	gitT(t, dir, "add", "crates/core/Cargo.toml")
+	ctx := warn.NewContext(context.Background(), false)
+	oid, err := gitOutput(ctx, dir, "rev-parse", ":Cargo.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	trace := filepath.Join(t.TempDir(), "trace")
+	t.Setenv("GIT_TRACE", trace)
+	got, err := StagedDelta(ctx, dir, trust.Policy{})
+	if err != nil {
+		t.Fatalf("StagedDelta: %v", err)
+	}
+	want := []Package{{Type: "cargo", Name: "tokio", Version: "1.40.0", Path: "crates/core/Cargo.toml"}}
+	if !reflect.DeepEqual(got.Packages, want) {
+		t.Errorf("delta mismatch:\n got: %+v\nwant: %+v", got.Packages, want)
+	}
+	// As with an unreadable root, the inherited pin is skipped out loud.
+	if out := warn.Drain(ctx); !strings.Contains(out, "workspace root could not be read") {
+		t.Errorf("no warning for the inherited pin:\n%s", out)
+	}
+	log, err := os.ReadFile(trace)
+	if err != nil || !strings.Contains(string(log), "cat-file --batch-check") {
+		t.Fatalf("git trace holds no sizing call (%v):\n%s", err, log)
+	}
+	for _, read := range []string{strings.TrimSpace(string(oid)), "show :Cargo.toml", "show HEAD:Cargo.toml"} {
+		if strings.Contains(string(log), read) {
+			t.Errorf("the hook read the root over the bound (%s):\n%s", read, log)
+		}
 	}
 }
 
