@@ -123,7 +123,7 @@ func TestReadTOMLRefusesAnOversizedManifest(t *testing.T) {
 	}
 }
 
-// A manifest whose size says 0 but whose read never ends must still stop at the limit.
+// A device whose size says 0 but whose read never ends is refused before it is read.
 func TestReadTOMLBoundsTheReadNotJustTheSize(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("no /dev/zero on Windows")
@@ -132,7 +132,7 @@ func TestReadTOMLBoundsTheReadNotJustTheSize(t *testing.T) {
 	if err := os.Symlink("/dev/zero", path); err != nil {
 		t.Skipf("symlink: %v", err)
 	}
-	if _, err := readTOML(path); err == nil || !strings.HasPrefix(err.Error(), "Cargo.toml is over ") {
-		t.Errorf("readTOML() error = %v, want the size refusal naming the file", err)
+	if _, err := readTOML(path); err == nil || !strings.HasPrefix(err.Error(), "Cargo.toml is not a regular file") {
+		t.Errorf("readTOML() error = %v, want the regular-file refusal naming the file", err)
 	}
 }

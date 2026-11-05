@@ -19,6 +19,12 @@ var errTOMLTooDeep = fmt.Errorf("toml: nested deeper than %d levels", maxTOMLDep
 
 // readTOML reads a TOML manifest, refusing one too large to be genuine.
 func readTOML(path string) ([]byte, error) {
+	// A FIFO or device can block the open or never end, so only a regular file is opened.
+	if info, err := os.Stat(path); err != nil {
+		return nil, err
+	} else if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", filepath.Base(path))
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
