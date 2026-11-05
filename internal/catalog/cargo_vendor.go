@@ -214,13 +214,17 @@ func readCargoFiles(r file.Resolver, locs []file.Location, rootSlash string, up 
 	return out, true
 }
 
-// cargoFilesAbove reads the configs, and with withManifests the manifests, cargo run inside root also sees: every ancestor's, and CARGO_HOME's; noLinks fails on a symlinked .cargo or config.
+// cargoFilesAbove reads the configs, and with withManifests the manifests, cargo run inside root also sees: every ancestor's, and CARGO_HOME's; noLinks fails on a symlinked .cargo or config and skips CARGO_HOME only as an ancestor's .cargo by its exact path.
 func cargoFilesAbove(root string, withManifests, noLinks bool) (manifests, configs []cargoFile, ok bool) {
 	exact := []string{".cargo"}
 	if withManifests {
 		exact = append(exact, "Cargo.toml")
 	}
-	seen := map[string]bool{}
+	seen, key := map[string]bool{}, foldPath
+	if noLinks {
+		// A folded path can name another directory on a case-sensitive filesystem, leaving CARGO_HOME unread.
+		key = path.Clean
+	}
 	for d := filepath.Dir(root); ; d = filepath.Dir(d) {
 		entries, err := cargoDirEntries(d, exact...)
 		if err != nil {
@@ -247,7 +251,7 @@ func cargoFilesAbove(root string, withManifests, noLinks bool) (manifests, confi
 					return nil, nil, false
 				}
 				configs = append(configs, cs...)
-				seen[foldPath(filepath.ToSlash(filepath.Join(d, n)))] = true
+				seen[key(filepath.ToSlash(filepath.Join(d, n)))] = true
 			}
 		}
 		if filepath.Dir(d) == d {
@@ -260,7 +264,7 @@ func cargoFilesAbove(root string, withManifests, noLinks bool) (manifests, confi
 			home = filepath.Join(h, ".cargo")
 		}
 	}
-	if home != "" && !seen[foldPath(filepath.ToSlash(home))] {
+	if home != "" && !seen[key(filepath.ToSlash(home))] {
 		cs, ok := cargoConfigsIn(home, filepath.Dir(home), false, noLinks)
 		if !ok {
 			return nil, nil, false

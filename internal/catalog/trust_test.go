@@ -600,6 +600,36 @@ func TestCatalogReadsALinkedCargoConfigForVendoringOnly(t *testing.T) {
 	}
 }
 
+// On a case-sensitive filesystem a CARGO_HOME spelled like an ancestor's .cargo in another case is another directory, so both configs are read.
+func TestCatalogReadsACargoHomeThatDiffersFromAnAncestorOnlyByCase(t *testing.T) {
+	base := t.TempDir()
+	if err := os.Mkdir(filepath.Join(base, "proj"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "PROJ")); err == nil {
+		t.Skip("the filesystem folds case")
+	}
+	writeTree(t, base, map[string]string{
+		"proj/.cargo/config.toml": "[net]\nretry = 2\n",
+		"PROJ/.cargo/config.toml": "[source.corp]\nregistry = \"sparse+https://crates.corp.example/internal/\"\nreplace-with = \"elsewhere\"\n",
+		"proj/app/Cargo.lock":     "version = 4\n\n[[package]]\nname = \"acme-sparse\"\nversion = \"1.0.0\"\nsource = \"sparse+https://crates.corp.example/internal/\"\nchecksum = \"aaaa\"\n",
+	})
+	t.Setenv("CARGO_HOME", filepath.Join(base, "PROJ", ".cargo"))
+	ctx := warn.NewContext(context.Background(), false)
+	policy := testPolicy(t, []string{"https://crates.corp.example/internal/"}, nil)
+
+	pkgs, err := Catalog(ctx, filepath.Join(base, "proj", "app"), Options{NoExec: true, SkipVersionLookup: true, Trust: policy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if trusted, _ := trustedNames(pkgs); len(trusted) != 0 {
+		t.Errorf("trusted = %v, want none", trusted)
+	}
+	if got := warn.Drain(ctx); strings.Count(got, "because a source replacement is configured") != 1 {
+		t.Errorf("warnings = %q, want the replacement once", got)
+	}
+}
+
 func TestCatalogWithoutPolicyTrustsNothing(t *testing.T) {
 	pkgs, err := Catalog(context.Background(), trustFixture(t), Options{NoExec: true, SkipVersionLookup: true})
 	if err != nil {
