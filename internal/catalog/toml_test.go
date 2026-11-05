@@ -114,8 +114,8 @@ func TestReadTOMLParsesALargeWorkspaceRoot(t *testing.T) {
 func TestReadTOMLRefusesAnOversizedManifest(t *testing.T) {
 	dir := t.TempDir()
 	path := writeFile(t, dir, "pyproject.toml", strings.Repeat("#", maxManifestBytes+1))
-	if _, err := readTOML(path); err == nil || !strings.HasPrefix(err.Error(), "pyproject.toml is ") {
-		t.Errorf("readTOML() error = %v, want the size refusal naming the file", err)
+	if _, err := readTOML(path); err == nil || !strings.HasPrefix(err.Error(), "read "+path+": ") {
+		t.Errorf("readTOML() error = %v, want the size refusal naming %s", err, path)
 	}
 	// Callers treat a manifest gone since the glob as nothing found.
 	if _, err := readTOML(filepath.Join(dir, "gone.toml")); !errors.Is(err, fs.ErrNotExist) {
@@ -132,7 +132,7 @@ func TestReadTOMLBoundsTheReadNotJustTheSize(t *testing.T) {
 	if err := os.Symlink("/dev/zero", path); err != nil {
 		t.Skipf("symlink: %v", err)
 	}
-	if _, err := readTOML(path); err == nil || !strings.HasPrefix(err.Error(), "Cargo.toml is not a regular file") {
-		t.Errorf("readTOML() error = %v, want the regular-file refusal naming the file", err)
+	if _, err := readTOML(path); err == nil || err.Error() != "read "+path+": not a regular file" {
+		t.Errorf("readTOML() error = %v, want the regular-file refusal naming %s", err, path)
 	}
 }

@@ -89,7 +89,7 @@ func catalogByGlob(ctx context.Context, resolver file.Resolver, root, glob, labe
 				// goes to stdout, so this never corrupts --local output.
 				// Past the deadline every remaining manifest fails the same way, and scan.Run reports that once.
 				if ctx.Err() == nil {
-					warn.Add(ctx, catalogerEntry(label, err))
+					warn.Add(ctx, catalogerEntry(label, relToRoot(root, err)))
 				}
 				return nil
 			}

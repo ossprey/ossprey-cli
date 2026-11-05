@@ -4,7 +4,6 @@ package catalog
 
 import (
 	"path/filepath"
-	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -23,8 +22,8 @@ func TestReadTOMLRefusesAFIFOWithoutBlocking(t *testing.T) {
 	}()
 	select {
 	case err := <-done:
-		if err == nil || !strings.HasPrefix(err.Error(), "Cargo.toml is not a regular file") {
-			t.Errorf("readTOML() error = %v, want the regular-file refusal naming the file", err)
+		if err == nil || err.Error() != "read "+path+": not a regular file" {
+			t.Errorf("readTOML() error = %v, want the regular-file refusal naming %s", err, path)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("readTOML() blocked on a FIFO")

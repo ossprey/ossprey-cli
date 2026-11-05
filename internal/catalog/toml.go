@@ -1,8 +1,10 @@
 package catalog
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -15,15 +17,18 @@ const maxManifestBytes = 1 << 20
 // maxTOMLDepth bounds nesting, since the toml parser allocates quadratically in it (OSS-2098).
 const maxTOMLDepth = 64
 
-var errTOMLTooDeep = fmt.Errorf("toml: nested deeper than %d levels", maxTOMLDepth)
+var (
+	errTOMLTooDeep = fmt.Errorf("toml: nested deeper than %d levels", maxTOMLDepth)
+	errNotRegular  = errors.New("not a regular file")
+)
 
-// readTOML reads a TOML manifest, refusing one too large to be genuine.
+// readTOML reads a TOML manifest, refusing one too large to be genuine; its errors name path as given.
 func readTOML(path string) ([]byte, error) {
 	// A FIFO or device can block the open or never end, so only a regular file is opened.
 	if info, err := os.Stat(path); err != nil {
 		return nil, err
 	} else if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s is not a regular file", filepath.Base(path))
+		return nil, &fs.PathError{Op: "read", Path: path, Err: errNotRegular}
 	}
 	f, err := os.Open(path)
 	if err != nil {
@@ -35,7 +40,7 @@ func readTOML(path string) ([]byte, error) {
 		return nil, err
 	}
 	if info.Size() > maxManifestBytes {
-		return nil, fmt.Errorf("%s is %d bytes, over the %d limit", filepath.Base(path), info.Size(), maxManifestBytes)
+		return nil, &fs.PathError{Op: "read", Path: path, Err: fmt.Errorf("%d bytes, over the %d byte limit", info.Size(), maxManifestBytes)}
 	}
 	// The size is only a hint: a device or a file still growing reads past it, so the read is bounded too.
 	data, err := io.ReadAll(io.LimitReader(f, maxManifestBytes+1))
@@ -43,9 +48,23 @@ func readTOML(path string) ([]byte, error) {
 		return nil, err
 	}
 	if len(data) > maxManifestBytes {
-		return nil, fmt.Errorf("%s is over the %d byte limit", filepath.Base(path), maxManifestBytes)
+		return nil, &fs.PathError{Op: "read", Path: path, Err: fmt.Errorf("over the %d byte limit", maxManifestBytes)}
 	}
 	return data, nil
+}
+
+// relToRoot names the file in a path error relative to the scan root, so a warning points at one manifest in a monorepo.
+func relToRoot(root string, err error) error {
+	pe, ok := err.(*fs.PathError)
+	if !ok {
+		return err
+	}
+	for _, r := range []string{root, resolvedRoot(root)} {
+		if rel, rerr := filepath.Rel(r, pe.Path); rerr == nil && filepath.IsLocal(rel) {
+			return &fs.PathError{Op: pe.Op, Path: rel, Err: pe.Err}
+		}
+	}
+	return err
 }
 
 // decodeTOML decodes data into v, refusing data nested deeper than maxTOMLDepth.

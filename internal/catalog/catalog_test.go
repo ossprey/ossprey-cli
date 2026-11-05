@@ -1565,8 +1565,10 @@ func TestCatalogSkipsTOMLNestedTooDeepToParse(t *testing.T) {
 			if !found {
 				t.Errorf("Catalog() = %v, want the normal manifest's %s", got, tc.want)
 			}
-			if drained := warn.Drain(ctx); !strings.Contains(drained, "nested deeper than") {
-				t.Errorf("warnings = %q, want the deep manifest reported", drained)
+			// Named root-relative, so a monorepo's warning points at the one manifest refused.
+			drained := warn.Drain(ctx)
+			if !strings.Contains(drained, "nested deeper than") || !strings.Contains(drained, " "+filepath.Join("deep", tc.manifest)+":") || strings.Contains(drained, dir) {
+				t.Errorf("warnings = %q, want the deep manifest reported by its path in the scan", drained)
 			}
 			if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 16<<20 {
 				t.Errorf("Catalog allocated %d MB", alloc>>20)

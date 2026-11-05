@@ -74,7 +74,7 @@ func parseCargoTomlFile(ctx context.Context, path string, loc file.Location, sca
 	var m cargoManifest
 	md, err := decodeTOML(data, &m)
 	if err != nil {
-		return nil, err
+		return nil, &fs.PathError{Op: "parse", Path: path, Err: err}
 	}
 
 	pool := workspacePool(m, md.IsDefined("workspace"), path, scanRoot)

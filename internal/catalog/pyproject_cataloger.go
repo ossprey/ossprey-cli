@@ -57,7 +57,7 @@ func readPyProject(path string) (*pyproject, error) {
 	}
 	var pp pyproject
 	if _, err := decodeTOML(data, &pp); err != nil {
-		return nil, err
+		return nil, &fs.PathError{Op: "parse", Path: path, Err: err}
 	}
 	return &pp, nil
 }
