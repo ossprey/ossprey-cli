@@ -1,6 +1,8 @@
 package registry
 
 import (
+	"cmp"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -12,7 +14,7 @@ import (
 // it against the semver npm bundles.
 
 type semver struct {
-	major, minor, patch int
+	major, minor, patch uint64
 	pre                 []string
 	cargo               bool // set on a version a Cargo requirement tests, so its prerelease identifiers order as Cargo orders them
 }
@@ -21,26 +23,35 @@ type semver struct {
 // the prerelease, build metadata ignored.
 var semverRe = regexp.MustCompile(`^[v=\s]*(\d+)\.(\d+)\.(\d+)(?:-?([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$`)
 
-func parseSemver(s string) (semver, bool) {
+// parseSemver reads a version, refusing a core number past u64 for Cargo, as its semver crate does, or past int for npm.
+func parseSemver(s string, cargo bool) (semver, bool) {
 	m := semverRe.FindStringSubmatch(strings.TrimSpace(s))
 	if m == nil {
 		return semver{}, false
 	}
-	var v semver
+	v := semver{cargo: cargo}
 	var err error
-	if v.major, err = strconv.Atoi(m[1]); err != nil {
+	if v.major, err = parseCore(m[1], cargo); err != nil {
 		return semver{}, false
 	}
-	if v.minor, err = strconv.Atoi(m[2]); err != nil {
+	if v.minor, err = parseCore(m[2], cargo); err != nil {
 		return semver{}, false
 	}
-	if v.patch, err = strconv.Atoi(m[3]); err != nil {
+	if v.patch, err = parseCore(m[3], cargo); err != nil {
 		return semver{}, false
 	}
 	if m[4] != "" {
 		v.pre = strings.Split(m[4], ".")
 	}
 	return v, true
+}
+
+func parseCore(s string, cargo bool) (uint64, error) {
+	if cargo {
+		return strconv.ParseUint(s, 10, 64)
+	}
+	n, err := strconv.Atoi(s)
+	return uint64(n), err
 }
 
 func cmpInt(a, b int) int {
@@ -54,13 +65,13 @@ func cmpInt(a, b int) int {
 }
 
 func (a semver) compare(b semver) int {
-	if c := cmpInt(a.major, b.major); c != 0 {
+	if c := cmp.Compare(a.major, b.major); c != 0 {
 		return c
 	}
-	if c := cmpInt(a.minor, b.minor); c != 0 {
+	if c := cmp.Compare(a.minor, b.minor); c != 0 {
 		return c
 	}
-	if c := cmpInt(a.patch, b.patch); c != 0 {
+	if c := cmp.Compare(a.patch, b.patch); c != 0 {
 		return c
 	}
 	// A release sorts above any of its prereleases.
@@ -145,10 +156,42 @@ var (
 
 func isX(s string) bool { return s == "" || s == "x" || s == "X" || s == "*" }
 
-func atoi(s string) int { n, _ := strconv.Atoi(s); return n }
+func atoi(s string) uint64 { n, _ := strconv.Atoi(s); return uint64(n) }
 
-func ver(major, minor, patch int, pre ...string) semver {
+// rangeNum reads a range's core number, saturating at int's limit for npm and as a u64 for Cargo, false past it.
+func rangeNum(s string, cargo bool) (uint64, bool) {
+	if !cargo || isX(s) {
+		return atoi(s), true
+	}
+	n, err := strconv.ParseUint(s, 10, 64)
+	return n, err == nil
+}
+
+func ver(major, minor, patch uint64, pre ...string) semver {
 	return semver{major: major, minor: minor, patch: patch, pre: pre}
+}
+
+// next is the first release above every version that starts with core, carrying past u64::MAX, or false when there is none.
+func next(core ...uint64) (semver, bool) {
+	for i := len(core) - 1; i >= 0; i-- {
+		if core[i] < math.MaxUint64 {
+			var v [3]uint64
+			copy(v[:], core[:i])
+			v[i] = core[i] + 1
+			return ver(v[0], v[1], v[2]), true
+		}
+	}
+	return semver{}, false
+}
+
+// below matches every version under next(core...), which is every version when there is none.
+func below(core ...uint64) comparator {
+	v, ok := next(core...)
+	if !ok {
+		return anyComp
+	}
+	v.pre = []string{zeroPre}
+	return comparator{op: "<", v: v}
 }
 
 func preOf(s string) []string {
@@ -165,11 +208,11 @@ var (
 )
 
 // parseNpmRange parses a range, or reports false for a string that is not one
-// (which npm then treats as a dist-tag).
-func parseNpmRange(r string) (npmRange, bool) {
+// (which npm then treats as a dist-tag); cargo reads core numbers as Cargo does.
+func parseNpmRange(r string, cargo bool) (npmRange, bool) {
 	var out npmRange
 	for _, set := range strings.Split(r, "||") {
-		cs, ok := parseCompSet(strings.TrimSpace(set))
+		cs, ok := parseCompSet(strings.TrimSpace(set), cargo)
 		if !ok {
 			return nil, false
 		}
@@ -178,7 +221,7 @@ func parseNpmRange(r string) (npmRange, bool) {
 	return out, true
 }
 
-func parseCompSet(set string) ([]comparator, bool) {
+func parseCompSet(set string, cargo bool) ([]comparator, bool) {
 	if m := hyphenRe.FindStringSubmatch(set); m != nil {
 		return hyphen(m[2:6], m[7:11]), true
 	}
@@ -193,7 +236,11 @@ func parseCompSet(set string) ([]comparator, bool) {
 		if m == nil {
 			return nil, false
 		}
-		out = append(out, desugar(m[1], m[2], m[3], m[4], m[5])...)
+		cs := desugar(m[1], m[2], m[3], m[4], m[5], cargo)
+		if cs == nil {
+			return nil, false
+		}
+		out = append(out, cs...)
 	}
 	return out, true
 }
@@ -226,10 +273,15 @@ func hyphen(from, to []string) []comparator {
 
 // desugar expands one comparator (tilde, caret, x-range or primitive) into
 // primitive comparators, as node-semver's replaceTilde/replaceCaret/
-// replaceXRange do.
-func desugar(op, M, m, p, pr string) []comparator {
+// replaceXRange do, or returns nil for a core number rangeNum refuses.
+func desugar(op, M, m, p, pr string, cargo bool) []comparator {
 	xM, xm, xp := isX(M), isX(M) || isX(m), isX(M) || isX(m) || isX(p)
-	maj, min, pat := atoi(M), atoi(m), atoi(p)
+	maj, okM := rangeNum(M, cargo)
+	min, okm := rangeNum(m, cargo)
+	pat, okp := rangeNum(p, cargo)
+	if !okM || !okm || !okp {
+		return nil
+	}
 	ge := func(v semver) comparator { return comparator{op: ">=", v: v} }
 	lt := func(v semver) comparator { return comparator{op: "<", v: v} }
 	switch op {
@@ -238,31 +290,31 @@ func desugar(op, M, m, p, pr string) []comparator {
 		case xM:
 			return []comparator{anyComp}
 		case xm:
-			return []comparator{ge(ver(maj, 0, 0)), lt(ver(maj+1, 0, 0, zeroPre))}
+			return []comparator{ge(ver(maj, 0, 0)), below(maj)}
 		case xp:
-			return []comparator{ge(ver(maj, min, 0)), lt(ver(maj, min+1, 0, zeroPre))}
+			return []comparator{ge(ver(maj, min, 0)), below(maj, min)}
 		}
-		return []comparator{ge(ver(maj, min, pat, preOf(pr)...)), lt(ver(maj, min+1, 0, zeroPre))}
+		return []comparator{ge(ver(maj, min, pat, preOf(pr)...)), below(maj, min)}
 	case "^":
 		switch {
 		case xM:
 			return []comparator{anyComp}
 		case xm:
-			return []comparator{ge(ver(maj, 0, 0)), lt(ver(maj+1, 0, 0, zeroPre))}
+			return []comparator{ge(ver(maj, 0, 0)), below(maj)}
 		case xp:
 			if maj == 0 {
-				return []comparator{ge(ver(maj, min, 0)), lt(ver(maj, min+1, 0, zeroPre))}
+				return []comparator{ge(ver(maj, min, 0)), below(maj, min)}
 			}
-			return []comparator{ge(ver(maj, min, 0)), lt(ver(maj+1, 0, 0, zeroPre))}
+			return []comparator{ge(ver(maj, min, 0)), below(maj)}
 		}
 		from := ge(ver(maj, min, pat, preOf(pr)...))
 		switch {
 		case maj == 0 && min == 0:
-			return []comparator{from, lt(ver(0, 0, pat+1, zeroPre))}
+			return []comparator{from, below(0, 0, pat)}
 		case maj == 0:
-			return []comparator{from, lt(ver(0, min+1, 0, zeroPre))}
+			return []comparator{from, below(0, min)}
 		}
-		return []comparator{from, lt(ver(maj+1, 0, 0, zeroPre))}
+		return []comparator{from, below(maj)}
 	}
 
 	// x-ranges and primitives.
@@ -276,35 +328,27 @@ func desugar(op, M, m, p, pr string) []comparator {
 		}
 		return []comparator{anyComp}
 	case op != "" && xp:
+		prefix := []uint64{maj, min}
 		if xm {
-			min = 0
+			prefix, min = prefix[:1], 0
 		}
-		pat = 0
-		var pre []string
 		switch op {
 		case ">":
-			op = ">="
-			if xm {
-				maj, min = maj+1, 0
-			} else {
-				min++
+			// Nothing lies above a prefix at u64::MAX.
+			if v, ok := next(prefix...); ok {
+				return []comparator{ge(v)}
 			}
+			return []comparator{nothingC}
 		case "<=":
-			op = "<"
-			if xm {
-				maj++
-			} else {
-				min++
-			}
+			return []comparator{below(prefix...)}
+		case "<":
+			return []comparator{lt(ver(maj, min, 0, zeroPre))}
 		}
-		if op == "<" {
-			pre = []string{zeroPre}
-		}
-		return []comparator{{op: op, v: ver(maj, min, pat, pre...)}}
+		return []comparator{ge(ver(maj, min, 0))}
 	case xm:
-		return []comparator{ge(ver(maj, 0, 0)), lt(ver(maj+1, 0, 0, zeroPre))}
+		return []comparator{ge(ver(maj, 0, 0)), below(maj)}
 	case xp:
-		return []comparator{ge(ver(maj, min, 0)), lt(ver(maj, min+1, 0, zeroPre))}
+		return []comparator{ge(ver(maj, min, 0)), below(maj, min)}
 	}
 	if op == "=" {
 		op = ""
@@ -347,16 +391,16 @@ func testSet(set []comparator, v semver) bool {
 // compatibility, which npm also ranks on, is not modelled. ok is false when
 // spec is not a range (it is a dist-tag) or nothing satisfies it.
 func pickNpmVersion(spec, latest string, versions []string, deprecated map[string]bool) (string, bool) {
-	r, ok := parseNpmRange(spec)
+	r, ok := parseNpmRange(spec, false)
 	if !ok {
 		return "", false
 	}
-	if lv, ok := parseSemver(latest); ok && r.satisfies(lv) && !deprecated[latest] {
+	if lv, ok := parseSemver(latest, false); ok && r.satisfies(lv) && !deprecated[latest] {
 		return latest, true
 	}
 	best, bestV, bestDep := "", semver{}, false
 	for _, s := range versions {
-		v, ok := parseSemver(s)
+		v, ok := parseSemver(s, false)
 		if !ok || !r.satisfies(v) {
 			continue
 		}

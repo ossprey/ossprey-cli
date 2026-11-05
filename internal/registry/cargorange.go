@@ -4,11 +4,10 @@ import "strings"
 
 // CargoSatisfies reports whether version meets a Cargo requirement via the npm port; ok is false if unreadable.
 func CargoSatisfies(req, version string) (match, ok bool) {
-	v, ok := parseSemver(version)
+	v, ok := parseSemver(version, true)
 	if !ok || strings.ContainsAny(req, "|") {
 		return false, false
 	}
-	v.cargo = true
 	var parts []string
 	for _, c := range strings.Split(req, ",") {
 		c = opSpaceRe.ReplaceAllString(strings.TrimSpace(c), "$1")
@@ -21,7 +20,7 @@ func CargoSatisfies(req, version string) (match, ok bool) {
 		}
 		parts = append(parts, c)
 	}
-	r, ok := parseNpmRange(strings.Join(parts, " "))
+	r, ok := parseNpmRange(strings.Join(parts, " "), true)
 	if !ok {
 		return false, false
 	}
