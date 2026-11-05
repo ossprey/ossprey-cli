@@ -37,6 +37,14 @@ func TestCargoSatisfies(t *testing.T) {
 		{"0.9", "0.9.12+spec-1.1.0", true, true},
 		{"1.2.3-alpha.x", "1.4.0", true, true},
 		{"1.2.3+build.x", "1.4.0", true, true},
+		// Numeric prerelease identifiers compare by length then lexically, as Cargo's semver crate does, however long they are.
+		{">=1.0.0-100000000000000000000", "1.0.0-99999999999999999999", false, true},
+		{"<1.0.0-100000000000000000000", "1.0.0-99999999999999999999", true, true},
+		{">=1.0.0-99999999999999999999", "1.0.0-100000000000000000000", true, true},
+		{"=1.0.0-18446744073709551616", "1.0.0-18446744073709551616", true, true},
+		{">=1.0.0-alpha.10", "1.0.0-alpha.9", false, true},
+		{">=1.0.0-99999999999999999999", "1.0.0-alpha", true, true},
+		{">=1.0.0-alpha", "1.0.0-99999999999999999999", false, true},
 		// Not Cargo's grammar.
 		{"1.0 || 2.0", "1.0.0", false, false},
 		{"1.0 - 2.0", "1.0.0", false, false},

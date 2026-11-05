@@ -14,6 +14,7 @@ import (
 type semver struct {
 	major, minor, patch int
 	pre                 []string
+	cargo               bool // set on a version a Cargo requirement tests, so its prerelease identifiers order as Cargo orders them
 }
 
 // semverRe is node-semver's LOOSE version: "v"/"=" prefix, optional "-" before
@@ -81,6 +82,12 @@ func (a semver) compare(b semver) int {
 			return 1
 		}
 		x, y := a.pre[i], b.pre[i]
+		if a.cargo {
+			if c := cargoIdentCompare(x, y); c != 0 {
+				return c
+			}
+			continue
+		}
 		xn, xerr := strconv.Atoi(x)
 		yn, yerr := strconv.Atoi(y)
 		var c int
@@ -141,7 +148,7 @@ func isX(s string) bool { return s == "" || s == "x" || s == "X" || s == "*" }
 func atoi(s string) int { n, _ := strconv.Atoi(s); return n }
 
 func ver(major, minor, patch int, pre ...string) semver {
-	return semver{major, minor, patch, pre}
+	return semver{major: major, minor: minor, patch: patch, pre: pre}
 }
 
 func preOf(s string) []string {

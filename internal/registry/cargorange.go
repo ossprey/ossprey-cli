@@ -8,6 +8,7 @@ func CargoSatisfies(req, version string) (match, ok bool) {
 	if !ok || strings.ContainsAny(req, "|") {
 		return false, false
 	}
+	v.cargo = true
 	var parts []string
 	for _, c := range strings.Split(req, ",") {
 		c = opSpaceRe.ReplaceAllString(strings.TrimSpace(c), "$1")
@@ -25,4 +26,24 @@ func CargoSatisfies(req, version string) (match, ok bool) {
 		return false, false
 	}
 	return r.satisfies(v), true
+}
+
+// cargoIdentCompare orders two prerelease identifiers as Cargo's semver crate does, numeric ones by length then lexically so none overflows, and below any other.
+func cargoIdentCompare(x, y string) int {
+	xn, yn := allDigits(x), allDigits(y)
+	switch {
+	case xn && yn:
+		if c := cmpInt(len(x), len(y)); c != 0 {
+			return c
+		}
+	case xn:
+		return -1
+	case yn:
+		return 1
+	}
+	return strings.Compare(x, y)
+}
+
+func allDigits(s string) bool {
+	return s != "" && strings.Trim(s, "0123456789") == ""
 }
