@@ -172,10 +172,32 @@ func cargoRegistryOf(m pkg.RustCargoLockEntry) string {
 	}
 	clean := crateURLCleaner.Replace(trimC0(raw))
 	// Cargo's IDNA may read a non-ASCII host as crates.io or a host other than Go's, and Cargo reads a sparse source's '\' as userinfo.
-	if u, err := url.Parse(clean); err != nil || strings.ContainsFunc(u.Hostname(), nonASCII) || atPastSlash(clean) || escapedPastHost(clean) {
+	if u, err := url.Parse(clean); err != nil || strings.ContainsFunc(u.Hostname(), nonASCII) || atPastSlash(clean) || escapedPastHost(clean) || dotOrEmptySegment(clean) {
 		return ""
 	}
 	return clean
+}
+
+// dotOrEmptySegment reports an empty, "." or ".." path segment, where Cargo's URL parser and the trust policy's path.Clean may land apart.
+func dotOrEmptySegment(clean string) bool {
+	_, rest, _ := strings.Cut(clean, ":")
+	rest = strings.TrimLeft(rest, "/")
+	i := strings.IndexAny(rest, "/?#")
+	if i < 0 {
+		return false
+	}
+	p := rest[i:]
+	if j := strings.IndexAny(p, "?#"); j >= 0 {
+		p = p[:j]
+	}
+	segs := strings.Split(strings.TrimPrefix(p, "/"), "/")
+	for k, s := range segs {
+		// Only the last segment may be empty, as a trailing '/'.
+		if s == "." || s == ".." || s == "" && k < len(segs)-1 {
+			return true
+		}
+	}
+	return false
 }
 
 // escapedPastHost reports a percent-escape after the host, which Cargo keeps inside a path segment where the trust policy decodes and cleans it.

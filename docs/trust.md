@@ -52,7 +52,8 @@ crates.io is always checked, even under a rule such as `https://github.com/` or
 `https://index.crates.io/` that covers crates.io's index. So is a crate Cargo
 fetches from git, whatever rule covers its repository, and a crate whose index
 host has non-ASCII characters, since Cargo may read that host as another one,
-or whose index URL has a percent-escape such as `%2F` after the host.
+or whose index URL has a percent-escape such as `%2F` after the host, or an
+empty, `.` or `..` path segment, such as `public//../internal`.
 A crate locked from your registry and the crates.io crate of the same name and
 version are different crates to Cargo, so trusting one never hides the other.
 
