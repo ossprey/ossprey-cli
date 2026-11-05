@@ -68,8 +68,9 @@ happens when:
   configs in and above the directory it really runs in, and a link could lead
   it to a config the scan never sees;
 - a Cargo config that Cargo may read for the project sets `replace-with` for
-  any source, has an `include`, defines an alias that passes `--config`, or
-  cannot be read or is not a regular file.
+  any source, has an `include`, defines an alias that passes `--config` or
+  holds a quote, a backslash or a leading `!`, or cannot be read or is not a
+  regular file.
 
 The scan reads the configs in the project, in every directory above it and in
 `CARGO_HOME`. For registry trust, a symlinked config inside `CARGO_HOME`, or a

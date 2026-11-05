@@ -377,6 +377,14 @@ func TestCatalogTrustsNoCrateUnderASourceReplacement(t *testing.T) {
 		"an alias passing --config":                 {files: map[string]string{"proj/.cargo/config.toml": "[alias]\nxtask = \"run --config xtask/replace.toml --package xtask --\"\n"}, warning: aliased},
 		"an alias passing --config= above the root": {files: map[string]string{".cargo/config.toml": "[alias]\nb = [\"build\", \"--config=source.corp.replace-with='elsewhere'\"]\n"}, warning: aliased},
 		"an alias without --config":                 {files: map[string]string{"proj/.cargo/config.toml": "[alias]\nxtask = \"run --package xtask --\"\n"}},
+		"an array alias without --config":           {files: map[string]string{"proj/.cargo/config.toml": "[alias]\nb = [\"build\", \"--release\"]\n"}},
+		// An alias that quotes, escapes or runs a shell may pass --config where a whitespace split sees none.
+		"an alias with single quotes":          {files: map[string]string{"proj/.cargo/config.toml": "[alias]\nb = \"build '--config' overrides.toml\"\n"}, warning: aliased},
+		"an alias with double quotes":          {files: map[string]string{"proj/.cargo/config.toml": "[alias]\nb = 'build \"--config\" overrides.toml'\n"}, warning: aliased},
+		"an alias with a backslash":            {files: map[string]string{"proj/.cargo/config.toml": "[alias]\nb = 'build \\--config overrides.toml'\n"}, warning: aliased},
+		"an alias starting with !":             {files: map[string]string{"proj/.cargo/config.toml": "[alias]\nb = \"!cargo build --release\"\n"}, warning: aliased},
+		"an array alias with a quoted element": {files: map[string]string{"proj/.cargo/config.toml": "[alias]\nb = [\"build\", \"'--config'\", \"overrides.toml\"]\n"}, warning: aliased},
+		"an array alias with a backslash":      {files: map[string]string{".cargo/config.toml": "[alias]\nb = [\"build\", '\\--config', \"overrides.toml\"]\n"}, warning: aliased},
 		// cargo reads .cargo above its physical cwd, so a build in a symlinked directory reads configs the index never holds.
 		"a replacement above a symlinked directory in a package sink": {files: map[string]string{"proj/.yarn/pkg/.cargo/config.toml": replace, "proj/.yarn/pkg/app/.keep": ""}, links: map[string]string{"proj/app": ".yarn/pkg/app"}, warning: linked},
 		"a replacement above a symlinked directory outside the scan":  {files: map[string]string{"elsewhere/pkg/.cargo/config.toml": replace, "elsewhere/pkg/app/.keep": ""}, links: map[string]string{"proj/app": "../elsewhere/pkg/app"}, warning: linked},

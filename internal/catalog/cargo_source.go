@@ -245,8 +245,31 @@ func cargoReplacement(r file.Resolver, root string) string {
 				return aliasConfig
 			}
 		}
+		if aliasIndeterminate(c.doc) {
+			return aliasConfig
+		}
 	}
 	return ""
+}
+
+// aliasIndeterminate reports an alias holding a quote or backslash, or a string one starting with '!', which a whitespace split may read apart from cargo or a shell.
+func aliasIndeterminate(doc map[string]any) bool {
+	aliases, _ := doc["alias"].(map[string]any)
+	for _, a := range aliases {
+		switch a := a.(type) {
+		case string:
+			if strings.HasPrefix(strings.TrimSpace(a), "!") || strings.ContainsAny(a, `'"\`) {
+				return true
+			}
+		case []any:
+			for _, s := range a {
+				if s, ok := s.(string); ok && strings.ContainsAny(s, `'"\`) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // cargoConfigsInScan reads every .cargo directory the index holds, or says why not.

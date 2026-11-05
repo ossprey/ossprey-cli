@@ -237,10 +237,12 @@ Every rule is a hole in the scan by design, so the rules are narrow:
   holds, read on disk, plus those above the root and `CARGO_HOME`, opened by
   name where a directory cannot be listed; manifests above the root play no
   part) sets a `replace-with`, has an `include` (stable since Cargo 1.94), has
-  an alias passing `--config`, or cannot be read (`clearReplacedCrateRegistries`,
-  one warning; only a regular file is opened, since a device or FIFO may never
-  end): cargo then fetches from the replacement while the lock still names the
-  trusted index, and a repository-controlled lock can carry matching checksums.
+  an alias passing `--config` or holding a quote, a backslash or a leading `!`
+  (a whitespace split cannot tell what those pass), or cannot be read
+  (`clearReplacedCrateRegistries`, one warning; only a regular file is opened,
+  since a device or FIFO may never end): cargo then fetches from the
+  replacement while the lock still names the trusted index, and a
+  repository-controlled lock can carry matching checksums.
   For trust only (`noLinks`), a symlinked config inside `CARGO_HOME`, or a
   symlinked `.cargo` or config above the root, counts as unreadable; the vendor
   filter reads through them as before, since a dotfile manager links
