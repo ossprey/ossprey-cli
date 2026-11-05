@@ -216,14 +216,19 @@ Every rule is a hole in the scan by design, so the rules are narrow:
   `resolved`, uv/poetry `Index`, pip `download_info.url`, our npm resolver's
   lock, a `Cargo.lock` `registry+`/`sparse+` `source` via `cargoRegistryOf`).
   Unrecorded means checked. A crate's source is never a git or crates.io one
-  (OSS-2581 decides how git crates may count later), nor one with a non-ASCII
-  host, an `@` past a `/`, a percent-escape past the host or an empty, `.` or
-  `..` path segment: Go's `ToLower` maps `İ` to `i` where Cargo's IDNA does
-  not, `sparse+` is a non-special scheme to Cargo, so `host\@evil` is userinfo
-  to it and a path to us, Cargo keeps `%2F` inside a segment where
-  `canonicalURL` decodes and cleans `public%2F..%2Finternal` to `/internal/`
-  (npm and PyPI still decode), and Cargo's `..` in `public//../internal` pops
-  only the empty segment, where `path.Clean` lands on `/internal/`. A
+  (OSS-2581 decides how git crates may count later), nor an index URL that is
+  not plain printable ASCII, or that holds a backslash or a percent-escape,
+  nor one with an `@` past a `/` or an empty, `.` or `..` path segment. The
+  first is an allow-list (bytes `!` to `~` bar `\` and `%`, tested before
+  anything is trimmed), because each spelling found outside it was another
+  place Go and Cargo part: Go's `ToLower` maps `İ` to `i` where Cargo's IDNA
+  does not, `TrimSpace` drops a trailing NBSP Cargo keeps as `%C2%A0`,
+  `sparse+` is a non-special scheme to Cargo, so `host\@evil` is userinfo to
+  it and `internal\outside` one path segment where we read a `/`, and Cargo
+  keeps `%2F` inside a segment where `canonicalURL` decodes and cleans
+  `public%2F..%2Finternal` to `/internal/` (npm and PyPI still decode).
+  Cargo's `..` in `public//../internal` pops only the empty segment, where
+  `path.Clean` lands on `/internal/`. A
   symlink anywhere in the scanned tree (outside the directories the scan
   skips) keeps every crate checked (`cargoConfigsInScan`, one pass over syft's
   metadata that the first link ends, about 0.1s at most on 100k files). Links

@@ -272,6 +272,46 @@ source = "sparse+https://crates.corp.example/internal/acme/.."
 name = "acme-nested"
 version = "1.0.0"
 source = "registry+https://crates.corp.example/internal/crates/index"
+
+[[package]]
+name = "acme-trailing-nbsp"
+version = "1.0.0"
+source = "registry+https://crates.corp.example/internal\u00a0"
+
+[[package]]
+name = "acme-leading-nbsp"
+version = "1.0.0"
+source = "\u00a0sparse+https://crates.corp.example/internal/"
+
+[[package]]
+name = "acme-tab"
+version = "1.0.0"
+source = "sparse+https://crates.corp.example/inter\tnal/"
+
+[[package]]
+name = "acme-space"
+version = "1.0.0"
+source = "sparse+https://crates.corp.example/internal/acme crates/"
+
+[[package]]
+name = "acme-sparse-backslash"
+version = "1.0.0"
+source = "sparse+https://crates.corp.example/internal\\outside/"
+
+[[package]]
+name = "acme-registry-backslash"
+version = "1.0.0"
+source = "registry+https://crates.corp.example/internal\\index"
+
+[[package]]
+name = "acme-non-ascii-path"
+version = "1.0.0"
+source = "sparse+https://crates.corp.example/internal/cr\u00e4tes/"
+
+[[package]]
+name = "acme-plain"
+version = "1.0.0"
+source = "sparse+https://crates.corp.example/internal/team-a_b.c~d/"
 `
 
 // Same acme-twin@1.0.0, but this project locks it from crates.io.
@@ -309,6 +349,7 @@ func TestCatalogTrustsCratesByTheirCargoLockIndex(t *testing.T) {
 		"cargo/acme-hub?repository_url=https://github.com/",             // git index under a host-wide rule
 		"cargo/acme-index?repository_url=https://git.corp.example/",     // git index under its repository prefix
 		"cargo/acme-nested?repository_url=https://crates.corp.example/", // a normalised path below the prefix
+		"cargo/acme-plain?repository_url=https://crates.corp.example/",  // printable ASCII punctuation in a path below the prefix
 		"cargo/acme-sparse?repository_url=https://crates.corp.example/", // sparse index
 		"cargo/acme-twin?repository_url=https://crates.corp.example/",   // the private crate of that name
 	}
@@ -324,8 +365,15 @@ func TestCatalogTrustsCratesByTheirCargoLockIndex(t *testing.T) {
 		"cargo/acme-escaped-slash?repository_url=https://crates.corp.example/",
 		// Git is never a registry, even under a trusted prefix.
 		"cargo/acme-git?vcs_url=git+https://git.corp.example/acme/acme-git@0123456789abcdef0123456789abcdef01234567",
-		"cargo/acme-proxied?repository_url=https://crates.corp.example/", // same host, another registry
+		"cargo/acme-leading-nbsp?repository_url=https://crates.corp.example/",   // Go trims the NBSP, Cargo reads no sparse+ kind
+		"cargo/acme-non-ascii-path?repository_url=https://crates.corp.example/", // only printable ASCII counts
+		"cargo/acme-proxied?repository_url=https://crates.corp.example/",        // same host, another registry
+		"cargo/acme-registry-backslash?repository_url=https://crates.corp.example/",
+		"cargo/acme-space?repository_url=https://crates.corp.example/",
+		"cargo/acme-sparse-backslash?repository_url=https://crates.corp.example/", // Cargo keeps '\' inside one sparse+ segment, Go cleans it to /internal/outside/
+		"cargo/acme-tab?repository_url=https://crates.corp.example/",
 		"cargo/acme-trailing-dots?repository_url=https://crates.corp.example/",
+		"cargo/acme-trailing-nbsp?repository_url=https://crates.corp.example/", // Go trims the NBSP, Cargo keeps it as /internal%C2%A0
 		"cargo/acme-twin", // locked from crates.io in rustapp2
 		"cargo/itoa",      // crates.io under its own sparse host's rule
 		"cargo/ryu",       // a non-ASCII host on crates.io's path goes out as twins, neither trusted

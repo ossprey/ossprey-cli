@@ -165,18 +165,22 @@ func cargoSourceQualifiers(source string) (map[string]string, string) {
 
 // cargoRegistryOf returns the index URL of a registry or sparse source for the trust policy, or "" for git, crates.io or a spelling Go and Cargo may read apart.
 func cargoRegistryOf(m pkg.RustCargoLockEntry) string {
-	source := strings.TrimSpace(m.Source)
-	kind, raw, _ := strings.Cut(source, "+")
-	if is, _ := isCratesIo(source); is || kind != "registry" && kind != "sparse" {
+	kind, raw, _ := strings.Cut(m.Source, "+")
+	// Any byte Go and Cargo may read apart keeps the crate checked, before anything is trimmed or cleaned.
+	if strings.ContainsFunc(raw, unplainURLByte) {
 		return ""
 	}
-	clean := crateURLCleaner.Replace(trimC0(raw))
-	// Cargo's IDNA may read a non-ASCII host as crates.io or a host other than Go's, and Cargo reads a sparse source's '\' as userinfo.
-	if u, err := url.Parse(clean); err != nil || strings.ContainsFunc(u.Hostname(), nonASCII) || atPastSlash(clean) || escapedPastHost(clean) || dotOrEmptySegment(clean) {
+	if is, _ := isCratesIo(m.Source); is || kind != "registry" && kind != "sparse" {
 		return ""
 	}
-	return clean
+	if _, err := url.Parse(raw); err != nil || atPastSlash(raw) || dotOrEmptySegment(raw) {
+		return ""
+	}
+	return raw
 }
+
+// unplainURLByte reports whitespace, a control, non-ASCII, '\' or '%', any of which Go and Cargo may read apart.
+func unplainURLByte(r rune) bool { return r < '!' || r > '~' || r == '\\' || r == '%' }
 
 // dotOrEmptySegment reports an empty, "." or ".." path segment, where Cargo's URL parser and the trust policy's path.Clean may land apart.
 func dotOrEmptySegment(clean string) bool {
@@ -198,14 +202,6 @@ func dotOrEmptySegment(clean string) bool {
 		}
 	}
 	return false
-}
-
-// escapedPastHost reports a percent-escape after the host, which Cargo keeps inside a path segment where the trust policy decodes and cleans it.
-func escapedPastHost(clean string) bool {
-	_, rest, _ := strings.Cut(clean, ":")
-	rest = strings.TrimLeft(rest, "/")
-	i := strings.IndexAny(rest, "/?#")
-	return i >= 0 && strings.Contains(rest[i:], "%")
 }
 
 const (
