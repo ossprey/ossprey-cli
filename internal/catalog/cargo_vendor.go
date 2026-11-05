@@ -689,7 +689,7 @@ func readLocation(r file.Resolver, loc file.Location, limit int64) ([]byte, erro
 		return nil, err
 	}
 	if int64(len(data)) > limit {
-		return nil, fmt.Errorf("%s is over %d bytes", loc.RealPath, limit)
+		return nil, &fs.PathError{Op: "read", Path: loc.RealPath, Err: fmt.Errorf("over the %d byte limit", limit)}
 	}
 	return data, nil
 }

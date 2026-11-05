@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -9,10 +10,16 @@ import (
 	"path/filepath"
 
 	"github.com/BurntSushi/toml"
+	"github.com/anchore/syft/syft/file"
+
+	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
 // maxManifestBytes bounds a TOML manifest to a size no genuine one reaches.
 const maxManifestBytes = 1 << 20
+
+// maxLockBytes bounds a TOML lockfile, which a large project's wheel hashes take to a few MB.
+const maxLockBytes = 32 << 20
 
 // maxTOMLDepth bounds nesting, since the toml parser allocates quadratically in it (OSS-2098).
 const maxTOMLDepth = 64
@@ -94,6 +101,77 @@ func relToRoot(root string, err error) error {
 		}
 	}
 	return err
+}
+
+// syftTOMLLocks are the lockfiles syft parses with no size or depth limit; it parses no pyproject.toml.
+var syftTOMLLocks = []string{"**/poetry.lock", "**/uv.lock", "**/pdm.lock", "**/Cargo.lock"}
+
+// boundedLocks hides from every cataloger the lockfiles withBoundedLocks refused.
+type boundedLocks struct {
+	file.Resolver
+	refused map[string]bool
+}
+
+// withBoundedLocks refuses each lockfile syft would parse over maxLockBytes or deeper than maxTOMLDepth, warning once for each.
+func withBoundedLocks(ctx context.Context, r file.Resolver, root string) file.Resolver {
+	checked, refused := map[string]bool{}, map[string]bool{}
+	for _, glob := range syftTOMLLocks {
+		locs, err := r.FilesByGlob(glob)
+		if err != nil {
+			continue
+		}
+		for _, l := range locs {
+			if checked[l.RealPath] {
+				continue
+			}
+			checked[l.RealPath] = true
+			data, err := readLocation(r, l, maxLockBytes)
+			if err == nil {
+				if err = checkTOMLDepth(data); err != nil {
+					err = &fs.PathError{Op: "parse", Path: l.RealPath, Err: err}
+				}
+			}
+			if err != nil {
+				refused[l.RealPath] = true
+				err = relToRoot(root, err)
+				warn.Add(ctx, warn.Entry{
+					Class: "lockfile:refused",
+					One:   fmt.Sprintf("lockfile skipped (%v); the packages it pins were not read from it", err),
+					Many:  "%d lockfiles skipped; the packages they pin were not read from them",
+					Item:  err.Error(),
+				})
+			}
+		}
+	}
+	if len(refused) == 0 {
+		return r
+	}
+	return boundedLocks{Resolver: r, refused: refused}
+}
+
+func (r boundedLocks) keep(locs []file.Location, err error) ([]file.Location, error) {
+	if err != nil {
+		return nil, err
+	}
+	var out []file.Location
+	for _, l := range locs {
+		if !r.refused[l.RealPath] {
+			out = append(out, l)
+		}
+	}
+	return out, nil
+}
+
+func (r boundedLocks) FilesByGlob(patterns ...string) ([]file.Location, error) {
+	return r.keep(r.Resolver.FilesByGlob(patterns...))
+}
+
+func (r boundedLocks) FilesByPath(paths ...string) ([]file.Location, error) {
+	return r.keep(r.Resolver.FilesByPath(paths...))
+}
+
+func (r boundedLocks) FilesByMIMEType(types ...string) ([]file.Location, error) {
+	return r.keep(r.Resolver.FilesByMIMEType(types...))
 }
 
 // decodeTOML decodes data into v, refusing data nested deeper than maxTOMLDepth.

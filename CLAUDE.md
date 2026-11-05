@@ -385,6 +385,16 @@ root is `EvalSymlinks`ed first or no exclusion matches under macOS `/var`.
 `TestDirectorySourceSkipsPackageSinks` asserts on the index, not on catalog
 output, because catalog output was already clean before the fix.
 
+**syft's TOML lockfile parsers sit behind a resolver wrapper** (`withBoundedLocks`,
+OSS-2098). syft v1.44.0 parses `poetry.lock`, `uv.lock` and `pdm.lock` with
+BurntSushi/toml, which allocates quadratically in nesting (643 MB for one 8 KB
+key, 3.7 GB for 4,000 nested inline tables in a `uv.lock`, which it parses
+twice), and `Cargo.lock` with pelletier/go-toml v1, which stays linear but
+recurses per array and dies of a fatal stack overflow at 400,000 nested arrays
+(800 KB). A fatal error cannot be recovered, so a lockfile over 32 MiB or
+deeper than `maxTOMLDepth` is hidden from every cataloger, with one warning per
+file. syft parses no `pyproject.toml`, so that one needs no wrapper.
+
 **`cargo vendor` crates are hidden by marker, not by name** (`withoutCargoVendor`,
 OSS-2561). Every crate it writes holds a `.cargo-checksum.json`, and the vendor
 directory's name is configurable, so a `vendor` sink would miss

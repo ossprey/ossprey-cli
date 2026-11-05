@@ -1577,6 +1577,50 @@ func TestCatalogSkipsTOMLNestedTooDeepToParse(t *testing.T) {
 	}
 }
 
+// OSS-2098: syft parses these lockfiles with no limit of its own, so one too deep or too large is refused before it.
+func TestCatalogRefusesLockfilesSyftWouldParseUnbounded(t *testing.T) {
+	poetry := "[[package]]\nname = \"requests\"\nversion = \"2.31.0\"\ndescription = \"\"\noptional = false\npython-versions = \"*\"\nfiles = []\n\n[metadata]\nlock-version = \"2.0\"\npython-versions = \"^3.12\"\ncontent-hash = \"x\"\n"
+	for name, c := range map[string]struct{ lock, normal, want, refused, why string }{
+		// BurntSushi/toml allocates 643 MB for this 8 KB key.
+		"poetry.lock": {"poetry.lock", poetry, "requests@2.31.0", deepTOMLKey(4000), "nested deeper than"},
+		"uv.lock":     {"uv.lock", "version = 1\nrequires-python = \">=3.12\"\n\n[[package]]\nname = \"requests\"\nversion = \"2.31.0\"\nsource = { registry = \"https://pypi.org/simple\" }\n", "requests@2.31.0", deepTOMLKey(4000), "nested deeper than"},
+		"pdm.lock":    {"pdm.lock", "[metadata]\ngroups = [\"default\"]\nlock_version = \"4.4\"\ncontent_hash = \"sha256:x\"\n\n[[package]]\nname = \"requests\"\nversion = \"2.31.0\"\nrequires_python = \">=3.7\"\nsummary = \"x\"\n", "requests@2.31.0", deepTOMLKey(4000), "nested deeper than"},
+		// pelletier/go-toml recurses per array: 111 MB and a 1 GB stack here, a fatal stack overflow at twice the depth.
+		"Cargo.lock":   {"Cargo.lock", "version = 3\n" + lockEntry("serde", "1.0.200", "aaaa"), "serde@1.0.200", "x = " + strings.Repeat("[", 200000) + strings.Repeat("]", 200000) + "\n", "nested deeper than"},
+		"over the cap": {"poetry.lock", poetry, "requests@2.31.0", "# " + strings.Repeat("x", maxLockBytes) + "\n", "byte limit"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("CARGO_HOME", t.TempDir())
+			writeTree(t, dir, map[string]string{"normal/" + c.lock: c.normal, "refused/" + c.lock: c.refused})
+
+			ctx := warn.NewContext(context.Background(), false)
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
+			got, err := Catalog(ctx, dir, Options{SkipVersionLookup: true, NoExec: true})
+			runtime.ReadMemStats(&after)
+			if err != nil {
+				t.Fatalf("Catalog: %v", err)
+			}
+
+			found := false
+			for _, p := range got {
+				found = found || p.Name+"@"+p.Version == c.want
+			}
+			if !found {
+				t.Errorf("Catalog() = %v, want the normal lockfile's %s", got, c.want)
+			}
+			if drained := warn.Drain(ctx); strings.Count(drained, "\n") != 1 || !strings.Contains(drained, c.why) || !strings.Contains(drained, " "+filepath.Join("refused", c.lock)+":") {
+				t.Errorf("warnings = %q, want one naming refused/%s", drained, c.lock)
+			}
+			// The cap case reads its 32 MB once to refuse it, so only the depth cases bound the allocation.
+			if alloc := after.TotalAlloc - before.TotalAlloc; c.why != "byte limit" && alloc > 16<<20 {
+				t.Errorf("Catalog allocated %d MB", alloc>>20)
+			}
+		})
+	}
+}
+
 func TestCargoDropReasonNamesTheRuleThatFailed(t *testing.T) {
 	// Both halves of validCargoComponent drop a component; reporting the name
 	// rule for a version failure sends the reader after the wrong thing.
