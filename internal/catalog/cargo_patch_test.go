@@ -28,6 +28,25 @@ serde = "=1.0.100"
 serde = { git = "https://github.com/evil/serde" }
 `
 
+const otherRev = "89abcdef0123456789abcdef0123456789abcdef"
+
+const registrySerde = "[[package]]\nname = \"serde\"\nversion = \"1.0.100\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n"
+
+// gitSerde is a Cargo.lock entry for serde 1.0.100 from the evil fork, its source ending in suffix.
+func gitSerde(suffix string) string {
+	return "[[package]]\nname = \"serde\"\nversion = \"1.0.100\"\nsource = \"git+https://github.com/evil/serde" + suffix + "\"\n"
+}
+
+// appLock is a Cargo.lock holding the app and entries.
+func appLock(entries ...string) string {
+	return "version = 4\n\n[[package]]\nname = \"app\"\nversion = \"0.1.0\"\n\n" + strings.Join(entries, "\n")
+}
+
+// patchedSerde is lockless7 with more keys on its serde patch.
+func patchedSerde(keys string) string {
+	return strings.Replace(lockless7, `git = "https://github.com/evil/serde" }`, `git = "https://github.com/evil/serde"`+keys+` }`, 1)
+}
+
 // cargoComponents spells each crate as name@version, its source qualifiers and where under root it was found.
 func cargoComponents(t *testing.T, pkgs []Package, root string) []string {
 	t.Helper()
@@ -209,6 +228,35 @@ source = "git+https://github.com/evil/serde#` + patchRev + `"
 		}, []string{
 			"serde@1.0.100 Cargo.toml",
 			"serde@1.0.100?vcs_url=git+https://github.com/evil/serde@" + patchRev + " Cargo.lock",
+		}},
+		// A build without --locked rewrites a lock that predates the patch and fetches the fork, so the manifest's target still goes out.
+		{"lock that predates the patch", map[string]string{
+			"Cargo.toml": lockless7,
+			"Cargo.lock": appLock(registrySerde),
+		}, []string{
+			"serde@1.0.100 Cargo.lock,Cargo.toml",
+			"serde@?vcs_url=git+https://github.com/evil/serde Cargo.toml",
+		}},
+		{"lock recording the patch as unused", map[string]string{
+			"Cargo.toml": lockless7,
+			"Cargo.lock": appLock(registrySerde, "[[patch.unused]]\nname = \"serde\"\nversion = \"1.0.200\"\nsource = \"git+https://github.com/evil/serde#"+patchRev+"\"\n"),
+		}, []string{
+			"serde@1.0.100 Cargo.lock,Cargo.toml",
+		}},
+		{"lock recording a branch patch", map[string]string{
+			"Cargo.toml": patchedSerde(`, branch = "main"`),
+			"Cargo.lock": appLock(gitSerde("?branch=main#" + patchRev)),
+		}, []string{
+			"serde@1.0.100 Cargo.toml",
+			"serde@1.0.100?vcs_url=git+https://github.com/evil/serde@" + patchRev + " Cargo.lock",
+		}},
+		{"lock at another commit than rev", map[string]string{
+			"Cargo.toml": patchedSerde(`, rev = "` + patchRev + `"`),
+			"Cargo.lock": appLock(gitSerde("?rev=" + otherRev + "#" + otherRev)),
+		}, []string{
+			"serde@1.0.100 Cargo.toml",
+			"serde@1.0.100?vcs_url=git+https://github.com/evil/serde@" + otherRev + " Cargo.lock",
+			"serde@?vcs_url=git+https://github.com/evil/serde@" + patchRev + " Cargo.toml",
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -8,13 +8,55 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/BurntSushi/toml"
+
 	"github.com/anchore/syft/syft/pkg"
 )
 
-// hasCargoLock reports whether a Cargo.lock sits beside the manifest at manifestPath.
-func hasCargoLock(manifestPath string) bool {
-	_, err := os.Stat(filepath.Join(filepath.Dir(manifestPath), "Cargo.lock"))
-	return err == nil
+// cargoLockGitSources maps each crate name to the git sources the Cargo.lock beside manifestPath records, as a package or an unused patch, or nil without a readable lock.
+func cargoLockGitSources(manifestPath string) map[string][]string {
+	lockPath := filepath.Join(filepath.Dir(manifestPath), "Cargo.lock")
+	if info, err := os.Stat(lockPath); err != nil || info.Size() > maxCargoProofBytes {
+		return nil
+	}
+	data, err := os.ReadFile(lockPath)
+	if err != nil {
+		return nil
+	}
+	type entry struct {
+		Name   string `toml:"name"`
+		Source string `toml:"source"`
+	}
+	var lock struct {
+		Package []entry `toml:"package"`
+		Patch   struct {
+			Unused []entry `toml:"unused"`
+		} `toml:"patch"`
+	}
+	if _, err := toml.Decode(string(data), &lock); err != nil {
+		return nil
+	}
+	out := map[string][]string{}
+	for _, e := range append(lock.Package, lock.Patch.Unused...) {
+		if strings.HasPrefix(e.Source, "git+") {
+			out[e.Name] = append(out[e.Name], e.Source)
+		}
+	}
+	return out
+}
+
+// lockRecords reports whether a lock records the git target from its repository, at its commit when the manifest names one.
+func lockRecords(locked map[string][]string, t pkg.RustCargoLockEntry) bool {
+	repo, rev, _ := strings.Cut(t.Source, "#")
+	repo, _, _ = strings.Cut(repo, "?")
+	for _, s := range locked[t.Name] {
+		lockRepo, commit, _ := strings.Cut(s, "#")
+		lockRepo, _, _ = strings.Cut(lockRepo, "?")
+		if lockRepo == repo && (rev == "" || commit == rev) {
+			return true
+		}
+	}
+	return false
 }
 
 // fullCommit is a whole git object id, the only rev Cargo.lock would record after '#'.

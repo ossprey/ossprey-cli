@@ -145,9 +145,14 @@ func parseCargoTomlFile(ctx context.Context, path string, loc file.Location, sca
 		l := withAnnotation(loc, cargoReqAnnotation, strings.Join(reqs[name], "\n"))
 		out = append(out, pkg.Package{Name: name, Type: pkg.RustPkg, Locations: file.NewLocationSet(l)})
 	}
-	// Cargo reads [patch] and [replace] only at the workspace root, and a lock there already records their git sources.
-	if !member && !hasCargoLock(path) {
-		for _, t := range cargoGitTargets(m) {
+	// Cargo reads [patch] and [replace] only at the workspace root.
+	if targets := cargoGitTargets(m); !member && len(targets) > 0 {
+		locked := cargoLockGitSources(path)
+		for _, t := range targets {
+			// A lock that predates the target does not hide it, since a build without --locked rewrites the lock to fetch it.
+			if lockRecords(locked, t) {
+				continue
+			}
 			if _, _, ok, why := vouched(t.Name, ""); !ok {
 				warn.Add(ctx, cargoDropEntry("cargotoml", why, t.Name))
 				continue

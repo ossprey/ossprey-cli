@@ -78,9 +78,10 @@ apart from the crates.io crate of that name. A crate from a registry host
 spelled with non-ASCII characters is sent both marked and as the crates.io
 crate, since Cargo reads some such hosts as crates.io. A dependency that `[patch]`
 or `[replace]` redirects to git is sent both ways: the git crate, marked, and the
-crates.io crate `Cargo.toml` declares. With a committed `Cargo.lock` the git
-crate comes from the lock at its locked commit. Without one it comes from your
-workspace root's `Cargo.toml`, with the commit when `rev` names a full one. A
+crates.io crate `Cargo.toml` declares. When your workspace root's `Cargo.lock`
+records the git crate, it comes from the lock at its locked commit. Otherwise,
+as when there is no lock or the lock predates the patch, it comes from the
+root's `Cargo.toml`, with the commit when `rev` names a full one. A
 workspace member scanned on its own counts as its own workspace root, so its
 git patches are sent too, although Cargo ignores them when it builds the whole
 workspace. A patch or replacement by `path` is your own code and is not sent.
