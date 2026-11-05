@@ -283,13 +283,19 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 				warn.Add(ctx, cargoDropEntry("cargolock", why, p.Name))
 				continue
 			}
+			registry := registryOf(p)
 			for _, qualifiers := range marks {
 				key := dedupKey(t, p.Name, version) + qualifierKey(qualifiers)
 				if i, ok := seen[key]; ok {
+					// A crate sighting with no registry, refused or unrecorded, vetoes trust for every other.
+					if t == "cargo" && (registry == "" || len(out[i].Registries) == 0) {
+						out[i].Registries = nil
+						continue
+					}
 					// Every sighting's source counts toward trust, not just the
 					// first: one lockfile fetching it from the public index is
 					// enough to need a check.
-					out[i].Registries = mergeUnique(out[i].Registries, []string{registryOf(p)})
+					out[i].Registries = mergeUnique(out[i].Registries, []string{registry})
 					continue
 				}
 				seen[key] = len(out)
@@ -299,7 +305,7 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 					Type:       t,
 					Source:     []string{c.Name()},
 					Locations:  locations(p),
-					Registries: mergeUnique(nil, []string{registryOf(p)}),
+					Registries: mergeUnique(nil, []string{registry}),
 					Qualifiers: qualifiers,
 				})
 			}

@@ -257,6 +257,8 @@ Every rule is a hole in the scan by design, so the rules are narrow:
   source, so it stays checked. Trusted needs **every** recorded sighting trusted: dedup and
   `mergeVersionless` fold sightings' `Registries` together rather than keeping
   the first, since one lockfile fetching it publicly is enough to need a check.
+  A crate sighting with no registry, refused or unrecorded, empties the
+  merged crate's `Registries`, since its dedup key holds only the origin.
   Don't add pnpm (no URL) or Pipfile.lock (index *name*) without real URLs.
 - **Named forwarded installs apply only the scope rule to the names typed**
   (`dropTrusted`, before anything is resolved so nothing private is looked up
