@@ -314,7 +314,7 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 	}
 
 	merged := mergeVersionless(out)
-	markLocalPackages(merged, findLocalPackageNames(ctx, resolver, absRoot))
+	markLocalPackages(merged, findLocalPackageNames(resolver, absRoot))
 	clearReplacedCrateRegistries(ctx, merged, opts.Trust, resolver, absRoot)
 	markTrustedPackages(merged, opts.Trust)
 	resolveVersionless(ctx, merged, opts)

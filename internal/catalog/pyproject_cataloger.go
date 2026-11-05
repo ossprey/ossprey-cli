@@ -64,8 +64,12 @@ func readPyProject(path string) (*pyproject, error) {
 
 func parsePyProjectFile(path string, loc file.Location) ([]pkg.Package, error) {
 	pp, err := readPyProject(path)
-	if err != nil || pp == nil {
-		return nil, err
+	if err != nil {
+		// Local-source marking skips the file too, so this one line also says what that costs.
+		return nil, withLocalSourcesCost(path, err)
+	}
+	if pp == nil {
+		return nil, nil
 	}
 
 	rootName := normalizeName(pp.Project.Name)

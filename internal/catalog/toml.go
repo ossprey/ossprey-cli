@@ -60,6 +60,23 @@ func readTOML(path string) ([]byte, error) {
 	return data, nil
 }
 
+// tomlPrefix is up to the first maxManifestBytes of a regular file, the part of a refused manifest that can still be read.
+func tomlPrefix(path string) []byte {
+	if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
+		return nil
+	}
+	f, err := os.OpenFile(path, os.O_RDONLY|oNonblock, 0)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	if info, err := f.Stat(); err != nil || !info.Mode().IsRegular() {
+		return nil
+	}
+	data, _ := io.ReadAll(io.LimitReader(f, maxManifestBytes))
+	return data
+}
+
 // openRegular opens path without blocking on a FIFO swapped in since a stat, then refuses all but a regular file within the cap.
 func openRegular(path string) (*os.File, error) {
 	f, err := os.OpenFile(path, os.O_RDONLY|oNonblock, 0)

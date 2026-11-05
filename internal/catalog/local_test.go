@@ -164,29 +164,43 @@ func keysOf(m map[string]struct{}) []string {
 	return out
 }
 
-// A pyproject.toml that cannot be read for local sources is named once, since a path package it declares goes to PyPI unmarked.
-func TestCatalogWarnsWhenLocalSourcesCannotBeRead(t *testing.T) {
-	sources := "[project]\nname = \"app\"\ndependencies = [\"mylib\"]\n\n[tool.uv.sources]\nmylib = { path = \"libs/mylib\" }\n"
-	for name, body := range map[string]string{
-		"over the cap":    sources + "# " + strings.Repeat("x", maxManifestBytes) + "\n",
-		"nested too deep": sources + deepTOMLKey(maxTOMLDepth+1),
+// A pyproject.toml that cannot be read is named in one line, which says its local packages go to PyPI only when its readable part declares some.
+func TestCatalogNamesAnUnreadablePyprojectOnce(t *testing.T) {
+	deep, filler := deepTOMLKey(maxTOMLDepth+1), "# "+strings.Repeat("x", maxManifestBytes)+"\n"
+	uvPath := "[project]\nname = \"app\"\ndependencies = [\"mylib\"]\n\n[tool.uv.sources]\nmylib = { path = \"libs/mylib\" } # local\n"
+	plain := "[project]\nname = \"app\"\ndependencies = [\"requests\"]\n"
+	for name, c := range map[string]struct {
+		body string
+		pypi bool
+	}{
+		"over the cap, a uv path source":         {uvPath + filler, true},
+		"nested too deep, a uv path source":      {uvPath + deep, true},
+		"nested too deep, a uv workspace source": {"[tool.uv.sources.mylib]\nworkspace = true\n" + deep, true},
+		"nested too deep, a uv workspace":        {"[tool.uv.workspace]\nmembers = [\"packages/*\"]\n" + deep, true},
+		"unparseable, a dotted uv source":        {"[tool.uv]\nsources.mylib = { path = \"../mylib\" }\nx =\n", true},
+		"nested too deep, a poetry path dep":     {"[tool.poetry.dependencies]\nmylib = { path = \"../mylib\", develop = true }\n" + deep, true},
+		"over the cap, no local source":          {plain + filler, false},
+		"nested too deep, no local source":       {plain + deep, false},
+		"unparseable, no local source":           {plain + "x =\n", false},
+		"nested too deep, a git source":          {"[tool.uv.sources]\nmylib = { git = \"https://github.com/a/b?path=x\" }\n" + deep, false},
+		"nested too deep, workspace off":         {"[tool.uv.sources]\nmylib = { workspace = false }\n" + deep, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
-			writeTree(t, dir, map[string]string{"app/pyproject.toml": body})
+			writeTree(t, dir, map[string]string{"app/pyproject.toml": c.body})
 			ctx := warn.NewContext(context.Background(), false)
 			if _, err := Catalog(ctx, dir, Options{SkipVersionLookup: true, NoExec: true}); err != nil {
 				t.Fatalf("Catalog: %v", err)
 			}
-			var lines []string
 			drained := warn.Drain(ctx)
+			var lines []string
 			for _, l := range strings.Split(drained, "\n") {
-				if strings.Contains(l, "local sources") {
+				if strings.Contains(l, filepath.Join("app", "pyproject.toml")) {
 					lines = append(lines, l)
 				}
 			}
-			if len(lines) != 1 || !strings.Contains(lines[0], " "+filepath.Join("app", "pyproject.toml")+":") {
-				t.Errorf("warnings = %q, want one local-sources warning naming app/pyproject.toml", drained)
+			if len(lines) != 1 || strings.Contains(lines[0], "looked up on PyPI") != c.pypi {
+				t.Errorf("warnings = %q, want one line naming app/pyproject.toml that mentions PyPI = %v", drained, c.pypi)
 			}
 		})
 	}
