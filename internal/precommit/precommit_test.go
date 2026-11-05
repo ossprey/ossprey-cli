@@ -567,6 +567,19 @@ func TestStagedDeltaVendoredCrateLocks(t *testing.T) {
 			want: plantedEvil,
 		},
 		{
+			name: "a crate whose Cargo.toml declares [workspace] keeps its own lock checked, though it passes every other proof",
+			setup: func(t *testing.T, dir string) {
+				writeRepoFile(t, dir, ".cargo/config.toml", vendorConfig("vendor"))
+				writeRepoFile(t, dir, "Cargo.toml", appManifest)
+				writeRepoFile(t, dir, "Cargo.lock", lockedCrates([3]string{"serde", "1.0.229", sumSerde}))
+				commitAll(t, dir)
+				vendorCrate(t, dir, "vendor/serde", "serde", "1.0.229", sumSerde, evilLock)
+				writeRepoFile(t, dir, "vendor/serde/Cargo.toml", "[package]\nname = \"serde\"\nversion = \"1.0.229\"\n\n[workspace]\n\n[dependencies]\nevil-crate = \"6\"\n")
+				gitT(t, dir, "add", "-A")
+			},
+			want: []Package{{Type: "cargo", Name: "evil-crate", Version: "6.6.6", Path: "vendor/serde/Cargo.lock"}},
+		},
+		{
 			name: "an exact pin hand-added to a vendored manifest is still checked",
 			setup: func(t *testing.T, dir string) {
 				writeRepoFile(t, dir, ".cargo/config.toml", vendorConfig("vendor"))

@@ -520,7 +520,8 @@ func vendoredCopy(ctx context.Context, repoDir string, files proofFiles, dir str
 		return false
 	}
 	name, version := catalog.CargoPackageID(manifest)
-	if name == "" || version == "" {
+	// cargo publish strips [workspace], so as in the scan's filter a manifest holding one is a project's own.
+	if name == "" || version == "" || catalog.DeclaresCargoWorkspace(manifest) {
 		return false
 	}
 	for a := dir; a != "."; {

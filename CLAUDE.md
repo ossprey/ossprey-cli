@@ -398,7 +398,10 @@ the crate's parent (`CargoVendorSource`: nearest config wins per key, a path is
 relative to the directory holding `.cargo`, and no config, an unclear one or a
 mismatch skips nothing). `CargoVendorSource` places no directory with `..`
 after a named directory, because cargo resolves `..` after following symlinks
-and a lexical join can name another directory. Every proof file comes from one
+and a lexical join can name another directory. A crate whose `Cargo.toml`
+declares `[workspace]` is never a vendored copy, as in the filter, since
+`cargo publish` strips the table and that crate's own lock is what pins its
+range dependencies. Every proof file comes from one
 `git ls-files -s` listing and is read by its blob only when its entry is a
 regular file: a symlink's blob is its target text, which cargo never reads as
 the file. One `git cat-file --batch-check` then sizes every listed blob, and a

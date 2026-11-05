@@ -79,8 +79,9 @@ framework manage both.
 - **A vendored crate's own `Cargo.lock`.** A crate `cargo vendor` copies
   keeps the `Cargo.lock` its author published, which your build never reads,
   so it is not looked up when your project's `Cargo.lock` pins that crate at
-  its vendored checksum and your project's `.cargo/config.toml`, staged or
-  committed, replaces crates.io with the directory the crate sits in; a
+  its vendored checksum, the crate's `Cargo.toml` declares no `[workspace]`,
+  and your project's `.cargo/config.toml`, staged or committed, replaces
+  crates.io with the directory the crate sits in; a
   `vendor/` change staged without its `Cargo.lock` is still checked in full.
 - **Rust crates on plans without Rust scanning.** Staged crates are not looked
   up; [supported ecosystems](ecosystems.md) says which plans include Rust.
