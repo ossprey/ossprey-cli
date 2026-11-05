@@ -15,7 +15,7 @@ There are two kinds of rule:
 
 | Rule | Trusts | Decided from |
 | ---- | ------ | ------------ |
-| `--registry <url>` | Packages fetched from that registry or index, npm or PyPI | Where your **lockfile** says each package came from |
+| `--registry <url>` | Packages fetched from that registry or index (npm, PyPI or Rust) | Where your **lockfile** says each package came from |
 | `--npm-scope @org` | Every `@org/*` npm package | The package name |
 
 ## Trusted registries
@@ -43,7 +43,56 @@ The source of each package is read from the lockfile:
 | `yarn.lock` | `resolved` |
 | `uv.lock` | `source = { registry = … }` |
 | `poetry.lock` | `[package.source] url` |
+| `Cargo.lock` | `source`, a `registry+` or `sparse+` index URL |
 | no lockfile, resolved by pip | pip's `download_info.url` |
+
+A `Cargo.lock` records each crate's index URL, so for Rust register that URL
+without its `registry+` or `sparse+` prefix, or any prefix of it. A crate from
+crates.io is always checked, even under a rule such as `https://github.com/` or
+`https://index.crates.io/` that covers crates.io's index. So is a crate Cargo
+fetches from git, whatever rule covers its repository, and a crate whose index
+Cargo may read as another one: an index URL that is not plain printable ASCII,
+or that holds a backslash or a percent-escape, or that has an IP-literal host
+such as `[::1]`, or an empty, `.` or `..` path segment, such as
+`public//../internal`. If one
+lockfile locks a crate from such an index URL on your registry's host and
+another locks the same version from your registry, it is checked.
+A crate locked from your registry and the crates.io crate of the same name and
+version are different crates to Cargo, so trusting one never hides the other.
+
+Cargo configuration can make Cargo fetch a crate from somewhere other than the
+index its lock names. Whenever the scan cannot tell where Cargo will fetch
+crates from, every crate is checked and the scan says why in one warning. That
+happens when:
+
+- the project holds a symlink. A symlink anywhere in the scanned tree
+  (outside the directories the scan skips) keeps every crate checked, even one
+  to another file in the project such as a shared `LICENSE`. Cargo reads the
+  configs in and above the directory it really runs in, and a link could lead
+  it to a config the scan never sees;
+- a Cargo config that Cargo may read for the project sets `replace-with` for
+  any source, has an `include`, defines an alias that passes `--config` or
+  holds a quote, a backslash or a leading `!`, or cannot be read or is not a
+  regular file.
+
+The scan reads the configs in the project, in every directory above it and in
+`CARGO_HOME`. For registry trust, a symlinked config inside `CARGO_HOME`, or a
+symlinked `.cargo` directory or config above the project, counts as a config
+that cannot be read. `CARGO_HOME` itself may be a symlink and is followed,
+unless it is also the `.cargo` directory of a directory above the project, as
+`~/.cargo` is for a project under your home directory.
+
+These are not checked:
+
+- How Cargo is run, which a repository scan cannot see: its `--config` option
+  typed on the command line, and environment variables such as
+  `CARGO_HTTP_PROXY` and `CARGO_HTTP_CAINFO`.
+- `[http]` `proxy` and `cainfo` settings in a config.
+- A config that Cargo reads only when it runs inside a directory the scan
+  skips, such as `node_modules` or `target`.
+- A `.cargo` directory inside the project that the user running the scan
+  cannot list. Git does not record directory permissions, so a checkout alone
+  cannot cause this.
 
 **A package whose source was not recorded is checked.** That covers
 `pnpm-lock.yaml` (it records no tarball URL), `Pipfile.lock` (it records an
