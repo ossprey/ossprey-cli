@@ -45,21 +45,7 @@ func readTOML(path string) ([]byte, error) {
 		return nil, err
 	}
 	defer f.Close()
-	return readBounded(f, path)
-}
-
-// readUserTOML reads a TOML file the user named, which may be a pipe such as <(...), within the same cap.
-func readUserTOML(path string) ([]byte, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	return readBounded(f, path)
-}
-
-// readBounded reads f to the cap, since a pipe, a device or a file still growing reads past any size it reports.
-func readBounded(f *os.File, path string) ([]byte, error) {
+	// The size is only a hint: a device or a file still growing reads past it, so the read is bounded too.
 	data, err := io.ReadAll(io.LimitReader(f, maxManifestBytes+1))
 	if err != nil {
 		return nil, err

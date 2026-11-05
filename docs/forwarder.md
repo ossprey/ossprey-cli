@@ -169,7 +169,10 @@ always checked). A bare install applies both rules, from the lockfile.
   configuration file it cannot read or parse, the
   `OSSPREY_RESOLVE_TIMEOUT` (default 2m) — only the named packages are checked,
   one line says so (`could not resolve the dependencies of foo (…); checking
-  the named packages only`), and the install proceeds. A tool run still
+  the named packages only`), and the install proceeds. A uv configuration
+  file given as a pipe (`--config-file <(...)`, `UV_CONFIG_FILE=/dev/fd/3`) is
+  never read by the dry run, since reading a pipe empties it and uv would then
+  run with none: the line names the file as a pipe instead. A tool run still
   checks what an earlier run left on disk (npm's npx cache, uv's cached or
   installed tool environments), since that is what the tool may run when
   today's resolution fails, and the line then says `checking the named

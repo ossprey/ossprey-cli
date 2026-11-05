@@ -827,6 +827,8 @@ func resolveWithUV(ctx context.Context, uv, dir string, specs, flags []string) (
 		if flags, err = uvToolRunConfig(flags, tmp); err != nil {
 			return nil, err
 		}
+	} else if err := uvConfigPipe(flags, dir); err != nil {
+		return nil, err
 	}
 
 	args := append([]string{"pip", "compile",
@@ -873,7 +875,8 @@ func resolveWithUV(ctx context.Context, uv, dir string, specs, flags []string) (
 // joined, the user's entries first) — is
 // written into scratch without that table and named by --config-file. A
 // run with --no-config reads none; a file that exists but cannot be read
-// or parsed here fails the resolve, so the names are checked alone. A
+// or parsed here fails the resolve, so the names are checked alone, and so
+// does a named pipe, which is never opened since the run reads it once. A
 // relative UV_CONFIG_FILE is read against
 // the directory uv runs in, which for the resolver is scratch, so it is
 // named by its absolute path whether or not it has the table. With no file
@@ -883,6 +886,9 @@ func resolveWithUV(ctx context.Context, uv, dir string, specs, flags []string) (
 // may sit under a project when TMPDIR points inside one, where `uv pip
 // compile` would read configuration uvx ignores.
 func uvToolRunConfig(flags []string, scratch string) ([]string, error) {
+	if err := uvConfigPipe(flags, ""); err != nil {
+		return nil, err
+	}
 	path, noConfig := UVConfigFileFlag(flags)
 	if noConfig {
 		return flags, nil
@@ -907,15 +913,10 @@ func uvToolRunConfig(flags []string, scratch string) ([]string, error) {
 	if discovered {
 		sources = uvConfigSources()
 	}
-	// A file the user names is their own input and may be a pipe; a discovered one is opened only when regular.
-	read := readUserTOML
-	if discovered {
-		read = readTOML
-	}
 	merged := map[string]any{}
 	found := false
 	for _, source := range sources {
-		data, err := read(source)
+		data, err := readTOML(source)
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				continue
@@ -957,6 +958,24 @@ func uvToolRunConfig(flags []string, scratch string) ([]string, error) {
 		}
 	}
 	return append(out, "--config-file", stripped), nil
+}
+
+// uvConfigPipe refuses a uv config named by flags or UV_CONFIG_FILE that is a pipe: the real run reads it once, so no dry run or probe may.
+func uvConfigPipe(flags []string, dir string) error {
+	path, noConfig := UVConfigFileFlag(flags)
+	if path == "" {
+		path = os.Getenv("UV_CONFIG_FILE")
+	}
+	if noConfig || path == "" {
+		return nil
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(dir, path)
+	}
+	if info, err := os.Stat(path); err != nil || info.Mode()&fs.ModeNamedPipe == 0 {
+		return nil
+	}
+	return fmt.Errorf("uv config %s is a pipe, and reading it would consume it before uv does", path)
 }
 
 // UVConfigFileFlag reads the configuration-file options among a uv

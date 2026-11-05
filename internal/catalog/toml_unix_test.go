@@ -3,10 +3,11 @@
 package catalog
 
 import (
+	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"syscall"
 	"testing"
@@ -74,55 +75,92 @@ func TestReadTOMLRefusesAFIFOSwappedInAfterTheStat(t *testing.T) {
 	}
 }
 
-// A uv config the user names may be a pipe, as `uvx --config-file <(...)` gives, and is read within the byte cap.
-func TestUVToolRunConfigReadsANamedPipe(t *testing.T) {
+// A uv config named as a pipe, as `uvx --config-file <(...)` gives, is refused unopened everywhere the dry run looks, so the run still reads it whole.
+func TestUVConfigPipeIsLeftForTheRun(t *testing.T) {
+	body := "index-url = \"https://top.example/simple\"\n"
+	_, noUV := lookTool("uv")
 	for name, c := range map[string]struct {
-		body    string
-		refused bool
+		needsUV bool
+		call    func(t *testing.T, fifo string) error
 	}{
-		"a config":              {body: "index-url = \"https://top.example/simple\"\n\n[pip]\nindex-url = \"https://pip.example/simple\"\n"},
-		"a config over the cap": {body: strings.Repeat("#", maxManifestBytes+1), refused: true},
+		"tool-run config": {call: func(t *testing.T, fifo string) error {
+			_, err := uvToolRunConfig([]string{"--config-file", fifo}, t.TempDir())
+			return err
+		}},
+		"UV_CONFIG_FILE": {call: func(t *testing.T, fifo string) error {
+			t.Setenv("UV_CONFIG_FILE", fifo)
+			_, err := uvToolRunConfig(nil, t.TempDir())
+			return err
+		}},
+		"uv cache dir": {needsUV: true, call: func(t *testing.T, fifo string) error {
+			_, err := UVCacheDir(context.Background(), []string{"--config-file", fifo})
+			return err
+		}},
+		"uv tool dir": {needsUV: true, call: func(t *testing.T, fifo string) error {
+			_, err := UVToolDir(context.Background(), []string{"--config-file", fifo})
+			return err
+		}},
+		"tool-run resolve": {needsUV: true, call: func(t *testing.T, fifo string) error {
+			_, err := ResolvePythonInstallWithUV(context.Background(), "", []string{"cowsay==6.1"}, []string{"--config-file", fifo})
+			return err
+		}},
+		"named install resolve": {needsUV: true, call: func(t *testing.T, fifo string) error {
+			_, err := ResolvePythonInstallWithUV(context.Background(), t.TempDir(), []string{"cowsay==6.1"}, []string{"--config-file", fifo})
+			return err
+		}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			fifo := filepath.Join(t.TempDir(), "config.toml")
+			if c.needsUV && noUV != nil {
+				t.Skip("uv not on PATH")
+			}
+			fifo := filepath.Join(t.TempDir(), "uv.toml")
 			if err := syscall.Mkfifo(fifo, 0o600); err != nil {
 				t.Skipf("mkfifo: %v", err)
 			}
 			t.Setenv("UV_CONFIG_FILE", "")
+			// The writer's open returns only once something opens the pipe to read it.
+			opened, written := make(chan struct{}), make(chan error, 1)
 			go func() {
-				if w, err := os.OpenFile(fifo, os.O_WRONLY, 0); err == nil {
-					w.WriteString(c.body)
-					w.Close()
+				w, err := os.OpenFile(fifo, os.O_WRONLY, 0)
+				if err != nil {
+					written <- err
+					return
 				}
+				close(opened)
+				_, err = w.WriteString(body)
+				w.Close()
+				written <- err
 			}()
-			scratch := t.TempDir()
-			type result struct {
-				flags []string
-				err   error
-			}
-			done := make(chan result, 1)
-			go func() {
-				flags, err := uvToolRunConfig([]string{"--config-file", fifo}, scratch)
-				done <- result{flags, err}
-			}()
-			var got result
+			done := make(chan error, 1)
+			go func() { done <- c.call(t, fifo) }()
 			select {
-			case got = <-done:
-			case <-time.After(10 * time.Second):
-				t.Fatal("uvToolRunConfig() blocked on a named pipe")
-			}
-			if c.refused {
-				if got.err == nil || !strings.Contains(got.err.Error(), fifo) {
-					t.Errorf("uvToolRunConfig() = %v, %v, want a refusal naming %s", got.flags, got.err, fifo)
+			case err := <-done:
+				if err == nil || !strings.Contains(err.Error(), "uv config "+fifo+" is a pipe") {
+					t.Errorf("error = %v, want the pipe refusal naming %s", err, fifo)
 				}
-				return
+			case <-time.After(10 * time.Second):
+				t.Fatal("blocked on the pipe")
 			}
-			stripped := filepath.Join(scratch, "uv.toml")
-			if got.err != nil || !reflect.DeepEqual(got.flags, []string{"--config-file", stripped}) {
-				t.Fatalf("uvToolRunConfig() = %v, %v, want the stripped copy named", got.flags, got.err)
+			select {
+			case <-opened:
+				t.Error("the pipe was opened before the run")
+			default:
 			}
-			if data, _ := os.ReadFile(stripped); !strings.Contains(string(data), "top.example") || strings.Contains(string(data), "pip") {
-				t.Errorf("stripped copy:\n%s", data)
+			r, err := os.OpenFile(fifo, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer r.Close()
+			select {
+			case <-opened:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the writer never reached the pipe")
+			}
+			if data, err := io.ReadAll(r); err != nil || string(data) != body {
+				t.Errorf("the run would read %q, %v, want %q", data, err, body)
+			}
+			if err := <-written; err != nil {
+				t.Error(err)
 			}
 		})
 	}
