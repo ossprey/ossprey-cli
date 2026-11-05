@@ -165,7 +165,8 @@ always checked). A bare install applies both rules, from the lockfile.
   predicted and the named packages are checked, with the warning below.
 
   The named package itself is then checked at the release the resolver picked.
-  When the dry run fails — no resolver, offline, a build-only package, the
+  When the dry run fails — no resolver, offline, a build-only package, a uv
+  configuration file it cannot read or parse, the
   `OSSPREY_RESOLVE_TIMEOUT` (default 2m) — only the named packages are checked,
   one line says so (`could not resolve the dependencies of foo (…); checking
   the named packages only`), and the install proceeds. A tool run still

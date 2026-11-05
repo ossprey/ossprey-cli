@@ -18,6 +18,12 @@ that resolver is missing from PATH or disabled, expect direct deps only —
 supply a lockfile for full transitive coverage. Rust has no resolver tier, so a
 crate with no `Cargo.lock` always catalogues direct dependencies only.
 
+A TOML file too large or nested too deeply to be genuine is skipped with a
+warning naming it, so a crafted file cannot exhaust the scan's memory: a
+`Cargo.toml` or `pyproject.toml` over 1 MiB, a `Cargo.lock`, `poetry.lock`,
+`uv.lock` or `pdm.lock` over 32 MiB, or any of them nested more than 64 levels
+deep.
+
 Directories that hold installed or built packages rather than your project's
 own manifests are not read at all: `node_modules`, `bower_components`,
 `.pnpm-store`, `.yarn`, `.venv`, `venv`, `site-packages`, `dist-packages`,
