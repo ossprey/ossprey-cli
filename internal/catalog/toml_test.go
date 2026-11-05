@@ -202,7 +202,7 @@ func TestBoundedLocksRefuseWhatTheOldCapsLetThrough(t *testing.T) {
 			if strings.Count(drained, "\n") != 1 || !strings.Contains(drained, c.why) || !strings.Contains(drained, " "+filepath.Join("app", "poetry.lock")+":") {
 				t.Errorf("warnings = %q, want one naming app/poetry.lock for %q", drained, c.why)
 			}
-			if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 3*maxLockBytes || took > 5*time.Second {
+			if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 64<<20 || took > 5*time.Second {
 				t.Errorf("refusing it took %v and allocated %d MB", took, alloc>>20)
 			}
 		})
