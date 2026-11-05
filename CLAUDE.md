@@ -224,8 +224,8 @@ Every rule is a hole in the scan by design, so the rules are narrow:
   `public%2F..%2Finternal` to `/internal/` (npm and PyPI still decode). A
   symlink anywhere in the scanned tree (outside the directories the scan
   skips) keeps every crate checked (`cargoConfigsInScan`, one pass over syft's
-  metadata, about 0.1s on 100k files with no link and tens of ms at most once
-  one ends it). Links are never followed or judged one by one: cargo walks up
+  metadata that the first link ends, about 0.1s at most on 100k files). Links
+  are never followed or judged one by one: cargo walks up
   from its physical cwd, so a directory link can lead it into a sink or out of
   the scan, a chain through `/proc/self/cwd` or `/dev/fd` resolves per
   process, and syft cleans a target's `..` before resolving it, so `app ->
