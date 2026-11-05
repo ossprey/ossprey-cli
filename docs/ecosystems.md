@@ -98,16 +98,21 @@ the replacement is a `cargo vendor` directory it verified as described above.
 
 A dependency a Cargo workspace member inherits with `{ workspace = true }`
 takes its version from the member's workspace root. That is the root the
-member's `package.workspace` names. Otherwise it is the first `Cargo.toml` on
-the way up from the member that has a `[workspace]` table whose `exclude` list
-leaves the member in, or the root that a package manifest on the way up names
-in its own `package.workspace`. A `Cargo.toml` on the way up that cannot be
-read or parsed, or that has no `[package]` or `[workspace]` table, is passed
-over only for a higher `[workspace]` whose `members` list names the member. If
-no root is found inside the directory you scan, the inherited dependency is
-skipped with a warning. Past such a `Cargo.toml`, a crate that joins the
-workspace only as a path dependency of a listed member, without being named in
-`members` itself, also has its inherited dependency skipped with that warning.
+member's `package.workspace` names (or `workspace` in a legacy `[project]`
+table). Otherwise it is the first `Cargo.toml` on the way up from the member
+that has a `[workspace]` table whose `exclude` list leaves the member in, or the
+root that a package manifest on the way up names in its own
+`package.workspace`. A `package.workspace` path, and an absolute `members` or
+`exclude` entry, is compared by real path, so a symlink or another spelling of
+the same directory still matches. A `Cargo.toml` on the way up that cannot be
+read or parsed, that is a symlink leading out of the directory you scan, or
+that has no `[package]`, `[project]` or `[workspace]` table, is passed over
+only for a higher `[workspace]` whose `members` list names the member and whose
+`exclude` list leaves it in. If no root is found inside the directory you scan,
+the inherited dependency is skipped with a warning. Past such a `Cargo.toml`, a
+crate that joins the workspace only as a path dependency of a listed member,
+without being named in `members` itself, also has its inherited dependency
+skipped with that warning.
 A dependency whose `registry-index` points at crates.io is read as a
 crates.io dependency. A `=` requirement is sent as a pinned version only when
 it is a valid semver release, with no leading zeros and no empty parts, and
