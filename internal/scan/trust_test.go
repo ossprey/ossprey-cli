@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -53,5 +54,42 @@ func TestRunLeavesTrustedPackagesOutOfTheSBOM(t *testing.T) {
 	if !strings.Contains(out, "2 packages are from trusted sources") ||
 		!strings.Contains(out, "@acme/web@2.0.0") || !strings.Contains(out, "acme-npm@1.0.0") {
 		t.Errorf("trusted packages not reported:\n%s", out)
+	}
+}
+
+// A crate one lock fetches from a refused source stays in the SBOM, even where another lock names the trusted index on the same origin.
+func TestRunKeepsACrateAnyLockFetchesFromARefusedSource(t *testing.T) {
+	t.Setenv("CARGO_HOME", t.TempDir())
+	dir := t.TempDir()
+	entry := func(name, source string) string {
+		return "[[package]]\nname = \"" + name + "\"\nversion = \"1.0.0\"\nsource = \"" + source + "\"\n\n"
+	}
+	const internal, escaped = "sparse+https://crates.corp.example/internal/", "sparse+https://crates.corp.example/public%2F..%2Finternal/"
+	locks := map[string]string{
+		"a/Cargo.lock": "version = 4\n\n" + entry("acme-core", internal) + entry("acme-refused-later", internal) + entry("acme-refused-first", escaped),
+		"b/Cargo.lock": "version = 4\n\n" + entry("acme-core", internal) + entry("acme-refused-later", escaped) + entry("acme-refused-first", internal),
+	}
+	for name, lock := range locks {
+		p := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(lock), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	policy, err := trust.Parse([]string{"https://crates.corp.example/internal/"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sbom, err := Run(warn.NewContext(context.Background(), false), Options{Path: dir, NoExec: true, SkipVersionLookup: true, Trust: policy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := componentNames(sbom)
+	slices.Sort(names)
+	if got := strings.Join(names, " "); got != "acme-refused-first acme-refused-later" {
+		t.Errorf("components = %q, want both refused crates and not acme-core", got)
 	}
 }

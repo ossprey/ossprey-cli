@@ -128,6 +128,16 @@ Checks a public GitHub repository itself before git fetches it.
 
 → [docs/git.md](docs/git.md)
 
+### Check a Homebrew formula before you install it
+
+```sh
+ossprey shim install --brew         # opt-in: plain `brew install` is checked
+```
+
+Checks the GitHub repos a formula and its dependencies are built from.
+
+→ [docs/brew.md](docs/brew.md)
+
 ### Check what a commit adds
 
 ```sh
@@ -198,7 +208,7 @@ for unpinned ranges. Details, including how unpinned versions are resolved, in
 | Variable | Effect |
 | -------- | ------ |
 | `OSSPREY_API_KEY` | Your API key (a stored `ossprey login` takes precedence) |
-| `OSSPREY_VERBOSE=1` | Explain every warning, including a failed resolver's own output; forwarders are silent without it unless they block malware or hit an error |
+| `OSSPREY_VERBOSE=1` | Explain every warning, including a failed resolver's own output; without it, forwarders print only the one-line clean verdict, a malware block or an error |
 | `OSSPREY_SKIP_CI=1` | Kill switch: no scan runs at all |
 | `OSSPREY_PASSIVE=1` | Observe-only: submit scans, never fail a build or block an install |
 
@@ -208,7 +218,7 @@ The full list, and every flag, is in [docs/cli-reference.md](docs/cli-reference.
 
 Everything above in depth: **[docs/](docs/README.md)** — [install](docs/install.md)
 · [`init`](docs/init.md) · [CLI reference](docs/cli-reference.md) ·
-[forwarder](docs/forwarder.md) · [shims](docs/shims.md) · [git](docs/git.md) ·
+[forwarder](docs/forwarder.md) · [shims](docs/shims.md) · [git](docs/git.md) · [brew](docs/brew.md) ·
 [passive monitoring](docs/passive-monitoring.md) ·
 [pre-commit](docs/precommit.md) · [CI](docs/ci.md) · [output](docs/output.md) ·
 [ecosystems](docs/ecosystems.md) · [trusted sources](docs/trust.md) ·

@@ -27,9 +27,10 @@ $ npm install left-pad
 added 1 package in 412ms
 ```
 
-The check is silent when it passes: only npm's own output appears. ossprey
-speaks up for a block (the full malware report) or a platform error; set
-`OSSPREY_VERBOSE=1` to see the verdict and narration for every install.
+When the check passes ossprey prints one line, `ossprey: no malware found in
+N packages, forwarding to npm`, then npm's own output follows. It otherwise
+speaks up only for a block (the full malware report) or a platform error; set
+`OSSPREY_VERBOSE=1` to see the narration and warnings for every install.
 
 | Command | What it does |
 |---------|--------------|
@@ -42,7 +43,7 @@ speaks up for a block (the full malware report) or a platform error; set
 | `ossprey shim install --monitor <id>` | Passive: submit through a monitor's id, with no credential on the machine |
 | `ossprey shim install --agent claude` | Also put the shims on PATH for Claude Code's Bash commands |
 
-Useful flags: `--git` to also shim git (opt-in, see [git.md](git.md)),
+Useful flags: `--git` to also shim git (opt-in, see [git.md](git.md)), `--brew` to also shim brew (opt-in, see [brew.md](brew.md)),
 `--managers npm,pip` to shim a subset, `--all` to shim managers
 you have not installed yet, `--no-path` to write the shims but manage PATH
 yourself, `--dir` / `$OSSPREY_SHIM_DIR` to relocate them.

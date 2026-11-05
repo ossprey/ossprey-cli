@@ -148,7 +148,9 @@ Windows resolves it under `%LOCALAPPDATA%`.
 
 5. **`git`** (`internal/gitscan`) — before `git clone`/`git pull` of a **public** GitHub repo, checks the repo itself as `pkg:github/<owner>/<repo>@<sha>` via `check.Run` (ecosystem `github`), not its deps. **Opt-in**: git is in `shim.optInManagers`, not `DefaultManagers()`, so `shim install` only writes it with `--git` or `--managers git`; a flagless re-run re-points an existing git shim, and `shim status` lists git only once shimmed. Why opt-in: it puts a GitHub API round trip in front of every pull. "Public" = unauthenticated `GET /repos/o/r` returns 200 with `private:false`; never send a token, or a private repo would read as checkable. It **fails open** on any GitHub/API error (unlike the package forwarders) because breaking `git pull` in an outage gets the shim ripped out. `pull` resolves remote/ref by running the *real* git (`shim.LookPathReal` + `OSSPREY_SHIM_BYPASS=1`), never PATH `git`, for the same recursion reason as `lookTool`. Value-flag tables carry the forwarder's asymmetry: a boolean wrongly listed swallows the URL and skips the check.
 
-   **Forwarders are silent by default.** A forwarder sits in front of every install a developer, script or agent runs, so without `OSSPREY_VERBOSE` a clean install prints nothing of ossprey's at all — only the manager's own output. It speaks only for a platform error (main's `error:` line, or a passive `could not post scan` / git `could not look up` / named-install `could not resolve the dependencies` warning — fail-open must never also be silent) and for a block, which always gets the full malware report (alert box, `Error: WARNING:` lines, blocked line) — a one-line block was tried and rejected, because that is the outcome a developer must not scroll past. Everything else — the clean verdict, why an install went unchecked, scan narration, collected warnings, informational findings, the update notice — is verbose-only. Smoke tests prove a silent check ran through the fake API's submitted purls, not a stderr line. The real manager's output is never touched (it inherits stdio). Three rules: route narration through `note`, never `Fprintf(errOut, ...)`; drain through `flushWarnings`, which **still drains** when quiet, or main's safety-net drain prints the warnings anyway; and draw progress through `progressTo()`, which keeps the self-erasing terminal animation but drops the plain line a pipe or CI log would keep. `gitscan` follows the same rules. `TestQuietForwarder_*` pins the contract; smoke tests that assert on narration use `runForwardVerbose`.
+6. **`brew`** (`internal/brewscan`) — checks the GitHub repos a formula and its runtime deps build from, plus each repo's own lockfile deps; behaviour is in `docs/brew.md`. The why: opt-in like git, since it puts a network walk in front of every install. Tags are pinned with `git ls-remote`, not the GitHub API, because a node install walks ~20 repos and the unauthenticated API allows 60 calls/hour. No public check: a homebrew/core source is fetched unauthenticated, so it is public. Repo deps come from the API's `POST /tools/sbom` (`client.RepoSBOM`) because bottles statically link them (crates, Go modules); one client is shared by the workers so a stored login refreshes once. Over-checking is the chosen error: every variation for the OS family, `uses_from_macos` with bounds on macOS. A ref keeps its tag/branch namespace (`source.kind`), since a tag and a branch can share a name.
+
+   **Forwarders are quiet by default.** A forwarder sits in front of every install a developer, script or agent runs, so without `OSSPREY_VERBOSE` a clean install prints exactly one line of ossprey's — the verdict (`ossprey: no malware found in N packages …, forwarding to npm`; git's names the repo), worded by `forward.CleanVerdict`, which counts only what the platform scanned and owns up to a finding below the failing floor — and then the manager's own output. That line was verbose-only once, and was made unconditional because silence could not be told apart from "nothing was checked"; it is printed just before the handoff, since `syscall.Exec` leaves nothing to print after the manager. An unchecked outcome (no components, nothing the platform scanned, `skip-ci`, passive) prints no verdict, because claiming clean there would be false. Beyond that it speaks only for a platform error (main's `error:` line, or a passive `could not post scan` / git `could not look up` / named-install `could not resolve the dependencies` warning — fail-open must never also be silent) and for a block, which always gets the full malware report (alert box, `Error: WARNING:` lines, blocked line) — a one-line block was tried and rejected, because that is the outcome a developer must not scroll past. Everything else — why an install went unchecked, scan narration, collected warnings, informational findings, the update notice — is verbose-only. Smoke tests prove a silent check ran through the fake API's submitted purls, not a stderr line. The real manager's output is never touched (it inherits stdio). Three rules: route narration through `note`, never `Fprintf(errOut, ...)`; drain through `flushWarnings`, which **still drains** when quiet, or main's safety-net drain prints the warnings anyway; and draw progress through `progressTo()`, which keeps the self-erasing terminal animation but drops the plain line a pipe or CI log would keep. `gitscan` and `brewscan` follow the same rules. `TestQuietForwarder_*` pins the contract; smoke tests that assert on narration use `runForwardVerbose`.
 
 **The forwarder replaces itself with the manager where nothing follows** (`forward.Handoff`, `syscall.Exec`), so `npm run start` shows as npm in `ps` and to parent-PID checks rather than as `ossprey`. Anything after the exec never runs, including defers: drain warnings and remove temp dirs first (`forwardTo` flushes; the `reqFilesDir` cleanups run before `finish`). A failed `syscall.Exec` falls back to the child-process `Exec`. Passive installs (`passiveAfterInstall`, `passiveAlongside`) must outlive the manager, so they keep the fork and the `ossprey` name; Windows has no exec(2) and does the same. `TestPassThroughReplacesTheProcess` pins it.
 
@@ -214,11 +216,58 @@ Every rule is a hole in the scan by design, so the rules are narrow:
   `/internal/../public-proxy/` (or `%2e%2e`) is judged where it lands.
 - **Provenance is what the lockfile recorded** (`registryOf`: npm/yarn
   `resolved`, uv/poetry `Index`, pip `download_info.url`, our npm resolver's
-  lock). Unrecorded means checked. Trusted needs **every** recorded sighting
-  trusted: dedup and `mergeVersionless` fold sightings' `Registries` together
-  rather than keeping the first, since one lockfile fetching it publicly is
-  enough to need a check. Don't add pnpm (no URL) or Pipfile.lock (index
-  *name*) without real URLs.
+  lock, a `Cargo.lock` `registry+`/`sparse+` `source` via `cargoRegistryOf`).
+  Unrecorded means checked. A crate's source is never a git or crates.io one
+  (OSS-2581 decides how git crates may count later), nor an index URL that is
+  not plain printable ASCII, or that holds a backslash or a percent-escape,
+  nor one with an `@` past a `/`, an IP-literal host, or an empty, `.` or
+  `..` path segment. The
+  first is an allow-list (bytes `!` to `~` bar `\` and `%`, tested before
+  anything is trimmed), because each spelling found outside it was another
+  place Go and Cargo part: Go's `ToLower` maps `İ` to `i` where Cargo's IDNA
+  does not, `TrimSpace` drops a trailing NBSP Cargo keeps as `%C2%A0`,
+  `sparse+` is a non-special scheme to Cargo, so `host\@evil` is userinfo to
+  it and `internal\outside` one path segment where we read a `/`, and Cargo
+  keeps `%2F` inside a segment where `canonicalURL` decodes and cleans
+  `public%2F..%2Finternal` to `/internal/` (npm and PyPI still decode).
+  Cargo's `..` in `public//../internal` pops only the empty segment, where
+  `path.Clean` lands on `/internal/`. A
+  symlink anywhere in the scanned tree (outside the directories the scan
+  skips) keeps every crate checked (`cargoConfigsInScan`, one pass over syft's
+  metadata that the first link ends, about 0.1s at most on 100k files). Links
+  are never followed or judged one by one: cargo walks up
+  from its physical cwd, so a directory link can lead it into a sink or out of
+  the scan, a chain through `/proc/self/cwd` or `/dev/fd` resolves per
+  process, and syft cleans a target's `..` before resolving it, so `app ->
+  node_modules/../y` past an unindexed `node_modules -> target/a/b` reads as a
+  file in the scan while the kernel lands in `target`. Nor does any crate
+  count when a config cargo may read (every `.cargo` directory the index
+  holds, read on disk, plus those above the root and `CARGO_HOME`, opened by
+  name where a directory cannot be listed; manifests above the root play no
+  part) sets a `replace-with`, has an `include` (stable since Cargo 1.94), has
+  an alias passing `--config` or holding a quote, a backslash or a leading `!`
+  (a whitespace split cannot tell what those pass), or cannot be read
+  (`clearReplacedCrateRegistries`, one warning; only a regular file is opened,
+  since a device or FIFO may never end): cargo then fetches from the
+  replacement while the lock still names the trusted index, and a
+  repository-controlled lock can carry matching checksums.
+  For trust only (`noLinks`), a symlinked config inside `CARGO_HOME`, or a
+  symlinked `.cargo` or config above the root, counts as unreadable; the vendor
+  filter reads through them as before, since a dotfile manager links
+  `~/.cargo/config.toml`. `CARGO_HOME` itself is followed, being the scanning
+  user's environment, unless the walk above the root reaches it first as an
+  ancestor's `.cargo`.
+  Not checked: a typed `--config`, environment such as `CARGO_HTTP_PROXY` and
+  `CARGO_HTTP_CAINFO` (cargo has no environment form for `[source]` keys),
+  `[http]` `proxy`/`cainfo`, a config only a build run from inside a sink would
+  read, and a `.cargo` inside a scanned directory syft cannot list. The
+  crates.io twin of a trusted crate is its own bare component with no recorded
+  source, so it stays checked. Trusted needs **every** recorded sighting trusted: dedup and
+  `mergeVersionless` fold sightings' `Registries` together rather than keeping
+  the first, since one lockfile fetching it publicly is enough to need a check.
+  A crate sighting with no registry, refused or unrecorded, empties the
+  merged crate's `Registries`, since its dedup key holds only the origin.
+  Don't add pnpm (no URL) or Pipfile.lock (index *name*) without real URLs.
 - **Named forwarded installs apply only the scope rule to the names typed**
   (`dropTrusted`, before anything is resolved so nothing private is looked up
   publicly). Inferring the registry from `pip.conf`/`.npmrc` was rejected:
@@ -518,7 +567,8 @@ changes.
 ### API client (`internal/client`)
 
 `Validate` POSTs the MiniBOM to `/public/v1/scans`, then polls
-`/public/v1/scans/status` (quadratic backoff, capped at `maxPollAttempts`), and
+`/public/v1/scans/status` (capped at `OSSPREY_VERDICT_TIMEOUT`, default
+`maxPollAttempts` x `pollInterval` = 15m), and
 refuses outright for an ingest client (see "Passive modes and monitor ids"). A
 quota-exhausted response surfaces as a typed `*ErrSkipped` that propagates
 unwrapped so callers can detect it via `errors.As` and **exit 0** rather than
@@ -541,6 +591,13 @@ accepted deliberately, because quota exhaustion fails **open** (`ErrSkipped`,
 exit 0) and the failure it prevents fails **closed** and reads as malware. Retries wait via `sleepOrDone` so a cancelled
 scan is never held open by a backoff, and `RetryBackoff` is overridable for the
 same reason `PollBackoff` is: no test should sleep.
+
+**A poll ceiling is not a scan failure.** It returns `*ErrVerdictTimeout`
+naming the scan id and last status, because the scan keeps running and lands
+in the dashboard; real scans do exceed 15m at peak (~02:15 UTC). The service's
+`ScanExceededClientTimeout` metric counts them, so keep its threshold in step
+with the default here. Network timeouts go through `explainTimeout` so a bare
+`context deadline exceeded` never reaches the user.
 
 `401`/`403` become `authError`, which names the credential the client actually
 used (`--api-key`/env, a stored login, or a monitor id — see

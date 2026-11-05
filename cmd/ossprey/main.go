@@ -15,6 +15,7 @@ import (
 
 	"github.com/ossprey/ossprey-cli/internal/alert"
 	"github.com/ossprey/ossprey-cli/internal/ansi"
+	"github.com/ossprey/ossprey-cli/internal/brewscan"
 	"github.com/ossprey/ossprey-cli/internal/check"
 	"github.com/ossprey/ossprey-cli/internal/client"
 	"github.com/ossprey/ossprey-cli/internal/env"
@@ -109,6 +110,7 @@ func newRootCmd() *cobra.Command {
 		root.AddCommand(newForwardCmd(bin))
 	}
 	root.AddCommand(newGitCmd())
+	root.AddCommand(newBrewCmd())
 
 	return root
 }
@@ -514,6 +516,35 @@ func newGitCmd() *cobra.Command {
 				return invalidMonitorErr(monitor)
 			}
 			err := gitscan.Run(cmd.Context(), gitscan.Options{
+				Args:      args,
+				APIURL:    apiURL,
+				APIKey:    os.Getenv("OSSPREY_API_KEY"),
+				SkipCI:    env.SkipCI(),
+				Passive:   env.Passive() || monitor != "",
+				MonitorID: monitor,
+			})
+			return forwardResult(err)
+		},
+	}
+}
+
+// newBrewCmd wraps brew: a formula install checks the GitHub repositories
+// the formula and its dependencies build from. Shimmed only on request.
+func newBrewCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:                "brew [args...]",
+		Short:              "Check a formula's GitHub source repos on install, then forward to brew",
+		DisableFlagParsing: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			apiURL := os.Getenv("OSSPREY_API_URL")
+			if apiURL == "" {
+				apiURL = defaultAPIURL
+			}
+			monitor := env.MonitorID()
+			if monitor != "" && !monitorpkg.ValidToken(monitor) {
+				return invalidMonitorErr(monitor)
+			}
+			err := brewscan.Run(cmd.Context(), brewscan.Options{
 				Args:      args,
 				APIURL:    apiURL,
 				APIKey:    os.Getenv("OSSPREY_API_KEY"),

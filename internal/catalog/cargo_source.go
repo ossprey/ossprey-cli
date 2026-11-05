@@ -1,15 +1,19 @@
 package catalog
 
 import (
+	"context"
+	"io/fs"
 	"maps"
 	"net/url"
 	"path"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"unicode"
 
+	"github.com/anchore/syft/syft/file"
 	"github.com/anchore/syft/syft/pkg"
 )
 
@@ -157,6 +161,155 @@ func cargoSourceQualifiers(source string) (map[string]string, string) {
 		}
 	}
 	return nil, "its source is over the API's length limit"
+}
+
+// cargoRegistryOf returns the index URL of a registry or sparse source for the trust policy, or "" for git, crates.io or a spelling Go and Cargo may read apart.
+func cargoRegistryOf(m pkg.RustCargoLockEntry) string {
+	kind, raw, _ := strings.Cut(m.Source, "+")
+	// Any byte Go and Cargo may read apart keeps the crate checked, before anything is trimmed or cleaned.
+	if strings.ContainsFunc(raw, unplainURLByte) {
+		return ""
+	}
+	if is, _ := isCratesIo(m.Source); is || kind != "registry" && kind != "sparse" {
+		return ""
+	}
+	if _, err := url.Parse(raw); err != nil || atPastSlash(raw) || dotOrEmptySegment(raw) || bracketedHost(raw) {
+		return ""
+	}
+	return raw
+}
+
+// bracketedHost reports an IP-literal host, which Go keeps as written where Cargo's URL parser serialises the address.
+func bracketedHost(clean string) bool {
+	_, rest, _ := strings.Cut(clean, ":")
+	rest = strings.TrimLeft(rest, "/")
+	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
+		rest = rest[:i]
+	}
+	return strings.HasPrefix(rest[strings.LastIndex(rest, "@")+1:], "[")
+}
+
+// unplainURLByte reports whitespace, a control, non-ASCII, '\' or '%', any of which Go and Cargo may read apart.
+func unplainURLByte(r rune) bool { return r < '!' || r > '~' || r == '\\' || r == '%' }
+
+// dotOrEmptySegment reports an empty, "." or ".." path segment, where Cargo's URL parser and the trust policy's path.Clean may land apart.
+func dotOrEmptySegment(clean string) bool {
+	_, rest, _ := strings.Cut(clean, ":")
+	rest = strings.TrimLeft(rest, "/")
+	i := strings.IndexAny(rest, "/?#")
+	if i < 0 {
+		return false
+	}
+	p := rest[i:]
+	if j := strings.IndexAny(p, "?#"); j >= 0 {
+		p = p[:j]
+	}
+	segs := strings.Split(strings.TrimPrefix(p, "/"), "/")
+	for k, s := range segs {
+		// Only the last segment may be empty, as a trailing '/'.
+		if s == "." || s == ".." || s == "" && k < len(segs)-1 {
+			return true
+		}
+	}
+	return false
+}
+
+const (
+	sourceReplaced = "a source replacement is configured"
+	configIncluded = "a cargo config includes another file"
+	configUnread   = "a cargo config could not be read"
+	aliasConfig    = "a cargo alias passes --config"
+	configLinked   = "a symlink in the scan could point cargo at another config"
+)
+
+// cargoReplacement says why no crate is trusted by registry: a symlink in the scan, or a cargo config cargo may read for root that replaces a source, includes a file, has an alias passing --config or cannot be read.
+func cargoReplacement(ctx context.Context, r file.Resolver, root string) string {
+	root = resolvedRoot(root)
+	inScan, why := cargoConfigsInScan(ctx, r, root)
+	if why != "" {
+		return why
+	}
+	// A manifest above the root names no source, so only configs decide trust.
+	_, above, ok := cargoFilesAbove(root, false, true)
+	if !ok {
+		return configUnread
+	}
+	for _, c := range slices.Concat(above, inScan) {
+		// Cargo 1.94 merges an included file, which may set replace-with, so any include counts.
+		if c.doc["include"] != nil {
+			return configIncluded
+		}
+		sources, _ := c.doc["source"].(map[string]any)
+		for _, s := range sources {
+			if tomlLookup(s, "replace-with") != nil {
+				return sourceReplaced
+			}
+		}
+		// An alias's --config sets a value or names a file the scan never reads.
+		for _, args := range cargoAliasArgs(c.doc) {
+			if slices.ContainsFunc(args, isConfigArg) {
+				return aliasConfig
+			}
+		}
+		if aliasIndeterminate(c.doc) {
+			return aliasConfig
+		}
+	}
+	return ""
+}
+
+// aliasIndeterminate reports an alias holding a quote or backslash, or a string one starting with '!', which a whitespace split may read apart from cargo or a shell.
+func aliasIndeterminate(doc map[string]any) bool {
+	aliases, _ := doc["alias"].(map[string]any)
+	for _, a := range aliases {
+		switch a := a.(type) {
+		case string:
+			if strings.HasPrefix(strings.TrimSpace(a), "!") || strings.ContainsAny(a, `'"\`) {
+				return true
+			}
+		case []any:
+			for _, s := range a {
+				if s, ok := s.(string); ok && strings.ContainsAny(s, `'"\`) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// cargoConfigsInScan reads every .cargo directory the index holds, or says why not.
+func cargoConfigsInScan(ctx context.Context, r file.Resolver, root string) ([]cargoFile, string) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	rootSlash := filepath.ToSlash(root)
+	var dirs []string
+	for l := range r.AllLocations(ctx) {
+		m, err := r.FileMetadataByLocation(l)
+		if err != nil || m.FileInfo == nil {
+			return nil, configUnread
+		}
+		// cargo walks up from its physical cwd, which a link can move per process, so any link ends trust.
+		if m.Mode()&fs.ModeSymlink != 0 {
+			return nil, configLinked
+		}
+		if rel := rootRel(l.RealPath, rootSlash+"/"); m.IsDir() && strings.ToLower(path.Base(rel)) == ".cargo" {
+			dirs = append(dirs, placeRef(rootSlash, rel))
+		}
+	}
+	// A cancelled scan closes the walk early, so the links and configs it never reached may still be there.
+	if ctx.Err() != nil {
+		return nil, configUnread
+	}
+	var configs []cargoFile
+	for _, d := range dirs {
+		cs, ok := cargoConfigsIn(filepath.FromSlash(d), filepath.FromSlash(path.Dir(d)), false, true)
+		if !ok {
+			return nil, configUnread
+		}
+		configs = append(configs, cs...)
+	}
+	return configs, ""
 }
 
 // atPastSlash reports an '@' after a '/' in the authority or path, where Go reads a password's tail as host or path.

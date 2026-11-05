@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -9,6 +10,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/anchore/syft/syft/file"
 	"github.com/ossprey/ossprey-cli/internal/registry"
@@ -48,10 +50,7 @@ func withoutCargoVendor(r file.Resolver, root string) file.Resolver {
 	if err != nil || len(marks) == 0 {
 		return r
 	}
-	// RealPath is root-relative on POSIX but absolute under the resolved root on Windows.
-	if resolved, err := filepath.EvalSymlinks(root); err == nil {
-		root = resolved
-	}
+	root = resolvedRoot(root)
 	rootSlash := filepath.ToSlash(root)
 	rootPrefix := rootSlash + "/"
 	marked := map[string]file.Location{}
@@ -92,7 +91,7 @@ func withoutCargoVendor(r file.Resolver, root string) file.Resolver {
 	if !ok {
 		return r
 	}
-	aboveManifests, aboveConfigs, ok := cargoFilesAbove(root)
+	aboveManifests, aboveConfigs, ok := cargoFilesAbove(root, true, false)
 	if !ok {
 		return r
 	}
@@ -166,6 +165,14 @@ func withoutCargoVendor(r file.Resolver, root string) file.Resolver {
 	return cargoVendored{Resolver: r, rootPrefix: rootPrefix, hidden: hidden}
 }
 
+// resolvedRoot is root with its symlinks resolved, since RealPath is root-relative on POSIX but absolute under the resolved root on Windows.
+func resolvedRoot(root string) string {
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		return resolved
+	}
+	return root
+}
+
 // isCargoConfig matches .cargo/config(.toml) in any case, as cargo opens them on a case-insensitive filesystem.
 func isCargoConfig(p string) bool {
 	return isExactCargoConfig(strings.ToLower(p))
@@ -206,47 +213,44 @@ func readCargoFiles(r file.Resolver, locs []file.Location, rootSlash string, up 
 	return out, true
 }
 
-// cargoFilesAbove reads the manifests and configs cargo run inside root also sees: every ancestor's, and CARGO_HOME's.
-func cargoFilesAbove(root string) (manifests, configs []cargoFile, ok bool) {
-	read := func(p, base string) (cargoFile, bool) {
-		data, err := readTOML(p)
-		if err != nil {
-			return cargoFile{}, false
-		}
-		f := cargoFile{bases: []string{filepath.ToSlash(base)}}
-		_, err = decodeTOML(data, &f.doc)
-		return f, err == nil
+// cargoFilesAbove reads the configs, and with withManifests the manifests, cargo run inside root also sees: every ancestor's, and CARGO_HOME's; noLinks fails on a symlinked .cargo or config and skips CARGO_HOME only as an ancestor's .cargo by its exact path.
+func cargoFilesAbove(root string, withManifests, noLinks bool) (manifests, configs []cargoFile, ok bool) {
+	exact := []string{".cargo"}
+	if withManifests {
+		exact = append(exact, "Cargo.toml")
 	}
-	configsIn := func(dir, base string, inexact bool) bool {
-		entries, _ := os.ReadDir(dir)
-		for _, e := range entries {
-			if n := strings.ToLower(e.Name()); n == "config" || n == "config.toml" {
-				c, ok := read(filepath.Join(dir, e.Name()), base)
-				if !ok {
-					return false
-				}
-				c.inexact = inexact || n != e.Name()
-				configs = append(configs, c)
-			}
-		}
-		return true
+	seen, key := map[string]bool{}, foldPath
+	if noLinks {
+		// A folded path can name another directory on a case-sensitive filesystem, leaving CARGO_HOME unread.
+		key = path.Clean
 	}
-	seen := map[string]bool{}
 	for d := filepath.Dir(root); ; d = filepath.Dir(d) {
-		entries, _ := os.ReadDir(d)
+		entries, err := cargoDirEntries(d, exact...)
+		if err != nil {
+			return nil, nil, false
+		}
 		for _, e := range entries {
-			switch strings.ToLower(e.Name()) {
+			n := e.Name()
+			switch strings.ToLower(n) {
 			case "cargo.toml":
-				m, ok := read(filepath.Join(d, e.Name()), d)
+				if !withManifests {
+					continue
+				}
+				m, ok := readCargoFileAt(filepath.Join(d, n), d)
 				if !ok {
 					return nil, nil, false
 				}
 				manifests = append(manifests, m)
 			case ".cargo":
-				if !configsIn(filepath.Join(d, e.Name()), d, e.Name() != ".cargo") {
+				if noLinks && e.Type()&fs.ModeSymlink != 0 {
 					return nil, nil, false
 				}
-				seen[foldPath(filepath.ToSlash(filepath.Join(d, e.Name())))] = true
+				cs, ok := cargoConfigsIn(filepath.Join(d, n), d, n != ".cargo", noLinks)
+				if !ok {
+					return nil, nil, false
+				}
+				configs = append(configs, cs...)
+				seen[key(filepath.ToSlash(filepath.Join(d, n)))] = true
 			}
 		}
 		if filepath.Dir(d) == d {
@@ -259,10 +263,75 @@ func cargoFilesAbove(root string) (manifests, configs []cargoFile, ok bool) {
 			home = filepath.Join(h, ".cargo")
 		}
 	}
-	if home != "" && !seen[foldPath(filepath.ToSlash(home))] && !configsIn(home, filepath.Dir(home), false) {
-		return nil, nil, false
+	if home != "" && !seen[key(filepath.ToSlash(home))] {
+		cs, ok := cargoConfigsIn(home, filepath.Dir(home), false, noLinks)
+		if !ok {
+			return nil, nil, false
+		}
+		configs = append(configs, cs...)
 	}
 	return manifests, configs, true
+}
+
+// cargoConfigsIn reads config and config.toml in dir in any case; false when one cannot be read, or with noLinks is a symlink.
+func cargoConfigsIn(dir, base string, inexact, noLinks bool) ([]cargoFile, bool) {
+	entries, err := cargoDirEntries(dir, "config", "config.toml")
+	if err != nil {
+		return nil, false
+	}
+	var configs []cargoFile
+	for _, e := range entries {
+		name := e.Name()
+		if n := strings.ToLower(name); n == "config" || n == "config.toml" {
+			if noLinks && e.Type()&fs.ModeSymlink != 0 {
+				return nil, false
+			}
+			c, ok := readCargoFileAt(filepath.Join(dir, name), base)
+			if !ok {
+				return nil, false
+			}
+			c.inexact = inexact || n != name
+			configs = append(configs, c)
+		}
+	}
+	return configs, true
+}
+
+// cargoDirEntries lists dir without following links, or when it can be searched but not listed, which of exact it holds; a missing dir holds nothing.
+func cargoDirEntries(dir string, exact ...string) ([]fs.DirEntry, error) {
+	entries, err := os.ReadDir(dir)
+	if err == nil || errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+		return entries, nil
+	}
+	var found []fs.DirEntry
+	for _, n := range exact {
+		if info, err := os.Lstat(filepath.Join(dir, n)); err == nil {
+			found = append(found, fs.FileInfoToDirEntry(info))
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return nil, err
+		}
+	}
+	return found, nil
+}
+
+// readCargoFileAt parses the regular file at p on disk, resolving its paths against base.
+func readCargoFileAt(p, base string) (cargoFile, bool) {
+	// A device or FIFO may never end, so only a regular file is opened, and read no further than the limit.
+	if info, err := os.Stat(p); err != nil || !info.Mode().IsRegular() {
+		return cargoFile{}, false
+	}
+	fh, err := os.Open(p)
+	if err != nil {
+		return cargoFile{}, false
+	}
+	defer fh.Close()
+	data, err := io.ReadAll(io.LimitReader(fh, maxManifestBytes+1))
+	if err != nil || len(data) > maxManifestBytes {
+		return cargoFile{}, false
+	}
+	f := cargoFile{bases: []string{filepath.ToSlash(base)}}
+	_, err = decodeTOML(data, &f.doc)
+	return f, err == nil
 }
 
 // vendorDir is the folded directory cargo run in dir takes crates.io crates from, or "" when unreplaced or unclear.
@@ -390,22 +459,10 @@ func projectCrates(files []cargoFile, marked map[string]file.Location, rootSlash
 func cargoPathRefs(doc map[string]any) (literals, globs []string, unsure bool) {
 	unsure = doc["include"] != nil
 	// An alias runs cargo with its own arguments: `cargo vendor` ignores source replacement, and --manifest-path names a crate.
-	aliases, _ := doc["alias"].(map[string]any)
-	for _, a := range aliases {
-		var args []string
-		switch a := a.(type) {
-		case string:
-			args = strings.Fields(a)
-		case []any:
-			for _, s := range a {
-				if s, ok := s.(string); ok {
-					args = append(args, s)
-				}
-			}
-		}
+	for _, args := range cargoAliasArgs(doc) {
 		for i, arg := range args {
 			// --config can undo the replacement for that run.
-			if i == 0 && arg == "vendor" || arg == "--config" || strings.HasPrefix(arg, "--config=") {
+			if i == 0 && arg == "vendor" || isConfigArg(arg) {
 				unsure = true
 			}
 			if v, ok := strings.CutPrefix(arg, "--manifest-path="); ok {
@@ -451,6 +508,31 @@ func cargoPathRefs(doc map[string]any) (literals, globs []string, unsure bool) {
 	}
 	walk(doc)
 	return literals, globs, unsure
+}
+
+// cargoAliasArgs is each [alias] value in doc split into the arguments cargo runs it with.
+func cargoAliasArgs(doc map[string]any) [][]string {
+	aliases, _ := doc["alias"].(map[string]any)
+	var out [][]string
+	for _, a := range aliases {
+		var args []string
+		switch a := a.(type) {
+		case string:
+			args = strings.Fields(a)
+		case []any:
+			for _, s := range a {
+				if s, ok := s.(string); ok {
+					args = append(args, s)
+				}
+			}
+		}
+		out = append(out, args)
+	}
+	return out
+}
+
+func isConfigArg(arg string) bool {
+	return arg == "--config" || strings.HasPrefix(arg, "--config=")
 }
 
 // lockCoversDeps reports whether the lock holds a release meeting each normal and build dependency doc turns on.

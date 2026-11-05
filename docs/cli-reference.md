@@ -9,6 +9,7 @@ Every command, flag and credential the CLI understands.
 | [`ossprey check -e <pypi\|npm> <pkg>...`](#check--scan-named-packages) | Check packages by name, no project needed. |
 | [`ossprey npm\|npx\|pnpm\|yarn\|bun\|bunx\|pip\|pip3\|poetry\|uv\|uvx ...`](forwarder.md) | Check, then run the real package manager. Blocks the install on malware. |
 | [`ossprey git clone\|pull ...`](git.md) | Check a public GitHub repo, then run git. Blocks on malware. |
+| [`ossprey brew install ...`](brew.md) | Check a formula's GitHub source repos, then run brew. Blocks on malware. |
 | [`ossprey shim install`](shims.md) | Put shims on `PATH` so installs are checked without the `ossprey` prefix. |
 | [`ossprey precommit`](precommit.md) | Git pre-commit hook: block commits that stage known-malicious packages. |
 | [`ossprey trust list\|add\|remove`](trust.md) | Manage trusted registries and npm scopes, whose packages are neither checked nor sent. |
@@ -50,12 +51,13 @@ a `verdict`, only when the scan actually reached one.
 | `OSSPREY_API_KEY` | `--api-key` | API key. A stored `ossprey login` still wins. |
 | `API_KEY` | — | Legacy spelling of the above, lowest precedence. |
 | `OSSPREY_API_URL` | `--url` | Override the API URL. |
-| `OSSPREY_VERBOSE=1` | `-v` | Explain every warning, including a failed resolver's output. On the forwarders and shims, which parse no flags, it also turns on everything they print besides a malware block or a platform error: the clean verdict, warnings, scan narration and informational findings. |
+| `OSSPREY_VERBOSE=1` | `-v` | Explain every warning, including a failed resolver's output. On the forwarders and shims, which parse no flags, it also turns on everything they print besides a malware block, a platform error or the one-line clean verdict: warnings, scan narration and informational findings. |
 | `OSSPREY_SKIP_CI=1` | `--skip-ci` | Kill switch: no scan runs at all. |
 | `OSSPREY_PASSIVE=1` | `--passive` | Observe-only: submit, never block or fail. |
 | `OSSPREY_MONITOR_ID` | `--monitor` | Submit through a monitor id. Implies passive. |
 | `OSSPREY_SCAN_TIMEOUT` | `--timeout` | Cap the whole catalogue; emit what resolved. |
 | `OSSPREY_RESOLVE_TIMEOUT` | — | Cap one uv/npm resolver invocation (default `2m`). |
+| `OSSPREY_VERDICT_TIMEOUT` | — | How long to wait for the API's verdict after submitting (default `15m`). On expiry the scan keeps running server-side; the error names the scan id and its result appears in the dashboard. |
 | `OSSPREY_SCAN_CONCURRENCY` | — | How many catalogers run at once (default `8`). |
 | `OSSPREY_RESOLVE_LATEST=0` | `--no-version-lookup` | Don't resolve unpinned versions from the registry. |
 | `OSSPREY_CONFIG_DIR` | — | Where the stored login and `trust.json` live. |
