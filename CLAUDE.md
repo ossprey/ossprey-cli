@@ -391,9 +391,16 @@ BurntSushi/toml, which allocates quadratically in nesting (643 MB for one 8 KB
 key, 3.7 GB for 4,000 nested inline tables in a `uv.lock`, which it parses
 twice), and `Cargo.lock` with pelletier/go-toml v1, which stays linear but
 recurses per array and dies of a fatal stack overflow at 400,000 nested arrays
-(800 KB). A fatal error cannot be recovered, so a lockfile over 32 MiB or
-deeper than `maxTOMLDepth` is hidden from every cataloger, with one warning per
-file. syft parses no `pyproject.toml`, so that one needs no wrapper.
+(800 KB). A fatal error cannot be recovered, so a lockfile over `maxLockBytes`
+(8 MiB) or deeper than `maxLockDepth` (16) is hidden from every cataloger, with
+one warning per file. Lockfiles get caps of their own, tighter than a
+manifest's: 4,677 real ones swept were at most 650 KB and 4 levels deep, while
+one crafted just inside 32 MiB and 64 levels still cost syft tens of seconds and
+gigabytes. Cost grows with size more than depth (8 MiB of 4-level inline tables
+takes BurntSushi about 3 s and 1.3 GB at peak), so the size cap is what bounds a
+crafted lockfile. The `cargo vendor` filter reads `Cargo.lock` within the same
+caps (`readLock`), since it runs before this wrapper. syft parses no
+`pyproject.toml`, so that one needs no wrapper.
 
 **`cargo vendor` crates are hidden by marker, not by name** (`withoutCargoVendor`,
 OSS-2561). Every crate it writes holds a `.cargo-checksum.json`, and the vendor

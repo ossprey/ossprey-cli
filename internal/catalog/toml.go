@@ -18,14 +18,18 @@ import (
 // maxManifestBytes bounds a TOML manifest to a size no genuine one reaches.
 const maxManifestBytes = 1 << 20
 
-// maxLockBytes bounds a TOML lockfile, which a large project's wheel hashes take to a few MB.
-const maxLockBytes = 32 << 20
+// maxLockBytes bounds a TOML lockfile at over ten times the largest real one swept (650 KB), since parse cost grows with size.
+const maxLockBytes = 8 << 20
 
 // maxTOMLDepth bounds nesting, since the toml parser allocates quadratically in it (OSS-2098).
 const maxTOMLDepth = 64
 
+// maxLockDepth bounds a lockfile's nesting tighter than a manifest's, since a real one nests at most 4 levels.
+const maxLockDepth = 16
+
 var (
 	errTOMLTooDeep = fmt.Errorf("toml: nested deeper than %d levels", maxTOMLDepth)
+	errLockTooDeep = fmt.Errorf("toml: nested deeper than %d levels", maxLockDepth)
 	errNotRegular  = errors.New("not a regular file")
 )
 
@@ -98,7 +102,7 @@ type boundedLocks struct {
 	refused map[string]bool
 }
 
-// withBoundedLocks refuses each lockfile syft would parse over maxLockBytes or deeper than maxTOMLDepth, warning once for each.
+// withBoundedLocks refuses each lockfile syft would parse over maxLockBytes or deeper than maxLockDepth, warning once for each.
 func withBoundedLocks(ctx context.Context, r file.Resolver, root string) file.Resolver {
 	checked, refused := map[string]bool{}, map[string]bool{}
 	for _, glob := range syftTOMLLocks {
@@ -111,13 +115,7 @@ func withBoundedLocks(ctx context.Context, r file.Resolver, root string) file.Re
 				continue
 			}
 			checked[l.RealPath] = true
-			data, err := readLocation(r, l, maxLockBytes)
-			if err == nil {
-				if err = checkTOMLDepth(data); err != nil {
-					err = &fs.PathError{Op: "parse", Path: l.RealPath, Err: err}
-				}
-			}
-			if err != nil {
+			if _, err := readLock(r, l); err != nil {
 				refused[l.RealPath] = true
 				err = relToRoot(root, err)
 				warn.Add(ctx, warn.Entry{
@@ -133,6 +131,18 @@ func withBoundedLocks(ctx context.Context, r file.Resolver, root string) file.Re
 		return r
 	}
 	return boundedLocks{Resolver: r, refused: refused}
+}
+
+// readLock reads a lockfile within the lockfile caps, refusing one over either.
+func readLock(r file.Resolver, l file.Location) ([]byte, error) {
+	data, err := readLocation(r, l, maxLockBytes)
+	if err != nil {
+		return nil, err
+	}
+	if tomlDepthOver(data, maxLockDepth) {
+		return nil, &fs.PathError{Op: "parse", Path: l.RealPath, Err: errLockTooDeep}
+	}
+	return data, nil
 }
 
 func (r boundedLocks) keep(locs []file.Location, err error) ([]file.Location, error) {
@@ -162,14 +172,14 @@ func (r boundedLocks) FilesByMIMEType(types ...string) ([]file.Location, error) 
 
 // decodeTOML decodes data into v, refusing data nested deeper than maxTOMLDepth.
 func decodeTOML(data []byte, v any) (toml.MetaData, error) {
-	if err := checkTOMLDepth(data); err != nil {
-		return toml.MetaData{}, err
+	if tomlDepthOver(data, maxTOMLDepth) {
+		return toml.MetaData{}, errTOMLTooDeep
 	}
 	return toml.Decode(string(data), v)
 }
 
-// checkTOMLDepth sums the dots outside strings and comments with the open brackets, never counting below the parser.
-func checkTOMLDepth(data []byte) error {
+// tomlDepthOver sums the dots outside strings and comments, dotted keys and headers alike, with the open brackets, never counting below the parser.
+func tomlDepthOver(data []byte, max int) bool {
 	var (
 		open     []int // dots in force when each open { or [ began
 		header   int   // dots in the current [table] header
@@ -220,11 +230,11 @@ func checkTOMLDepth(data []byte) error {
 				dots = open[len(open)-1]
 			}
 		}
-		if header+dots+len(open) > maxTOMLDepth {
-			return errTOMLTooDeep
+		if header+dots+len(open) > max {
+			return true
 		}
 	}
-	return nil
+	return false
 }
 
 // skipTOMLString returns the index of the last byte of the string opening at data[i].

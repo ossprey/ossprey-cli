@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -9,6 +10,12 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/anchore/syft/syft/file"
+	"github.com/anchore/syft/syft/source"
+
+	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
 // deepTOMLKey is one dotted key nested depth levels.
@@ -134,5 +141,69 @@ func TestReadTOMLBoundsTheReadNotJustTheSize(t *testing.T) {
 	}
 	if _, err := readTOML(path); err == nil || err.Error() != "read "+path+": not a regular file" {
 		t.Errorf("readTOML() error = %v, want the regular-file refusal naming %s", err, path)
+	}
+}
+
+// dirResolver is the resolver Catalog reads dir through.
+func dirResolver(t *testing.T, dir string) file.Resolver {
+	t.Helper()
+	src, err := newDirectorySource(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { src.Close() })
+	r, err := src.FileResolver(source.SquashedScope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+// Lockfiles get caps of their own: one just inside the old 32 MiB and 64-level caps cost syft's parser seconds and gigabytes, and is now refused from a bounded read.
+func TestBoundedLocksRefuseWhatTheOldCapsLetThrough(t *testing.T) {
+	// 60 nested inline tables a line, the shape BurntSushi/toml pays most for, out to 31 MiB.
+	var near strings.Builder
+	for i := 0; near.Len() < 31<<20; i++ {
+		fmt.Fprintf(&near, "k%d = %s1%s\n", i, strings.Repeat("{a=", 60), strings.Repeat("}", 60))
+	}
+	for name, c := range map[string]struct {
+		body, why string
+	}{
+		"near the old caps":                 {near.String(), "byte limit"},
+		"a dotted key past the lock depth":  {deepTOMLKey(maxLockDepth + 1), "nested deeper than 16 levels"},
+		"inline tables past the lock depth": {"x = " + strings.Repeat("{a=", maxLockDepth+1) + "1" + strings.Repeat("}", maxLockDepth+1) + "\n", "nested deeper than 16 levels"},
+		"a header past the lock depth":      {"[" + strings.Repeat("a.", maxLockDepth+1) + "z]\nk = 1\n", "nested deeper than 16 levels"},
+		"at the lock depth":                 {deepTOMLKey(maxLockDepth), ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeTree(t, dir, map[string]string{"app/poetry.lock": c.body})
+			r := dirResolver(t, dir)
+			ctx := warn.NewContext(context.Background(), false)
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
+			start := time.Now()
+			bounded := withBoundedLocks(ctx, r, dir)
+			took := time.Since(start)
+			runtime.ReadMemStats(&after)
+
+			locs, err := bounded.FilesByGlob("**/poetry.lock")
+			drained := warn.Drain(ctx)
+			if c.why == "" {
+				if err != nil || len(locs) != 1 || drained != "" {
+					t.Errorf("FilesByGlob() = %v, %v with warnings %q, want the lock kept in silence", locs, err, drained)
+				}
+				return
+			}
+			if err != nil || len(locs) != 0 {
+				t.Errorf("FilesByGlob() = %v, %v, want the lock hidden", locs, err)
+			}
+			if strings.Count(drained, "\n") != 1 || !strings.Contains(drained, c.why) || !strings.Contains(drained, " "+filepath.Join("app", "poetry.lock")+":") {
+				t.Errorf("warnings = %q, want one naming app/poetry.lock for %q", drained, c.why)
+			}
+			if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 3*maxLockBytes || took > 5*time.Second {
+				t.Errorf("refusing it took %v and allocated %d MB", took, alloc>>20)
+			}
+		})
 	}
 }

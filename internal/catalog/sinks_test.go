@@ -495,6 +495,16 @@ func TestCatalogRefusesCargoFilesNestedTooDeepForTheFilter(t *testing.T) {
 	}
 }
 
+// The filter reads the project's Cargo.lock within the lockfile caps too, so a lock past the lockfile depth proves nothing.
+func TestCargoVendorFilterReadsTheLockWithinTheLockfileCaps(t *testing.T) {
+	proj := t.TempDir()
+	vendoredCrate(t, proj, "vendor/serde", "1.0.228", "cccc", "[dev-dependencies]\nserde_derive = \"=1.0.228\"\n")
+	vendoringRoot(t, proj, "", "", lockEntry("serde", "1.0.228", "cccc"), deepTOMLKey(maxLockDepth+1))
+	if got := catalogNames(t, proj); got["serde_derive"] != "1.0.228" {
+		t.Errorf("serde_derive@1.0.228 hidden on a lock past the lockfile depth, got %v", got)
+	}
+}
+
 // TestCatalogReadsAVendoredCrateScannedDirectly: scanning a vendored crate asks for that crate.
 func TestCatalogReadsAVendoredCrateScannedDirectly(t *testing.T) {
 	proj := cargoVendorFixture(t)

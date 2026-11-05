@@ -20,7 +20,7 @@ import (
 // cargoVendorMarker sits at the root of every crate `cargo vendor` writes, whatever the vendor directory is called.
 const cargoVendorMarker = ".cargo-checksum.json"
 
-// maxCargoProofBytes bounds a lockfile or marker read; real ones are a few MB at most.
+// maxCargoProofBytes bounds a marker read; real ones are a few MB at most.
 const maxCargoProofBytes = 32 << 20
 
 // cargoVendored hides the Cargo.toml and Cargo.lock of proven vendored crates; it never hides any other file.
@@ -623,7 +623,12 @@ func projectLocks(r file.Resolver, locks []file.Location, manifests map[string]c
 				Checksum string `toml:"checksum"`
 			} `toml:"package"`
 		}
-		if err := decodeTOMLAt(r, l, maxCargoProofBytes, &lock); err != nil {
+		// The lockfile caps, as for syft's own parse: this one runs before withBoundedLocks hides anything.
+		data, err := readLock(r, l)
+		if err != nil {
+			continue
+		}
+		if _, err := decodeTOML(data, &lock); err != nil {
 			continue
 		}
 		set := lockedSet{sums: map[string]map[string]bool{}, versions: map[string][]string{}}
