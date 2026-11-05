@@ -24,8 +24,9 @@ flowchart LR
 
     A --> D["internal/catalog<br/>lockfiles + manifests"]
     D -. "no lockfile" .-> E["uv / npm resolvers<br/>resolve ranges to versions"]
-    E --> T
-    D --> T{"trusted source?<br/>(internal/trust)"}
+    E --> R
+    D --> R["Cargo source + config check<br/>(internal/catalog, crates only)"]
+    R --> T{"trusted source?<br/>(internal/trust)"}
     T -- "yes" --> X["dropped: not checked, not sent"]
     T -- "no" --> F["OSSBOM"]
     B --> F

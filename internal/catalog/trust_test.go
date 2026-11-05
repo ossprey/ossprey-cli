@@ -2,14 +2,19 @@ package catalog
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/anchore/syft/syft/file"
+	"github.com/anchore/syft/syft/source"
 
 	"github.com/ossprey/ossprey-cli/internal/trust"
+	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
 const (
@@ -122,7 +127,7 @@ func trustFixture(t *testing.T) string {
 
 func trustedNames(pkgs []Package) (trusted, checked []string) {
 	for _, p := range pkgs {
-		id := p.Type + "/" + strings.ToLower(p.Name)
+		id := p.Type + "/" + strings.ToLower(p.Name) + qualifierKey(p.Qualifiers)
 		if p.Trusted {
 			trusted = append(trusted, id)
 		} else {
@@ -164,6 +169,464 @@ func TestCatalogMarksPackagesFromTrustedSources(t *testing.T) {
 	}
 	if strings.Join(checked, " ") != strings.Join(wantChecked, " ") {
 		t.Errorf("checked = %v\nwant      %v", checked, wantChecked)
+	}
+}
+
+const trustCargoLock = `version = 4
+
+[[package]]
+name = "acme-sparse"
+version = "1.0.0"
+source = "sparse+https://crates.corp.example/internal/"
+checksum = "aaaa"
+
+[[package]]
+name = "acme-index"
+version = "1.0.0"
+source = "registry+https://git.corp.example/acme/crates-index.git"
+checksum = "bbbb"
+
+[[package]]
+name = "acme-hub"
+version = "1.0.0"
+source = "registry+https://github.com/acme/crates-index"
+
+[[package]]
+name = "acme-twin"
+version = "1.0.0"
+source = "sparse+https://crates.corp.example/internal/"
+
+[[package]]
+name = "acme-git"
+version = "1.0.0"
+source = "git+https://git.corp.example/acme/acme-git#0123456789abcdef0123456789abcdef01234567"
+
+[[package]]
+name = "acme-proxied"
+version = "1.0.0"
+source = "sparse+https://crates.corp.example/internal-proxy/"
+
+[[package]]
+name = "serde"
+version = "1.0.228"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cccc"
+
+[[package]]
+name = "itoa"
+version = "1.0.15"
+source = "sparse+https://index.crates.io/"
+checksum = "dddd"
+
+[[package]]
+name = "ryu"
+version = "1.0.20"
+source = "registry+https://gİthub.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "acme-dotted"
+version = "1.0.0"
+source = "registry+https://gİt.corp.example/acme/crates-index.git"
+
+[[package]]
+name = "acme-backslash"
+version = "1.0.0"
+source = "sparse+https://github.com\\@evil.example/acme/"
+
+[[package]]
+name = "acme-escaped-slash"
+version = "1.0.0"
+source = "sparse+https://crates.corp.example/public%2F..%2Finternal/"
+
+[[package]]
+name = "acme-escaped-lower"
+version = "1.0.0"
+source = "registry+https://git.corp.example/public%2f..%2facme/crates-index.git"
+
+[[package]]
+name = "acme-escaped-dots"
+version = "1.0.0"
+source = "sparse+https://crates.corp.example/public%2F%2E%2E%2Finternal/"
+
+[[package]]
+name = "acme-escaped-backslash"
+version = "1.0.0"
+source = "sparse+https://crates.corp.example/internal/..%5C..%5Cpublic/"
+
+[[package]]
+name = "acme-empty-segment"
+version = "1.0.0"
+source = "registry+https://crates.corp.example/public//../internal/index"
+
+[[package]]
+name = "acme-dot-segment"
+version = "1.0.0"
+source = "sparse+https://crates.corp.example/./internal/"
+
+[[package]]
+name = "acme-trailing-dots"
+version = "1.0.0"
+source = "sparse+https://crates.corp.example/internal/acme/.."
+
+[[package]]
+name = "acme-nested"
+version = "1.0.0"
+source = "registry+https://crates.corp.example/internal/crates/index"
+
+[[package]]
+name = "acme-trailing-nbsp"
+version = "1.0.0"
+source = "registry+https://crates.corp.example/internal\u00a0"
+
+[[package]]
+name = "acme-leading-nbsp"
+version = "1.0.0"
+source = "\u00a0sparse+https://crates.corp.example/internal/"
+
+[[package]]
+name = "acme-tab"
+version = "1.0.0"
+source = "sparse+https://crates.corp.example/inter\tnal/"
+
+[[package]]
+name = "acme-space"
+version = "1.0.0"
+source = "sparse+https://crates.corp.example/internal/acme crates/"
+
+[[package]]
+name = "acme-sparse-backslash"
+version = "1.0.0"
+source = "sparse+https://crates.corp.example/internal\\outside/"
+
+[[package]]
+name = "acme-registry-backslash"
+version = "1.0.0"
+source = "registry+https://crates.corp.example/internal\\index"
+
+[[package]]
+name = "acme-non-ascii-path"
+version = "1.0.0"
+source = "sparse+https://crates.corp.example/internal/cr\u00e4tes/"
+
+[[package]]
+name = "acme-plain"
+version = "1.0.0"
+source = "sparse+https://crates.corp.example/internal/team-a_b.c~d/"
+
+[[package]]
+name = "acme-ipv6"
+version = "1.0.0"
+source = "sparse+https://[::1]:8443/internal/"
+`
+
+// Same acme-twin@1.0.0, but this project locks it from crates.io.
+const trustCargoLockCratesIoTwin = `version = 4
+
+[[package]]
+name = "acme-twin"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eeee"
+`
+
+// A crate is trusted by the private index its Cargo.lock names, never from crates.io, git or a host Go and Cargo read apart.
+func TestCatalogTrustsCratesByTheirCargoLockIndex(t *testing.T) {
+	t.Setenv("CARGO_HOME", t.TempDir())
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		"rustapp/Cargo.lock":  trustCargoLock,
+		"rustapp2/Cargo.lock": trustCargoLockCratesIoTwin,
+	})
+	policy := testPolicy(t, []string{
+		"https://crates.corp.example/internal/",
+		"https://git.corp.example/acme/",
+		"https://github.com/",
+		"https://index.crates.io/",
+		"https://[::1]:8443/internal/",
+	}, nil)
+
+	pkgs, err := Catalog(context.Background(), root, Options{NoExec: true, SkipVersionLookup: true, Trust: policy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	trusted, checked := trustedNames(pkgs)
+
+	wantTrusted := []string{
+		"cargo/acme-hub?repository_url=https://github.com/",             // git index under a host-wide rule
+		"cargo/acme-index?repository_url=https://git.corp.example/",     // git index under its repository prefix
+		"cargo/acme-nested?repository_url=https://crates.corp.example/", // a normalised path below the prefix
+		"cargo/acme-plain?repository_url=https://crates.corp.example/",  // printable ASCII punctuation in a path below the prefix
+		"cargo/acme-sparse?repository_url=https://crates.corp.example/", // sparse index
+		"cargo/acme-twin?repository_url=https://crates.corp.example/",   // the private crate of that name
+	}
+	wantChecked := []string{
+		"cargo/acme-backslash?repository_url=https:///",                        // Cargo reads github.com\ as userinfo and fetches from evil.example
+		"cargo/acme-dot-segment?repository_url=https://crates.corp.example/",   // a path segment Cargo and path.Clean may resolve apart
+		"cargo/acme-dotted?repository_url=https://g%C4%B0t.corp.example/",      // Go folds İ to i, Cargo's IDNA does not
+		"cargo/acme-empty-segment?repository_url=https://crates.corp.example/", // Cargo's ".." pops the empty segment, landing in /public/internal/
+		// Cargo keeps an escape inside its path segment where Go decodes and cleans it into the trusted prefix.
+		"cargo/acme-escaped-backslash?repository_url=https://crates.corp.example/",
+		"cargo/acme-escaped-dots?repository_url=https://crates.corp.example/",
+		"cargo/acme-escaped-lower?repository_url=https://git.corp.example/",
+		"cargo/acme-escaped-slash?repository_url=https://crates.corp.example/",
+		// Git is never a registry, even under a trusted prefix.
+		"cargo/acme-git?vcs_url=git+https://git.corp.example/acme/acme-git@0123456789abcdef0123456789abcdef01234567",
+		"cargo/acme-ipv6?repository_url=https://[::1]:8443/",                    // Go keeps an IP literal as written where Cargo serialises it
+		"cargo/acme-leading-nbsp?repository_url=https://crates.corp.example/",   // Go trims the NBSP, Cargo reads no sparse+ kind
+		"cargo/acme-non-ascii-path?repository_url=https://crates.corp.example/", // only printable ASCII counts
+		"cargo/acme-proxied?repository_url=https://crates.corp.example/",        // same host, another registry
+		"cargo/acme-registry-backslash?repository_url=https://crates.corp.example/",
+		"cargo/acme-space?repository_url=https://crates.corp.example/",
+		"cargo/acme-sparse-backslash?repository_url=https://crates.corp.example/", // Cargo keeps '\' inside one sparse+ segment, Go cleans it to /internal/outside/
+		"cargo/acme-tab?repository_url=https://crates.corp.example/",
+		"cargo/acme-trailing-dots?repository_url=https://crates.corp.example/",
+		"cargo/acme-trailing-nbsp?repository_url=https://crates.corp.example/", // Go trims the NBSP, Cargo keeps it as /internal%C2%A0
+		"cargo/acme-twin", // locked from crates.io in rustapp2
+		"cargo/itoa",      // crates.io under its own sparse host's rule
+		"cargo/ryu",       // a non-ASCII host on crates.io's path goes out as twins, neither trusted
+		"cargo/ryu?repository_url=https://g%C4%B0thub.com/",
+		"cargo/serde", // crates.io under a github.com rule
+	}
+	if strings.Join(trusted, " ") != strings.Join(wantTrusted, " ") {
+		t.Errorf("trusted = %v\nwant      %v", trusted, wantTrusted)
+	}
+	if strings.Join(checked, " ") != strings.Join(wantChecked, " ") {
+		t.Errorf("checked = %v\nwant      %v", checked, wantChecked)
+	}
+}
+
+// A cargo config replacing any source lets Cargo fetch a crate elsewhere while its Cargo.lock still names the trusted index.
+func TestCatalogTrustsNoCrateUnderASourceReplacement(t *testing.T) {
+	replace := "[source.corp]\nregistry = \"sparse+https://crates.corp.example/internal/\"\nreplace-with = \"elsewhere\"\n\n[source.elsewhere]\nregistry = \"sparse+https://crates.elsewhere.example/\"\n"
+	const replaced, included, unread, aliased = "because a source replacement is configured", "because a cargo config includes another file", "because a cargo config could not be read", "because a cargo alias passes --config"
+	const linked = "because a symlink in the scan could point cargo at another config"
+	for name, c := range map[string]struct {
+		files   map[string]string
+		links   map[string]string
+		modes   map[string]os.FileMode
+		warning string
+	}{
+		"no config":                         {},
+		"a replacement in the scan":         {files: map[string]string{"proj/.cargo/config.toml": replace}, warning: replaced},
+		"a replacement above the scan root": {files: map[string]string{".cargo/config.toml": replace}, warning: replaced},
+		"a replacement in CARGO_HOME":       {files: map[string]string{"home/config.toml": replace}, warning: replaced},
+		"an unreadable config":              {files: map[string]string{"proj/.cargo/config.toml": "[net]\nretry = 2\n"}, modes: map[string]os.FileMode{"proj/.cargo/config.toml": 0}, warning: unread},
+		"an unparseable config":             {files: map[string]string{"proj/.cargo/config.toml": "[source\n"}, warning: unread},
+		"an include in the scan":            {files: map[string]string{"proj/.cargo/config.toml": "include = [\"extra.toml\"]\n", "proj/.cargo/extra.toml": replace}, warning: included},
+		"an include in CARGO_HOME":          {files: map[string]string{"home/config.toml": "include = [{ path = \"extra.toml\" }]\n", "home/extra.toml": replace}, warning: included},
+		// The vendor filter's manifests above the root play no part in trust.
+		"an unparseable manifest above the root": {files: map[string]string{"Cargo.toml": "[package\n"}},
+		"an oversized manifest above the root":   {files: map[string]string{"Cargo.toml": "# " + strings.Repeat("x", maxManifestBytes) + "\n"}},
+		// A directory outside the scan that can be searched but not listed still has its configs opened by name.
+		"a replacement in an unlistable .cargo above the root": {files: map[string]string{".cargo/config.toml": replace}, modes: map[string]os.FileMode{".cargo": 0o311}, warning: replaced},
+		"a replacement in an unlistable CARGO_HOME":            {files: map[string]string{"home/config.toml": replace}, modes: map[string]os.FileMode{"home": 0o311}, warning: replaced},
+		"an unlistable directory above the scan root":          {modes: map[string]os.FileMode{".": 0o311}},
+		// A link can resolve differently for cargo than for the scan, so a symlinked config or .cargo is never followed.
+		"a config symlinked to its sibling":               {files: map[string]string{"proj/.cargo/replace.toml": replace}, links: map[string]string{"proj/.cargo/config.toml": "replace.toml"}, warning: linked},
+		"a config symlinked into another dot directory":   {files: map[string]string{"proj/.yarn/cargo.toml": replace}, links: map[string]string{"proj/.cargo/config.toml": "../.yarn/cargo.toml"}, warning: linked},
+		"a symlinked config beside a plain one":           {files: map[string]string{"proj/.cargo/replace.toml": replace, "proj/.cargo/config.toml": "[net]\nretry = 2\n"}, links: map[string]string{"proj/.cargo/config": "replace.toml"}, warning: linked},
+		"a symlinked config named in another case":        {files: map[string]string{"proj/.cargo/replace.toml": replace}, links: map[string]string{"proj/.cargo/Config.toml": "replace.toml"}, warning: linked},
+		"a .cargo directory symlinked to a dot directory": {files: map[string]string{"proj/.yarn/config.toml": replace}, links: map[string]string{"proj/.cargo": ".yarn"}, warning: linked},
+		"a .cargo directory symlinked above the root":     {files: map[string]string{"dotcargo/config.toml": "[net]\nretry = 2\n"}, links: map[string]string{".cargo": "dotcargo"}, warning: unread},
+		"a config symlinked in CARGO_HOME":                {files: map[string]string{"cargo.toml": "[net]\nretry = 2\n"}, links: map[string]string{"home/config.toml": "../cargo.toml"}, warning: unread},
+		// An alias applies its --config value or file whenever it runs.
+		"an alias passing --config":                 {files: map[string]string{"proj/.cargo/config.toml": "[alias]\nxtask = \"run --config xtask/replace.toml --package xtask --\"\n"}, warning: aliased},
+		"an alias passing --config= above the root": {files: map[string]string{".cargo/config.toml": "[alias]\nb = [\"build\", \"--config=source.corp.replace-with='elsewhere'\"]\n"}, warning: aliased},
+		"an alias without --config":                 {files: map[string]string{"proj/.cargo/config.toml": "[alias]\nxtask = \"run --package xtask --\"\n"}},
+		"an array alias without --config":           {files: map[string]string{"proj/.cargo/config.toml": "[alias]\nb = [\"build\", \"--release\"]\n"}},
+		// An alias that quotes, escapes or runs a shell may pass --config where a whitespace split sees none.
+		"an alias with single quotes":          {files: map[string]string{"proj/.cargo/config.toml": "[alias]\nb = \"build '--config' overrides.toml\"\n"}, warning: aliased},
+		"an alias with double quotes":          {files: map[string]string{"proj/.cargo/config.toml": "[alias]\nb = 'build \"--config\" overrides.toml'\n"}, warning: aliased},
+		"an alias with a backslash":            {files: map[string]string{"proj/.cargo/config.toml": "[alias]\nb = 'build \\--config overrides.toml'\n"}, warning: aliased},
+		"an alias starting with !":             {files: map[string]string{"proj/.cargo/config.toml": "[alias]\nb = \"!cargo build --release\"\n"}, warning: aliased},
+		"an array alias with a quoted element": {files: map[string]string{"proj/.cargo/config.toml": "[alias]\nb = [\"build\", \"'--config'\", \"overrides.toml\"]\n"}, warning: aliased},
+		"an array alias with a backslash":      {files: map[string]string{".cargo/config.toml": "[alias]\nb = [\"build\", '\\--config', \"overrides.toml\"]\n"}, warning: aliased},
+		// cargo reads .cargo above its physical cwd, so a build in a symlinked directory reads configs the index never holds.
+		"a replacement above a symlinked directory in a package sink": {files: map[string]string{"proj/.yarn/pkg/.cargo/config.toml": replace, "proj/.yarn/pkg/app/.keep": ""}, links: map[string]string{"proj/app": ".yarn/pkg/app"}, warning: linked},
+		"a replacement above a symlinked directory outside the scan":  {files: map[string]string{"elsewhere/pkg/.cargo/config.toml": replace, "elsewhere/pkg/app/.keep": ""}, links: map[string]string{"proj/app": "../elsewhere/pkg/app"}, warning: linked},
+		"an include above a symlinked directory in a package sink":    {files: map[string]string{"proj/target/.cargo/config": "include = \"extra.toml\"\n", "proj/target/app/.keep": ""}, links: map[string]string{"proj/app": "target/app"}, warning: linked},
+		"a plain config above a symlinked directory":                  {files: map[string]string{"proj/.yarn/pkg/.cargo/config.toml": "[net]\nretry = 2\n", "proj/.yarn/pkg/app/.keep": ""}, links: map[string]string{"proj/app": ".yarn/pkg/app"}, warning: linked},
+		"a dangling directory symlink":                                {links: map[string]string{"proj/app": ".yarn/missing"}, warning: linked},
+		// Any link in the index ends trust, since the index cleans a target's ".." before an unindexed link in it resolves.
+		"a symlink to a file outside the scan": {files: map[string]string{"LICENSE": ""}, links: map[string]string{"proj/LICENSE": "../LICENSE"}, warning: linked},
+		"a symlink to a file in the scan":      {files: map[string]string{"proj/docs/LICENSE": ""}, links: map[string]string{"proj/LICENSE": "docs/LICENSE"}, warning: linked},
+		"a symlink through a sink link and ..": {files: map[string]string{"proj/y": "", "proj/target/a/b/.keep": "", "proj/target/a/y/.cargo/config.toml": replace}, links: map[string]string{"proj/node_modules": "target/a/b", "proj/app": "node_modules/../y"}, warning: linked},
+		// Only a regular file is read, as a device or FIFO may never end.
+		"a config symlinked to a device": {links: map[string]string{"proj/.cargo/config.toml": "/dev/zero"}, warning: linked},
+		"a config that is a directory":   {files: map[string]string{"proj/.cargo/config.toml/.keep": ""}, warning: unread},
+		"an oversized config":            {files: map[string]string{"proj/.cargo/config.toml": "# " + strings.Repeat("x", maxManifestBytes) + "\n"}, warning: unread},
+	} {
+		t.Run(name, func(t *testing.T) {
+			base := t.TempDir()
+			t.Setenv("CARGO_HOME", filepath.Join(base, "home"))
+			writeTree(t, base, map[string]string{
+				"home/.keep":                 "",
+				"proj/Cargo.lock":            "version = 4\n\n[[package]]\nname = \"acme-sparse\"\nversion = \"1.0.0\"\nsource = \"sparse+https://crates.corp.example/internal/\"\nchecksum = \"aaaa\"\n",
+				"proj/web/package-lock.json": trustPackageLock,
+			})
+			writeTree(t, base, c.files)
+			for link, target := range c.links {
+				// Symlinks need privileges on Windows, as in the other symlink tests.
+				if runtime.GOOS == "windows" {
+					t.Skip("symlinks need privileges on Windows")
+				}
+				p := filepath.Join(base, filepath.FromSlash(link))
+				if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, p); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+			}
+			for rel, mode := range c.modes {
+				if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+					t.Skip("file modes do not stop this user reading")
+				}
+				p := filepath.Join(base, filepath.FromSlash(rel))
+				if err := os.Chmod(p, mode); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(p, 0o755) })
+			}
+			ctx := warn.NewContext(context.Background(), false)
+			policy := testPolicy(t, []string{"https://crates.corp.example/internal/", npmInternal}, nil)
+
+			pkgs, err := Catalog(ctx, filepath.Join(base, "proj"), Options{NoExec: true, SkipVersionLookup: true, Trust: policy})
+			if err != nil {
+				t.Fatal(err)
+			}
+			trusted, _ := trustedNames(pkgs)
+			want := []string{"cargo/acme-sparse?repository_url=https://crates.corp.example/", "npm/acme-npm"}
+			if c.warning != "" {
+				want = want[1:]
+			}
+			if strings.Join(trusted, " ") != strings.Join(want, " ") {
+				t.Errorf("trusted = %v, want %v", trusted, want)
+			}
+			if got := warn.Drain(ctx); c.warning == "" && strings.Contains(got, "registry trust") || c.warning != "" && strings.Count(got, c.warning) != 1 {
+				t.Errorf("warnings = %q, want %q once", got, c.warning)
+			}
+		})
+	}
+}
+
+// A cancelled scan may close the walk before a link or config, so no crate is trusted by registry.
+func TestCatalogTrustsNoCrateWhenTheConfigWalkIsCancelled(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("CARGO_HOME", filepath.Join(base, "home"))
+	writeTree(t, base, map[string]string{
+		"home/.keep":       "",
+		"proj/Cargo.lock":  "version = 4\n\n[[package]]\nname = \"acme-sparse\"\nversion = \"1.0.0\"\nsource = \"sparse+https://crates.corp.example/internal/\"\nchecksum = \"aaaa\"\n",
+		"proj/src/main.rs": "fn main() {}\n",
+	})
+	root := filepath.Join(base, "proj")
+	src, err := newDirectorySource(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	r, err := src.FileResolver(source.SquashedScope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const index = "https://crates.corp.example/internal/"
+	policy := testPolicy(t, []string{index}, nil)
+	for name, cancelled := range map[string]bool{"a live scan": false, "a cancelled scan": true} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(warn.NewContext(context.Background(), false))
+			defer cancel()
+			if cancelled {
+				cancel()
+			}
+			pkgs := []Package{{Name: "acme-sparse", Version: "1.0.0", Type: "cargo", Registries: []string{index}}}
+			clearReplacedCrateRegistries(ctx, pkgs, policy, r, root)
+			markTrustedPackages(pkgs, policy)
+			if pkgs[0].Trusted == cancelled {
+				t.Errorf("trusted = %v, want %v", pkgs[0].Trusted, !cancelled)
+			}
+			if got := warn.Drain(ctx); cancelled && strings.Count(got, "because a cargo config could not be read") != 1 || !cancelled && got != "" {
+				t.Errorf("warnings = %q", got)
+			}
+		})
+	}
+}
+
+// A dotfile manager's linked cargo config is read through by the vendor filter, but counts as unreadable for registry trust.
+func TestCatalogReadsALinkedCargoConfigForVendoringOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks need privileges on Windows")
+	}
+	for name, link := range map[string][2]string{
+		"a config symlinked in CARGO_HOME":            {"home/config.toml", "dotfiles/cargo/config.toml"},
+		"a .cargo directory symlinked above the root": {".cargo", "dotfiles/cargo"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			base := t.TempDir()
+			t.Setenv("CARGO_HOME", filepath.Join(base, "home"))
+			writeTree(t, base, map[string]string{
+				"home/.keep":                 "",
+				"dotfiles/cargo/config.toml": "[net]\nretry = 2\n",
+				"trusted/Cargo.lock":         "version = 4\n\n[[package]]\nname = \"acme-sparse\"\nversion = \"1.0.0\"\nsource = \"sparse+https://crates.corp.example/internal/\"\nchecksum = \"aaaa\"\n",
+			})
+			if err := os.Symlink(filepath.Join(base, link[1]), filepath.Join(base, link[0])); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+			proj := filepath.Join(base, "vendoring")
+			vendoredCrate(t, proj, "vendor/serde", "1.0.228", "cccc", "[dev-dependencies]\nserde_derive = \"=1.0.228\"\n")
+			vendoringRoot(t, proj, "", "", lockEntry("serde", "1.0.228", "cccc"))
+
+			pkgs, err := Catalog(context.Background(), proj, Options{NoExec: true, SkipVersionLookup: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, p := range pkgs {
+				if p.Name == "serde_derive" {
+					t.Errorf("serde_derive came from a proven vendored crate, so the filter never ran")
+				}
+			}
+
+			ctx := warn.NewContext(context.Background(), false)
+			policy := testPolicy(t, []string{"https://crates.corp.example/internal/"}, nil)
+			if pkgs, err = Catalog(ctx, filepath.Join(base, "trusted"), Options{NoExec: true, SkipVersionLookup: true, Trust: policy}); err != nil {
+				t.Fatal(err)
+			}
+			if trusted, _ := trustedNames(pkgs); len(trusted) != 0 {
+				t.Errorf("trusted = %v, want none", trusted)
+			}
+			if got := warn.Drain(ctx); strings.Count(got, "because a cargo config could not be read") != 1 {
+				t.Errorf("warnings = %q, want the unread config once", got)
+			}
+		})
+	}
+}
+
+// On a case-sensitive filesystem a CARGO_HOME spelled like an ancestor's .cargo in another case is another directory, so both configs are read.
+func TestCatalogReadsACargoHomeThatDiffersFromAnAncestorOnlyByCase(t *testing.T) {
+	base := t.TempDir()
+	if err := os.Mkdir(filepath.Join(base, "proj"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "PROJ")); err == nil {
+		t.Skip("the filesystem folds case")
+	}
+	writeTree(t, base, map[string]string{
+		"proj/.cargo/config.toml": "[net]\nretry = 2\n",
+		"PROJ/.cargo/config.toml": "[source.corp]\nregistry = \"sparse+https://crates.corp.example/internal/\"\nreplace-with = \"elsewhere\"\n",
+		"proj/app/Cargo.lock":     "version = 4\n\n[[package]]\nname = \"acme-sparse\"\nversion = \"1.0.0\"\nsource = \"sparse+https://crates.corp.example/internal/\"\nchecksum = \"aaaa\"\n",
+	})
+	t.Setenv("CARGO_HOME", filepath.Join(base, "PROJ", ".cargo"))
+	ctx := warn.NewContext(context.Background(), false)
+	policy := testPolicy(t, []string{"https://crates.corp.example/internal/"}, nil)
+
+	pkgs, err := Catalog(ctx, filepath.Join(base, "proj", "app"), Options{NoExec: true, SkipVersionLookup: true, Trust: policy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if trusted, _ := trustedNames(pkgs); len(trusted) != 0 {
+		t.Errorf("trusted = %v, want none", trusted)
+	}
+	if got := warn.Drain(ctx); strings.Count(got, "because a source replacement is configured") != 1 {
+		t.Errorf("warnings = %q, want the replacement once", got)
 	}
 }
 
