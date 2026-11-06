@@ -321,15 +321,15 @@ func TestPipSanitizerKeepsIndexOptionsAndIncludes(t *testing.T) {
 		"sub/a.txt":    "-r ../requirements.txt\nidna\n",
 		"wheels/.keep": "",
 	})
-	s := newPipSanitizer(t.TempDir())
+	s := newPipSanitizer(context.Background(), t.TempDir())
 	out, err := s.file(filepath.Join(src, "requirements.txt"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	data, _ := os.ReadFile(out)
 	got := string(data)
-	for _, want := range []string{"--index-url https://idx/simple", "--extra-index-url https://x/simple",
-		"--find-links " + filepath.Join(src, "wheels"), "requests==2.31.0\n", "--requirement "} {
+	for _, want := range []string{"--index-url 'https://idx/simple'", "--extra-index-url 'https://x/simple'",
+		"--find-links '" + filepath.Join(src, "wheels") + "'", "requests==2.31.0\n", "--requirement "} {
 		if !strings.Contains(got, want) {
 			t.Errorf("copy lacks %q:\n%s", want, got)
 		}
@@ -339,12 +339,12 @@ func TestPipSanitizerKeepsIndexOptionsAndIncludes(t *testing.T) {
 			t.Errorf("copy keeps %q:\n%s", bad, got)
 		}
 	}
-	if !slices.Contains(s.dropped, "-e .") || !slices.Contains(s.dropped, "-c https://remote/c.txt") {
+	if !slices.Contains(s.dropped, "an editable (-e)") || !slices.Contains(s.dropped, "a remote include (-c <url>)") {
 		t.Errorf("dropped = %v", s.dropped)
 	}
-	inc := strings.Fields(strings.SplitAfter(got, "--requirement ")[1])[0]
-	sub, _ := os.ReadFile(inc)
-	if !strings.Contains(string(sub), "idna") || !strings.Contains(string(sub), "--requirement "+out) {
+	incTok, _ := shlexSplit(strings.SplitN(strings.SplitAfter(got, "--requirement ")[1], "\n", 2)[0])
+	sub, _ := os.ReadFile(incTok[0])
+	if !strings.Contains(string(sub), "idna") || !strings.Contains(string(sub), "--requirement "+shlexQuote(out)) {
 		t.Errorf("include copy wrong (cycle should point back at %s):\n%s", out, sub)
 	}
 }

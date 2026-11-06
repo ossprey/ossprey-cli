@@ -37,6 +37,8 @@ func (c *SetupPyCataloger) Catalog(ctx context.Context, resolver file.Resolver) 
 		}
 		return nil, fmt.Errorf("%s: resolving setup.py would run it, so direct dependencies only", dir)
 	}
-	out, err := resolveByGlob(ctx, resolver, c.root, "**/setup.py", "setup.py", parse)
+	out, err := resolveByGlob(ctx, resolver, c.root, "**/setup.py", "setup.py", func(p string) bool {
+		return pyprojectLockCovered(filepath.Join(filepath.Dir(p), "pyproject.toml"))
+	}, parse)
 	return out, nil, err
 }

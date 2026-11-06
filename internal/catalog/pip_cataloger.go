@@ -83,7 +83,7 @@ func (c *PipCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]p
 		if err != nil {
 			return nil, fmt.Errorf("pip %s: %w", absPath, err)
 		}
-		san := newPipSanitizer(scratch)
+		san := newPipSanitizer(ctx, scratch)
 		reqFile, err := san.file(absPath)
 		if err != nil {
 			return nil, fmt.Errorf("pip %s: %w", absPath, err)
@@ -91,7 +91,7 @@ func (c *PipCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]p
 		c.leftOut(ctx, absPath, san.dropped)
 		return runPipResolve(ctx, python, cache, cache, filepath.Dir(absPath), []string{"-r", reqFile}, loc)
 	}
-	reqs, err := resolveByGlob(ctx, resolver, c.root, requirementsGlob, "pip", reqParse)
+	reqs, err := resolveByGlob(ctx, resolver, c.root, requirementsGlob, "pip", nil, reqParse)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -113,7 +113,7 @@ func (c *PipCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]p
 			if req, ok := pipSafeRequirement(spec); ok {
 				safe = append(safe, req)
 			} else {
-				dropped = append(dropped, spec)
+				dropped = append(dropped, describeUnsafeRequirement(spec))
 			}
 		}
 		c.leftOut(ctx, absPath, dropped)
@@ -129,7 +129,7 @@ func (c *PipCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]p
 		}
 		return runPipResolve(ctx, python, cache, cache, filepath.Dir(absPath), []string{"-r", reqFile}, loc)
 	}
-	projs, err := resolveByGlob(ctx, resolver, c.root, "**/pyproject.toml", "pip", projParse)
+	projs, err := resolveByGlob(ctx, resolver, c.root, "**/pyproject.toml", "pip", pyprojectLockCovered, projParse)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -144,12 +144,16 @@ func (c *PipCataloger) leftOut(ctx context.Context, manifest string, lines []str
 	if len(lines) == 0 {
 		return
 	}
-	markUnresolved(ctx, c.root, manifest)
+	if filepath.Base(manifest) != "pyproject.toml" || !pyprojectLockCovered(manifest) {
+		markUnresolved(ctx, c.root, manifest)
+	}
+	// lines describe what was left out, never quote it (see
+	// describeUnsafeRequirement).
 	for _, l := range lines {
 		warn.Add(ctx, warn.Entry{
 			Class: "pip:needs-build",
-			One:   fmt.Sprintf("pip: %s: not resolved, since resolving it builds code: %s", manifest, l),
-			Many:  "pip: %d requirements not resolved, since resolving them builds code (OSSPREY_VERBOSE=1 lists them)",
+			One:   fmt.Sprintf("pip: %s: %s left out of resolution, since it could build code or change what resolves", manifest, l),
+			Many:  "pip: %d requirements or options left out of resolution, since they could build code or change what resolves (OSSPREY_VERBOSE=1 lists them)",
 			Item:  manifest + ": " + l,
 		})
 	}
@@ -162,7 +166,11 @@ func (c *PipCataloger) markAllUnresolved(ctx context.Context, resolver file.Reso
 	projs, _ := resolver.FilesByGlob("**/pyproject.toml")
 	for _, loc := range projs {
 		p := hostPath(c.root, loc.RealPath)
-		if specs, _ := pyprojectRequirementSpecs(p); len(specs) > 0 || pyprojectNeedsBuild(p) != nil {
+		if pyprojectLockCovered(p) {
+			continue // syft reads the lock beside it
+		}
+		pp, _ := readPyProject(p)
+		if specs, _ := pyprojectRequirementSpecs(p); len(specs) > 0 || pyprojectNeedsBuild(p) != nil || (pp != nil && dynamicDependencies(pp)) {
 			locs = append(locs, loc)
 		}
 	}

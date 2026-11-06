@@ -81,7 +81,7 @@ func (c *UVCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]pk
 		args := uvArgsForPyProject(dir)
 		return runUV(ctx, c.uv, cache, dir, args, loc)
 	}
-	out, err := resolveByGlob(ctx, resolver, c.root, "**/pyproject.toml", "uv", parse)
+	out, err := resolveByGlob(ctx, resolver, c.root, "**/pyproject.toml", "uv", pyprojectLockCovered, parse)
 	return out, nil, err
 }
 

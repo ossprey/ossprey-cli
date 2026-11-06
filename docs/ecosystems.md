@@ -34,7 +34,10 @@ never does that:
   `pip.py` in your repository is never what runs), and is handed a copy of each
   requirements file holding only registry requirements and index options. A
   `--no-binary` option, a local path, an editable (`-e`) or a direct URL
-  (`name @ url`) is left out, since pip would build it whatever the flags say.
+  (`name @ url`) is left out, since pip would build it whatever the flags say,
+  and so is an index or find-links option that names an environment variable
+  (`${VAR}`), which pip would fill in from the scanning machine. Keep a private
+  index's credentials in pip's own configuration or `PIP_*` variables instead.
 - A legacy `setup.py` project is not resolved at all: that would run
   `setup.py`. Its literal `install_requires` are still read.
 - A `pyproject.toml` whose dependencies are `dynamic`, or a poetry project with
@@ -42,6 +45,12 @@ never does that:
   either.
 - The resolvers do not see `OSSPREY_API_KEY`, `API_KEY`, `OSSPREY_MONITOR_ID` or
   any other `OSSPREY_*` variable.
+
+A Rust crate with dependencies and no `Cargo.lock` (beside it or at its
+workspace root) is unresolved too, as is a `package.json` whose
+`package-lock.json` or `npm-shrinkwrap.json` cannot be parsed when no npm is
+available to resolve it instead. A manifest whose `uv.lock`, `poetry.lock`
+or `pdm.lock` parses is covered by that lock even when nothing could resolve it.
 
 A manifest that cannot be resolved this way keeps its direct dependencies and
 is reported **unresolved** by a warning naming it. Commit a lockfile (`uv.lock`,

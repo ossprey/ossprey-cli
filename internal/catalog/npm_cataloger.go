@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/anchore/syft/syft/artifact"
@@ -38,7 +39,7 @@ func (c *NpmResolveCataloger) Catalog(ctx context.Context, resolver file.Resolve
 	if err != nil {
 		// No real npm on PATH: the package.json fallback keeps the direct
 		// dependencies, and the manifests that needed resolving say so.
-		_, err := resolveByGlob(ctx, resolver, c.root, "**/package.json", "npm", func(absPath string, loc file.Location) ([]pkg.Package, error) {
+		_, err := resolveByGlob(ctx, resolver, c.root, "**/package.json", "npm", nil, func(absPath string, loc file.Location) ([]pkg.Package, error) {
 			if c.standsDown(absPath) {
 				return nil, nil
 			}
@@ -62,7 +63,7 @@ func (c *NpmResolveCataloger) Catalog(ctx context.Context, resolver file.Resolve
 		}
 		return runNpmResolve(ctx, npm, cache, absPath, loc)
 	}
-	out, err := resolveByGlob(ctx, resolver, c.root, "**/package.json", "npm", parse)
+	out, err := resolveByGlob(ctx, resolver, c.root, "**/package.json", "npm", nil, parse)
 	return out, nil, err
 }
 
@@ -74,13 +75,47 @@ func (c *NpmResolveCataloger) standsDown(packageJSON string) bool {
 }
 
 // hasNpmLockfile reports whether dir already ships a lockfile syft can read.
+// Present is not enough: a truncated or corrupt lock stood the resolve down
+// while syft could read nothing from it, so the project's tree was missing
+// from the scan and nothing recorded it.
 func hasNpmLockfile(dir string) bool {
 	for _, name := range []string{"package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml"} {
-		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+		if npmLockReadable(filepath.Join(dir, name)) {
 			return true
 		}
 	}
 	return false
+}
+
+// npmLockReadCache memoises npmLockReadable by path, size and modification
+// time: a monorepo root lock is consulted once per workspace member.
+var npmLockReadCache sync.Map
+
+// npmLockReadable reports whether the lockfile at path exists and, for npm's
+// JSON locks, parses. yarn.lock and pnpm-lock.yaml count when present: an
+// empty one is how a project with no dependencies ships, and syft has its own
+// parsers for their several formats.
+func npmLockReadable(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	key := fmt.Sprintf("%s\x00%d\x00%d", path, info.Size(), info.ModTime().UnixNano())
+	if v, ok := npmLockReadCache.Load(key); ok {
+		return v.(bool)
+	}
+	ok := false
+	if data, err := os.ReadFile(path); err == nil {
+		switch filepath.Base(path) {
+		case "package-lock.json", "npm-shrinkwrap.json":
+			_, err := parseNpmLock(data, file.Location{})
+			ok = err == nil
+		default:
+			ok = true
+		}
+	}
+	npmLockReadCache.Store(key, ok)
+	return ok
 }
 
 // runNpmResolve copies package.json into a throwaway dir, generates a lockfile

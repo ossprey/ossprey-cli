@@ -214,7 +214,14 @@ func hasPEP621Project(path string) bool {
 // is reported unresolved. nil when there is nothing that needs it.
 func pyprojectNeedsBuild(path string) error {
 	pp, err := readPyProject(path)
-	if err != nil || pp == nil || hasPEP621Project(path) {
+	if err != nil {
+		// Unreadable: nothing could resolve it, unless a lock covers it.
+		if pyprojectLockCovered(path) {
+			return nil
+		}
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	if pp == nil || hasPEP621Project(path) {
 		return nil
 	}
 	deps := 0
@@ -227,7 +234,7 @@ func pyprojectNeedsBuild(path string) error {
 		return nil
 	}
 	dir := filepath.Dir(path)
-	if _, err := os.Stat(filepath.Join(dir, "poetry.lock")); err == nil {
+	if pyprojectLockCovered(path) {
 		return nil
 	}
 	return fmt.Errorf("%s: poetry dependencies with no poetry.lock; resolving them would build the project, so direct dependencies only", dir)
@@ -238,6 +245,28 @@ func pyprojectNeedsBuild(path string) error {
 func dynamicDependencies(pp *pyproject) bool {
 	for _, d := range pp.Project.Dynamic {
 		if d == "dependencies" || d == "optional-dependencies" {
+			return true
+		}
+	}
+	return false
+}
+
+// pythonLockfiles are the lockfiles beside a pyproject.toml that syft reads
+// for the project's whole tree.
+var pythonLockfiles = []string{"uv.lock", "poetry.lock", "pdm.lock"}
+
+// pyprojectLockCovered reports whether a lockfile beside the pyproject.toml
+// at path parses, so syft has the transitive tree whether or not a resolver
+// could produce one. A lock that does not parse covers nothing.
+func pyprojectLockCovered(path string) bool {
+	dir := filepath.Dir(path)
+	for _, name := range pythonLockfiles {
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			continue
+		}
+		var doc map[string]any
+		if _, err := toml.Decode(string(data), &doc); err == nil && len(doc) > 0 {
 			return true
 		}
 	}
