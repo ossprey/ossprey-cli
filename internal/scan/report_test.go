@@ -322,3 +322,40 @@ func TestReportOmitsUnscannedWhenFullyCovered(t *testing.T) {
 		t.Errorf("unscanned should be omitted when zero: %s", blob)
 	}
 }
+
+func TestReportCoverage(t *testing.T) {
+	r := NewReport(ossbom.New(ossbom.Environment{}), severity.FailingFloor)
+	if r.Incomplete() != "" {
+		t.Errorf("fresh report incomplete: %q", r.Incomplete())
+	}
+	raw, _ := json.Marshal(r)
+	if strings.Contains(string(raw), "transitive") || strings.Contains(string(raw), "unresolved_manifests") {
+		t.Errorf("coverage keys present without SetCoverage (check's report): %s", raw)
+	}
+
+	r.SetCoverage(nil)
+	raw, _ = json.Marshal(r)
+	if !strings.Contains(string(raw), `"transitive":"complete"`) || !strings.Contains(string(raw), `"unresolved_manifests":[]`) {
+		t.Errorf("complete scan report: %s", raw)
+	}
+
+	r.SetCoverage([]string{"a/requirements.txt", "b/pyproject.toml", "c/setup.py", "d/package.json"})
+	r.Unscanned, r.Components = 2, 5
+	if r.Transitive != TransitivePartial {
+		t.Errorf("transitive = %q", r.Transitive)
+	}
+	why := r.Incomplete()
+	for _, want := range []string{"4 manifest(s)", "a/requirements.txt", "and 1 more", "2 of 5 package(s) not scanned"} {
+		if !strings.Contains(why, want) {
+			t.Errorf("Incomplete() = %q, missing %q", why, want)
+		}
+	}
+	if len(r.UnresolvedManifests) != 4 {
+		t.Errorf("Incomplete truncated the report's own list: %v", r.UnresolvedManifests)
+	}
+
+	s := SkippedReport(ossbom.New(ossbom.Environment{}), severity.FailingFloor, "quota", "")
+	if !strings.Contains(s.Incomplete(), "skipped") {
+		t.Errorf("a skipped scan is not complete: %q", s.Incomplete())
+	}
+}

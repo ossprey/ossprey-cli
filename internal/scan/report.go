@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
 	"github.com/ossprey/ossprey-cli/internal/severity"
@@ -81,6 +82,52 @@ type Report struct {
 	Findings      []Finding `json:"findings"`
 	Informational []Finding `json:"informational,omitempty"`
 	Skipped       *Skip     `json:"skipped,omitempty"`
+	// Transitive says whether every manifest's transitive tree was resolved:
+	// "complete", or "partial" when UnresolvedManifests is not empty. Set by
+	// scan only (SetCoverage); check names its packages, so it has no tree.
+	Transitive string `json:"transitive,omitempty"`
+	// UnresolvedManifests are the manifests, relative to the scanned path,
+	// whose transitive dependencies were not resolved — a resolver failed, or
+	// resolving would have meant building a package — so only their direct
+	// dependencies were checked. Always present on a scan report, [] when
+	// none; absent from check's.
+	UnresolvedManifests []string `json:"unresolved_manifests,omitzero"`
+}
+
+// Transitive coverage values.
+const (
+	TransitiveComplete = "complete"
+	TransitivePartial  = "partial"
+)
+
+// SetCoverage records which manifests a scan could not resolve.
+func (r *Report) SetCoverage(unresolved []string) {
+	r.UnresolvedManifests = append([]string{}, unresolved...)
+	r.Transitive = TransitiveComplete
+	if len(unresolved) > 0 {
+		r.Transitive = TransitivePartial
+	}
+}
+
+// Incomplete explains why a report does not cover the whole project, or
+// returns "" when it does: a manifest left unresolved, a package the platform
+// did not scan, or a scan the platform skipped outright.
+func (r Report) Incomplete() string {
+	var why []string
+	if r.Verdict == VerdictSkipped {
+		why = append(why, "the scan was skipped")
+	}
+	if n := len(r.UnresolvedManifests); n > 0 {
+		names := r.UnresolvedManifests
+		if n > 3 {
+			names = append(names[:3:3], fmt.Sprintf("and %d more", n-3))
+		}
+		why = append(why, fmt.Sprintf("%d manifest(s) not fully resolved (%s)", n, strings.Join(names, ", ")))
+	}
+	if r.Unscanned > 0 {
+		why = append(why, fmt.Sprintf("%d of %d package(s) not scanned", r.Unscanned, r.Components))
+	}
+	return strings.Join(why, "; ")
 }
 
 // NewReport summarises a scanned SBOM: "malware" when any finding is at or

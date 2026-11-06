@@ -153,6 +153,7 @@ func newScanCmd() *cobra.Command {
 		cacheScanOnly   bool
 		monitorID       string
 		timeout         time.Duration
+		requireComplete bool
 	)
 
 	cmd := &cobra.Command{
@@ -213,6 +214,17 @@ func newScanCmd() *cobra.Command {
 				}
 				fmt.Fprintf(os.Stderr, "ossprey: warning: passive mode is set in the environment, so no report was written to %s: a passive scan never reaches a verdict.\n", reportPath)
 				reportPath = ""
+			}
+			// --require-complete judges a verdict's coverage, so it needs one.
+			if requireComplete && local {
+				return errors.New("--local and --require-complete are mutually exclusive: --local exits before any verdict")
+			}
+			if requireComplete && passiveMode {
+				if passiveTyped {
+					return errors.New("--passive and --require-complete are mutually exclusive: a passive scan never reaches a verdict")
+				}
+				fmt.Fprintln(os.Stderr, "ossprey: warning: passive mode is set in the environment, so --require-complete has no effect: a passive scan never reaches a verdict.")
+				requireComplete = false
 			}
 			if local && passiveMode {
 				if passiveTyped {
@@ -290,7 +302,12 @@ func newScanCmd() *cobra.Command {
 				stop()
 				if err != nil {
 					if skipped, ok := printSkipped(err); ok {
-						return writeReport(reportPath, scan.SkippedReport(sbom, resolveFloor(sbom.FailingSeverityFloor, override), skipped.Message, skipped.ResetAt))
+						r := scan.SkippedReport(sbom, resolveFloor(sbom.FailingSeverityFloor, override), skipped.Message, skipped.ResetAt)
+						r.SetCoverage(warn.Unresolved(cmd.Context()))
+						if err := writeReport(reportPath, r); err != nil {
+							return err
+						}
+						return requireCompleteErr(requireComplete, r)
 					}
 					return err
 				}
@@ -319,20 +336,24 @@ func newScanCmd() *cobra.Command {
 			// one CI most needs the report for.
 			flushWarnings(cmd.Context())
 
-			if err := writeReport(reportPath, scan.NewReport(sbom, floor)); err != nil {
+			report := scan.NewReport(sbom, floor)
+			report.SetCoverage(warn.Unresolved(cmd.Context()))
+			if err := writeReport(reportPath, report); err != nil {
 				return err
 			}
 
+			// Malware outranks coverage: exit 1 is the verdict CI acts on.
 			if reportMalware(sbom, floor) {
 				os.Exit(1)
 			}
 
 			fmt.Println(noMalwareLine(sbom))
-			return nil
+			return requireCompleteErr(requireComplete, report)
 		},
 	}
 
 	cmd.Flags().StringVarP(&output, "output", "o", "", "write SBOM to file")
+	cmd.Flags().BoolVar(&requireComplete, "require-complete", false, "exit 2 unless every manifest's dependency tree was resolved and every package was scanned")
 	cmd.Flags().StringVar(&reportPath, "report", "", "write a JSON verdict report (verdict + findings) to file")
 	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "list every warned package and manifest, and the full output of any resolver that failed (or OSSPREY_VERBOSE=1)")
 	cmd.Flags().BoolVar(&local, "local", false, "dump SBOM JSON to stdout and exit (no API submission, no verdict)")
@@ -688,6 +709,19 @@ func reportSkipped(err error) bool {
 
 // writeReport writes the JSON report when --report asked for one. Never to
 // stdout: `ossprey scan --local` puts the OSSBOM there and CI parses it.
+// requireCompleteErr fails a clean scan whose coverage was partial, when the
+// user asked for --require-complete. An error, so exit 2: the scan did not
+// find malware, it failed to look everywhere.
+func requireCompleteErr(required bool, r scan.Report) error {
+	if !required {
+		return nil
+	}
+	if why := r.Incomplete(); why != "" {
+		return fmt.Errorf("--require-complete: coverage is incomplete: %s", why)
+	}
+	return nil
+}
+
 func writeReport(path string, r scan.Report) error {
 	if path == "" {
 		return nil

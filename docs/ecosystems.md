@@ -44,7 +44,10 @@ never does that:
   any other `OSSPREY_*` variable.
 
 A manifest that cannot be resolved this way keeps its direct dependencies and
-is reported **unresolved** by a warning naming it. Commit a lockfile (`uv.lock`,
+is reported **unresolved**: a warning names it, the
+[`--report`](output.md#machine-readable-verdict---report) file lists it in
+`unresolved_manifests`, and [`--require-complete`](ci.md#requiring-complete-coverage)
+fails the scan over it. Commit a lockfile (`uv.lock`,
 `poetry.lock`, a compiled `requirements.txt`) to cover its whole tree.
 
 Directories that hold installed or built packages rather than your project's

@@ -115,6 +115,8 @@ ossprey scan . --report report.json
   "path": "/home/me/my-service",
   "components": 412,
   "unscanned": 2,
+  "transitive": "partial",
+  "unresolved_manifests": ["tools/legacy/setup.py"],
   "findings": [
     {
       "purl": "pkg:npm/@acme/logger@1.4.2",
@@ -148,6 +150,18 @@ rather than this field.
 A `clean` verdict with a non-zero `unscanned` means nothing was flagged in the
 part that was scanned, and the summary line says so: `No malware found in 410 of
 412 packages`.
+
+`transitive` and `unresolved_manifests` say whether every manifest's dependency
+tree was resolved. `unresolved_manifests` lists, relative to the scanned path,
+each manifest whose transitive dependencies were not resolved — its resolver
+failed, none was available, or resolving it would have meant building a
+package, which a scan never does (see [ecosystems](ecosystems.md#a-scan-never-runs-package-code)).
+Only the direct dependencies of those manifests were checked. `transitive` is
+`partial` when that list is non-empty and `complete` otherwise. Both are always
+present on a `scan` report (`[]` when nothing is unresolved) and absent from a
+`check` report, which names its packages and has no tree. Neither changes the
+verdict or the exit code; [`--require-complete`](ci.md#requiring-complete-coverage)
+turns incomplete coverage into a failure.
 
 `findings` is always present, empty on a clean scan, so
 `jq '.findings | length'` works either way. The file is written before the
