@@ -265,6 +265,17 @@ func dynamicDependencies(pp *pyproject) bool {
 // for the project's whole tree.
 var pythonLockfiles = []string{"uv.lock", "poetry.lock", "pdm.lock"}
 
+// tomlLockHasPackages reports a TOML lockfile (uv, poetry, pdm, Cargo) that
+// parses and locks at least one [[package]]. A stub such as `version = 1`
+// parses but supplies no tree, so it must not stand in for one.
+func tomlLockHasPackages(data []byte) bool {
+	var doc struct {
+		Package []map[string]any `toml:"package"`
+	}
+	_, err := toml.Decode(string(data), &doc)
+	return err == nil && len(doc.Package) > 0
+}
+
 // pyprojectLockCovered reports whether a lockfile beside the pyproject.toml
 // at path parses, so syft has the transitive tree whether or not a resolver
 // could produce one. A lock that does not parse covers nothing.
@@ -275,8 +286,7 @@ func pyprojectLockCovered(path string) bool {
 		if err != nil {
 			continue
 		}
-		var doc map[string]any
-		if _, err := toml.Decode(string(data), &doc); err == nil && len(doc) > 0 {
+		if tomlLockHasPackages(data) {
 			return true
 		}
 	}

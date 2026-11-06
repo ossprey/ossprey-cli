@@ -291,7 +291,7 @@ func TestMalformedPyprojectNeedsBuild(t *testing.T) {
 	if pyprojectNeedsBuild(p) == nil {
 		t.Error("a malformed pyproject read as needing nothing")
 	}
-	writeTree(t, dir, map[string]string{"uv.lock": "version = 1\n"})
+	writeTree(t, dir, map[string]string{"uv.lock": "version = 1\n\n[[package]]\nname = \"app\"\nversion = \"0.1.0\"\n"})
 	if err := pyprojectNeedsBuild(p); err != nil {
 		t.Errorf("a lock beside it covers it: %v", err)
 	}

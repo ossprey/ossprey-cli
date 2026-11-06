@@ -386,7 +386,5 @@ func cargoLockReadable(dir string) bool {
 	if err != nil {
 		return false
 	}
-	var doc map[string]any
-	_, err = toml.Decode(string(data), &doc)
-	return err == nil && len(doc) > 0
+	return tomlLockHasPackages(data) // a lock always holds the crate itself
 }
