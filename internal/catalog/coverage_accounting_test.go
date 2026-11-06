@@ -257,16 +257,24 @@ func TestStubLockCoversNothing(t *testing.T) {
 		files map[string]string
 		want  string
 	}{
-		"Cargo.lock":        {map[string]string{"Cargo.toml": crate, "Cargo.lock": "version = 3\n"}, "Cargo.toml"},
-		"uv.lock":           {map[string]string{"pyproject.toml": pp, "uv.lock": "version = 1\n"}, "pyproject.toml"},
-		"poetry.lock":       {map[string]string{"pyproject.toml": pp, "poetry.lock": "[metadata]\nlock-version = \"2.0\"\n"}, "pyproject.toml"},
-		"package-lock.json": {map[string]string{"package.json": pj, "package-lock.json": stubNpm}, "package.json"},
+		"Cargo.lock":           {map[string]string{"Cargo.toml": crate, "Cargo.lock": "version = 3\n"}, "Cargo.toml"},
+		"uv.lock":              {map[string]string{"pyproject.toml": pp, "uv.lock": "version = 1\n"}, "pyproject.toml"},
+		"poetry.lock":          {map[string]string{"pyproject.toml": pp, "poetry.lock": "[metadata]\nlock-version = \"2.0\"\n"}, "pyproject.toml"},
+		"package-lock.json":    {map[string]string{"package.json": pj, "package-lock.json": stubNpm}, "package.json"},
+		"v1 package-lock.json": {map[string]string{"package.json": pj, "package-lock.json": `{"name":"app","lockfileVersion":1,"dependencies":{}}`}, "package.json"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if got := unresolvedFor(t, tc.files); !slices.Equal(got, []string{tc.want}) {
 				t.Errorf("unresolved = %v, want [%s]", got, tc.want)
 			}
 		})
+	}
+	// A v1 lock (top-level "dependencies" only) that locks a package covers.
+	v1 := `{"name":"app","lockfileVersion":1,"requires":true,"dependencies":{"left-pad":{"version":"1.3.0","resolved":"https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"}}}`
+	for _, lock := range []string{"package-lock.json", "npm-shrinkwrap.json"} {
+		if got := unresolvedFor(t, map[string]string{"package.json": pj, lock: v1}); len(got) != 0 {
+			t.Errorf("valid v1 %s: unresolved = %v, want none", lock, got)
+		}
 	}
 	// A root-only npm lock still covers a package.json declaring nothing.
 	if got := unresolvedFor(t, map[string]string{"package.json": `{"name":"app","version":"1.0.0"}`, "package-lock.json": stubNpm}); len(got) != 0 {

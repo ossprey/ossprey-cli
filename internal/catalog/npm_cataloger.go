@@ -122,8 +122,8 @@ func npmLockReadable(path string) bool {
 		switch filepath.Base(path) {
 		case "package-lock.json", "npm-shrinkwrap.json":
 			// A lock locking nothing covers only a manifest declaring nothing.
-			pkgs, err := parseNpmLock(data, file.Location{})
-			ok = err == nil && (len(pkgs) > 0 || !declaresNpmDependencies(filepath.Join(filepath.Dir(path), "package.json")))
+			_, err := parseNpmLock(data, file.Location{})
+			ok = err == nil && (npmLockLocksSomething(data) || !declaresNpmDependencies(filepath.Join(filepath.Dir(path), "package.json")))
 		default:
 			ok = true
 		}
