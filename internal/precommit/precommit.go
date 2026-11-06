@@ -14,11 +14,15 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/ossprey/ossprey-cli/internal/catalog"
@@ -29,7 +33,7 @@ import (
 // diff — enough for a caller to build a purl (pkg:<type>/<name>@<version>)
 // and report "package X (from package-lock.json)".
 type Package struct {
-	// Type is the OSSBOM ecosystem: "npm" or "pypi".
+	// Type is the OSSBOM ecosystem: "npm", "pypi" or "cargo".
 	Type string
 	// Name is the package name as cataloged.
 	Name string
@@ -39,6 +43,8 @@ type Package struct {
 	// Path is the repo-relative manifest/lockfile the package was parsed
 	// from, slash-separated (e.g. "web/package-lock.json").
 	Path string
+	// Qualifiers mark a git or private-registry crate, which is not the crates.io crate of that name.
+	Qualifiers map[string]string
 }
 
 // Delta is the set of packages present in the staged (index) manifest set
@@ -66,6 +72,7 @@ func StagedDelta(ctx context.Context, repoDir string, policy trust.Policy) (Delt
 	if err != nil {
 		return Delta{}, err
 	}
+	paths = withoutVendoredLocks(ctx, repoDir, paths)
 	if len(paths) == 0 {
 		return Delta{}, nil
 	}
@@ -105,6 +112,28 @@ func StagedDelta(ctx context.Context, repoDir string, policy trust.Policy) (Delt
 		}
 	}
 
+	// A member's `workspace = true` pins live in a workspace root the commit may not touch.
+	ancestors := cargoAncestors(paths)
+	var specs []string
+	for _, a := range ancestors {
+		specs = append(specs, ":"+a)
+		if hasHead {
+			specs = append(specs, "HEAD:"+a)
+		}
+	}
+	// A root git cannot size reads as unreadable.
+	roots, _ := blobSizes(ctx, repoDir, specs)
+	for _, a := range ancestors {
+		if err := writeWorkspaceRoot(ctx, repoDir, roots, ":"+a, stagedRoot, a); err != nil {
+			return Delta{}, err
+		}
+		if hasHead {
+			if err := writeWorkspaceRoot(ctx, repoDir, roots, "HEAD:"+a, headRoot, a); err != nil {
+				return Delta{}, err
+			}
+		}
+	}
+
 	// No-exec + no version lookup: a pre-commit hook must be fast, offline,
 	// and must never run npm/uv against a synthetic tree.
 	opts := catalog.Options{SkipVersionLookup: true, NoExec: true, Trust: policy}
@@ -115,6 +144,13 @@ func StagedDelta(ctx context.Context, repoDir string, policy trust.Policy) (Delt
 	headPkgs, err := catalogFn(ctx, headRoot, opts)
 	if err != nil {
 		return Delta{}, fmt.Errorf("precommit: catalog head tree: %w", err)
+	}
+
+	// A pin changed only in a root's [workspace.dependencies] reaches no manifest in the trees, so the root reports it.
+	for _, p := range paths {
+		if path.Base(p) == "Cargo.toml" {
+			stagedPkgs = append(stagedPkgs, workspacePinChanges(stagedRoot, headRoot, p)...)
+		}
 	}
 
 	return diffPackages(stagedPkgs, headPkgs, stagedRoot, paths), nil
@@ -134,8 +170,8 @@ func diffPackages(staged, head []catalog.Package, stagedRoot string, repoPaths [
 	exact := make(map[string]struct{}, len(head))
 	names := make(map[string]struct{}, len(head))
 	for _, p := range head {
-		exact[pkgKey(p.Type, p.Name, p.Version)] = struct{}{}
-		names[nameKey(p.Type, p.Name)] = struct{}{}
+		exact[pkgKey(p)] = struct{}{}
+		names[nameKey(p)] = struct{}{}
 	}
 
 	var out []Package
@@ -145,15 +181,15 @@ func diffPackages(staged, head []catalog.Package, stagedRoot string, repoPaths [
 		if p.Local {
 			continue // the repo's own path/workspace code, never a registry package
 		}
-		if _, ok := exact[pkgKey(p.Type, p.Name, p.Version)]; ok {
+		key := pkgKey(p)
+		if _, ok := exact[key]; ok {
 			continue
 		}
 		if p.Version == "" {
-			if _, ok := names[nameKey(p.Type, p.Name)]; ok {
+			if _, ok := names[nameKey(p)]; ok {
 				continue
 			}
 		}
-		key := pkgKey(p.Type, p.Name, p.Version)
 		if _, ok := seen[key]; ok {
 			continue
 		}
@@ -163,10 +199,11 @@ func diffPackages(staged, head []catalog.Package, stagedRoot string, repoPaths [
 			continue
 		}
 		out = append(out, Package{
-			Type:    p.Type,
-			Name:    p.Name,
-			Version: p.Version,
-			Path:    repoRelLocation(p.Locations, stagedRoot, known),
+			Type:       p.Type,
+			Name:       p.Name,
+			Version:    p.Version,
+			Path:       repoRelLocation(p.Locations, stagedRoot, known),
+			Qualifiers: p.Qualifiers,
 		})
 	}
 
@@ -182,13 +219,18 @@ func diffPackages(staged, head []catalog.Package, stagedRoot string, repoPaths [
 	return Delta{Packages: out, Trusted: trusted}
 }
 
-// pkgKey matches catalog's dedup identity: (type, normalized name, version).
-func pkgKey(t, name, version string) string {
-	return nameKey(t, name) + "@" + version
+// pkgKey matches catalog's dedup identity: (type, normalized name, version) plus any source qualifiers.
+func pkgKey(p catalog.Package) string {
+	return nameKey(p) + "@" + p.Version
 }
 
-func nameKey(t, name string) string {
-	return t + "@" + strings.ToLower(strings.TrimSpace(name))
+// nameKey keeps a source-marked crate apart from the crates.io crate of that name, as catalog does.
+func nameKey(p catalog.Package) string {
+	key := p.Type + "@" + strings.ToLower(strings.TrimSpace(p.Name))
+	for _, k := range slices.Sorted(maps.Keys(p.Qualifiers)) {
+		key += "?" + k + "=" + p.Qualifiers[k]
+	}
+	return key
 }
 
 // repoRelLocation maps a cataloged location back to its repo-relative path.
@@ -272,14 +314,15 @@ func stagedManifestPaths(ctx context.Context, repoDir string, hasHead bool) ([]s
 // parse without shelling out. Mirrors catalog's coverage — syft's python
 // cataloger (**/*requirements*.txt, poetry.lock, Pipfile.lock, setup.py,
 // uv.lock, pdm.lock), syft's JS lock cataloger (package-lock.json, yarn.lock,
-// pnpm-lock.yaml), and our pyproject/package.json direct-deps parsers. A bare
-// Pipfile is deliberately absent: no cataloger parses it.
+// pnpm-lock.yaml), syft's Cargo.lock cataloger, and our pyproject/package.json/
+// Cargo.toml direct-deps parsers. A bare Pipfile is deliberately absent: no
+// cataloger parses it.
 func isManifestPath(p string) bool {
 	base := path.Base(p)
 	switch base {
 	case "package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
 		"pyproject.toml", "poetry.lock", "Pipfile.lock", "uv.lock",
-		"pdm.lock", "setup.py":
+		"pdm.lock", "setup.py", "Cargo.toml", "Cargo.lock":
 		return true
 	}
 	// Matches syft's "**/*requirements*.txt" glob.
@@ -290,6 +333,289 @@ func isManifestPath(p string) bool {
 // dependency tree is skipped.
 func isVendoredPath(p string) bool {
 	return strings.Contains(filepath.ToSlash(p), "node_modules/")
+}
+
+// maxVendorProofs bounds the staged Cargo.lock files tested as vendored copies; the rest are looked up as usual.
+const maxVendorProofs = 2048
+
+// maxProofLocks bounds the ancestor directories read as proof, for Cargo.lock and cargo config each.
+const maxProofLocks = 64
+
+// cargoConfig is a directory's staged cargo config, nil for none, with ok false when cargo's reading of it is unclear.
+type cargoConfig struct {
+	doc map[string]any
+	ok  bool
+}
+
+// withoutVendoredLocks drops the Cargo.lock `cargo vendor` copied with a crate, which no build of the project reads.
+func withoutVendoredLocks(ctx context.Context, repoDir string, paths []string) []string {
+	var files proofFiles
+	locks := map[string]*catalog.CargoLock{}
+	lockAt := func(dir string) *catalog.CargoLock {
+		if l, ok := locks[dir]; ok || len(locks) >= maxProofLocks {
+			return l
+		}
+		var l *catalog.CargoLock
+		// As in the scan's filter, only a lock beside its Cargo.toml in an unmarked directory is a project's.
+		_, marked := files[path.Join(dir, ".cargo-checksum.json")]
+		if blob, ok := files.read(ctx, repoDir, path.Join(dir, "Cargo.lock"), catalog.CargoProofLimit); ok && files[path.Join(dir, "Cargo.toml")].oid != "" && !marked {
+			if parsed, err := catalog.ParseCargoLock(blob); err == nil {
+				l = &parsed
+			}
+		}
+		locks[dir] = l
+		return l
+	}
+	configs := map[string]cargoConfig{}
+	configAt := func(dir string) (map[string]any, bool) {
+		c, ok := configs[dir]
+		if !ok && len(configs) < maxProofLocks {
+			c = stagedCargoConfig(ctx, repoDir, files, dir)
+			configs[dir] = c
+		}
+		return c.doc, c.ok
+	}
+	tested := 0
+	out := make([]string, 0, len(paths))
+	for _, p := range paths {
+		if dir := path.Dir(p); path.Base(p) == "Cargo.lock" && dir != "." && tested < maxVendorProofs {
+			if files == nil {
+				files = listProofFiles(ctx, repoDir)
+			}
+			tested++
+			if vendoredCopy(ctx, repoDir, files, dir, lockAt, configAt) {
+				continue
+			}
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// proofBlob is a blob and its size, with no blob for an entry the hook must not read or could not size.
+type proofBlob struct {
+	oid  string
+	size int64
+}
+
+// proofFiles maps each index path a vendor proof may read, or each rev:path spec of a workspace root, to its blob.
+type proofFiles map[string]proofBlob
+
+// listProofFiles lists every Cargo.lock, Cargo.toml, marker and cargo config in the index, then their blob sizes, in two calls.
+func listProofFiles(ctx context.Context, repoDir string) proofFiles {
+	files := proofFiles{}
+	out, err := gitOutput(ctx, repoDir, "ls-files", "-s", "-z", "--full-name", "--",
+		":(top,glob)**/Cargo.lock", ":(top,glob)**/Cargo.toml", ":(top,glob)**/.cargo-checksum.json",
+		":(top,glob)**/.cargo/config", ":(top,glob)**/.cargo/config.toml")
+	if err != nil {
+		return files
+	}
+	var oids []string
+	for _, entry := range strings.Split(string(out), "\x00") {
+		meta, p, ok := strings.Cut(entry, "\t")
+		f := strings.Fields(meta)
+		if !ok || len(f) != 3 {
+			continue
+		}
+		// A symlink's blob is its target text, which cargo never reads as the file, and a conflicted path has several.
+		_, seen := files[p]
+		if (f[0] == "100644" || f[0] == "100755") && f[2] == "0" && !seen {
+			files[p] = proofBlob{oid: f[1]}
+			oids = append(oids, f[1])
+		} else {
+			files[p] = proofBlob{}
+		}
+	}
+	sizes, err := blobSizes(ctx, repoDir, oids)
+	if err != nil {
+		return proofFiles{}
+	}
+	for p, b := range files {
+		files[p] = sizes[b.oid]
+	}
+	return files
+}
+
+// blobSizes asks git for the blob each object name resolves to and its size in one call, reading none of them.
+func blobSizes(ctx context.Context, repoDir string, names []string) (proofFiles, error) {
+	blobs := proofFiles{}
+	var asked []string
+	for _, n := range names {
+		// cat-file reads one name per line, so a name holding a newline is never asked and has no blob.
+		if !strings.Contains(n, "\n") {
+			asked = append(asked, n)
+		}
+	}
+	if len(asked) == 0 {
+		return blobs, nil
+	}
+	cmd := exec.CommandContext(ctx, "git", "-C", repoDir, "cat-file", "--batch-check")
+	cmd.Stdin = strings.NewReader(strings.Join(asked, "\n") + "\n")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	lines := strings.Split(strings.TrimSuffix(string(out), "\n"), "\n")
+	if len(lines) != len(asked) {
+		return nil, fmt.Errorf("git cat-file --batch-check: %d answers for %d names", len(lines), len(asked))
+	}
+	for i, line := range lines {
+		// Each line is "<oid> blob <size>", or "<name> missing" and the like.
+		if f := strings.Fields(line); len(f) == 3 && f[1] == "blob" {
+			if n, err := strconv.ParseInt(f[2], 10, 64); err == nil {
+				blobs[asked[i]] = proofBlob{oid: f[0], size: n}
+			}
+		}
+	}
+	return blobs, nil
+}
+
+// read returns the blob at p, false when p has none, it is over limit bytes or unreadable.
+func (f proofFiles) read(ctx context.Context, repoDir, p string, limit int64) ([]byte, bool) {
+	// The object's own size refuses an oversized file before any of it is read.
+	if b := f[p]; b.oid != "" && b.size <= limit {
+		return readBlob(ctx, repoDir, b.oid, limit)
+	}
+	return nil, false
+}
+
+// readBlob reads the blob oid, false when git fails or the blob passes limit bytes, where it stops git.
+func readBlob(ctx context.Context, repoDir, oid string, limit int64) ([]byte, bool) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", repoDir, "cat-file", "blob", oid)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, false
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, false
+	}
+	blob, err := io.ReadAll(io.LimitReader(stdout, limit+1))
+	if err != nil || int64(len(blob)) > limit {
+		cancel()
+		_ = cmd.Wait()
+		return nil, false
+	}
+	return blob, cmd.Wait() == nil
+}
+
+// stagedCargoConfig reads dir's .cargo/config or .cargo/config.toml from the index, unclear when both exist or one is not a regular file that parses.
+func stagedCargoConfig(ctx context.Context, repoDir string, files proofFiles, dir string) cargoConfig {
+	var c cargoConfig
+	for _, name := range []string{"config", "config.toml"} {
+		p := path.Join(dir, ".cargo", name)
+		if _, listed := files[p]; !listed {
+			continue
+		}
+		blob, ok := files.read(ctx, repoDir, p, catalog.CargoManifestLimit)
+		if !ok {
+			return cargoConfig{}
+		}
+		doc, err := catalog.ParseCargoConfig(blob)
+		if err != nil || c.doc != nil {
+			return cargoConfig{}
+		}
+		c.doc = doc
+	}
+	c.ok = true
+	return c
+}
+
+// vendoredCopy reports whether a strict ancestor's staged Cargo.lock locks dir's crate at its marker's .crate checksum and its cargo config vendors crates.io into dir's parent.
+func vendoredCopy(ctx context.Context, repoDir string, files proofFiles, dir string, lockAt func(string) *catalog.CargoLock, configAt func(string) (map[string]any, bool)) bool {
+	marker, ok := files.read(ctx, repoDir, path.Join(dir, ".cargo-checksum.json"), catalog.CargoProofLimit)
+	if !ok {
+		return false
+	}
+	sum := catalog.CargoVendorChecksum(marker)
+	if sum == "" {
+		return false
+	}
+	manifest, ok := files.read(ctx, repoDir, path.Join(dir, "Cargo.toml"), catalog.CargoManifestLimit)
+	if !ok {
+		return false
+	}
+	name, version := catalog.CargoPackageID(manifest)
+	// cargo publish strips [workspace], so as in the scan's filter a manifest holding one is a project's own.
+	if name == "" || version == "" || catalog.DeclaresCargoWorkspace(manifest) {
+		return false
+	}
+	for a := dir; a != "."; {
+		a = path.Dir(a)
+		if l := lockAt(a); l != nil && l.Vendors(name, version, sum) && catalog.CargoVendorSource(a, configAt) == path.Dir(dir) {
+			return true
+		}
+	}
+	return false
+}
+
+// cargoAncestors lists the unstaged Cargo.toml paths above each staged one, up to the repo root.
+func cargoAncestors(paths []string) []string {
+	seen := make(map[string]bool, len(paths))
+	for _, p := range paths {
+		seen[p] = true
+	}
+	var out []string
+	for _, p := range paths {
+		if path.Base(p) != "Cargo.toml" {
+			continue
+		}
+		for dir := path.Dir(p); dir != "."; {
+			dir = path.Dir(dir)
+			a := path.Join(dir, "Cargo.toml")
+			if !seen[a] {
+				seen[a] = true
+				out = append(out, a)
+			}
+		}
+	}
+	return out
+}
+
+// writeWorkspaceRoot writes the Cargo.toml at spec into root when it is within the manifest bound and declares [workspace].
+func writeWorkspaceRoot(ctx context.Context, repoDir string, roots proofFiles, spec, root, repoRelPath string) error {
+	blob, ok := roots.read(ctx, repoDir, spec, catalog.CargoManifestLimit)
+	if !ok || !catalog.DeclaresCargoWorkspace(blob) {
+		return nil
+	}
+	return writeTreeFile(root, repoRelPath, blob)
+}
+
+// workspacePinChanges returns the exact crates.io pins in the staged [workspace.dependencies] of the Cargo.toml at p that its HEAD copy lacks.
+func workspacePinChanges(stagedRoot, headRoot, p string) []catalog.Package {
+	staged, ok := readTreeManifest(stagedRoot, p)
+	if !ok {
+		return nil
+	}
+	head, _ := readTreeManifest(headRoot, p)
+	old := map[string]bool{}
+	for _, q := range catalog.CargoWorkspacePins(head) {
+		old[pkgKey(q)] = true
+	}
+	var out []catalog.Package
+	for _, q := range catalog.CargoWorkspacePins(staged) {
+		if !old[pkgKey(q)] {
+			q.Locations = []string{p}
+			out = append(out, q)
+		}
+	}
+	return out
+}
+
+// readTreeManifest reads a temp tree's copy of the Cargo.toml at p, false when it is absent or over the manifest bound.
+func readTreeManifest(root, p string) ([]byte, bool) {
+	f, err := os.Open(filepath.Join(root, filepath.FromSlash(p)))
+	if err != nil {
+		return nil, false
+	}
+	defer f.Close()
+	// As for a blob, the size refuses an oversized copy before any of it is read.
+	if info, err := f.Stat(); err != nil || info.Size() > catalog.CargoManifestLimit {
+		return nil, false
+	}
+	data, err := io.ReadAll(io.LimitReader(f, catalog.CargoManifestLimit+1))
+	return data, err == nil && len(data) <= catalog.CargoManifestLimit
 }
 
 // writeTreeFile writes blob at root/<repoRelPath>, creating parent dirs.
