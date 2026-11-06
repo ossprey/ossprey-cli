@@ -827,6 +827,8 @@ func resolveWithUV(ctx context.Context, uv, dir string, specs, flags []string) (
 		if flags, err = uvToolRunConfig(flags, tmp); err != nil {
 			return nil, err
 		}
+	} else if err := uvConfigPipe(flags, dir); err != nil {
+		return nil, err
 	}
 
 	args := append([]string{"pip", "compile",
@@ -872,8 +874,10 @@ func resolveWithUV(ctx context.Context, uv, dir string, specs, flags []string) (
 // merged as uv merges them (field by field, the user's winning; arrays
 // joined, the user's entries first) — is
 // written into scratch without that table and named by --config-file. A
-// run with --no-config reads none; a file uv cannot parse is left for uv
-// to report, as the run would. A relative UV_CONFIG_FILE is read against
+// run with --no-config reads none; a file that exists but cannot be read
+// or parsed here fails the resolve, so the names are checked alone, and so
+// does a named pipe, which is never opened since the run reads it once. A
+// relative UV_CONFIG_FILE is read against
 // the directory uv runs in, which for the resolver is scratch, so it is
 // named by its absolute path whether or not it has the table. With no file
 // named, the discovered configuration is always written and named, even
@@ -882,6 +886,9 @@ func resolveWithUV(ctx context.Context, uv, dir string, specs, flags []string) (
 // may sit under a project when TMPDIR points inside one, where `uv pip
 // compile` would read configuration uvx ignores.
 func uvToolRunConfig(flags []string, scratch string) ([]string, error) {
+	if err := uvConfigPipe(flags, ""); err != nil {
+		return nil, err
+	}
 	path, noConfig := UVConfigFileFlag(flags)
 	if noConfig {
 		return flags, nil
@@ -909,7 +916,7 @@ func uvToolRunConfig(flags []string, scratch string) ([]string, error) {
 	merged := map[string]any{}
 	found := false
 	for _, source := range sources {
-		data, err := os.ReadFile(source)
+		data, err := readTOML(source)
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				continue
@@ -917,8 +924,9 @@ func uvToolRunConfig(flags []string, scratch string) ([]string, error) {
 			return nil, err
 		}
 		var cfg map[string]any
-		if _, err := toml.Decode(string(data), &cfg); err != nil {
-			return flags, nil
+		if _, err := decodeTOML(data, &cfg); err != nil {
+			// Skipped, the file would still reach `uv pip compile`, which applies the [pip] table uvx ignores.
+			return nil, &fs.PathError{Op: "parse", Path: source, Err: err}
 		}
 		anchorUVConfigPaths(cfg, filepath.Dir(source))
 		mergeTOML(merged, cfg)
@@ -950,6 +958,24 @@ func uvToolRunConfig(flags []string, scratch string) ([]string, error) {
 		}
 	}
 	return append(out, "--config-file", stripped), nil
+}
+
+// uvConfigPipe refuses a uv config named by flags or UV_CONFIG_FILE that is a pipe: the real run reads it once, so no dry run or probe may.
+func uvConfigPipe(flags []string, dir string) error {
+	path, noConfig := UVConfigFileFlag(flags)
+	if path == "" {
+		path = os.Getenv("UV_CONFIG_FILE")
+	}
+	if noConfig || path == "" {
+		return nil
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(dir, path)
+	}
+	if info, err := os.Stat(path); err != nil || info.Mode()&fs.ModeNamedPipe == 0 {
+		return nil
+	}
+	return fmt.Errorf("uv config %s is a pipe, and reading it would consume it before uv does", path)
 }
 
 // UVConfigFileFlag reads the configuration-file options among a uv
@@ -1147,12 +1173,12 @@ func absDir(dir string) string {
 // uvResolutionKeys. Unreadable or unparseable is true: what cannot be read
 // cannot be reproduced for pip.
 func tomlShapesResolution(path, table string) bool {
-	data, err := os.ReadFile(path)
+	data, err := readTOML(path)
 	if err != nil {
 		return true
 	}
 	var cfg map[string]any
-	if _, err := toml.Decode(string(data), &cfg); err != nil {
+	if _, err := decodeTOML(data, &cfg); err != nil {
 		return true
 	}
 	if table != "" {

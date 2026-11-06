@@ -67,9 +67,16 @@ func (c *UVCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]pk
 	}
 	defer os.RemoveAll(cache)
 
+	// A uv.lock withBoundedLocks refused is gone from the resolver, so the project compiles from its manifest as one with no lock does.
+	locked := map[string]bool{}
+	if locks, err := resolver.FilesByGlob("**/uv.lock"); err == nil {
+		for _, l := range locks {
+			locked[filepath.Dir(hostPath(c.root, l.RealPath))] = true
+		}
+	}
 	parse := func(absPath string, loc file.Location) ([]pkg.Package, error) {
 		dir := filepath.Dir(absPath)
-		args := uvArgsForPyProject(dir)
+		args := uvArgsForPyProject(dir, locked[dir])
 		return runUV(ctx, c.uv, cache, dir, args, loc)
 	}
 	out, err := catalogByGlob(ctx, resolver, c.root, "**/pyproject.toml", "uv", parse)
@@ -77,9 +84,9 @@ func (c *UVCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]pk
 }
 
 // uvArgsForPyProject picks the right uv invocation for a project dir.
-// Prefers uv.lock (faster, deterministic), falls back to pip compile.
-func uvArgsForPyProject(dir string) []string {
-	if _, err := os.Stat(filepath.Join(dir, "uv.lock")); err == nil {
+// Prefers its uv.lock when the scan reads one (faster, deterministic), falls back to pip compile.
+func uvArgsForPyProject(dir string, locked bool) []string {
+	if locked {
 		return []string{
 			"export",
 			"--directory", dir,

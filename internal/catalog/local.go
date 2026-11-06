@@ -1,11 +1,11 @@
 package catalog
 
 import (
-	"os"
+	"fmt"
+	"io/fs"
 	"regexp"
 	"strings"
 
-	"github.com/BurntSushi/toml"
 	"github.com/anchore/syft/syft/file"
 )
 
@@ -36,8 +36,9 @@ func canonicalPackageName(s string) string {
 // findLocalPackageNames walks every pyproject.toml under root and returns the
 // canonicalised names of packages declared as local (uv path/workspace sources
 // or poetry path dependencies). Vendored trees are skipped, matching the
-// cataloguers. Best-effort: unreadable or malformed manifests are ignored so a
-// stray file never fails the scan.
+// cataloguers. Best-effort: unreadable or malformed manifests are skipped so a
+// stray file never fails the scan; the pyproject cataloguer names each one,
+// with what skipping it here costs (withLocalSourcesCost).
 func findLocalPackageNames(resolver file.Resolver, root string) map[string]struct{} {
 	names := map[string]struct{}{}
 	locs, err := resolver.FilesByGlob("**/pyproject.toml")
@@ -48,7 +49,7 @@ func findLocalPackageNames(resolver file.Resolver, root string) map[string]struc
 		if isVendoredPath(loc.RealPath) {
 			continue
 		}
-		data, err := os.ReadFile(hostPath(root, loc.RealPath))
+		data, err := readTOML(hostPath(root, loc.RealPath))
 		if err != nil {
 			continue
 		}
@@ -57,11 +58,53 @@ func findLocalPackageNames(resolver file.Resolver, root string) map[string]struc
 	return names
 }
 
+// withLocalSourcesCost adds to a pyproject.toml's read or parse error that its local packages go to PyPI, when its readable part declares any.
+func withLocalSourcesCost(path string, err error) error {
+	pe, ok := err.(*fs.PathError)
+	if !ok || !declaresLocalSources(tomlPrefix(path)) {
+		return err
+	}
+	return &fs.PathError{Op: pe.Op, Path: pe.Path, Err: fmt.Errorf("%w; any path or workspace package it declares is looked up on PyPI", pe.Err)}
+}
+
+// localSourceEntry matches a path or workspace source, the entries collectLocalNames marks local.
+var localSourceEntry = regexp.MustCompile(`(^|[{,.\s])(path\s*=|workspace\s*=\s*true)`)
+
+// declaresLocalSources reads TOML the parser refused line by line for [tool.uv.workspace], or a path or workspace entry under [tool.uv.sources] or [tool.poetry.dependencies].
+func declaresLocalSources(data []byte) bool {
+	bare := strings.NewReplacer(`"`, "", "'", "", " ", "", "\t", "")
+	table := ""
+	for _, line := range strings.Split(string(data), "\n") {
+		line, _, _ = strings.Cut(line, "#")
+		line = strings.TrimSpace(line)
+		key := table
+		if strings.HasPrefix(line, "[") {
+			table = bare.Replace(strings.Trim(line, "[]"))
+			key = table
+		} else if k, _, ok := strings.Cut(line, "="); ok {
+			key = dottedKey(table, bare.Replace(k))
+		}
+		under := func(t string) bool { return key == t || strings.HasPrefix(key, t+".") }
+		if under("tool.uv.workspace") || (under("tool.uv.sources") || under("tool.poetry.dependencies")) && localSourceEntry.MatchString(line) {
+			return true
+		}
+	}
+	return false
+}
+
+// dottedKey is table.k, or just the table once it is longer than every table declaresLocalSources matches, so a long header is never copied per key.
+func dottedKey(table, k string) string {
+	if t := strings.TrimPrefix(table, "."); len(t) > len("tool.poetry.dependencies") {
+		return t
+	}
+	return strings.TrimPrefix(table+"."+k, ".")
+}
+
 // collectLocalNames parses one pyproject.toml and adds the canonical name of
 // every locally-sourced package to out.
 func collectLocalNames(data []byte, out map[string]struct{}) {
 	var pp localPyProject
-	if err := toml.Unmarshal(data, &pp); err != nil {
+	if _, err := decodeTOML(data, &pp); err != nil {
 		return
 	}
 	for name, src := range pp.Tool.Uv.Sources {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -12,6 +13,8 @@ import (
 
 	"github.com/anchore/syft/syft/file"
 	"github.com/anchore/syft/syft/pkg"
+
+	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
 // pkgKey collapses a package to "name@version" for set comparisons.
@@ -415,7 +418,7 @@ django>=4.0
 func TestUVArgsForPyProject(t *testing.T) {
 	// no uv.lock -> pip compile against pyproject.toml
 	noLock := t.TempDir()
-	args := uvArgsForPyProject(noLock)
+	args := uvArgsForPyProject(noLock, false)
 	if len(args) < 2 || args[0] != "pip" || args[1] != "compile" {
 		t.Errorf("without uv.lock want `pip compile ...`, got %v", args)
 	}
@@ -423,7 +426,7 @@ func TestUVArgsForPyProject(t *testing.T) {
 	// uv.lock present -> export
 	withLock := t.TempDir()
 	writeFile(t, withLock, "uv.lock", "version = 1\n")
-	args = uvArgsForPyProject(withLock)
+	args = uvArgsForPyProject(withLock, true)
 	if len(args) == 0 || args[0] != "export" {
 		t.Errorf("with uv.lock want `export ...`, got %v", args)
 	}
@@ -450,7 +453,7 @@ func TestUVArgsForPyProjectPoetryPythonFloor(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
 			writeFile(t, dir, "pyproject.toml", tt.pyproject)
-			args := uvArgsForPyProject(dir)
+			args := uvArgsForPyProject(dir, false)
 			if got := pythonVersion(args); got != tt.want {
 				t.Errorf("--python-version = %q, want %q (args %v)", got, tt.want, args)
 			}
@@ -1527,6 +1530,94 @@ pinned = { workspace = true }
 		if p.Name == "pinned" {
 			t.Errorf("inherited %q from the outer workspace across a nested root", p.Name)
 		}
+	}
+}
+
+// OSS-2098: one manifest nested too deep to parse is skipped with a warning, not left to OOM the scan.
+func TestCatalogSkipsTOMLNestedTooDeepToParse(t *testing.T) {
+	for _, tc := range []struct{ manifest, normal, want string }{
+		{"Cargo.toml", "[dependencies]\nserde = \"=1.0.200\"\n", "serde@1.0.200"},
+		{"pyproject.toml", "[project]\nname = \"app\"\ndependencies = [\"requests==2.31.0\"]\n", "requests@2.31.0"},
+	} {
+		t.Run(tc.manifest, func(t *testing.T) {
+			dir := t.TempDir()
+			for _, sub := range []string{"normal", "deep"} {
+				if err := os.Mkdir(filepath.Join(dir, sub), 0o755); err != nil {
+					t.Fatalf("mkdir: %v", err)
+				}
+			}
+			writeFile(t, filepath.Join(dir, "normal"), tc.manifest, tc.normal)
+			writeFile(t, filepath.Join(dir, "deep"), tc.manifest, deepTOMLKey(4000))
+
+			ctx := warn.NewContext(context.Background(), false)
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
+			got, err := Catalog(ctx, dir, Options{SkipVersionLookup: true, NoExec: true})
+			runtime.ReadMemStats(&after)
+			if err != nil {
+				t.Fatalf("Catalog: %v", err)
+			}
+
+			found := false
+			for _, p := range got {
+				found = found || p.Name+"@"+p.Version == tc.want
+			}
+			if !found {
+				t.Errorf("Catalog() = %v, want the normal manifest's %s", got, tc.want)
+			}
+			// Named root-relative, so a monorepo's warning points at the one manifest refused.
+			drained := warn.Drain(ctx)
+			if !strings.Contains(drained, "nested deeper than") || !strings.Contains(drained, " "+filepath.Join("deep", tc.manifest)+":") || strings.Contains(drained, dir) {
+				t.Errorf("warnings = %q, want the deep manifest reported by its path in the scan", drained)
+			}
+			if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 16<<20 {
+				t.Errorf("Catalog allocated %d MB", alloc>>20)
+			}
+		})
+	}
+}
+
+// OSS-2098: syft parses these lockfiles with no limit of its own, so one too deep or too large is refused before it.
+func TestCatalogRefusesLockfilesSyftWouldParseUnbounded(t *testing.T) {
+	poetry := "[[package]]\nname = \"requests\"\nversion = \"2.31.0\"\ndescription = \"\"\noptional = false\npython-versions = \"*\"\nfiles = []\n\n[metadata]\nlock-version = \"2.0\"\npython-versions = \"^3.12\"\ncontent-hash = \"x\"\n"
+	for name, c := range map[string]struct{ lock, normal, want, refused, why string }{
+		// BurntSushi/toml allocates 643 MB for this 8 KB key.
+		"poetry.lock": {"poetry.lock", poetry, "requests@2.31.0", deepTOMLKey(4000), "nested deeper than"},
+		"uv.lock":     {"uv.lock", "version = 1\nrequires-python = \">=3.12\"\n\n[[package]]\nname = \"requests\"\nversion = \"2.31.0\"\nsource = { registry = \"https://pypi.org/simple\" }\n", "requests@2.31.0", deepTOMLKey(4000), "nested deeper than"},
+		"pdm.lock":    {"pdm.lock", "[metadata]\ngroups = [\"default\"]\nlock_version = \"4.4\"\ncontent_hash = \"sha256:x\"\n\n[[package]]\nname = \"requests\"\nversion = \"2.31.0\"\nrequires_python = \">=3.7\"\nsummary = \"x\"\n", "requests@2.31.0", deepTOMLKey(4000), "nested deeper than"},
+		// pelletier/go-toml recurses per array: 111 MB and a 1 GB stack here, a fatal stack overflow at twice the depth.
+		"Cargo.lock":   {"Cargo.lock", "version = 3\n" + lockEntry("serde", "1.0.200", "aaaa"), "serde@1.0.200", "x = " + strings.Repeat("[", 200000) + strings.Repeat("]", 200000) + "\n", "nested deeper than"},
+		"over the cap": {"poetry.lock", poetry, "requests@2.31.0", "# " + strings.Repeat("x", maxLockBytes) + "\n", "byte limit"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("CARGO_HOME", t.TempDir())
+			writeTree(t, dir, map[string]string{"normal/" + c.lock: c.normal, "refused/" + c.lock: c.refused})
+
+			ctx := warn.NewContext(context.Background(), false)
+			var before, after runtime.MemStats
+			runtime.ReadMemStats(&before)
+			got, err := Catalog(ctx, dir, Options{SkipVersionLookup: true, NoExec: true})
+			runtime.ReadMemStats(&after)
+			if err != nil {
+				t.Fatalf("Catalog: %v", err)
+			}
+
+			found := false
+			for _, p := range got {
+				found = found || p.Name+"@"+p.Version == c.want
+			}
+			if !found {
+				t.Errorf("Catalog() = %v, want the normal lockfile's %s", got, c.want)
+			}
+			if drained := warn.Drain(ctx); strings.Count(drained, "\n") != 1 || !strings.Contains(drained, c.why) || !strings.Contains(drained, " "+filepath.Join("refused", c.lock)+":") {
+				t.Errorf("warnings = %q, want one naming refused/%s", drained, c.lock)
+			}
+			// The cap case reads its 2 MiB once to refuse it, so only the depth cases bound the allocation.
+			if alloc := after.TotalAlloc - before.TotalAlloc; c.why != "byte limit" && alloc > 16<<20 {
+				t.Errorf("Catalog allocated %d MB", alloc>>20)
+			}
+		})
 	}
 }
 
