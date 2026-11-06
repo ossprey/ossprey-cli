@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
 // A FIFO named like a manifest would block the open forever, so it is refused without being opened.
@@ -162,6 +164,42 @@ func TestUVConfigPipeIsLeftForTheRun(t *testing.T) {
 			if err := <-written; err != nil {
 				t.Error(err)
 			}
+		})
+	}
+}
+
+// A uv.lock refused for its size never reaches uv export, so the project compiles from its manifest, as the warning says its pins were not read.
+func TestUVCompilesAProjectWhoseLockWasRefused(t *testing.T) {
+	bin := t.TempDir()
+	// Shell builtins only: PATH is this directory alone.
+	writeScript(t, bin, "uv", "#!/bin/sh\n[ \"$1\" = \"--version\" ] && { echo 'uv 0.5.0'; exit 0; }\n"+
+		"case \"$1\" in export) echo 'from-export==1.0.0';; pip) echo 'from-compile==1.0.0';; esac\nexit 0\n")
+	t.Setenv("PATH", bin)
+	for _, tc := range []struct {
+		name, lock, want string
+	}{
+		{"lock within the caps", "version = 1\n", "from-export"},
+		{"lock over the size cap", "version = 1\n" + strings.Repeat("#"+strings.Repeat(" ", 1022)+"\n", maxLockBytes/1024+1), "from-compile"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, dir, "pyproject.toml", "[project]\nname = \"app\"\nversion = \"0.1.0\"\ndependencies = [\"requests\"]\n")
+			writeFile(t, dir, "uv.lock", tc.lock)
+			ctx := warn.NewContext(context.Background(), false)
+			pkgs, err := Catalog(ctx, dir, Options{SkipVersionLookup: true})
+			if err != nil {
+				t.Fatalf("Catalog: %v", err)
+			}
+			var names []string
+			for _, p := range pkgs {
+				if strings.HasPrefix(p.Name, "from-") {
+					names = append(names, p.Name)
+				}
+			}
+			if len(names) != 1 || names[0] != tc.want {
+				t.Errorf("uv resolved %v, want only %s", names, tc.want)
+			}
+			_ = warn.Drain(ctx)
 		})
 	}
 }

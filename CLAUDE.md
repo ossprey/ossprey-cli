@@ -393,7 +393,7 @@ twice), and `Cargo.lock` with pelletier/go-toml v1, which stays linear but
 recurses per array and dies of a fatal stack overflow at 400,000 nested arrays
 (800 KB). A fatal error cannot be recovered, so a lockfile over `maxLockBytes`
 (2 MiB) or deeper than `maxLockDepth` (16) is hidden from every cataloger, with
-one warning per file. Lockfiles get caps of their own, tighter than a
+one warning per file. A refused `uv.lock` is gone for the uv cataloger too, which then compiles the project from its manifest (`uvArgsForPyProject` asks the resolver, not the disk), so `uv export` never reads pins the warning says were not read. Lockfiles get caps of their own, tighter than a
 manifest's: 4,680 real ones swept were at most 650 KB and 4 levels deep, while
 one crafted just inside 32 MiB and 64 levels still cost syft tens of seconds and
 gigabytes. Cost grows with size more than depth, so the size cap is what bounds a
