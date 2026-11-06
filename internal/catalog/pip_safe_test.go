@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -20,7 +21,7 @@ func sanitize(t *testing.T, files map[string]string) (string, *pipSanitizer, err
 	t.Helper()
 	src := t.TempDir()
 	writeTree(t, src, files)
-	s := newPipSanitizer(context.Background(), t.TempDir())
+	s := newPipSanitizer(context.Background(), t.TempDir(), src)
 	out, err := s.file(filepath.Join(src, "requirements.txt"))
 	if err != nil {
 		return "", s, err
@@ -38,6 +39,18 @@ func TestPipSafeRequirementRejectsLineBreaks(t *testing.T) {
 		"requests\x00",
 		`requests; python_version > "${GITHUB_TOKEN}"`,
 		"${PKG}==1.0",
+		// Python's splitlines, which pip reads a file with, splits on these too.
+		"requests; python_version >= '0'\u2028./local",
+		"requests; python_version >= '0'\u2029./local",
+		"requests; python_version >= '0'\u0085./local",
+		"requests; python_version >= '0'\x85./local",
+		"requests; python_version >= '0'\v./local",
+		"requests; python_version >= '0'\f./local",
+		"requests; python_version >= '0'\x1c./local",
+		// pip strips the extras before taking the name for a local archive.
+		"evilpkg-1.0.tar.gz[extra]",
+		"evilpkg-1.0.whl [x]",
+		"evilpkg-1.0.zip[a,b]>=1",
 	} {
 		if got, ok := pipSafeRequirement(spec); ok {
 			t.Errorf("pipSafeRequirement(%q) kept %q", spec, got)
@@ -150,7 +163,7 @@ func TestPipSanitizerBoundsIncludes(t *testing.T) {
 	cancel()
 	src := t.TempDir()
 	writeTree(t, src, map[string]string{"requirements.txt": "requests\n"})
-	if _, err := newPipSanitizer(ctx, t.TempDir()).file(filepath.Join(src, "requirements.txt")); err == nil {
+	if _, err := newPipSanitizer(ctx, t.TempDir(), src).file(filepath.Join(src, "requirements.txt")); err == nil {
 		t.Error("a cancelled scan went on sanitizing")
 	}
 }
@@ -160,15 +173,15 @@ func TestPipSanitizerBoundsIncludes(t *testing.T) {
 func TestPipSanitizerQuotesPaths(t *testing.T) {
 	src := filepath.Join(t.TempDir(), "my project")
 	writeTree(t, src, map[string]string{
-		"requirements.txt": "-r \"more reqs.txt\"\n-f 'my wheels'\n",
+		"requirements.txt": "-r \"more reqs.txt\"\n-c 'my cons.txt'\n",
 		"more reqs.txt":    "idna\n",
-		"my wheels/.keep":  "",
+		"my cons.txt":      "idna<4\n",
 	})
 	dst := filepath.Join(t.TempDir(), "scratch dir")
 	if err := os.MkdirAll(dst, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	s := newPipSanitizer(context.Background(), dst)
+	s := newPipSanitizer(context.Background(), dst, src)
 	out, err := s.file(filepath.Join(src, "requirements.txt"))
 	if err != nil {
 		t.Fatalf("a quoted include failed: %v", err)
@@ -214,23 +227,32 @@ func TestPipResolvesThroughPathsWithSpaces(t *testing.T) {
 func TestLeftOutNeverQuotesTheRequirement(t *testing.T) {
 	src := t.TempDir()
 	writeTree(t, src, map[string]string{"requirements.txt": "private @ https://deploy:hunter2@pkgs.example/p.whl?token=s3cret\n" +
-		"-e git+https://ghp_abc123@github.com/o/r.git#egg=r\n--index-url=https://x/${SECRET_TOKEN}\nsecretpkg-s3cr3t.tar.gz\n"})
-	s := newPipSanitizer(context.Background(), t.TempDir())
+		"-e git+https://ghp_abc123@github.com/o/r.git#egg=r\n--index-url=https://x/${SECRET_TOKEN}\nsecretpkg-s3cr3t.tar.gz\n" +
+		"--token-hunter2\n--no-binary :all:\nevilpkg-1.0.tar.gz[x]\n"})
+	s := newPipSanitizer(context.Background(), t.TempDir(), src)
 	if _, err := s.file(filepath.Join(src, "requirements.txt")); err != nil {
 		t.Fatal(err)
 	}
-	ctx := warn.NewContext(context.Background(), true)
-	c := NewPipCataloger(src)
-	c.leftOut(ctx, filepath.Join(src, "requirements.txt"), s.dropped)
-	out := warn.Drain(ctx)
-	for _, secret := range []string{"hunter2", "s3cret", "ghp_abc123", "SECRET_TOKEN", "s3cr3t"} {
-		if strings.Contains(out, secret) {
-			t.Errorf("warning leaked %q:\n%s", secret, out)
-		}
+	if strings.Count(strings.Join(s.dropped, "\n"), "a local archive") != 2 {
+		t.Errorf("an archive with extras was not described as one: %v", s.dropped)
 	}
-	for _, want := range []string{"a URL or direct reference", "an editable (-e)", "--index-url naming an environment variable", "a local archive"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("warning does not say %q:\n%s", want, out)
+	for _, verbose := range []bool{false, true} {
+		ctx := warn.NewContext(context.Background(), verbose)
+		c := NewPipCataloger(src)
+		c.leftOut(ctx, filepath.Join(src, "requirements.txt"), s.dropped)
+		out := warn.Drain(ctx)
+		for _, secret := range []string{"hunter2", "s3cret", "ghp_abc123", "SECRET_TOKEN", "s3cr3t", "token-"} {
+			if strings.Contains(out, secret) {
+				t.Errorf("verbose=%v: warning leaked %q:\n%s", verbose, secret, out)
+			}
+		}
+		if !verbose {
+			continue
+		}
+		for _, want := range []string{"a URL or direct reference", "an editable (-e)", "--index-url naming an environment variable", "a local archive", "an unrecognised option", "option --no-binary"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("warning does not say %q:\n%s", want, out)
+			}
 		}
 	}
 }
@@ -307,5 +329,77 @@ func TestUVNeverExpandsRepositoryEnvVars(t *testing.T) {
 				t.Errorf("no warning says why:\n%s", out)
 			}
 		})
+	}
+}
+
+// An include is read only inside the scan root: an absolute path, a .. or a
+// symlink out of it would send another file's lines to the index.
+func TestPipSanitizerConfinesIncludesToTheRoot(t *testing.T) {
+	outside := t.TempDir()
+	writeTree(t, outside, map[string]string{"secret.txt": "s3cretpkg\n"})
+	secret := filepath.Join(outside, "secret.txt")
+	cases := map[string]map[string]string{
+		"absolute": {"requirements.txt": "-r " + shlexQuote(secret) + "\n"},
+		"dotdot":   {"requirements.txt": "-c ../" + filepath.Base(outside) + "/secret.txt\n"},
+	}
+	for name, files := range cases {
+		t.Run(name, func(t *testing.T) {
+			parent := filepath.Dir(outside)
+			src, err := os.MkdirTemp(parent, "proj-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer os.RemoveAll(src)
+			writeTree(t, src, files)
+			_, err = newPipSanitizer(context.Background(), t.TempDir(), src).file(filepath.Join(src, "requirements.txt"))
+			if !errors.Is(err, errOutsideRoot) {
+				t.Errorf("err = %v, want errOutsideRoot", err)
+			}
+			if err := uvExpandsEnv(context.Background(), filepath.Join(src, "requirements.txt"), src); !errors.Is(err, errOutsideRoot) {
+				t.Errorf("uv: err = %v, want errOutsideRoot", err)
+			}
+		})
+	}
+	if runtime.GOOS != "windows" {
+		src := t.TempDir()
+		writeTree(t, src, map[string]string{"requirements.txt": "-r inc.txt\n"})
+		if err := os.Symlink(secret, filepath.Join(src, "inc.txt")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := newPipSanitizer(context.Background(), t.TempDir(), src).file(filepath.Join(src, "requirements.txt")); !errors.Is(err, errOutsideRoot) {
+			t.Errorf("symlink: err = %v, want errOutsideRoot", err)
+		}
+	}
+	if _, _, err := sanitize(t, map[string]string{"requirements.txt": "-r sub/in.txt\n", "sub/in.txt": "idna\n"}); err != nil {
+		t.Errorf("an include inside the root failed: %v", err)
+	}
+}
+
+// A line over the scanner's 1 MiB limit fails the file instead of hiding
+// what follows it.
+func TestOverlongRequirementLineFails(t *testing.T) {
+	body := "# " + strings.Repeat("x", 1<<20+10) + "\n--index-url https://evil/${SECRET}\nrequests\n"
+	if _, _, err := sanitize(t, map[string]string{"requirements.txt": body}); err == nil {
+		t.Error("pip: an overlong line was silently skipped")
+	}
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{"requirements.txt": body})
+	if err := uvExpandsEnv(context.Background(), filepath.Join(dir, "requirements.txt"), dir); err == nil {
+		t.Error("uv: an overlong line hid a ${VAR} after it")
+	}
+}
+
+// pyprojectExpandsEnv reads the raw lists: an entry naming the project
+// itself still reaches uv, and a file that does not parse is an error.
+func TestPyprojectExpandsEnvReadsRawEntries(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "pyproject.toml")
+	writeTree(t, dir, map[string]string{"pyproject.toml": "[project]\nname = \"app\"\nversion = \"0.1.0\"\n[project.optional-dependencies]\nx = [\"app[y] @ https://h/${SECRET}/app.whl\"]\n"})
+	if err := pyprojectExpandsEnv(p); !errors.Is(err, errNamesEnvVar) {
+		t.Errorf("self-reference: err = %v, want errNamesEnvVar", err)
+	}
+	writeTree(t, dir, map[string]string{"pyproject.toml": "[project\nname = "})
+	if err := pyprojectExpandsEnv(p); err == nil {
+		t.Error("a pyproject that does not parse passed")
 	}
 }

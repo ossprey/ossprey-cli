@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -33,6 +34,35 @@ func resolverTimeout() time.Duration {
 		return d
 	}
 	return 2 * time.Minute
+}
+
+// maxLockfileBytes bounds a lockfile read to decide coverage; a larger one
+// covers nothing.
+const maxLockfileBytes = 64 << 20
+
+// readRegularFile reads a regular file of at most limit bytes. A FIFO or a
+// device (a lockfile linked to /dev/zero) could otherwise never end.
+func readRegularFile(path string, limit int64) ([]byte, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("%s is over %d bytes", path, limit)
+	}
+	return data, nil
 }
 
 // fileParser converts one matched manifest into syft packages.

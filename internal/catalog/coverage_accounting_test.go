@@ -139,3 +139,109 @@ func TestUnresolvedPathsAreRelativeUnderASymlinkedRoot(t *testing.T) {
 		t.Errorf("unresolved = %v, want [Cargo.toml]", got)
 	}
 }
+
+// A crate an ancestor workspace excludes is not covered by that workspace's
+// lock: cargo looks further up for its root, and here finds none. An
+// explicit members entry wins over exclude, as in cargo's is_excluded.
+func TestCargoExcludedCrateIsNotCoveredByTheRootLock(t *testing.T) {
+	member := "[package]\nname = \"core\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = \"=1.0.228\"\n"
+	excl := map[string]string{
+		"Cargo.toml": "[workspace]\nmembers = []\nexclude = [\"crates/core\"]\n", "Cargo.lock": validCargoLock,
+		"crates/core/Cargo.toml": member,
+	}
+	if got := unresolvedFor(t, excl); !slices.Equal(got, []string{"crates/core/Cargo.toml"}) {
+		t.Errorf("excluded crate: unresolved = %v, want [crates/core/Cargo.toml]", got)
+	}
+	excl["Cargo.toml"] = "[workspace]\nmembers = [\"crates/core\"]\nexclude = [\"crates\"]\n"
+	if got := unresolvedFor(t, excl); len(got) != 0 {
+		t.Errorf("explicit member: unresolved = %v, want none", got)
+	}
+}
+
+// A lockfile is read only when it is a regular file within a bound: one
+// linked to /dev/zero covers nothing, and the scan does not hang on it.
+func TestLockLinkedToADeviceCoversNothing(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no /dev/zero")
+	}
+	cases := []struct {
+		lock, manifest, body string
+	}{
+		{"Cargo.lock", "Cargo.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = \"=1.0.228\"\n"},
+		{"uv.lock", "pyproject.toml", "[project]\nname = \"app\"\nversion = \"0.1.0\"\ndependencies = [\"requests>=2\"]\n"},
+		{"package-lock.json", "package.json", `{"name":"app","version":"1.0.0","dependencies":{"left-pad":"^1.3.0"}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.lock, func(t *testing.T) {
+			dir := t.TempDir()
+			writeTree(t, dir, map[string]string{tc.manifest: tc.body})
+			if err := os.Symlink("/dev/zero", filepath.Join(dir, tc.lock)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := readRegularFile(filepath.Join(dir, tc.lock), maxLockfileBytes); err == nil {
+				t.Fatal("a device read as a lockfile")
+			}
+			switch tc.lock {
+			case "Cargo.lock":
+				if cargoLockCovers(filepath.Join(dir, tc.manifest), dir) {
+					t.Error("covered")
+				}
+			case "uv.lock":
+				if pyprojectLockCovered(filepath.Join(dir, tc.manifest)) {
+					t.Error("covered")
+				}
+			default:
+				if hasNpmLockfile(dir) {
+					t.Error("covered")
+				}
+			}
+		})
+	}
+}
+
+// Poetry installs dev and group dependencies too, so a project declaring only
+// those, with no poetry.lock, is still unresolved.
+func TestPoetryDevDependenciesNeedTheLock(t *testing.T) {
+	for name, pp := range map[string]string{
+		"dev-dependencies": "[tool.poetry]\nname = \"app\"\n\n[tool.poetry.dependencies]\npython = \"^3.11\"\n\n[tool.poetry.dev-dependencies]\npytest = \"^8\"\n",
+		"group":            "[tool.poetry]\nname = \"app\"\n\n[tool.poetry.dependencies]\npython = \"^3.11\"\n\n[tool.poetry.group.dev.dependencies]\npytest = \"^8\"\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := unresolvedFor(t, map[string]string{"pyproject.toml": pp}); !slices.Equal(got, []string{"pyproject.toml"}) {
+				t.Errorf("unresolved = %v, want [pyproject.toml]", got)
+			}
+		})
+	}
+}
+
+// A resolver whose temporary cache cannot be made records the manifests it
+// would have resolved, rather than erroring past the accounting.
+func TestResolverCacheFailureIsUnresolved(t *testing.T) {
+	cases := map[string]struct {
+		tools []string
+		files map[string]string
+		want  string
+	}{
+		"npm": {[]string{"npm", "node"}, map[string]string{"package.json": `{"name":"app","version":"1.0.0","dependencies":{"left-pad":"^1.3.0"}}`}, "package.json"},
+		"uv":  {[]string{"uv", "python3"}, map[string]string{"requirements.txt": "requests>=2\n"}, "requirements.txt"},
+		"pip": {[]string{"python3"}, map[string]string{"requirements.txt": "requests>=2\n"}, "requirements.txt"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			realToolsOnly(t, tc.tools...)
+			if name == "pip" {
+				requirePip(t)
+			}
+			proj := t.TempDir()
+			writeTree(t, proj, tc.files)
+			t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "missing"))
+			ctx := warn.NewContext(context.Background(), false)
+			if _, err := Catalog(ctx, proj, Options{SkipVersionLookup: true}); err != nil {
+				t.Fatalf("Catalog: %v", err)
+			}
+			if got := warn.Unresolved(ctx); !slices.Contains(got, tc.want) {
+				t.Errorf("unresolved = %v, want %s in it\n%s", got, tc.want, warn.Drain(ctx))
+			}
+		})
+	}
+}
