@@ -75,7 +75,12 @@ framework manage both.
   lookup; `-v` reports how many.
 - **Crates from git or a private registry.** A `Cargo.lock` crate that Cargo
   fetches from anywhere but crates.io is not the crates.io crate of that name,
-  so it is left out of the lookup.
+  so it is left out of the lookup; `-v` reports how many.
+- **Pins inherited from a workspace root outside the crate's parent
+  directories.** A crate that names its root with `package.workspace`
+  elsewhere in the repository takes its `{ workspace = true }` pins from
+  there, and the hook does not read that root yet, so those dependencies are
+  skipped with a warning.
 - **A vendored crate's own `Cargo.lock`.** A crate `cargo vendor` copies
   keeps the `Cargo.lock` its author published, which your build never reads,
   so it is not looked up when your project's `Cargo.lock` pins that crate at

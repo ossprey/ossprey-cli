@@ -11,6 +11,7 @@
 package precommit
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -72,7 +73,10 @@ func StagedDelta(ctx context.Context, repoDir string, policy trust.Policy) (Delt
 	if err != nil {
 		return Delta{}, err
 	}
-	paths = withoutVendoredLocks(ctx, repoDir, paths)
+	// One git serves every blob read, where a git per file took seconds on a vendored commit.
+	blobs := &blobReader{ctx: ctx, repoDir: repoDir}
+	defer blobs.close()
+	paths = withoutVendoredLocks(ctx, repoDir, blobs, paths)
 	if len(paths) == 0 {
 		return Delta{}, nil
 	}
@@ -93,7 +97,7 @@ func StagedDelta(ctx context.Context, repoDir string, policy trust.Policy) (Delt
 	for _, p := range paths {
 		// Staged (index) content — the exact bytes this commit would record,
 		// which may differ from the worktree file.
-		blob, err := gitShow(ctx, repoDir, ":"+p)
+		blob, err := blobs.show(indexSpec(p))
 		if err != nil {
 			return Delta{}, fmt.Errorf("precommit: read staged %s: %w", p, err)
 		}
@@ -105,7 +109,7 @@ func StagedDelta(ctx context.Context, repoDir string, policy trust.Policy) (Delt
 		}
 		// HEAD content; absent from HEAD (newly added file) → no file at all
 		// in the head tree, so every package it declares reads as added.
-		if blob, err := gitShow(ctx, repoDir, "HEAD:"+p); err == nil {
+		if blob, err := blobs.show("HEAD:" + p); err == nil {
 			if err := writeTreeFile(headRoot, p, blob); err != nil {
 				return Delta{}, err
 			}
@@ -116,19 +120,22 @@ func StagedDelta(ctx context.Context, repoDir string, policy trust.Policy) (Delt
 	ancestors := cargoAncestors(paths)
 	var specs []string
 	for _, a := range ancestors {
-		specs = append(specs, ":"+a)
+		specs = append(specs, indexSpec(a))
 		if hasHead {
 			specs = append(specs, "HEAD:"+a)
 		}
 	}
-	// A root git cannot size reads as unreadable.
-	roots, _ := blobSizes(ctx, repoDir, specs)
+	// A root git could not size would drop its members' inherited pins unseen, so that fails like a staged read.
+	roots, err := blobSizes(ctx, repoDir, specs)
+	if err != nil {
+		return Delta{}, fmt.Errorf("precommit: size workspace roots: %w", err)
+	}
 	for _, a := range ancestors {
-		if err := writeWorkspaceRoot(ctx, repoDir, roots, ":"+a, stagedRoot, a); err != nil {
+		if err := writeWorkspaceRoot(blobs, roots, indexSpec(a), stagedRoot, a); err != nil {
 			return Delta{}, err
 		}
 		if hasHead {
-			if err := writeWorkspaceRoot(ctx, repoDir, roots, "HEAD:"+a, headRoot, a); err != nil {
+			if err := writeWorkspaceRoot(blobs, roots, "HEAD:"+a, headRoot, a); err != nil {
 				return Delta{}, err
 			}
 		}
@@ -348,7 +355,7 @@ type cargoConfig struct {
 }
 
 // withoutVendoredLocks drops the Cargo.lock `cargo vendor` copied with a crate, which no build of the project reads.
-func withoutVendoredLocks(ctx context.Context, repoDir string, paths []string) []string {
+func withoutVendoredLocks(ctx context.Context, repoDir string, blobs *blobReader, paths []string) []string {
 	var files proofFiles
 	locks := map[string]*catalog.CargoLock{}
 	lockAt := func(dir string) *catalog.CargoLock {
@@ -358,7 +365,7 @@ func withoutVendoredLocks(ctx context.Context, repoDir string, paths []string) [
 		var l *catalog.CargoLock
 		// As in the scan's filter, only a lock beside its Cargo.toml in an unmarked directory is a project's.
 		_, marked := files[path.Join(dir, ".cargo-checksum.json")]
-		if blob, ok := files.read(ctx, repoDir, path.Join(dir, "Cargo.lock"), catalog.CargoProofLimit); ok && files[path.Join(dir, "Cargo.toml")].oid != "" && !marked {
+		if blob, ok := files.read(blobs, path.Join(dir, "Cargo.lock"), catalog.CargoProofLimit); ok && files[path.Join(dir, "Cargo.toml")].oid != "" && !marked {
 			if parsed, err := catalog.ParseCargoLock(blob); err == nil {
 				l = &parsed
 			}
@@ -370,7 +377,7 @@ func withoutVendoredLocks(ctx context.Context, repoDir string, paths []string) [
 	configAt := func(dir string) (map[string]any, bool) {
 		c, ok := configs[dir]
 		if !ok && len(configs) < maxProofLocks {
-			c = stagedCargoConfig(ctx, repoDir, files, dir)
+			c = stagedCargoConfig(blobs, files, dir)
 			configs[dir] = c
 		}
 		return c.doc, c.ok
@@ -383,7 +390,7 @@ func withoutVendoredLocks(ctx context.Context, repoDir string, paths []string) [
 				files = listProofFiles(ctx, repoDir)
 			}
 			tested++
-			if vendoredCopy(ctx, repoDir, files, dir, lockAt, configAt) {
+			if vendoredCopy(blobs, files, dir, lockAt, configAt) {
 				continue
 			}
 		}
@@ -441,10 +448,22 @@ func blobSizes(ctx context.Context, repoDir string, names []string) (proofFiles,
 	blobs := proofFiles{}
 	var asked []string
 	for _, n := range names {
-		// cat-file reads one name per line, so a name holding a newline is never asked and has no blob.
-		if !strings.Contains(n, "\n") {
-			asked = append(asked, n)
+		// cat-file reads one name per line, so a name holding a newline is resolved by a git of its own first.
+		if strings.Contains(n, "\n") {
+			oid, err := gitOutput(ctx, repoDir, "rev-parse", "--verify", "-q", n)
+			if err != nil {
+				continue // no object, as cat-file answers "missing"
+			}
+			sized, err := blobSizes(ctx, repoDir, []string{strings.TrimSpace(string(oid))})
+			if err != nil {
+				return nil, err
+			}
+			if b, ok := sized[strings.TrimSpace(string(oid))]; ok {
+				blobs[n] = b
+			}
+			continue
 		}
+		asked = append(asked, n)
 	}
 	if len(asked) == 0 {
 		return blobs, nil
@@ -471,15 +490,113 @@ func blobSizes(ctx context.Context, repoDir string, names []string) (proofFiles,
 }
 
 // read returns the blob at p, false when p has none, it is over limit bytes or unreadable.
-func (f proofFiles) read(ctx context.Context, repoDir, p string, limit int64) ([]byte, bool) {
+func (f proofFiles) read(blobs *blobReader, p string, limit int64) ([]byte, bool) {
 	// The object's own size refuses an oversized file before any of it is read.
 	if b := f[p]; b.oid != "" && b.size <= limit {
-		return readBlob(ctx, repoDir, b.oid, limit)
+		return blobs.read(b.oid, limit)
 	}
 	return nil, false
 }
 
-// readBlob reads the blob oid, false when git fails or the blob passes limit bytes, where it stops git.
+// blobReader reads blobs through one `git cat-file --batch`, started on the first read and restarted after a refused one.
+type blobReader struct {
+	ctx     context.Context
+	repoDir string
+	cmd     *exec.Cmd
+	in      io.WriteCloser
+	out     *bufio.Reader
+}
+
+// read returns the blob an object name resolves to, false when it names none, it passes limit bytes or git fails.
+func (b *blobReader) read(name string, limit int64) ([]byte, bool) {
+	blob, _, ok := b.fetch(name, limit)
+	return blob, ok
+}
+
+// fetch is read, also reporting a name git answered has no object.
+func (b *blobReader) fetch(name string, limit int64) (blob []byte, missing, ok bool) {
+	// cat-file reads one name per line, so a name holding a newline gets a git of its own.
+	if strings.Contains(name, "\n") {
+		blob, ok = readBlob(b.ctx, b.repoDir, name, limit)
+		return blob, false, ok
+	}
+	if b.cmd == nil && !b.start() {
+		return nil, false, false
+	}
+	if _, err := io.WriteString(b.in, name+"\n"); err != nil {
+		b.close()
+		return nil, false, false
+	}
+	header, err := b.out.ReadString('\n')
+	if err != nil {
+		b.close()
+		return nil, false, false
+	}
+	if strings.HasSuffix(header, " missing\n") || strings.HasSuffix(header, " ambiguous\n") {
+		return nil, true, false
+	}
+	f := strings.Fields(header)
+	size := int64(-1)
+	if len(f) == 3 && f[1] == "blob" {
+		size, _ = strconv.ParseInt(f[2], 10, 64)
+	}
+	// git is mid-object here, so a refused one ends this process and the next read starts another.
+	if size < 0 || size > limit {
+		b.close()
+		return nil, false, false
+	}
+	blob = make([]byte, size+1)
+	if _, err := io.ReadFull(b.out, blob); err != nil {
+		b.close()
+		return nil, false, false
+	}
+	return blob[:size], false, true
+}
+
+// show returns the blob at a rev:path spec, as git show does, with no limit.
+func (b *blobReader) show(spec string) ([]byte, error) {
+	blob, missing, ok := b.fetch(spec, maxShowBytes)
+	switch {
+	case ok:
+		return blob, nil
+	case missing:
+		return nil, fmt.Errorf("git cat-file: %s: no such object", spec)
+	}
+	// Anything else gets a git of its own, and git's own error.
+	return gitShow(b.ctx, b.repoDir, spec)
+}
+
+// maxShowBytes is no limit, short of what readBlob's limit+1 can hold.
+const maxShowBytes = 1<<62 - 1
+
+func (b *blobReader) start() bool {
+	cmd := exec.CommandContext(b.ctx, "git", "-C", b.repoDir, "cat-file", "--batch")
+	in, err := cmd.StdinPipe()
+	if err != nil {
+		return false
+	}
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		return false
+	}
+	if err := cmd.Start(); err != nil {
+		return false
+	}
+	b.cmd, b.in, b.out = cmd, in, bufio.NewReader(out)
+	return true
+}
+
+func (b *blobReader) close() {
+	if b.cmd == nil {
+		return
+	}
+	_ = b.in.Close()
+	_ = b.cmd.Process.Kill()
+	_ = b.cmd.Wait()
+	b.cmd = nil
+}
+
+// readBlob reads the blob an object name resolves to with a git of its own, false when git fails or the blob passes limit bytes, where it stops git.
 func readBlob(ctx context.Context, repoDir, oid string, limit int64) ([]byte, bool) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -501,14 +618,14 @@ func readBlob(ctx context.Context, repoDir, oid string, limit int64) ([]byte, bo
 }
 
 // stagedCargoConfig reads dir's .cargo/config or .cargo/config.toml from the index, unclear when both exist or one is not a regular file that parses.
-func stagedCargoConfig(ctx context.Context, repoDir string, files proofFiles, dir string) cargoConfig {
+func stagedCargoConfig(blobs *blobReader, files proofFiles, dir string) cargoConfig {
 	var c cargoConfig
 	for _, name := range []string{"config", "config.toml"} {
 		p := path.Join(dir, ".cargo", name)
 		if _, listed := files[p]; !listed {
 			continue
 		}
-		blob, ok := files.read(ctx, repoDir, p, catalog.CargoManifestLimit)
+		blob, ok := files.read(blobs, p, catalog.CargoManifestLimit)
 		if !ok {
 			return cargoConfig{}
 		}
@@ -523,8 +640,8 @@ func stagedCargoConfig(ctx context.Context, repoDir string, files proofFiles, di
 }
 
 // vendoredCopy reports whether a strict ancestor's staged Cargo.lock locks dir's crate at its marker's .crate checksum and its cargo config vendors crates.io into dir's parent.
-func vendoredCopy(ctx context.Context, repoDir string, files proofFiles, dir string, lockAt func(string) *catalog.CargoLock, configAt func(string) (map[string]any, bool)) bool {
-	marker, ok := files.read(ctx, repoDir, path.Join(dir, ".cargo-checksum.json"), catalog.CargoProofLimit)
+func vendoredCopy(blobs *blobReader, files proofFiles, dir string, lockAt func(string) *catalog.CargoLock, configAt func(string) (map[string]any, bool)) bool {
+	marker, ok := files.read(blobs, path.Join(dir, ".cargo-checksum.json"), catalog.CargoProofLimit)
 	if !ok {
 		return false
 	}
@@ -532,7 +649,7 @@ func vendoredCopy(ctx context.Context, repoDir string, files proofFiles, dir str
 	if sum == "" {
 		return false
 	}
-	manifest, ok := files.read(ctx, repoDir, path.Join(dir, "Cargo.toml"), catalog.CargoManifestLimit)
+	manifest, ok := files.read(blobs, path.Join(dir, "Cargo.toml"), catalog.CargoManifestLimit)
 	if !ok {
 		return false
 	}
@@ -574,8 +691,8 @@ func cargoAncestors(paths []string) []string {
 }
 
 // writeWorkspaceRoot writes the Cargo.toml at spec into root when it is within the manifest bound and declares [workspace].
-func writeWorkspaceRoot(ctx context.Context, repoDir string, roots proofFiles, spec, root, repoRelPath string) error {
-	blob, ok := roots.read(ctx, repoDir, spec, catalog.CargoManifestLimit)
+func writeWorkspaceRoot(blobs *blobReader, roots proofFiles, spec, root, repoRelPath string) error {
+	blob, ok := roots.read(blobs, spec, catalog.CargoManifestLimit)
 	if !ok || !catalog.DeclaresCargoWorkspace(blob) {
 		return nil
 	}
@@ -636,6 +753,9 @@ func gitHasHead(ctx context.Context, repoDir string) bool {
 	_, err := gitOutput(ctx, repoDir, "rev-parse", "--verify", "-q", "HEAD")
 	return err == nil
 }
+
+// indexSpec names a path's staged blob with its stage spelled out, since git reads ":0:../x" as stage 0 of a path outside the repo.
+func indexSpec(p string) string { return ":0:" + p }
 
 // gitShow returns the blob content for a git revision:path spec (":p" for the
 // index, "HEAD:p" for the last commit).
