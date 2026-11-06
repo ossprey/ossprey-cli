@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -159,11 +160,53 @@ func resolveByGlob(ctx context.Context, resolver file.Resolver, root, glob, labe
 // markUnresolved records a manifest as unresolved under its path relative to
 // the scan root, slash-separated so a report reads the same on every OS.
 func markUnresolved(ctx context.Context, root, absPath string) {
-	rel := absPath
-	if r, err := filepath.Rel(root, absPath); err == nil && !strings.HasPrefix(r, "..") {
-		rel = r
+	rel, ok := relToRoot(root, absPath)
+	if !ok {
+		rel = absPath
 	}
 	warn.MarkUnresolved(ctx, filepath.ToSlash(rel))
+}
+
+// relToRoot makes p relative to the scan root. The two can name the same
+// directory differently: syft reports Windows paths symlink- and
+// short-name-resolved (C:\Users\runneradmin where the root said
+// C:\Users\RUNNER~1), and Windows compares names without case. So both the
+// root as given and as resolved are tried, case-folded on Windows.
+func relToRoot(root, p string) (string, bool) {
+	fold := runtime.GOOS == "windows"
+	roots := []string{root}
+	if r, err := filepath.EvalSymlinks(root); err == nil && r != root {
+		roots = append(roots, r)
+	}
+	paths := []string{p}
+	if r, err := filepath.EvalSymlinks(p); err == nil && r != p {
+		paths = append(paths, r)
+	}
+	for _, r := range roots {
+		for _, q := range paths {
+			if rel, ok := relWithin(r, q, fold); ok {
+				return rel, true
+			}
+		}
+	}
+	return "", false
+}
+
+// relWithin is filepath.Rel for a path inside root, comparing names without
+// case when fold is set.
+func relWithin(root, p string, fold bool) (string, bool) {
+	root, p = filepath.Clean(root), filepath.Clean(p)
+	if r, err := filepath.Rel(root, p); err == nil && r != ".." && !strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+		return r, true
+	}
+	if !fold || len(p) <= len(root) || !strings.EqualFold(p[:len(root)], root) {
+		return "", false
+	}
+	rest := p[len(root):]
+	if !os.IsPathSeparator(rest[0]) && !os.IsPathSeparator(root[len(root)-1]) {
+		return "", false
+	}
+	return strings.TrimLeft(rest, `/\`), true
 }
 
 // catalogerEntry turns one manifest's failure into a warning. A subprocess
