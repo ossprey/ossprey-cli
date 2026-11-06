@@ -270,6 +270,7 @@ func TestPipCatalogerWarnsWithNoResolver(t *testing.T) {
 	binDir := t.TempDir()
 	// A Python whose pip predates --dry-run/--report.
 	writeScript(t, binDir, "python3", "#!/bin/sh\n"+
+		"[ \"$1\" = \"-I\" ] && shift\n"+
 		"[ \"$1\" = \"-c\" ] && exit 0\n"+
 		"echo 'pip 22.0.2 from /fake (python 3.10)'\nexit 0\n")
 	t.Setenv("PATH", binDir)
@@ -321,6 +322,7 @@ func TestPipCatalogerQuietWithoutPythonManifests(t *testing.T) {
 // stays invisible), which the script inherits, so `cat` and friends are not
 // there to call.
 const fakePythonScript = `#!/bin/sh
+if [ "$1" = "-I" ]; then shift; fi
 if [ "$1" = "-c" ]; then exit 0; fi
 if [ "$3" = "--version" ]; then
   echo "pip 24.0 from /fake (python 3.12)"

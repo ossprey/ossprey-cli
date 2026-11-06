@@ -16,6 +16,8 @@ import (
 	"github.com/anchore/syft/syft/artifact"
 	"github.com/anchore/syft/syft/file"
 	"github.com/anchore/syft/syft/pkg"
+
+	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
 var uvReqLine = regexp.MustCompile(`^([A-Za-z0-9_.\-]+)==([^\s;]+)`)
@@ -39,7 +41,9 @@ func lookupUV(ctx context.Context) (string, bool) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	if err := exec.CommandContext(ctx, path, "--version").Run(); err != nil {
+	cmd := exec.CommandContext(ctx, path, "--version")
+	cmd.Env = toolEnv()
+	if err := cmd.Run(); err != nil {
 		return "", false
 	}
 	return path, true
@@ -61,26 +65,87 @@ func NewUVCataloger(root, uv string) *UVCataloger { return &UVCataloger{root: ro
 func (c *UVCataloger) Name() string { return "ossprey-uv-cataloger" }
 
 func (c *UVCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]pkg.Package, []artifact.Relationship, error) {
-	cache, err := os.MkdirTemp("", "ossprey-uv-cache-")
-	if err != nil {
-		return nil, nil, fmt.Errorf("uv cache: %w", err)
+	// A cache that cannot be made fails each manifest (below), so each is
+	// recorded unresolved.
+	cache, cacheErr := os.MkdirTemp("", "ossprey-uv-cache-")
+	if cacheErr == nil {
+		defer os.RemoveAll(cache)
 	}
-	defer os.RemoveAll(cache)
 
 	parse := func(absPath string, loc file.Location) ([]pkg.Package, error) {
 		dir := filepath.Dir(absPath)
-		args := uvArgsForPyProject(dir)
-		return runUV(ctx, c.uv, cache, dir, args, loc)
+		if !hasUVLock(dir) {
+			// Without a [project] table uv can only learn the dependencies by
+			// building the project, which --no-build refuses.
+			if err := pyprojectNeedsBuild(absPath); err != nil || !hasPEP621Project(absPath) {
+				return nil, err
+			}
+		}
+		// uv export re-locks from the pyproject when the lock is stale, so
+		// its dependencies are read either way.
+		if err := pyprojectExpandsEnv(absPath); err != nil {
+			return nil, err
+		}
+		if cacheErr != nil {
+			return nil, fmt.Errorf("uv cache: %w", cacheErr)
+		}
+		// Extras are resolved too: their direct names reach the scan through
+		// the pyproject fallback, so leaving their trees out would read as
+		// complete. If they cannot resolve, the base tree still counts and
+		// the manifest is marked unresolved.
+		if !hasOptionalDependencies(absPath) {
+			return runUV(ctx, c.uv, cache, dir, uvArgsForPyProject(dir, false), loc)
+		}
+		pkgs, err := runUV(ctx, c.uv, cache, dir, uvArgsForPyProject(dir, true), loc)
+		if err == nil {
+			return pkgs, nil
+		}
+		pkgs, baseErr := runUV(ctx, c.uv, cache, dir, uvArgsForPyProject(dir, false), loc)
+		if baseErr != nil {
+			return nil, baseErr
+		}
+		if !pyprojectLockCovered(absPath) {
+			warn.Add(ctx, catalogerEntry("uv", fmt.Errorf("%s: optional dependencies not resolved: %w", absPath, err)))
+			markUnresolved(ctx, c.root, absPath)
+		}
+		return pkgs, nil
 	}
-	out, err := catalogByGlob(ctx, resolver, c.root, "**/pyproject.toml", "uv", parse)
+	out, err := resolveByGlob(ctx, resolver, c.root, "**/pyproject.toml", "uv", pyprojectLockCovered, parse)
 	return out, nil, err
+}
+
+// hasOptionalDependencies reports a [project] table declaring any extra.
+func hasOptionalDependencies(path string) bool {
+	pp, err := readPyProject(path)
+	if err != nil || pp == nil {
+		return false
+	}
+	for _, deps := range pp.Project.OptionalDependencies {
+		if len(deps) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func hasUVLock(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, "uv.lock"))
+	return err == nil
 }
 
 // uvArgsForPyProject picks the right uv invocation for a project dir.
 // Prefers uv.lock (faster, deterministic), falls back to pip compile.
-func uvArgsForPyProject(dir string) []string {
-	if _, err := os.Stat(filepath.Join(dir, "uv.lock")); err == nil {
-		return []string{
+//
+// Every scan-path uv call carries --no-build: an sdist-only dependency would
+// otherwise have uv run its PEP 517 backend to read its metadata. Such a
+// manifest fails instead and is reported unresolved.
+func uvArgsForPyProject(dir string, allExtras bool) []string {
+	var extras []string
+	if allExtras {
+		extras = []string{"--all-extras"}
+	}
+	if hasUVLock(dir) {
+		return append([]string{
 			"export",
 			"--directory", dir,
 			"--format", "requirements.txt",
@@ -88,10 +153,11 @@ func uvArgsForPyProject(dir string) []string {
 			"--no-hashes",
 			"--no-emit-project",
 			"--no-progress",
-		}
+			"--no-build",
+		}, extras...)
 	}
 	pyproject := filepath.Join(dir, "pyproject.toml")
-	args := []string{"pip", "compile", "--universal", "--no-progress"}
+	args := append([]string{"pip", "compile", "--universal", "--no-progress", "--no-build"}, extras...)
 	if floor := poetryPythonFloor(pyproject); floor != "" {
 		args = append(args, "--python-version", floor)
 	}
@@ -169,7 +235,7 @@ func runUV(ctx context.Context, uv, cache, dir string, args []string, loc file.L
 
 	cmd := exec.CommandContext(ctx, uv, args...)
 	cmd.Env = toolEnv("UV_CACHE_DIR=" + cache)
-	cmd.WaitDelay = 5 * time.Second // the kill lands on uv, but Output still waits on pipes a PEP 517 build backend may hold
+	cmd.WaitDelay = 5 * time.Second // the kill lands on uv, but Output still waits on pipes a grandchild may hold
 	stdout, err := cmd.Output()
 	if err != nil {
 		if ctx.Err() != nil {

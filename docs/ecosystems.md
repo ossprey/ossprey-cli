@@ -13,12 +13,58 @@ Python, JavaScript and Rust, via syft's static catalogers.
 Rust (crates.io) scanning is available on Teams and Enterprise plans.
 
 The CLI never installs your dependencies. It does run a resolver — `npm install
---package-lock-only` (in a temporary directory) or `uv pip compile` — when a
-project ships a manifest with no lockfile, purely to work out which versions an
-install would pull; nothing is installed and your project is not modified. When
-that resolver is missing from PATH or disabled, expect direct deps only —
-supply a lockfile for full transitive coverage. Rust has no resolver tier, so a
-crate with no `Cargo.lock` always catalogues direct dependencies only.
+--package-lock-only` (in a temporary directory), `uv pip compile`/`uv export`,
+or `pip install --dry-run` on a host with no uv — when a project ships a
+manifest with no lockfile, purely to work out which versions an install would
+pull; nothing is installed and your project is not modified. When that resolver
+is missing from PATH or disabled, expect direct deps only — supply a lockfile
+for full transitive coverage. Rust has no resolver tier, so a crate with no
+`Cargo.lock` always catalogues direct dependencies only.
+
+### A scan never runs package code
+
+Resolving a Python dependency that ships only a source distribution (no wheel
+for your platform) normally means running its build backend to read its
+metadata — code from the dependency tree being scanned for malware. The scan
+never does that:
+
+- npm runs with `--ignore-scripts`.
+- uv runs with `--no-build`.
+- pip runs with `--only-binary=:all:`, in isolated mode (`python -I`, so a
+  `pip.py` in your repository is never what runs), and is handed a copy of each
+  requirements file holding only registry requirements. A `--no-binary`
+  option, a local path, an editable (`-e`) or a direct URL (`name @ url`) is
+  left out, since pip would build it whatever the flags say, and so is any line
+  that names an environment variable (`${VAR}`), which pip would fill in from
+  the scanning machine. A requirements file that names its own index or
+  find-links location (`--index-url`, `--extra-index-url`, `--find-links`) is
+  not resolved by pip at all and is reported unresolved: a wheel there can
+  declare a dependency by URL on a source distribution, which pip builds even
+  under `--only-binary`. uv refuses such a dependency, so with uv installed the
+  file resolves. An include (`-r`, `-c`) outside the scanned directory is not
+  read by either resolver, and its manifest is reported unresolved.
+- uv is never handed a requirements file (or one it includes) or a
+  `pyproject.toml` dependency that names `${VAR}`, which uv fills in the same
+  way; that manifest is reported unresolved instead. Keep a private index's
+  credentials in pip's or uv's own configuration, `PIP_INDEX_URL` /
+  `UV_INDEX_URL`, keyring or `.netrc`, which a repository cannot write.
+- A legacy `setup.py` project is not resolved at all: that would run
+  `setup.py`. Its literal `install_requires` are still read.
+- A `pyproject.toml` whose dependencies are `dynamic`, or a poetry project with
+  no `poetry.lock`, would have to be built to learn them, so it is not resolved
+  either.
+- The resolvers do not see `OSSPREY_API_KEY`, `API_KEY`, `OSSPREY_MONITOR_ID` or
+  any other `OSSPREY_*` variable.
+
+A Rust crate with dependencies and no `Cargo.lock` (beside it or at its
+workspace root) is unresolved too, as is a `package.json` whose
+`package-lock.json` or `npm-shrinkwrap.json` cannot be parsed when no npm is
+available to resolve it instead. A manifest whose `uv.lock`, `poetry.lock`
+or `pdm.lock` parses is covered by that lock even when nothing could resolve it.
+
+A manifest that cannot be resolved this way keeps its direct dependencies and
+is reported **unresolved** by a warning naming it. Commit a lockfile (`uv.lock`,
+`poetry.lock`, a compiled `requirements.txt`) to cover its whole tree.
 
 Directories that hold installed or built packages rather than your project's
 own manifests are not read at all: `node_modules`, `bower_components`,

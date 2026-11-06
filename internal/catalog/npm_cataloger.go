@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/anchore/syft/syft/artifact"
@@ -36,37 +37,99 @@ func (c *NpmResolveCataloger) Name() string { return "ossprey-npm-cataloger" }
 func (c *NpmResolveCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]pkg.Package, []artifact.Relationship, error) {
 	npm, err := lookTool("npm")
 	if err != nil {
-		return nil, nil, nil // no real npm on PATH — silently skip
+		// No real npm on PATH: the package.json fallback keeps the direct
+		// dependencies, and the manifests that needed resolving say so.
+		_, err := resolveByGlob(ctx, resolver, c.root, "**/package.json", "npm", nil, func(absPath string, loc file.Location) ([]pkg.Package, error) {
+			if c.standsDown(absPath) {
+				return nil, nil
+			}
+			if direct, _ := parsePackageJSONFile(absPath, loc); len(direct) == 0 {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("%s: no npm on PATH to resolve it, so direct dependencies only", filepath.Dir(absPath))
+		})
+		return nil, nil, err
 	}
-	// One shared cache for the whole scan
-	cache, err := os.MkdirTemp("", "ossprey-npm-cache-")
-	if err != nil {
-		return nil, nil, fmt.Errorf("npm cache: %w", err)
+	// One shared cache for the whole scan. One that cannot be made fails each
+	// manifest, so each is recorded unresolved.
+	cache, cacheErr := os.MkdirTemp("", "ossprey-npm-cache-")
+	if cacheErr == nil {
+		defer os.RemoveAll(cache)
 	}
-	defer os.RemoveAll(cache)
 
 	parse := func(absPath string, loc file.Location) ([]pkg.Package, error) {
-		dir := filepath.Dir(absPath)
-		if hasNpmLockfile(dir) {
-			return nil, nil // syft's lock cataloger already resolves this project
+		if c.standsDown(absPath) {
+			return nil, nil
 		}
-		if isWorkspaceMember(dir, c.root) {
-			return nil, nil // an ancestor lockfile already carries this member's full tree
+		if cacheErr != nil {
+			if direct, _ := parsePackageJSONFile(absPath, loc); len(direct) == 0 {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("npm cache: %w", cacheErr)
 		}
 		return runNpmResolve(ctx, npm, cache, absPath, loc)
 	}
-	out, err := catalogByGlob(ctx, resolver, c.root, "**/package.json", "npm", parse)
+	out, err := resolveByGlob(ctx, resolver, c.root, "**/package.json", "npm", nil, parse)
 	return out, nil, err
 }
 
+// standsDown reports a package.json whose tree a lockfile already carries:
+// its own (syft reads it), or an ancestor's that declares it a workspace member.
+func (c *NpmResolveCataloger) standsDown(packageJSON string) bool {
+	dir := filepath.Dir(packageJSON)
+	return hasNpmLockfile(dir) || isWorkspaceMember(dir, c.root)
+}
+
 // hasNpmLockfile reports whether dir already ships a lockfile syft can read.
+// Present is not enough: a truncated or corrupt lock stood the resolve down
+// while syft could read nothing from it, so the project's tree was missing
+// from the scan and nothing recorded it.
 func hasNpmLockfile(dir string) bool {
 	for _, name := range []string{"package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml"} {
-		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+		if npmLockReadable(filepath.Join(dir, name)) {
 			return true
 		}
 	}
 	return false
+}
+
+// declaresNpmDependencies reports a package.json with any direct dependency;
+// one that cannot be read counts as declaring some.
+func declaresNpmDependencies(path string) bool {
+	direct, err := parsePackageJSONFile(path, file.Location{})
+	return err != nil || len(direct) > 0
+}
+
+// npmLockReadCache memoises npmLockReadable by path, size and modification
+// time: a monorepo root lock is consulted once per workspace member.
+var npmLockReadCache sync.Map
+
+// npmLockReadable reports whether the lockfile at path exists and, for npm's
+// JSON locks, parses. yarn.lock and pnpm-lock.yaml count when present: an
+// empty one is how a project with no dependencies ships, and syft has its own
+// parsers for their several formats.
+func npmLockReadable(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	key := fmt.Sprintf("%s\x00%d\x00%d", path, info.Size(), info.ModTime().UnixNano())
+	if v, ok := npmLockReadCache.Load(key); ok {
+		return v.(bool)
+	}
+	ok := false
+	if data, err := readRegularFile(path, maxLockfileBytes); err == nil {
+		switch filepath.Base(path) {
+		case "package-lock.json", "npm-shrinkwrap.json":
+			// A lock locking nothing covers only a manifest declaring nothing.
+			_, err := parseNpmLock(data, file.Location{})
+			ok = err == nil && (npmLockLocksSomething(data) || !declaresNpmDependencies(filepath.Join(filepath.Dir(path), "package.json")))
+		default:
+			ok = true
+		}
+	}
+	npmLockReadCache.Store(key, ok)
+	return ok
 }
 
 // runNpmResolve copies package.json into a throwaway dir, generates a lockfile

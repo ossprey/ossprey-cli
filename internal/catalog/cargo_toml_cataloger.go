@@ -23,6 +23,9 @@ import (
 // crate that gitignores it catalogues to nothing.
 type CargoTomlCataloger struct {
 	root string
+	// coverage records a crate with no covering Cargo.lock as unresolved. Off
+	// for NoExec runs (the pre-commit hook's temp trees hold no lock).
+	coverage bool
 }
 
 func NewCargoTomlCataloger(root string) *CargoTomlCataloger {
@@ -34,7 +37,20 @@ func (c *CargoTomlCataloger) Name() string { return "ossprey-cargotoml-cataloger
 func (c *CargoTomlCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]pkg.Package, []artifact.Relationship, error) {
 	// The scan root bounds the walk to a member's workspace root.
 	parse := func(path string, loc file.Location) ([]pkg.Package, error) {
-		return parseCargoTomlFile(ctx, path, loc, c.root)
+		pkgs, err := parseCargoTomlFile(ctx, path, loc, c.root)
+		// Without a Cargo.lock, here or at its workspace root, only the
+		// direct dependencies are known: Rust has no resolver tier.
+		if c.coverage && err == nil && len(pkgs) > 0 && !cargoLockCovers(path, c.root) {
+			markUnresolved(ctx, c.root, path)
+			dir := filepath.Dir(path)
+			warn.Add(ctx, warn.Entry{
+				Class: "cargotoml:no-lock",
+				One:   fmt.Sprintf("cargotoml: %s has no readable Cargo.lock; direct dependencies only", dir),
+				Many:  "cargotoml: %d crates have no readable Cargo.lock; direct dependencies only (OSSPREY_VERBOSE=1 lists them)",
+				Item:  dir,
+			})
+		}
+		return pkgs, err
 	}
 	out, err := catalogByGlob(ctx, resolver, c.root, "**/Cargo.toml", "cargotoml", parse)
 	return out, nil, err
@@ -63,6 +79,8 @@ type cargoManifest struct {
 	} `toml:"target"`
 	Workspace struct {
 		Dependencies map[string]any `toml:"dependencies"`
+		Members      []string       `toml:"members"`
+		Exclude      []string       `toml:"exclude"`
 	} `toml:"workspace"`
 }
 
@@ -312,4 +330,61 @@ func cargoExactVersion(spec string) string {
 		return ""
 	}
 	return s
+}
+
+// cargoLockCovers reports whether a Cargo.lock syft reads holds the tree of
+// the crate at manifestPath: one beside it, or, for a workspace member, the
+// one at the nearest ancestor (inside the scan) that declares [workspace],
+// which is the only lock cargo writes for a member. A lock that does not
+// parse covers nothing.
+func cargoLockCovers(manifestPath, scanRoot string) bool {
+	dir := filepath.Dir(filepath.Clean(manifestPath))
+	if cargoLockReadable(dir) {
+		return true
+	}
+	if data, err := readManifest(manifestPath); err == nil && DeclaresCargoWorkspace(data) {
+		return false // a workspace root's lock is its own
+	}
+	root := filepath.Clean(scanRoot)
+	for {
+		parent := filepath.Dir(dir)
+		if parent == dir || !withinRoot(parent, root) {
+			return false
+		}
+		dir = parent
+		data, err := readManifest(filepath.Join(dir, "Cargo.toml"))
+		if err != nil || !DeclaresCargoWorkspace(data) {
+			continue
+		}
+		var m cargoManifest
+		if _, err := toml.Decode(string(data), &m); err != nil {
+			return false
+		}
+		if cargoExcludes(m, dir, manifestPath) {
+			continue // cargo looks further up for an excluded crate's root
+		}
+		return cargoLockReadable(dir)
+	}
+}
+
+// cargoExcludes is cargo's is_excluded: the crate sits under a workspace.exclude
+// path and under no members entry, each taken as a literal path prefix.
+func cargoExcludes(m cargoManifest, rootDir, manifestPath string) bool {
+	under := func(paths []string) bool {
+		for _, p := range paths {
+			if rel, err := filepath.Rel(filepath.Join(rootDir, p), manifestPath); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				return true
+			}
+		}
+		return false
+	}
+	return under(m.Workspace.Exclude) && !under(m.Workspace.Members)
+}
+
+func cargoLockReadable(dir string) bool {
+	data, err := readRegularFile(filepath.Join(dir, "Cargo.lock"), maxLockfileBytes)
+	if err != nil {
+		return false
+	}
+	return tomlLockHasPackages(data) // a lock always holds the crate itself
 }

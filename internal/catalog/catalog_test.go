@@ -415,7 +415,7 @@ django>=4.0
 func TestUVArgsForPyProject(t *testing.T) {
 	// no uv.lock -> pip compile against pyproject.toml
 	noLock := t.TempDir()
-	args := uvArgsForPyProject(noLock)
+	args := uvArgsForPyProject(noLock, false)
 	if len(args) < 2 || args[0] != "pip" || args[1] != "compile" {
 		t.Errorf("without uv.lock want `pip compile ...`, got %v", args)
 	}
@@ -423,7 +423,7 @@ func TestUVArgsForPyProject(t *testing.T) {
 	// uv.lock present -> export
 	withLock := t.TempDir()
 	writeFile(t, withLock, "uv.lock", "version = 1\n")
-	args = uvArgsForPyProject(withLock)
+	args = uvArgsForPyProject(withLock, false)
 	if len(args) == 0 || args[0] != "export" {
 		t.Errorf("with uv.lock want `export ...`, got %v", args)
 	}
@@ -450,7 +450,7 @@ func TestUVArgsForPyProjectPoetryPythonFloor(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			dir := t.TempDir()
 			writeFile(t, dir, "pyproject.toml", tt.pyproject)
-			args := uvArgsForPyProject(dir)
+			args := uvArgsForPyProject(dir, false)
 			if got := pythonVersion(args); got != tt.want {
 				t.Errorf("--python-version = %q, want %q (args %v)", got, tt.want, args)
 			}

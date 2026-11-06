@@ -189,9 +189,6 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 				// Custom: full transitive resolution via uv (covers hatch, uv, bare
 				// pyproject without poetry.lock).
 				NewUVCataloger(absRoot, uv),
-				// Custom: resolve transitives from setup.py when pyproject is absent
-				// or lacks a [project] table (legacy setuptools projects).
-				NewSetupPyCataloger(absRoot, uv),
 				// Custom: resolve transitives from requirements.txt via uv (syft's
 				// built-in reads the file literally — direct deps only).
 				NewRequirementsCataloger(absRoot, uv),
@@ -202,6 +199,8 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 			// to the direct-deps fallback below.
 			catalogers = append(catalogers, NewPipCataloger(absRoot))
 		}
+		// Custom: reports setup.py projects unresolved; resolving one runs it.
+		catalogers = append(catalogers, NewSetupPyCataloger(absRoot))
 	}
 	// Custom: direct-deps fallback for pyproject.toml when uv is missing.
 	catalogers = append(catalogers, NewPyProjectCataloger(absRoot))
@@ -220,7 +219,9 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 	catalogers = append(catalogers, NewPackageJSONCataloger(absRoot))
 	// Custom: direct-deps fallback for Cargo.toml. Syft reads Cargo.lock only,
 	// and a library crate conventionally gitignores it.
-	catalogers = append(catalogers, NewCargoTomlCataloger(absRoot))
+	cargoToml := NewCargoTomlCataloger(absRoot)
+	cargoToml.coverage = !opts.NoExec
+	catalogers = append(catalogers, cargoToml)
 
 	seen := map[string]int{} // dedup key -> index in out
 	locks := newNpmLockClassifier(absRoot)

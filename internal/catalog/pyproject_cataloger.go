@@ -3,8 +3,10 @@ package catalog
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -36,11 +38,15 @@ type pyproject struct {
 		RequiresPython       string              `toml:"requires-python"`
 		Dependencies         []string            `toml:"dependencies"`
 		OptionalDependencies map[string][]string `toml:"optional-dependencies"`
+		Dynamic              []string            `toml:"dynamic"`
 	} `toml:"project"`
 	Tool struct {
 		Poetry struct {
 			Dependencies    map[string]any `toml:"dependencies"`
 			DevDependencies map[string]any `toml:"dev-dependencies"`
+			Group           map[string]struct {
+				Dependencies map[string]any `toml:"dependencies"`
+			} `toml:"group"`
 		} `toml:"poetry"`
 	} `toml:"tool"`
 }
@@ -202,4 +208,87 @@ func hasPEP621Project(path string) bool {
 		return false
 	}
 	return pp.Project.Name != "" || len(pp.Project.Dependencies) > 0
+}
+
+// pyprojectNeedsBuild reports, as an error, a pyproject.toml whose dependencies
+// can only be learned by building the project: no [project] table, poetry
+// dependencies, and no poetry.lock beside it to read them from instead.
+// Building runs the project's backend, which a scan never does, so the manifest
+// is reported unresolved. nil when there is nothing that needs it.
+func pyprojectNeedsBuild(path string) error {
+	pp, err := readPyProject(path)
+	if err != nil {
+		// Unreadable: nothing could resolve it, unless a lock covers it.
+		if pyprojectLockCovered(path) {
+			return nil
+		}
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	if pp == nil || hasPEP621Project(path) {
+		return nil
+	}
+	deps := 0
+	count := func(table map[string]any) {
+		for name := range table {
+			if name != "python" {
+				deps++
+			}
+		}
+	}
+	count(pp.Tool.Poetry.Dependencies)
+	count(pp.Tool.Poetry.DevDependencies) // poetry installs these too
+	for _, g := range pp.Tool.Poetry.Group {
+		count(g.Dependencies)
+	}
+	if deps == 0 {
+		return nil
+	}
+	dir := filepath.Dir(path)
+	if pyprojectLockCovered(path) {
+		return nil
+	}
+	return fmt.Errorf("%s: poetry dependencies with no poetry.lock; resolving them would build the project, so direct dependencies only", dir)
+}
+
+// dynamicDependencies reports whether a [project] table leaves its
+// dependencies to the build backend, which only a build would reveal.
+func dynamicDependencies(pp *pyproject) bool {
+	for _, d := range pp.Project.Dynamic {
+		if d == "dependencies" || d == "optional-dependencies" {
+			return true
+		}
+	}
+	return false
+}
+
+// pythonLockfiles are the lockfiles beside a pyproject.toml that syft reads
+// for the project's whole tree.
+var pythonLockfiles = []string{"uv.lock", "poetry.lock", "pdm.lock"}
+
+// tomlLockHasPackages reports a TOML lockfile (uv, poetry, pdm, Cargo) that
+// parses and locks at least one [[package]]. A stub such as `version = 1`
+// parses but supplies no tree, so it must not stand in for one.
+func tomlLockHasPackages(data []byte) bool {
+	var doc struct {
+		Package []map[string]any `toml:"package"`
+	}
+	_, err := toml.Decode(string(data), &doc)
+	return err == nil && len(doc.Package) > 0
+}
+
+// pyprojectLockCovered reports whether a lockfile beside the pyproject.toml
+// at path parses, so syft has the transitive tree whether or not a resolver
+// could produce one. A lock that does not parse covers nothing.
+func pyprojectLockCovered(path string) bool {
+	dir := filepath.Dir(path)
+	for _, name := range pythonLockfiles {
+		data, err := readRegularFile(filepath.Join(dir, name), maxLockfileBytes)
+		if err != nil {
+			continue
+		}
+		if tomlLockHasPackages(data) {
+			return true
+		}
+	}
+	return false
 }
