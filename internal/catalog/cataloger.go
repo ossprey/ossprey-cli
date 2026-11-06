@@ -125,7 +125,9 @@ func catalogByGlob(ctx context.Context, resolver file.Resolver, root, glob, labe
 // scan deadline passed before its turn — is recorded as unresolved: the scan
 // still covers its direct dependencies through the fallback catalogers, but
 // the report has to say the tree is partial rather than let it read as whole.
-func resolveByGlob(ctx context.Context, resolver file.Resolver, root, glob, label string, parse fileParser) ([]pkg.Package, error) {
+// covered, when not nil, exempts a manifest whose tree a lockfile beside it
+// already supplies (syft reads it), so the failure costs nothing.
+func resolveByGlob(ctx context.Context, resolver file.Resolver, root, glob, label string, covered func(absPath string) bool, parse fileParser) ([]pkg.Package, error) {
 	var (
 		mu   sync.Mutex
 		done = map[string]bool{}
@@ -147,7 +149,7 @@ func resolveByGlob(ctx context.Context, resolver file.Resolver, root, glob, labe
 		if isVendoredPath(loc.RealPath) {
 			continue
 		}
-		if p := hostPath(root, loc.RealPath); !done[p] {
+		if p := hostPath(root, loc.RealPath); !done[p] && (covered == nil || !covered(p)) {
 			markUnresolved(ctx, root, p)
 		}
 	}

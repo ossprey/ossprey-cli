@@ -219,7 +219,9 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 	catalogers = append(catalogers, NewPackageJSONCataloger(absRoot))
 	// Custom: direct-deps fallback for Cargo.toml. Syft reads Cargo.lock only,
 	// and a library crate conventionally gitignores it.
-	catalogers = append(catalogers, NewCargoTomlCataloger(absRoot))
+	cargoToml := NewCargoTomlCataloger(absRoot)
+	cargoToml.coverage = !opts.NoExec
+	catalogers = append(catalogers, cargoToml)
 
 	seen := map[string]int{} // dedup key -> index in out
 	locks := newNpmLockClassifier(absRoot)
