@@ -126,7 +126,8 @@ func Drain(ctx context.Context) string {
 			continue
 		}
 		headline := entries[0].One
-		if len(entries) > 1 {
+		// A class with no Many says the same thing however often it occurs.
+		if len(entries) > 1 && entries[0].Many != "" {
 			headline = fmt.Sprintf(entries[0].Many, len(entries))
 		}
 		b.WriteString(prefix + truncate(headline) + "\n")

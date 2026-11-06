@@ -248,7 +248,7 @@ func TestMergeVersionlessFoldsPEP503Spellings(t *testing.T) {
 	got := mergeVersionless([]Package{
 		{Name: "typing-extensions", Version: "4.0.0", Type: "pypi"},
 		{Name: "typing_extensions", Type: "pypi"},
-	})
+	}, nil, nil)
 	if len(got) != 1 {
 		t.Errorf("got %+v, want one component", got)
 	}
