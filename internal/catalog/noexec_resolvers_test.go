@@ -389,3 +389,27 @@ func TestPipSanitizerRefusesIndexOptionsKeepsIncludes(t *testing.T) {
 		t.Errorf("include copy wrong (cycle should point back at %s):\n%s", out, sub)
 	}
 }
+
+// An sdist-only dependency reached through the machine's own pip
+// configuration, which no sanitizer touches: only --only-binary keeps pip
+// from building it.
+func TestPipOnlyBinaryHoldsForTrustedConfig(t *testing.T) {
+	realToolsOnly(t, "python3")
+	requirePip(t)
+	dist := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "marker")
+	evilSdist(t, dist, marker)
+	t.Setenv("PIP_NO_INDEX", "1")
+	t.Setenv("PIP_FIND_LINKS", dist)
+	proj := t.TempDir()
+	writeTree(t, proj, map[string]string{"requirements.txt": "evilpkg==1.0\n"})
+
+	ctx := warn.NewContext(context.Background(), false)
+	if _, err := Catalog(ctx, proj, Options{SkipVersionLookup: true}); err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	assertNotRun(t, marker)
+	if got := warn.Unresolved(ctx); !slices.Equal(got, []string{"requirements.txt"}) {
+		t.Errorf("unresolved = %v, want [requirements.txt]\n%s", got, warn.Drain(ctx))
+	}
+}
