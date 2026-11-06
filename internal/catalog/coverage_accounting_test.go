@@ -97,17 +97,21 @@ func TestRelWithin(t *testing.T) {
 	sep := string(filepath.Separator)
 	root := sep + filepath.Join("Users", "RunnerAdmin", "Temp", "scan")
 	for _, tc := range []struct {
-		p    string
-		fold bool
-		want string
-		ok   bool
+		p             string
+		fold          bool
+		want          string
+		ok            bool
+		caseSensitive bool
 	}{
-		{filepath.Join(root, "a", "Cargo.toml"), false, filepath.Join("a", "Cargo.toml"), true},
-		{sep + filepath.Join("users", "runneradmin", "temp", "scan", "Cargo.toml"), true, "Cargo.toml", true},
-		{sep + filepath.Join("users", "runneradmin", "temp", "scan", "Cargo.toml"), false, "", false},
-		{sep + filepath.Join("Users", "RunnerAdmin", "Temp", "scanner", "x"), true, "", false},
-		{sep + filepath.Join("Users", "RunnerAdmin", "Temp", "other"), false, "", false},
+		{filepath.Join(root, "a", "Cargo.toml"), false, filepath.Join("a", "Cargo.toml"), true, false},
+		{sep + filepath.Join("users", "runneradmin", "temp", "scan", "Cargo.toml"), true, "Cargo.toml", true, false},
+		{sep + filepath.Join("users", "runneradmin", "temp", "scan", "Cargo.toml"), false, "", false, true},
+		{sep + filepath.Join("Users", "RunnerAdmin", "Temp", "scanner", "x"), true, "", false, false},
+		{sep + filepath.Join("Users", "RunnerAdmin", "Temp", "other"), false, "", false, false},
 	} {
+		if tc.caseSensitive && runtime.GOOS == "windows" {
+			continue // filepath.Rel already ignores case there
+		}
 		got, ok := relWithin(root, tc.p, tc.fold)
 		if ok != tc.ok || got != tc.want {
 			t.Errorf("relWithin(%q, %q, %v) = %q, %v; want %q, %v", root, tc.p, tc.fold, got, ok, tc.want, tc.ok)
