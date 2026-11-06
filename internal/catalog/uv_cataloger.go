@@ -63,11 +63,12 @@ func NewUVCataloger(root, uv string) *UVCataloger { return &UVCataloger{root: ro
 func (c *UVCataloger) Name() string { return "ossprey-uv-cataloger" }
 
 func (c *UVCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]pkg.Package, []artifact.Relationship, error) {
-	cache, err := os.MkdirTemp("", "ossprey-uv-cache-")
-	if err != nil {
-		return nil, nil, fmt.Errorf("uv cache: %w", err)
+	// A cache that cannot be made fails each manifest (below), so each is
+	// recorded unresolved.
+	cache, cacheErr := os.MkdirTemp("", "ossprey-uv-cache-")
+	if cacheErr == nil {
+		defer os.RemoveAll(cache)
 	}
-	defer os.RemoveAll(cache)
 
 	parse := func(absPath string, loc file.Location) ([]pkg.Package, error) {
 		dir := filepath.Dir(absPath)
@@ -82,6 +83,9 @@ func (c *UVCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]pk
 		// its dependencies are read either way.
 		if err := pyprojectExpandsEnv(absPath); err != nil {
 			return nil, err
+		}
+		if cacheErr != nil {
+			return nil, fmt.Errorf("uv cache: %w", cacheErr)
 		}
 		args := uvArgsForPyProject(dir)
 		return runUV(ctx, c.uv, cache, dir, args, loc)

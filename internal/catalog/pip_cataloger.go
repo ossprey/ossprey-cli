@@ -71,7 +71,9 @@ func (c *PipCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]p
 
 	cache, err := os.MkdirTemp("", "ossprey-pip-cache-")
 	if err != nil {
-		return nil, nil, fmt.Errorf("pip cache: %w", err)
+		warn.Add(ctx, catalogerEntry("pip", fmt.Errorf("pip cache: %w", err)))
+		c.markAllUnresolved(ctx, resolver)
+		return nil, nil, nil
 	}
 	defer os.RemoveAll(cache)
 
@@ -83,12 +85,15 @@ func (c *PipCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]p
 		if err != nil {
 			return nil, fmt.Errorf("pip %s: %w", absPath, err)
 		}
-		san := newPipSanitizer(ctx, scratch)
+		san := newPipSanitizer(ctx, scratch, c.root)
 		reqFile, err := san.file(absPath)
 		if err != nil {
 			return nil, fmt.Errorf("pip %s: %w", absPath, err)
 		}
 		c.leftOut(ctx, absPath, san.dropped)
+		if san.ownIndex {
+			return nil, fmt.Errorf("pip %s %w", absPath, errPipOwnIndex)
+		}
 		return runPipResolve(ctx, python, cache, cache, filepath.Dir(absPath), []string{"-r", reqFile}, loc)
 	}
 	reqs, err := resolveByGlob(ctx, resolver, c.root, requirementsGlob, "pip", nil, reqParse)

@@ -50,16 +50,22 @@ func (c *NpmResolveCataloger) Catalog(ctx context.Context, resolver file.Resolve
 		})
 		return nil, nil, err
 	}
-	// One shared cache for the whole scan
-	cache, err := os.MkdirTemp("", "ossprey-npm-cache-")
-	if err != nil {
-		return nil, nil, fmt.Errorf("npm cache: %w", err)
+	// One shared cache for the whole scan. One that cannot be made fails each
+	// manifest, so each is recorded unresolved.
+	cache, cacheErr := os.MkdirTemp("", "ossprey-npm-cache-")
+	if cacheErr == nil {
+		defer os.RemoveAll(cache)
 	}
-	defer os.RemoveAll(cache)
 
 	parse := func(absPath string, loc file.Location) ([]pkg.Package, error) {
 		if c.standsDown(absPath) {
 			return nil, nil
+		}
+		if cacheErr != nil {
+			if direct, _ := parsePackageJSONFile(absPath, loc); len(direct) == 0 {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("npm cache: %w", cacheErr)
 		}
 		return runNpmResolve(ctx, npm, cache, absPath, loc)
 	}
@@ -105,7 +111,7 @@ func npmLockReadable(path string) bool {
 		return v.(bool)
 	}
 	ok := false
-	if data, err := os.ReadFile(path); err == nil {
+	if data, err := readRegularFile(path, maxLockfileBytes); err == nil {
 		switch filepath.Base(path) {
 		case "package-lock.json", "npm-shrinkwrap.json":
 			_, err := parseNpmLock(data, file.Location{})

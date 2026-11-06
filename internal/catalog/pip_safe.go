@@ -4,12 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // pip's --only-binary=:all: does not stop it building everything. Verified
@@ -19,6 +20,9 @@ import (
 // the flag says. All of that is repository content, so pip is never handed a
 // requirements file from the tree: pipSanitizer writes a copy holding only
 // registry requirements and the index options, and reports what it left out.
+
+// pipNameRE is the distribution-name part of a requirement.
+var pipNameRE = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?`)
 
 // pipSafeRequirementRE is a registry requirement and nothing else: a name,
 // optional extras and version clauses. No '@', '/', '\' or ':', so no direct
@@ -31,12 +35,21 @@ var pipLineOption = regexp.MustCompile(`\s-`)
 // builds (pip's is_archive_file).
 var pipArchiveSuffixes = []string{".zip", ".whl", ".tar.bz2", ".tbz", ".tar.xz", ".txz", ".tlz", ".tar.lz", ".tar.lzma", ".tar.gz", ".tgz", ".tar"}
 
+// pipLineBreak reports a rune Python's splitlines (which pip reads a
+// requirements file with) may split on: every control character, and U+2028
+// and U+2029, which unicode.IsControl does not cover.
+func pipLineBreak(r rune) bool {
+	return unicode.IsControl(r) || r == '\u2028' || r == '\u2029'
+}
+
 // pipSafeRequirement returns the requirement to hand pip, without per-line
 // options, or false when resolving it could build something.
 func pipSafeRequirement(line string) (string, bool) {
 	// A line break would let a marker smuggle a second requirement line
 	// (a TOML string may hold one); no control character belongs here.
-	if strings.IndexFunc(line, unicode.IsControl) >= 0 {
+	// Invalid UTF-8 too: pip may decode the file in a locale where a stray
+	// byte is one of those (0x85 in Latin-1).
+	if strings.IndexFunc(line, pipLineBreak) >= 0 || !utf8.ValidString(line) {
 		return "", false
 	}
 	// pip expands ${VAR} on every line, a marker's string included, and the
@@ -55,16 +68,25 @@ func pipSafeRequirement(line string) (string, bool) {
 	if !pipSafeRequirementRE.MatchString(spec) {
 		return "", false
 	}
-	lower := strings.ToLower(spec)
-	for _, suf := range pipArchiveSuffixes {
-		if strings.HasSuffix(lower, suf) {
-			return "", false
-		}
+	if pipArchiveName(spec) {
+		return "", false
 	}
 	if hasMarker {
 		return spec + " ;" + marker, true
 	}
 	return spec, true
+}
+
+// pipArchiveName reports a requirement whose name pip may take for a local
+// archive. pip strips extras first, so `x-1.0.tar.gz[e]` is the archive too.
+func pipArchiveName(spec string) bool {
+	name := strings.ToLower(pipNameRE.FindString(spec))
+	for _, suf := range pipArchiveSuffixes {
+		if strings.HasSuffix(name, suf) {
+			return true
+		}
+	}
+	return false
 }
 
 // Bounds on what one manifest's includes may cost before pip starts: the
@@ -80,13 +102,26 @@ const (
 type pipSanitizer struct {
 	ctx     context.Context
 	dir     string
+	root    string            // the scan root; no file outside it is read
 	written map[string]string // source path -> copy
 	dropped []string          // what was left out, described without its text (it may hold a credential)
+	// ownIndex is set when a file names an index or find-links location. A
+	// wheel there can declare `Requires-Dist: x @ <sdist URL>`, which pip
+	// builds whatever --only-binary says (verified against pip 24.0), so pip
+	// must not resolve the manifest at all.
+	ownIndex bool
 }
 
-func newPipSanitizer(ctx context.Context, dir string) *pipSanitizer {
-	return &pipSanitizer{ctx: ctx, dir: dir, written: map[string]string{}}
+func newPipSanitizer(ctx context.Context, dir, root string) *pipSanitizer {
+	return &pipSanitizer{ctx: ctx, dir: dir, root: root, written: map[string]string{}}
 }
+
+// errPipOwnIndex refuses a requirements file pip cannot resolve without
+// possibly building code.
+var errPipOwnIndex = errors.New("names its own index or find-links location, where a wheel can declare an sdist pip would build; not resolved by pip (uv resolves it)")
+
+// errOutsideRoot refuses a requirements file, or an include, outside the scan.
+var errOutsideRoot = errors.New("is outside the scan root or cannot be read; not resolved")
 
 // file writes the copy of the requirements file at src (and of every file it
 // includes) and returns the copy's path.
@@ -111,12 +146,21 @@ func (s *pipSanitizer) fileAt(src string, depth int) (string, error) {
 	}
 	out := filepath.Join(s.dir, fmt.Sprintf("req-%d-%s.txt", len(s.written), id))
 	s.written[src] = out
+	// An include may name any path, through .. or a link; what it reads
+	// would go to pip as requirements, and on to the index.
+	if !withinRoot(src, s.root) {
+		return "", fmt.Errorf("%s %w", src, errOutsideRoot)
+	}
 	data, err := readRequirementsFile(src)
 	if err != nil {
 		return "", err
 	}
+	lines, err := scanRequirementLines(data)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", src, err)
+	}
 	var b strings.Builder
-	for _, line := range requirementLines(data) {
+	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		switch {
 		case line == "":
@@ -146,30 +190,12 @@ func (s *pipSanitizer) fileAt(src string, depth int) (string, error) {
 // readRequirementsFile reads a regular file of bounded size. A device or FIFO
 // named by an include could otherwise never end or never answer.
 func readRequirementsFile(path string) ([]byte, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, err
-	}
-	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s is not a regular file", path)
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	data, err := io.ReadAll(io.LimitReader(f, maxPipRequirementsBytes+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(data) > maxPipRequirementsBytes {
-		return nil, fmt.Errorf("%s is over %d bytes", path, maxPipRequirementsBytes)
-	}
-	return data, nil
+	return readRegularFile(path, maxPipRequirementsBytes)
 }
 
 // pipPassOptions are the requirements-file options that only say where to
-// look, mapped to their long name and whether they take a value.
+// look, mapped to their long name and whether they take a value. The index
+// and find-links ones are recognised only to refuse the file (ownIndex).
 var pipPassOptions = map[string]struct {
 	long  string
 	value bool
@@ -181,6 +207,18 @@ var pipPassOptions = map[string]struct {
 	"--pre":           {"--pre", false},
 	"--prefer-binary": {"--prefer-binary", false},
 	"--trusted-host":  {"--trusted-host", true},
+}
+
+// pipIndexOptions name where pip fetches from.
+var pipIndexOptions = map[string]bool{"--index-url": true, "--extra-index-url": true, "--find-links": true}
+
+// pipNamedOptions are pip options a warning may name. Anything else is
+// described generically: an unknown token is repository text, and may be a
+// secret from a file the include named.
+var pipNamedOptions = map[string]bool{
+	"--no-binary": true, "--only-binary": true, "--use-feature": true, "--use-pep517": true,
+	"--no-use-pep517": true, "--global-option": true, "--install-option": true,
+	"--config-settings": true, "--hash": true, "--no-build-isolation": true,
 }
 
 // pipSilentOptions change nothing about which releases resolve, so dropping
@@ -257,21 +295,22 @@ func (s *pipSanitizer) options(src, line string, depth int) ([]string, error) {
 			continue
 		}
 		if !ok {
-			if !pipSilentOptions[name] {
+			switch {
+			case pipSilentOptions[name]:
+			case pipNamedOptions[name]:
 				s.dropped = append(s.dropped, "option "+name)
+			default:
+				s.dropped = append(s.dropped, "an unrecognised option")
 			}
+			continue
+		}
+		if pipIndexOptions[o.long] {
+			s.ownIndex = true
 			continue
 		}
 		if !o.value {
 			kept = append(kept, o.long)
 			continue
-		}
-		if o.long == "--find-links" && !strings.Contains(value, "://") && !filepath.IsAbs(value) {
-			// pip prefers a find-links path relative to the file it was read
-			// from, and the copy lives elsewhere.
-			if p := filepath.Join(filepath.Dir(src), value); pathExists(p) {
-				value = p
-			}
 		}
 		kept = append(kept, o.long+" "+shlexQuote(value))
 	}
@@ -362,9 +401,8 @@ func shlexQuote(s string) string {
 // without its text: a direct reference or an included file outside the scan
 // can carry a credential, and warnings reach CI logs.
 func describeUnsafeRequirement(line string) string {
-	lower := strings.ToLower(line)
 	switch {
-	case strings.IndexFunc(line, unicode.IsControl) >= 0:
+	case strings.IndexFunc(line, pipLineBreak) >= 0 || !utf8.ValidString(line):
 		return "a requirement with a line break"
 	case strings.Contains(line, "${"):
 		return "a requirement naming an environment variable"
@@ -373,10 +411,8 @@ func describeUnsafeRequirement(line string) string {
 	case strings.HasPrefix(line, ".") || strings.HasPrefix(line, "~") || strings.ContainsAny(line, `/\`):
 		return "a local path"
 	}
-	for _, suf := range pipArchiveSuffixes {
-		if strings.HasSuffix(lower, suf) {
-			return "a local archive"
-		}
+	if pipArchiveName(line) {
+		return "a local archive"
 	}
 	return "a requirement pip could build"
 }
@@ -391,7 +427,10 @@ var errNamesEnvVar = errors.New("names an environment variable (${...}), which t
 // --index-url and a direct URL each sent the variable's value to the host),
 // so a repository could send a runner secret anywhere. uv reads the file
 // itself, so the whole file is refused rather than rewritten.
-func uvExpandsEnv(ctx context.Context, path string) error {
+//
+// Includes outside root are refused the same way: uv would read them and send
+// their lines to the index as requirements.
+func uvExpandsEnv(ctx context.Context, path, root string) error {
 	seen := map[string]bool{}
 	var walk func(p string, depth int) error
 	walk = func(p string, depth int) error {
@@ -405,11 +444,18 @@ func uvExpandsEnv(ctx context.Context, path string) error {
 			return fmt.Errorf("%s: includes nest deeper than %d or number over %d", p, maxPipIncludeDepth, maxPipIncludeFiles)
 		}
 		seen[p] = true
+		if !withinRoot(p, root) {
+			return fmt.Errorf("%s %w", p, errOutsideRoot)
+		}
 		data, err := readRequirementsFile(p)
 		if err != nil {
 			return err
 		}
-		for _, line := range requirementLines(data) {
+		lines, err := scanRequirementLines(data)
+		if err != nil {
+			return fmt.Errorf("%s: %w", p, err)
+		}
+		for _, line := range lines {
 			if strings.Contains(line, "${") {
 				return fmt.Errorf("%s %w", p, errNamesEnvVar)
 			}
@@ -452,17 +498,24 @@ func uvExpandsEnv(ctx context.Context, path string) error {
 
 // pyprojectExpandsEnv is uvExpandsEnv for a pyproject's [project]
 // dependencies, which uv expands the same way.
+// It reads the raw lists: an entry naming the project itself, which
+// pyprojectRequirementSpecs drops, is still read by uv.
 func pyprojectExpandsEnv(path string) error {
-	specs, _ := pyprojectRequirementSpecs(path)
-	for _, s := range specs {
+	pp, err := readPyProject(path)
+	if err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	if pp == nil {
+		return nil
+	}
+	deps := slices.Clone(pp.Project.Dependencies)
+	for _, group := range pp.Project.OptionalDependencies {
+		deps = append(deps, group...)
+	}
+	for _, s := range deps {
 		if strings.Contains(s, "${") {
 			return fmt.Errorf("%s %w", path, errNamesEnvVar)
 		}
 	}
 	return nil
-}
-
-func pathExists(p string) bool {
-	_, err := os.Stat(p)
-	return err == nil
 }

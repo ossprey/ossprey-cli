@@ -79,6 +79,8 @@ type cargoManifest struct {
 	} `toml:"target"`
 	Workspace struct {
 		Dependencies map[string]any `toml:"dependencies"`
+		Members      []string       `toml:"members"`
+		Exclude      []string       `toml:"exclude"`
 	} `toml:"workspace"`
 }
 
@@ -354,12 +356,33 @@ func cargoLockCovers(manifestPath, scanRoot string) bool {
 		if err != nil || !DeclaresCargoWorkspace(data) {
 			continue
 		}
+		var m cargoManifest
+		if _, err := toml.Decode(string(data), &m); err != nil {
+			return false
+		}
+		if cargoExcludes(m, dir, manifestPath) {
+			continue // cargo looks further up for an excluded crate's root
+		}
 		return cargoLockReadable(dir)
 	}
 }
 
+// cargoExcludes is cargo's is_excluded: the crate sits under a workspace.exclude
+// path and under no members entry, each taken as a literal path prefix.
+func cargoExcludes(m cargoManifest, rootDir, manifestPath string) bool {
+	under := func(paths []string) bool {
+		for _, p := range paths {
+			if rel, err := filepath.Rel(filepath.Join(rootDir, p), manifestPath); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+				return true
+			}
+		}
+		return false
+	}
+	return under(m.Workspace.Exclude) && !under(m.Workspace.Members)
+}
+
 func cargoLockReadable(dir string) bool {
-	data, err := os.ReadFile(filepath.Join(dir, "Cargo.lock"))
+	data, err := readRegularFile(filepath.Join(dir, "Cargo.lock"), maxLockfileBytes)
 	if err != nil {
 		return false
 	}

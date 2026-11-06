@@ -44,6 +44,9 @@ type pyproject struct {
 		Poetry struct {
 			Dependencies    map[string]any `toml:"dependencies"`
 			DevDependencies map[string]any `toml:"dev-dependencies"`
+			Group           map[string]struct {
+				Dependencies map[string]any `toml:"dependencies"`
+			} `toml:"group"`
 		} `toml:"poetry"`
 	} `toml:"tool"`
 }
@@ -225,10 +228,17 @@ func pyprojectNeedsBuild(path string) error {
 		return nil
 	}
 	deps := 0
-	for name := range pp.Tool.Poetry.Dependencies {
-		if name != "python" {
-			deps++
+	count := func(table map[string]any) {
+		for name := range table {
+			if name != "python" {
+				deps++
+			}
 		}
+	}
+	count(pp.Tool.Poetry.Dependencies)
+	count(pp.Tool.Poetry.DevDependencies) // poetry installs these too
+	for _, g := range pp.Tool.Poetry.Group {
+		count(g.Dependencies)
 	}
 	if deps == 0 {
 		return nil
@@ -261,7 +271,7 @@ var pythonLockfiles = []string{"uv.lock", "poetry.lock", "pdm.lock"}
 func pyprojectLockCovered(path string) bool {
 	dir := filepath.Dir(path)
 	for _, name := range pythonLockfiles {
-		data, err := os.ReadFile(filepath.Join(dir, name))
+		data, err := readRegularFile(filepath.Join(dir, name), maxLockfileBytes)
 		if err != nil {
 			continue
 		}

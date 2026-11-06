@@ -32,11 +32,17 @@ never does that:
 - uv runs with `--no-build`.
 - pip runs with `--only-binary=:all:`, in isolated mode (`python -I`, so a
   `pip.py` in your repository is never what runs), and is handed a copy of each
-  requirements file holding only registry requirements and index options. A
-  `--no-binary` option, a local path, an editable (`-e`) or a direct URL
-  (`name @ url`) is left out, since pip would build it whatever the flags say,
-  and so is any line that names an environment variable (`${VAR}`), which pip
-  would fill in from the scanning machine.
+  requirements file holding only registry requirements. A `--no-binary`
+  option, a local path, an editable (`-e`) or a direct URL (`name @ url`) is
+  left out, since pip would build it whatever the flags say, and so is any line
+  that names an environment variable (`${VAR}`), which pip would fill in from
+  the scanning machine. A requirements file that names its own index or
+  find-links location (`--index-url`, `--extra-index-url`, `--find-links`) is
+  not resolved by pip at all and is reported unresolved: a wheel there can
+  declare a dependency by URL on a source distribution, which pip builds even
+  under `--only-binary`. uv refuses such a dependency, so with uv installed the
+  file resolves. An include (`-r`, `-c`) outside the scanned directory is not
+  read by either resolver, and its manifest is reported unresolved.
 - uv is never handed a requirements file (or one it includes) or a
   `pyproject.toml` dependency that names `${VAR}`, which uv fills in the same
   way; that manifest is reported unresolved instead. Keep a private index's

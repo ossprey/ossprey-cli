@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -44,6 +45,36 @@ func evilSdist(t *testing.T, dir, marker string) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "evilpkg-1.0.tar.gz"), buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// wheelNamingSdist writes wheelpkg-1.0, a wheel whose only dependency is
+// evilpkg by direct reference to the sdist evilSdist writes beside it.
+func wheelNamingSdist(t *testing.T, dir string) {
+	t.Helper()
+	sdist := "file://" + filepath.ToSlash(filepath.Join(dir, "evilpkg-1.0.tar.gz"))
+	files := map[string]string{
+		"wheelpkg/__init__.py":            "",
+		"wheelpkg-1.0.dist-info/METADATA": "Metadata-Version: 2.1\nName: wheelpkg\nVersion: 1.0\nRequires-Dist: evilpkg @ " + sdist + "\n",
+		"wheelpkg-1.0.dist-info/WHEEL":    "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+		"wheelpkg-1.0.dist-info/RECORD":   "",
+	}
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for name, body := range files {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte(body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "wheelpkg-1.0-py3-none-any.whl"), buf.Bytes(), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -114,6 +145,11 @@ func TestResolversNeverBuild(t *testing.T) {
 			"sub/.placeholder":  "",
 			"dist/.placeholder": "",
 		},
+		// A wheel's own metadata naming an sdist by URL: pip builds it
+		// whatever --only-binary says, so no repository index reaches pip.
+		"wheel naming an sdist": {
+			"requirements.txt": "--no-index\n--find-links DIST\nwheelpkg==1.0\n",
+		},
 		"local directory": {
 			"requirements.txt": "--no-index\n./local\n",
 		},
@@ -141,6 +177,7 @@ func TestResolversNeverBuild(t *testing.T) {
 				proj := t.TempDir()
 				marker := filepath.Join(t.TempDir(), "marker")
 				evilSdist(t, filepath.Join(proj, "dist"), marker)
+				wheelNamingSdist(t, filepath.Join(proj, "dist"))
 				for n, body := range evilProject(marker) {
 					writeTree(t, proj, map[string]string{"local/" + n: body})
 				}
@@ -312,7 +349,9 @@ func TestPipSafeRequirement(t *testing.T) {
 	}
 }
 
-func TestPipSanitizerKeepsIndexOptionsAndIncludes(t *testing.T) {
+// Index and find-links options are recognised but never passed: a wheel
+// there can name an sdist pip builds, so the file is refused (ownIndex).
+func TestPipSanitizerRefusesIndexOptionsKeepsIncludes(t *testing.T) {
 	src := t.TempDir()
 	writeTree(t, src, map[string]string{
 		"requirements.txt": "-i https://idx/simple\n--extra-index-url=https://x/simple\n" +
@@ -321,20 +360,22 @@ func TestPipSanitizerKeepsIndexOptionsAndIncludes(t *testing.T) {
 		"sub/a.txt":    "-r ../requirements.txt\nidna\n",
 		"wheels/.keep": "",
 	})
-	s := newPipSanitizer(context.Background(), t.TempDir())
+	s := newPipSanitizer(context.Background(), t.TempDir(), src)
 	out, err := s.file(filepath.Join(src, "requirements.txt"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	data, _ := os.ReadFile(out)
 	got := string(data)
-	for _, want := range []string{"--index-url 'https://idx/simple'", "--extra-index-url 'https://x/simple'",
-		"--find-links '" + filepath.Join(src, "wheels") + "'", "requests==2.31.0\n", "--requirement "} {
+	if !s.ownIndex {
+		t.Error("index options did not refuse the file")
+	}
+	for _, want := range []string{"requests==2.31.0\n", "--requirement "} {
 		if !strings.Contains(got, want) {
 			t.Errorf("copy lacks %q:\n%s", want, got)
 		}
 	}
-	for _, bad := range []string{"no-binary", "\n-e", "pep517", "hash", "remote"} {
+	for _, bad := range []string{"no-binary", "\n-e", "pep517", "hash", "remote", "index-url", "find-links"} {
 		if strings.Contains(got, bad) {
 			t.Errorf("copy keeps %q:\n%s", bad, got)
 		}
