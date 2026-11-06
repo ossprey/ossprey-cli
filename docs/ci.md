@@ -76,6 +76,32 @@ jobs:
 For other CI systems the shape is the same: install the CLI, set
 `OSSPREY_API_KEY` from your secret store, run `ossprey scan .`.
 
+## Requiring complete coverage
+
+A clean verdict says nothing was flagged in what was checked. Two things can
+leave part of a project unchecked without failing the build: a manifest whose
+dependency tree could not be resolved (only its direct dependencies were
+checked — for example a Python dependency that ships no wheel, since a scan
+never builds one), and packages the platform did not scan (`unscanned`, such as
+packages the registry did not have). Both are in the
+[`--report` file](output.md#machine-readable-verdict---report) as
+`unresolved_manifests`/`transitive` and `unscanned`.
+
+To fail the build on them instead, add `--require-complete`:
+
+```sh
+ossprey scan . --report report.json --require-complete
+```
+
+It exits **2** — an error, not the `1` reserved for malware — when any manifest
+is unresolved, any package went unscanned, or the scan was skipped (quota),
+and the error line says which. Malware still exits 1 first. The report is
+written either way. It is off by default, and it is refused with `--passive`
+and `--local`, which reach no verdict; passive mode set in the environment
+makes it a no-op with a warning. The usual fix for an unresolved manifest is to
+commit its lockfile (`uv.lock`, `poetry.lock`, a compiled `requirements.txt`,
+`package-lock.json`).
+
 Inside GitHub Actions or Azure Pipelines the scan also picks up the repository,
 organisation and branch from the runner's environment and sends them with the
 OSSBOM, so a scan made with a login or an API key groups by repository in the

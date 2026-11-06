@@ -68,6 +68,7 @@ func Run(ctx context.Context, opts Options) (*ossbom.SBOM, error) {
 		return nil, fmt.Errorf("catalog: %w", err)
 	}
 	if ctx.Err() != nil {
+		warn.MarkTruncated(ctx) // what was never reached was never marked unresolved
 		fmt.Fprintf(os.Stderr, "ossprey: scan deadline (%s) reached; emitting %d component(s) cataloged so far\n", opts.Timeout, len(pkgs))
 	}
 

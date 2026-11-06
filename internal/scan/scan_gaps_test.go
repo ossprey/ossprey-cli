@@ -106,6 +106,11 @@ func TestRunTimeoutEmitsPartialSBOM(t *testing.T) {
 	if !strings.Contains(stderr, "scan deadline (1.5s) reached") {
 		t.Errorf("deadline not reported on stderr:\n%s", stderr)
 	}
+	// Manifests past the deadline were never reached, so never marked: the
+	// report must say partial on the deadline alone.
+	if !warn.Truncated(ctx) {
+		t.Error("the deadline was not recorded for the report's coverage")
+	}
 	if out := warn.Drain(ctx); strings.Contains(out, "npm") {
 		t.Errorf("per-manifest resolver failure reported past the deadline:\n%s", out)
 	}
@@ -114,12 +119,16 @@ func TestRunTimeoutEmitsPartialSBOM(t *testing.T) {
 // A scan with no deadline must not announce one.
 func TestRunWithoutTimeoutIsSilentAboutDeadlines(t *testing.T) {
 	dir := t.TempDir()
+	ctx := warn.NewContext(context.Background(), false)
 	stderr := captureStderr(t, func() {
-		if _, err := Run(context.Background(), Options{Path: dir, NoExec: true, SkipVersionLookup: true}); err != nil {
+		if _, err := Run(ctx, Options{Path: dir, NoExec: true, SkipVersionLookup: true}); err != nil {
 			t.Errorf("Run: %v", err)
 		}
 	})
 	if strings.Contains(stderr, "deadline") {
 		t.Errorf("unexpected deadline message:\n%s", stderr)
+	}
+	if warn.Truncated(ctx) {
+		t.Error("a scan with no deadline recorded one")
 	}
 }
