@@ -2,6 +2,9 @@ package catalog
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"runtime"
 	"slices"
 	"testing"
 
@@ -85,5 +88,50 @@ func TestPythonLockCoversPyprojectWithoutResolver(t *testing.T) {
 	}
 	if got := unresolvedFor(t, map[string]string{"pyproject.toml": pp}); !slices.Equal(got, []string{"pyproject.toml"}) {
 		t.Errorf("without a lock: unresolved = %v, want [pyproject.toml]", got)
+	}
+}
+
+// Windows names one directory several ways; a manifest is still reported
+// relative to the scan root, never as an absolute path.
+func TestRelWithin(t *testing.T) {
+	sep := string(filepath.Separator)
+	root := sep + filepath.Join("Users", "RunnerAdmin", "Temp", "scan")
+	for _, tc := range []struct {
+		p    string
+		fold bool
+		want string
+		ok   bool
+	}{
+		{filepath.Join(root, "a", "Cargo.toml"), false, filepath.Join("a", "Cargo.toml"), true},
+		{sep + filepath.Join("users", "runneradmin", "temp", "scan", "Cargo.toml"), true, "Cargo.toml", true},
+		{sep + filepath.Join("users", "runneradmin", "temp", "scan", "Cargo.toml"), false, "", false},
+		{sep + filepath.Join("Users", "RunnerAdmin", "Temp", "scanner", "x"), true, "", false},
+		{sep + filepath.Join("Users", "RunnerAdmin", "Temp", "other"), false, "", false},
+	} {
+		got, ok := relWithin(root, tc.p, tc.fold)
+		if ok != tc.ok || got != tc.want {
+			t.Errorf("relWithin(%q, %q, %v) = %q, %v; want %q, %v", root, tc.p, tc.fold, got, ok, tc.want, tc.ok)
+		}
+	}
+}
+
+// A root given through a symlink still yields relative manifest paths.
+func TestUnresolvedPathsAreRelativeUnderASymlinkedRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks need privileges on Windows")
+	}
+	t.Setenv("PATH", t.TempDir())
+	real := t.TempDir()
+	writeTree(t, real, map[string]string{"Cargo.toml": "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = \"=1.0.228\"\n"})
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	ctx := warn.NewContext(context.Background(), false)
+	if _, err := Catalog(ctx, link, Options{SkipVersionLookup: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got := warn.Unresolved(ctx); !slices.Equal(got, []string{"Cargo.toml"}) {
+		t.Errorf("unresolved = %v, want [Cargo.toml]", got)
 	}
 }
