@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -247,6 +248,30 @@ func TestPrecommitVersionlessPackagesAreSkipped(t *testing.T) {
 	}
 	if out.Len() != 0 {
 		t.Errorf("must be silent, got: %q", out.String())
+	}
+}
+
+// A git or private-registry crate has no crates.io advisory, so it is never sent as the bare crates.io purl.
+func TestPrecommitSendsCratesIoCratesButNotMarkedOnes(t *testing.T) {
+	var sent []string
+	stubPrecommit(t,
+		func(context.Context, string) (precommit.Delta, error) {
+			return precommit.Delta{Packages: []precommit.Package{
+				{Type: "cargo", Name: "forked-crate", Version: "2.0.0", Path: "Cargo.lock",
+					Qualifiers: map[string]string{"vcs_url": "git+https://git.example.com/acme/forked-crate@0123456"}},
+				{Type: "cargo", Name: "serde", Version: "1.0.228", Path: "Cargo.lock"},
+			}}, nil
+		},
+		func(_ context.Context, _, _ string, purls []string) ([]client.MalwareHit, error) {
+			sent = purls
+			return nil, nil
+		})
+
+	if blocked := runPrecommit(context.Background(), "https://api.test", "key", false, io.Discard); blocked {
+		t.Fatal("clean commit must not be blocked")
+	}
+	if len(sent) != 1 || sent[0] != "pkg:cargo/serde@1.0.228" {
+		t.Errorf("purls sent: got %v, want only pkg:cargo/serde@1.0.228", sent)
 	}
 }
 

@@ -1,0 +1,23 @@
+# Go deps and the toolchain (`go` directive) feed straight into the released
+# binary, and from there into the service images' Inspector findings.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: fix
+      include: scope
+    groups:
+      go-minor-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: ci

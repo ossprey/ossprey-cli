@@ -192,7 +192,7 @@ install instead. Either way nothing is blocked and nothing waits.
 | --------- | --------- |
 | Python | `requirements.txt`, `poetry.lock`, `uv.lock`, `Pipfile.lock`, `pdm.lock`, `setup.py`, `pyproject.toml`, installed metadata |
 | JavaScript | `package.json`, `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml` |
-| Rust | `Cargo.lock`, `Cargo.toml` |
+| Rust | `Cargo.lock`, `Cargo.toml` (Teams and Enterprise plans) |
 
 **Internal packages?** `ossprey trust add --registry <url>` or
 `--npm-scope @org` skips packages from your private registries, and never

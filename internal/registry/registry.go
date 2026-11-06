@@ -1,6 +1,6 @@
 // Package registry resolves the latest published version of a package from its
-// upstream registry (npm registry, PyPI). Used to fill in a version when the
-// user names a package without pinning one (e.g. `ossprey npm install lodash`).
+// upstream registry (npm registry, PyPI, crates.io). Used to fill in a version
+// when the user names a package without pinning one (e.g. `ossprey npm install lodash`).
 package registry
 
 import (
@@ -41,7 +41,7 @@ func CanResolve(ecosystem string) bool {
 }
 
 // ResolveLatest returns the latest version string for name in the given
-// ecosystem ("npm" or "pypi").
+// ecosystem ("npm", "pypi" or "cargo").
 func ResolveLatest(ctx context.Context, ecosystem, name string) (string, error) {
 	switch ecosystem {
 	case "npm":
@@ -147,31 +147,63 @@ var ErrNotFound = errors.New("not on the public registry")
 // errAllYanked is a not-found: a crate with every release yanked has nothing to pin.
 var errAllYanked = fmt.Errorf("%w (every release is yanked)", ErrNotFound)
 
-// resolveCargo reads the crate's latest stable release for a Cargo.toml range no lockfile pins.
-func resolveCargo(ctx context.Context, name string) (string, error) {
-	endpoint := cratesBaseURL + url.PathEscape(name)
+// cratesIoCrate is the part of crates.io's record of a crate the resolver reads.
+type cratesIoCrate struct {
+	Name             string `json:"name"`
+	Yanked           bool   `json:"yanked"`
+	MaxStableVersion string `json:"max_stable_version"`
+	NewestVersion    string `json:"newest_version"`
+}
+
+// fetchCrate reads crates.io's record of a crate, which it serves under every spelling that folds to the crate's name.
+func fetchCrate(ctx context.Context, name string) (cratesIoCrate, error) {
 	var body struct {
-		Crate struct {
-			Yanked           bool   `json:"yanked"`
-			MaxStableVersion string `json:"max_stable_version"`
-			NewestVersion    string `json:"newest_version"`
-		} `json:"crate"`
+		Crate cratesIoCrate `json:"crate"`
 	}
-	if err := getJSON(ctx, endpoint, &body); err != nil {
-		return "", err
-	}
+	err := getJSON(ctx, cratesBaseURL+url.PathEscape(name), &body)
+	return body.Crate, err
+}
+
+// latest is the crate's latest stable release, else its newest pre-release.
+func (c cratesIoCrate) latest(name string) (string, error) {
 	// crates.io sets yanked only when every release is, and then names a placeholder 0.0.0.
-	if body.Crate.Yanked {
+	if c.Yanked {
 		return "", errAllYanked
 	}
 	// max_stable_version is empty for a crate that has only ever pre-released.
-	if v := body.Crate.MaxStableVersion; v != "" {
+	if v := c.MaxStableVersion; v != "" {
 		return v, nil
 	}
-	if v := body.Crate.NewestVersion; v != "" {
+	if v := c.NewestVersion; v != "" {
 		return v, nil
 	}
 	return "", fmt.Errorf("crates.io returned no version for %q", name)
+}
+
+// resolveCargo reads the crate's latest stable release, for a Cargo.toml range no lockfile pins.
+func resolveCargo(ctx context.Context, name string) (string, error) {
+	c, err := fetchCrate(ctx, name)
+	if err != nil {
+		return "", err
+	}
+	return c.latest(name)
+}
+
+// CanonicalCrate returns the name crates.io gives a crate and, when version is empty, the crate's latest stable release.
+func CanonicalCrate(ctx context.Context, name, version string) (string, string, error) {
+	c, err := fetchCrate(ctx, name)
+	if err != nil {
+		return "", "", err
+	}
+	if c.Name == "" {
+		return "", "", fmt.Errorf("crates.io returned no name for %q", name)
+	}
+	if version == "" {
+		if version, err = c.latest(name); err != nil {
+			return "", "", err
+		}
+	}
+	return c.Name, version, nil
 }
 
 func getJSON(ctx context.Context, endpoint string, out any) error {

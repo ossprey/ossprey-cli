@@ -546,3 +546,94 @@ func sinkFixture(t *testing.T, root, rel, content string) {
 		t.Fatal(err)
 	}
 }
+
+// TestParseCargoLockRefusesDeepNesting: brackets and dots in strings and comments neither count toward nor hide nesting.
+func TestParseCargoLockRefusesDeepNesting(t *testing.T) {
+	lock := "version = 4\n\n[[package]]\nname = \"a\"\nversion = \"1.0.0\"\n"
+	n := maxProofNesting + 1
+	open := strings.Repeat("[", n)
+	deep := open + strings.Repeat("]", n)
+	dotted, inline := "", ""
+	for i := range n {
+		dotted += fmt.Sprintf("k%d.workspace = true\n", i)
+		inline += fmt.Sprintf("k%d.b = 1, ", i)
+	}
+	dotted += "x = {" + inline + "c = 1}\nfloats = [" + strings.Repeat("1.5, ", n) + "]\n"
+	for _, tc := range []struct {
+		name, extra string
+		deep        bool
+	}{
+		{"brackets in strings and comments", "# " + open + "\n" + `x = ['` + open + `', "\"` + open + `", '''` + open + `'''', """` + open + `\""""]` + "\n", false},
+		{"nesting past the bound", "x = " + deep + "\n", true},
+		{"closers in strings between levels", "x = " + strings.Repeat(`["]]",`, n) + strings.Repeat("]", n) + "\n", true},
+		{"a multi-line string ending in extra quotes", `x = ["""a"""", ` + deep + "]\n", true},
+		{"six closing quotes after an escaped backslash", `x = ["""a\\"""""", ` + deep + "]\n", true},
+		{"dots in strings and a short dotted header", "[target.'cfg(" + strings.Repeat("a.", n) + ")'.x]\n" + `y.z = "` + strings.Repeat("a.", n) + `"` + "\n", false},
+		{"many short dotted keys", dotted, false},
+		{"a dotted key at the bound, between floats", "f = 1.5\nx" + strings.Repeat(".a", maxProofNesting) + " = 1.5\n", false},
+		{"a dotted key past the bound", "x" + strings.Repeat(".a", n) + " = 1\n", true},
+		{"a dotted header past the bound", "[x" + strings.Repeat(".a", n-1) + "]\n", true},
+		{"a line over the bound", `x = "` + strings.Repeat("a", maxProofLine) + "\"\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseCargoLock([]byte(tc.extra + lock))
+			if (err != nil) != tc.deep {
+				t.Errorf("ParseCargoLock error = %v, want refused = %v", err, tc.deep)
+			}
+		})
+	}
+}
+
+// TestCargoConfigAndManifestRefuseDeepOrLongInput: a config or vendored manifest gets the same guard as a proof lock.
+func TestCargoConfigAndManifestRefuseDeepOrLongInput(t *testing.T) {
+	manifest := "[package]\nname = \"a\"\nversion = \"1.0.0\"\n\n[[package.metadata.capi.install.include.asset]]\nfrom = \"a.h\"\n\n[target.'cfg(unix)'.dependencies.libc]\nversion = \"0.2\"\nfeatures = [\"std\"]\n"
+	config := "[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.vendored-sources]\ndirectory = \"vendor\"\n"
+	if name, version := CargoPackageID([]byte(manifest)); name != "a" || version != "1.0.0" {
+		t.Fatalf("CargoPackageID = %q, %q, want a, 1.0.0", name, version)
+	}
+	if _, err := ParseCargoConfig([]byte(config)); err != nil {
+		t.Fatalf("ParseCargoConfig: %v", err)
+	}
+	n := maxProofNesting + 1
+	for name, extra := range map[string]string{
+		"nested inline tables": "x = " + strings.Repeat("{a = ", n) + "1" + strings.Repeat("}", n) + "\n",
+		"a dotted key":         "x" + strings.Repeat(".a", n) + " = 1\n",
+		"a long line":          `x = "` + strings.Repeat("a", maxProofLine) + "\"\n",
+		"six quotes":           `x = """a\\""""""` + "\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got, version := CargoPackageID([]byte(extra + manifest)); got != "" || version != "" {
+				t.Errorf("CargoPackageID = %q, %q, want refused", got, version)
+			}
+			if _, err := ParseCargoConfig([]byte(extra + config)); err == nil {
+				t.Error("ParseCargoConfig accepted it")
+			}
+		})
+	}
+}
+
+// TestCargoVendorSourceRefusesDotDotAfterAName: cargo resolves ".." after symlinks, so only a leading one is placed.
+func TestCargoVendorSourceRefusesDotDotAfterAName(t *testing.T) {
+	for directory, want := range map[string]string{
+		"vendor":            "app/vendor",
+		"./vendor":          "app/vendor",
+		"../app/vendor":     "app/vendor",
+		"vendor/../tools":   "",
+		"./vendor/../tools": "",
+		`vendor\..\tools`:   "",
+	} {
+		config := map[string]any{"source": map[string]any{
+			"crates-io":        map[string]any{"replace-with": "vendored-sources"},
+			"vendored-sources": map[string]any{"directory": directory},
+		}}
+		configAt := func(dir string) (map[string]any, bool) {
+			if dir == "app" {
+				return config, true
+			}
+			return nil, true
+		}
+		if got := CargoVendorSource("app", configAt); got != want {
+			t.Errorf("CargoVendorSource with directory %q = %q, want %q", directory, got, want)
+		}
+	}
+}

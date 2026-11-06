@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +24,12 @@ const cargoVendorMarker = ".cargo-checksum.json"
 // maxCargoProofBytes bounds a marker read; real ones are a few MB at most.
 const maxCargoProofBytes = 32 << 20
 
+// CargoProofLimit bounds a lock or marker and CargoManifestLimit a manifest or cargo config, as the parsers here refuse them.
+const (
+	CargoProofLimit    = maxCargoProofBytes
+	CargoManifestLimit = maxManifestBytes
+)
+
 // cargoVendored hides the Cargo.toml and Cargo.lock of proven vendored crates; it never hides any other file.
 type cargoVendored struct {
 	file.Resolver
@@ -38,8 +45,8 @@ type cargoFile struct {
 	inexact bool
 }
 
-// lockedSet is one project's Cargo.lock: checksums per name@version ("" for a path crate) and versions per name.
-type lockedSet struct {
+// CargoLock is one project's Cargo.lock: checksums per name@version ("" for a path crate) and versions per name.
+type CargoLock struct {
 	sums     map[string]map[string]bool
 	versions map[string][]string
 }
@@ -150,9 +157,7 @@ func withoutCargoVendor(r file.Resolver, root string) file.Resolver {
 			if !ok {
 				continue
 			}
-			// "" is a path crate of the same name and version, which the project builds itself.
-			sums := lock.sums[name+"@"+version]
-			if sums[sum] && !sums[""] && lockCoversDeps(lock, m.doc) && vendorDir(levels, path.Join(rootSlash, a)) == source {
+			if lock.Vendors(name, version, sum) && lockCoversDeps(lock, m.doc) && vendorDir(levels, path.Join(rootSlash, a)) == source {
 				hidden[p] = true
 				hidden[dir+"/Cargo.lock"] = true
 				break
@@ -527,7 +532,7 @@ func isConfigArg(arg string) bool {
 }
 
 // lockCoversDeps reports whether the lock holds a release meeting each normal and build dependency doc turns on.
-func lockCoversDeps(lock lockedSet, doc map[string]any) bool {
+func lockCoversDeps(lock CargoLock, doc map[string]any) bool {
 	on := defaultFeatureDeps(doc)
 	tables := []any{doc["dependencies"], doc["build-dependencies"], doc["build_dependencies"]}
 	if targets, ok := doc["target"].(map[string]any); ok {
@@ -604,8 +609,8 @@ func defaultFeatureDeps(doc map[string]any) map[string]bool {
 }
 
 // projectLocks reads the Cargo.lock of each unmarked directory that also holds a Cargo.toml.
-func projectLocks(r file.Resolver, locks []file.Location, manifests map[string]cargoFile, marked map[string]file.Location, rootPrefix string) map[string]lockedSet {
-	out := map[string]lockedSet{}
+func projectLocks(r file.Resolver, locks []file.Location, manifests map[string]cargoFile, marked map[string]file.Location, rootPrefix string) map[string]CargoLock {
+	out := map[string]CargoLock{}
 	for _, l := range locks {
 		p := rootRel(l.RealPath, rootPrefix)
 		dir := path.Dir(p)
@@ -615,38 +620,129 @@ func projectLocks(r file.Resolver, locks []file.Location, manifests map[string]c
 		if _, ok := manifests[path.Join(dir, "Cargo.toml")]; !ok {
 			continue
 		}
-		var lock struct {
-			Package []struct {
-				Name     string `toml:"name"`
-				Version  string `toml:"version"`
-				Source   string `toml:"source"`
-				Checksum string `toml:"checksum"`
-			} `toml:"package"`
-		}
 		// The lockfile caps, as for syft's own parse: this one runs before withBoundedLocks hides anything.
 		data, err := readLock(r, l)
 		if err != nil {
 			continue
 		}
-		if _, err := decodeTOML(data, &lock); err != nil {
-			continue
+		if set, err := ParseCargoLock(data); err == nil {
+			out[dir] = set
 		}
-		set := lockedSet{sums: map[string]map[string]bool{}, versions: map[string][]string{}}
-		for _, p := range lock.Package {
-			set.versions[p.Name] = append(set.versions[p.Name], p.Version)
-			// A git crate has a source but no checksum, and proves nothing either way.
-			if p.Checksum == "" && p.Source != "" {
-				continue
-			}
-			key := p.Name + "@" + p.Version
-			if set.sums[key] == nil {
-				set.sums[key] = map[string]bool{}
-			}
-			set.sums[key][p.Checksum] = true
-		}
-		out[dir] = set
 	}
 	return out
+}
+
+// maxProofNesting bounds how deeply a proof file nests brackets, braces and dotted keys; real ones reach 7, and the decoder's stack and memory grow with each level.
+const maxProofNesting = 16
+
+// maxProofLine bounds a proof file's line, since one dotted key costs the decoder memory quadratic in its length.
+const maxProofLine = 4096
+
+// ParseCargoLock reads a Cargo.lock as the vendor filter does, refusing one over its size bound or that proofTOMLError refuses.
+func ParseCargoLock(data []byte) (CargoLock, error) {
+	if len(data) > maxCargoProofBytes {
+		return CargoLock{}, fmt.Errorf("Cargo.lock is %d bytes, over the %d limit", len(data), maxCargoProofBytes)
+	}
+	if err := proofTOMLError(data); err != nil {
+		return CargoLock{}, fmt.Errorf("Cargo.lock %w", err)
+	}
+	var lock struct {
+		Package []struct {
+			Name     string `toml:"name"`
+			Version  string `toml:"version"`
+			Source   string `toml:"source"`
+			Checksum string `toml:"checksum"`
+		} `toml:"package"`
+	}
+	if _, err := decodeTOML(data, &lock); err != nil {
+		return CargoLock{}, err
+	}
+	set := CargoLock{sums: map[string]map[string]bool{}, versions: map[string][]string{}}
+	for _, p := range lock.Package {
+		set.versions[p.Name] = append(set.versions[p.Name], p.Version)
+		// A git crate has a source but no checksum, and proves nothing either way.
+		if p.Checksum == "" && p.Source != "" {
+			continue
+		}
+		key := p.Name + "@" + p.Version
+		if set.sums[key] == nil {
+			set.sums[key] = map[string]bool{}
+		}
+		set.sums[key][p.Checksum] = true
+	}
+	return set, nil
+}
+
+// proofTOMLError refuses a proof file nested too deep for the decoder, or one the nesting scan could misread.
+func proofTOMLError(data []byte) error {
+	line, quotes := 0, 0
+	for _, c := range data {
+		if line++; c == '\n' {
+			line = 0
+		} else if line > maxProofLine {
+			return fmt.Errorf("has a line over %d bytes", maxProofLine)
+		}
+		if quotes++; c != '"' && c != '\'' {
+			quotes = 0
+		} else if quotes >= 6 {
+			// The decoder can close a multi-line string later in a run of six quotes than the scan does.
+			return errors.New("holds six quotes in a row")
+		}
+	}
+	if tomlNestsPast(data, maxProofNesting) {
+		return fmt.Errorf("nests over %d deep", maxProofNesting)
+	}
+	return nil
+}
+
+// tomlNestsPast reports whether data nests brackets, braces or a key's dots more than limit deep outside its strings and comments.
+func tomlNestsPast(data []byte, limit int) bool {
+	depth, dots := 0, 0
+	for i := 0; i < len(data); i++ {
+		switch c := data[i]; c {
+		case '#':
+			for i+1 < len(data) && data[i+1] != '\n' {
+				i++
+			}
+		case '"', '\'':
+			q := []byte{c}
+			if bytes.HasPrefix(data[i:], []byte{c, c, c}) {
+				q = []byte{c, c, c}
+			}
+			j := i + len(q)
+			for j < len(data) && !bytes.HasPrefix(data[j:], q) && (len(q) == 3 || data[j] != '\n') {
+				if c == '"' && data[j] == '\\' {
+					j++
+				}
+				j++
+			}
+			// A multi-line string may end in up to two more quotes.
+			for n := 0; len(q) == 3 && n < 2 && j+3 < len(data) && data[j+3] == c; n++ {
+				j++
+			}
+			i = j + len(q) - 1
+		case '.':
+			// Each dot of a key opens one more table, and only a byte no key holds ends the key.
+			if dots++; depth+dots > limit {
+				return true
+			}
+		case '[', '{':
+			if depth++; depth > limit {
+				return true
+			}
+		case ']', '}':
+			depth = max(depth-1, 0)
+		case '\n', '=', ',':
+			dots = 0
+		}
+	}
+	return false
+}
+
+// Vendors reports whether the lock takes name@version from a registry at the .crate checksum sum and has no path crate of that name and version.
+func (l CargoLock) Vendors(name, version, sum string) bool {
+	sums := l.sums[name+"@"+version]
+	return sum != "" && sums[sum] && !sums[""]
 }
 
 func underMarked(p string, marked map[string]file.Location) bool {
@@ -664,13 +760,87 @@ func vendoredChecksum(r file.Resolver, mark file.Location) string {
 	if err != nil {
 		return ""
 	}
+	return CargoVendorChecksum(data)
+}
+
+// CargoVendorChecksum is the .crate checksum a `cargo vendor` marker records, or "".
+func CargoVendorChecksum(data []byte) string {
 	var marker struct {
 		Package string `json:"package"`
 	}
-	if json.Unmarshal(data, &marker) != nil {
+	if len(data) > maxCargoProofBytes || json.Unmarshal(data, &marker) != nil {
 		return ""
 	}
 	return marker.Package
+}
+
+// CargoPackageID is the [package] name and version a Cargo.toml states as strings, or "" for either it does not or one proofTOMLError refuses.
+func CargoPackageID(data []byte) (name, version string) {
+	var doc map[string]any
+	if len(data) > maxManifestBytes || proofTOMLError(data) != nil {
+		return "", ""
+	}
+	if _, err := decodeTOML(data, &doc); err != nil {
+		return "", ""
+	}
+	name, _ = tomlLookup(doc, "package", "name").(string)
+	version, _ = tomlLookup(doc, "package", "version").(string)
+	return name, version
+}
+
+// ParseCargoConfig reads a .cargo/config(.toml) as the vendor filter does, refusing one over its size bound or that proofTOMLError refuses.
+func ParseCargoConfig(data []byte) (map[string]any, error) {
+	if len(data) > maxManifestBytes {
+		return nil, fmt.Errorf("cargo config is %d bytes, over the %d limit", len(data), maxManifestBytes)
+	}
+	if err := proofTOMLError(data); err != nil {
+		return nil, fmt.Errorf("cargo config %w", err)
+	}
+	doc := map[string]any{}
+	_, err := decodeTOML(data, &doc)
+	return doc, err
+}
+
+// CargoVendorSource is the slash directory that configAt's configs at or above dir replace crates.io with, or "" when none or unclear.
+func CargoVendorSource(dir string, configAt func(dir string) (doc map[string]any, ok bool)) string {
+	// find is the nearest value set at keys and its config's directory, with ok false at a config it cannot follow.
+	find := func(keys ...string) (v any, base string, ok bool) {
+		for d := dir; ; d = path.Dir(d) {
+			doc, ok := configAt(d)
+			if !ok || doc["include"] != nil {
+				return nil, "", false
+			}
+			if v := tomlLookup(doc, keys...); v != nil {
+				return v, d, true
+			}
+			if path.Dir(d) == d {
+				return nil, "", true
+			}
+		}
+	}
+	v, _, ok := find("source", "crates-io", "replace-with")
+	name, _ := v.(string)
+	if !ok || name == "" {
+		return ""
+	}
+	// cargo follows a replacement's own replace-with, so only a source replaced once is the vendor tree.
+	if again, _, ok := find("source", name, "replace-with"); !ok || again != nil {
+		return ""
+	}
+	v, base, ok := find("source", name, "directory")
+	directory, _ := v.(string)
+	if !ok || directory == "" || path.IsAbs(directory) || filepath.VolumeName(directory) != "" {
+		return ""
+	}
+	// cargo resolves ".." after following symlinks, so one after a named directory may lead somewhere else.
+	named := false
+	for _, seg := range strings.FieldsFunc(directory, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if seg == ".." && named {
+			return ""
+		}
+		named = named || seg != "." && seg != ".."
+	}
+	return path.Join(base, directory)
 }
 
 func decodeTOMLAt(r file.Resolver, loc file.Location, limit int64, v any) error {

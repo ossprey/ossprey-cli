@@ -99,11 +99,13 @@ func TestOverlay(t *testing.T) {
 				"GITHUB_REF_NAME":   "main",
 			},
 			want: ossbom.Environment{
-				GithubOrg:  "acme",
-				GithubRepo: "widget",
-				Branch:     "main",
-				ProductEnv: ProductGitHubActions,
-				Project:    "widget",
+				GithubOrg:   "acme",
+				GithubRepo:  "widget",
+				Branch:      "main",
+				ProductEnv:  ProductGitHubActions,
+				MachineName: MachineGitHubSelfHosted,
+				Person:      PersonGitHubActions,
+				Project:     "widget",
 			},
 		},
 		{
@@ -115,11 +117,13 @@ func TestOverlay(t *testing.T) {
 				"GITHUB_HEAD_REF":   "feature/foo",
 			},
 			want: ossbom.Environment{
-				GithubOrg:  "acme",
-				GithubRepo: "widget",
-				Branch:     "feature/foo",
-				ProductEnv: ProductGitHubActions,
-				Project:    "widget",
+				GithubOrg:   "acme",
+				GithubRepo:  "widget",
+				Branch:      "feature/foo",
+				ProductEnv:  ProductGitHubActions,
+				MachineName: MachineGitHubSelfHosted,
+				Person:      PersonGitHubActions,
+				Project:     "widget",
 			},
 		},
 		{
@@ -130,8 +134,10 @@ func TestOverlay(t *testing.T) {
 				"GITHUB_REF_NAME":   "main",
 			},
 			want: ossbom.Environment{
-				Branch:     "main",
-				ProductEnv: ProductGitHubActions,
+				Branch:      "main",
+				ProductEnv:  ProductGitHubActions,
+				MachineName: MachineGitHubSelfHosted,
+				Person:      PersonGitHubActions,
 			},
 		},
 		{
@@ -151,7 +157,10 @@ func TestOverlay(t *testing.T) {
 			Overlay(&got)
 
 			want := tt.want
-			want.Path, want.MachineName = "/src", "agent-1"
+			want.Path = "/src"
+			if want.MachineName == "" {
+				want.MachineName = "agent-1"
+			}
 
 			if got != want {
 				t.Errorf("Overlay()\n got: %+v\nwant: %+v", got, want)
@@ -207,8 +216,8 @@ func TestOverlayMachineName(t *testing.T) {
 		want   string
 	}{
 		{name: "github-hosted runner gets a stable name", runner: "github-hosted", want: MachineGitHubHosted},
-		{name: "self-hosted runner keeps its hostname", runner: "self-hosted", want: "fv-az123"},
-		{name: "unknown runner environment keeps its hostname", runner: "", want: "fv-az123"},
+		{name: "self-hosted runner gets a stable name", runner: "self-hosted", want: MachineGitHubSelfHosted},
+		{name: "unknown runner environment gets the self-hosted name", runner: "", want: MachineGitHubSelfHosted},
 	}
 
 	for _, tt := range tests {
@@ -226,7 +235,31 @@ func TestOverlayMachineName(t *testing.T) {
 			if got.MachineName != tt.want {
 				t.Errorf("MachineName = %q, want %q", got.MachineName, tt.want)
 			}
+			if got.Person != PersonGitHubActions {
+				t.Errorf("Person = %q, want %q", got.Person, PersonGitHubActions)
+			}
 		})
+	}
+}
+
+// Two jobs on different ephemeral runners must produce the same env, or the
+// backend hashes each into its own SBOM.
+func TestOverlayGivesEveryGitHubActionsJobTheSameIdentity(t *testing.T) {
+	for _, k := range ciVars {
+		t.Setenv(k, "")
+	}
+	t.Setenv("GITHUB_ACTIONS", "true")
+	t.Setenv("GITHUB_REPOSITORY", "acme/widget")
+	t.Setenv("GITHUB_REF_NAME", "main")
+	t.Setenv("RUNNER_ENVIRONMENT", "self-hosted")
+
+	first := ossbom.Environment{Path: "/__w/widget/widget", MachineName: "3fa9c1d2e4b7", Person: "root@3fa9c1d2e4b7"}
+	second := ossbom.Environment{Path: "/__w/widget/widget", MachineName: "8be04f71a2c9", Person: "root@8be04f71a2c9"}
+	Overlay(&first)
+	Overlay(&second)
+
+	if first != second {
+		t.Errorf("jobs on different runners differ:\n first: %+v\nsecond: %+v", first, second)
 	}
 }
 
@@ -237,10 +270,10 @@ func TestOverlayKeepsTheHostnameOutsideCI(t *testing.T) {
 	}
 	t.Setenv("RUNNER_ENVIRONMENT", "github-hosted")
 
-	got := ossbom.Environment{MachineName: "laptop"}
+	got := ossbom.Environment{MachineName: "laptop", Person: "andy@laptop"}
 	Overlay(&got)
 
-	if got.MachineName != "laptop" {
-		t.Errorf("MachineName = %q, want %q", got.MachineName, "laptop")
+	if got.MachineName != "laptop" || got.Person != "andy@laptop" {
+		t.Errorf("Overlay changed a local scan's identity: %+v", got)
 	}
 }

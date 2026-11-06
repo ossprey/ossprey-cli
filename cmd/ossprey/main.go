@@ -375,12 +375,12 @@ func newCheckCmd() *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:   "check --eco-system <pypi|npm> <name[@version]>...",
+		Use:   "check --eco-system <pypi|npm|cargo> <name[@version]>...",
 		Short: "Check named packages for malware without a project directory",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if ecosystem == "" {
-				return errors.New("--eco-system is required (pypi or npm)")
+				return errors.New("--eco-system is required (pypi, npm or cargo)")
 			}
 
 			override, err := parseFloorOverride(failOn)
@@ -393,6 +393,18 @@ func newCheckCmd() *cobra.Command {
 				s, err := check.ParseSpec(ecosystem, a)
 				if err != nil {
 					return err
+				}
+				// crates.io folds case and '-'/'_' into one crate, while the malware lookup matches names exactly.
+				if s.Ecosystem == "cargo" {
+					name, v, err := registry.CanonicalCrate(cmd.Context(), s.Name, s.Version)
+					switch {
+					case err == nil:
+						s.Name, s.Version = name, v
+					case s.Version != "" && errors.Is(err, registry.ErrNotFound):
+						// crates.io deletes a malicious crate, so a pinned crate it no longer has is checked as typed.
+					default:
+						return fmt.Errorf("look up crate %s on crates.io: %w", s.Name, err)
+					}
 				}
 				// `check` resolves latest for unpinned packages, failing closed:
 				// if we can't pin a version we can't honestly check it.
@@ -447,7 +459,7 @@ func newCheckCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVarP(&ecosystem, "eco-system", "e", "", "package ecosystem: pypi or npm (required)")
+	cmd.Flags().StringVarP(&ecosystem, "eco-system", "e", "", "package ecosystem: pypi, npm or cargo (required)")
 	cmd.Flags().StringVar(&reportPath, "report", "", "write a JSON verdict report (verdict + findings) to file")
 	cmd.Flags().StringVar(&apiURL, "url", defaultAPIURL, "Ossprey API URL")
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "Ossprey API key (or OSSPREY_API_KEY / API_KEY env var; optional after `ossprey login`)")
