@@ -39,6 +39,11 @@ func pipSafeRequirement(line string) (string, bool) {
 	if strings.IndexFunc(line, unicode.IsControl) >= 0 {
 		return "", false
 	}
+	// pip expands ${VAR} on every line, a marker's string included, and the
+	// marker is copied as written.
+	if strings.Contains(line, "${") {
+		return "", false
+	}
 	line = strings.TrimSpace(line)
 	// Per-requirement options (--hash, --config-settings) matter only to an
 	// install or a build.
@@ -100,7 +105,11 @@ func (s *pipSanitizer) fileAt(src string, depth int) (string, error) {
 		return "", fmt.Errorf("%s: includes nest deeper than %d or number over %d", src, maxPipIncludeDepth, maxPipIncludeFiles)
 	}
 	// Numbered, not named after src: two sources can map to one name.
-	out := filepath.Join(s.dir, fmt.Sprintf("req-%d-%s.txt", len(s.written), requirementsFileID(filepath.Base(src))))
+	id := requirementsFileID(filepath.Base(src))
+	if len(id) > 40 {
+		id = id[:40] // the counter keeps it unique; this only keeps it readable
+	}
+	out := filepath.Join(s.dir, fmt.Sprintf("req-%d-%s.txt", len(s.written), id))
 	s.written[src] = out
 	data, err := readRequirementsFile(src)
 	if err != nil {
@@ -357,6 +366,8 @@ func describeUnsafeRequirement(line string) string {
 	switch {
 	case strings.IndexFunc(line, unicode.IsControl) >= 0:
 		return "a requirement with a line break"
+	case strings.Contains(line, "${"):
+		return "a requirement naming an environment variable"
 	case strings.Contains(line, "://") || strings.Contains(line, "@"):
 		return "a URL or direct reference"
 	case strings.HasPrefix(line, ".") || strings.HasPrefix(line, "~") || strings.ContainsAny(line, `/\`):
@@ -368,6 +379,87 @@ func describeUnsafeRequirement(line string) string {
 		}
 	}
 	return "a requirement pip could build"
+}
+
+// errNamesEnvVar refuses a manifest uv would fill in from this machine's
+// environment.
+var errNamesEnvVar = errors.New("names an environment variable (${...}), which the resolver would fill in from this machine; not resolved")
+
+// uvExpandsEnv reports, as an error, a requirements file (or any file it
+// includes) with a ${VAR} on any line. uv expands those from its environment
+// in requirement and option lines alike (verified against uv 0.11: an
+// --index-url and a direct URL each sent the variable's value to the host),
+// so a repository could send a runner secret anywhere. uv reads the file
+// itself, so the whole file is refused rather than rewritten.
+func uvExpandsEnv(ctx context.Context, path string) error {
+	seen := map[string]bool{}
+	var walk func(p string, depth int) error
+	walk = func(p string, depth int) error {
+		if seen[p] {
+			return nil
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if depth > maxPipIncludeDepth || len(seen) >= maxPipIncludeFiles {
+			return fmt.Errorf("%s: includes nest deeper than %d or number over %d", p, maxPipIncludeDepth, maxPipIncludeFiles)
+		}
+		seen[p] = true
+		data, err := readRequirementsFile(p)
+		if err != nil {
+			return err
+		}
+		for _, line := range requirementLines(data) {
+			if strings.Contains(line, "${") {
+				return fmt.Errorf("%s %w", p, errNamesEnvVar)
+			}
+			line = strings.TrimSpace(line)
+			if !strings.HasPrefix(line, "-") {
+				continue
+			}
+			tokens, err := shlexSplit(line)
+			if err != nil {
+				continue // uv refuses it too
+			}
+			for i, tok := range tokens {
+				name, value, attached := splitPipToken(tok)
+				switch name {
+				case "-r", "--requirement", "-c", "--constraint":
+				default:
+					continue
+				}
+				if !attached {
+					if i+1 >= len(tokens) {
+						continue
+					}
+					value = tokens[i+1]
+				}
+				if strings.Contains(value, "://") {
+					continue
+				}
+				if !filepath.IsAbs(value) {
+					value = filepath.Join(filepath.Dir(p), value)
+				}
+				if err := walk(value, depth+1); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	return walk(path, 0)
+}
+
+// pyprojectExpandsEnv is uvExpandsEnv for a pyproject's [project]
+// dependencies, which uv expands the same way.
+func pyprojectExpandsEnv(path string) error {
+	specs, _ := pyprojectRequirementSpecs(path)
+	for _, s := range specs {
+		if strings.Contains(s, "${") {
+			return fmt.Errorf("%s %w", path, errNamesEnvVar)
+		}
+	}
+	return nil
 }
 
 func pathExists(p string) bool {

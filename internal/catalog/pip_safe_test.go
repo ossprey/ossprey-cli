@@ -3,11 +3,14 @@ package catalog
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/ossprey/ossprey-cli/internal/warn"
@@ -33,6 +36,8 @@ func TestPipSafeRequirementRejectsLineBreaks(t *testing.T) {
 		"requests; python_version >= '0'\n./local",
 		"requests; python_version >= '0'\r./local",
 		"requests\x00",
+		`requests; python_version > "${GITHUB_TOKEN}"`,
+		"${PKG}==1.0",
 	} {
 		if got, ok := pipSafeRequirement(spec); ok {
 			t.Errorf("pipSafeRequirement(%q) kept %q", spec, got)
@@ -80,6 +85,19 @@ func TestPipSanitizerRefusesEnvironmentExpansionInOptions(t *testing.T) {
 	}
 	if len(s.dropped) != 3 {
 		t.Errorf("dropped = %v, want all three options", s.dropped)
+	}
+}
+
+// A source name at the filesystem's limit still yields a copy name under it.
+func TestPipSanitizerBoundsCopyNames(t *testing.T) {
+	name := strings.Repeat("r", 250) + ".txt"
+	got, _, err := sanitize(t, map[string]string{"requirements.txt": "-r " + name + "\n", name: "idna\n"})
+	if err != nil {
+		t.Fatalf("a long include name failed: %v", err)
+	}
+	tok, _ := shlexSplit(strings.TrimSpace(got))
+	if len(filepath.Base(tok[1])) > 64 {
+		t.Errorf("copy name %d bytes long: %s", len(filepath.Base(tok[1])), tok[1])
 	}
 }
 
@@ -239,5 +257,55 @@ func TestMalformedPyprojectNeedsBuild(t *testing.T) {
 	writeTree(t, dir, map[string]string{"uv.lock": "version = 1\n"})
 	if err := pyprojectNeedsBuild(p); err != nil {
 		t.Errorf("a lock beside it covers it: %v", err)
+	}
+}
+
+// uv expands ${VAR} in requirements files (options and requirements alike)
+// and in pyproject dependencies, so a manifest naming one is never handed to
+// it: the variable's value would reach a host the repository chose.
+func TestUVNeverExpandsRepositoryEnvVars(t *testing.T) {
+	var seen []string
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = append(seen, r.URL.String())
+		mu.Unlock()
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	t.Setenv("LEAKTEST_SECRET", "topsecret123")
+	cases := map[string]map[string]string{
+		"index url":     {"requirements.txt": "--index-url " + srv.URL + "/${LEAKTEST_SECRET}/simple\nrequests\n"},
+		"direct url":    {"requirements.txt": "requests @ " + srv.URL + "/${LEAKTEST_SECRET}/requests-2.31.0-py3-none-any.whl\n"},
+		"included file": {"requirements.txt": "-r more.txt\n", "more.txt": "--extra-index-url=" + srv.URL + "/${LEAKTEST_SECRET}/simple\nrequests\n"},
+		"pyproject":     {"pyproject.toml": "[project]\nname = \"app\"\nversion = \"0.1.0\"\ndependencies = [\"requests @ " + srv.URL + "/${LEAKTEST_SECRET}/requests-2.31.0-py3-none-any.whl\"]\n"},
+	}
+	for name, files := range cases {
+		t.Run(name, func(t *testing.T) {
+			realToolsOnly(t, "uv", "python3")
+			proj := t.TempDir()
+			writeTree(t, proj, files)
+			ctx := warn.NewContext(context.Background(), false)
+			if _, err := Catalog(ctx, proj, Options{SkipVersionLookup: true}); err != nil {
+				t.Fatal(err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			for _, u := range seen {
+				if strings.Contains(u, "topsecret123") {
+					t.Fatalf("uv sent the secret: %s", u)
+				}
+			}
+			manifest := "requirements.txt"
+			if _, ok := files["pyproject.toml"]; ok {
+				manifest = "pyproject.toml"
+			}
+			if got := warn.Unresolved(ctx); !slices.Contains(got, manifest) {
+				t.Errorf("unresolved = %v, want %s", got, manifest)
+			}
+			if out := warn.Drain(ctx); !strings.Contains(out, "environment variable") {
+				t.Errorf("no warning says why:\n%s", out)
+			}
+		})
 	}
 }

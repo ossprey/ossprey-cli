@@ -78,6 +78,11 @@ func (c *UVCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]pk
 				return nil, err
 			}
 		}
+		// uv export re-locks from the pyproject when the lock is stale, so
+		// its dependencies are read either way.
+		if err := pyprojectExpandsEnv(absPath); err != nil {
+			return nil, err
+		}
 		args := uvArgsForPyProject(dir)
 		return runUV(ctx, c.uv, cache, dir, args, loc)
 	}

@@ -35,9 +35,13 @@ never does that:
   requirements file holding only registry requirements and index options. A
   `--no-binary` option, a local path, an editable (`-e`) or a direct URL
   (`name @ url`) is left out, since pip would build it whatever the flags say,
-  and so is an index or find-links option that names an environment variable
-  (`${VAR}`), which pip would fill in from the scanning machine. Keep a private
-  index's credentials in pip's own configuration or `PIP_*` variables instead.
+  and so is any line that names an environment variable (`${VAR}`), which pip
+  would fill in from the scanning machine.
+- uv is never handed a requirements file (or one it includes) or a
+  `pyproject.toml` dependency that names `${VAR}`, which uv fills in the same
+  way; that manifest is reported unresolved instead. Keep a private index's
+  credentials in pip's or uv's own configuration, `PIP_INDEX_URL` /
+  `UV_INDEX_URL`, keyring or `.netrc`, which a repository cannot write.
 - A legacy `setup.py` project is not resolved at all: that would run
   `setup.py`. Its literal `install_requires` are still read.
 - A `pyproject.toml` whose dependencies are `dynamic`, or a poetry project with
