@@ -245,3 +245,31 @@ func TestResolverCacheFailureIsUnresolved(t *testing.T) {
 		})
 	}
 }
+
+// A lockfile that parses but locks nothing is a stub, not a tree: it must not
+// exempt a manifest that declares dependencies.
+func TestStubLockCoversNothing(t *testing.T) {
+	crate := "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = \"=1.0.228\"\n"
+	pp := "[project]\nname = \"app\"\nversion = \"0.1.0\"\ndependencies = [\"requests>=2\"]\n"
+	pj := `{"name":"app","version":"1.0.0","dependencies":{"left-pad":"^1.3.0"}}`
+	stubNpm := `{"name":"app","lockfileVersion":3,"packages":{"":{"name":"app"}}}`
+	for name, tc := range map[string]struct {
+		files map[string]string
+		want  string
+	}{
+		"Cargo.lock":        {map[string]string{"Cargo.toml": crate, "Cargo.lock": "version = 3\n"}, "Cargo.toml"},
+		"uv.lock":           {map[string]string{"pyproject.toml": pp, "uv.lock": "version = 1\n"}, "pyproject.toml"},
+		"poetry.lock":       {map[string]string{"pyproject.toml": pp, "poetry.lock": "[metadata]\nlock-version = \"2.0\"\n"}, "pyproject.toml"},
+		"package-lock.json": {map[string]string{"package.json": pj, "package-lock.json": stubNpm}, "package.json"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := unresolvedFor(t, tc.files); !slices.Equal(got, []string{tc.want}) {
+				t.Errorf("unresolved = %v, want [%s]", got, tc.want)
+			}
+		})
+	}
+	// A root-only npm lock still covers a package.json declaring nothing.
+	if got := unresolvedFor(t, map[string]string{"package.json": `{"name":"app","version":"1.0.0"}`, "package-lock.json": stubNpm}); len(got) != 0 {
+		t.Errorf("dependency-free project: unresolved = %v, want none", got)
+	}
+}

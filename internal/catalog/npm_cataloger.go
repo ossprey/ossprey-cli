@@ -93,6 +93,13 @@ func hasNpmLockfile(dir string) bool {
 	return false
 }
 
+// declaresNpmDependencies reports a package.json with any direct dependency;
+// one that cannot be read counts as declaring some.
+func declaresNpmDependencies(path string) bool {
+	direct, err := parsePackageJSONFile(path, file.Location{})
+	return err != nil || len(direct) > 0
+}
+
 // npmLockReadCache memoises npmLockReadable by path, size and modification
 // time: a monorepo root lock is consulted once per workspace member.
 var npmLockReadCache sync.Map
@@ -114,8 +121,9 @@ func npmLockReadable(path string) bool {
 	if data, err := readRegularFile(path, maxLockfileBytes); err == nil {
 		switch filepath.Base(path) {
 		case "package-lock.json", "npm-shrinkwrap.json":
-			_, err := parseNpmLock(data, file.Location{})
-			ok = err == nil
+			// A lock locking nothing covers only a manifest declaring nothing.
+			pkgs, err := parseNpmLock(data, file.Location{})
+			ok = err == nil && (len(pkgs) > 0 || !declaresNpmDependencies(filepath.Join(filepath.Dir(path), "package.json")))
 		default:
 			ok = true
 		}
