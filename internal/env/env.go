@@ -15,19 +15,25 @@ const (
 	ProductGitHubActions = "GITHUB_ACTIONS"
 )
 
-// MachineGitHubHosted stands in for the hostname on a GitHub-hosted runner.
-// Each job gets a fresh VM with its own hostname, and the backend hashes the
-// SBOM's env into its id, so the real hostname made every CI run of unchanged
-// dependencies a distinct SBOM the service could not recognise as a repeat.
-const MachineGitHubHosted = "github-hosted-runner"
+// MachineGitHubHosted and MachineGitHubSelfHosted stand in for the hostname on
+// a GitHub Actions runner, and PersonGitHubActions for the OS user. Each job on
+// a hosted VM or an ephemeral self-hosted runner (ARC, container jobs) gets a
+// fresh hostname, and the backend hashes the SBOM's env into its id, so the
+// real values made every CI run of unchanged dependencies a distinct SBOM the
+// service could not recognise as a repeat.
+const (
+	MachineGitHubHosted     = "github-hosted-runner"
+	MachineGitHubSelfHosted = "github-self-hosted-runner"
+	PersonGitHubActions     = "github-actions"
+)
 
 type detector func() (ossbom.Environment, bool)
 
 var detectors = []detector{detectAzureDevOps, detectGitHubActions}
 
 // Overlay fills attribution and Project from the detected CI platform, leaving
-// Path to the caller. MachineName is left to the caller too, except on an
-// ephemeral hosted runner, where the platform's stable name replaces it.
+// Path to the caller. MachineName and Person are left to the caller too, except
+// on GitHub Actions, where the platform's stable names replace them.
 func Overlay(e *ossbom.Environment) {
 	for _, detect := range detectors {
 		got, ok := detect()
@@ -41,6 +47,9 @@ func Overlay(e *ossbom.Environment) {
 		setIfEmpty(&e.Project, got.Project)
 		if got.MachineName != "" {
 			e.MachineName = got.MachineName
+		}
+		if got.Person != "" {
+			e.Person = got.Person
 		}
 		return
 	}
@@ -94,9 +103,14 @@ func detectGitHubActions() (ossbom.Environment, bool) {
 		return ossbom.Environment{}, false
 	}
 
-	e := ossbom.Environment{Branch: githubBranch(), ProductEnv: ProductGitHubActions}
-	// Self-hosted runners keep their hostname: it is stable, so it already
-	// dedupes, and it says which machine ran the scan.
+	e := ossbom.Environment{
+		Branch:      githubBranch(),
+		ProductEnv:  ProductGitHubActions,
+		MachineName: MachineGitHubSelfHosted,
+		Person:      PersonGitHubActions,
+	}
+	// Self-hosted runners are named too: autoscaled and containerised ones get a
+	// fresh hostname per job.
 	if os.Getenv("RUNNER_ENVIRONMENT") == "github-hosted" {
 		e.MachineName = MachineGitHubHosted
 	}
