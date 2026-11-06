@@ -1,0 +1,35 @@
+name: Vulncheck
+
+# Fails when the Go toolchain or a module in go.mod has a known CVE.
+# The weekly run catches advisories published after the last merge.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Scans the built binary at module level, matching what AWS Inspector
+      # reports on the service images: any vulnerable module fails, reachable or not.
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+          CGO_ENABLED=0 go build -trimpath -o ossprey ./cmd/ossprey
+          govulncheck -mode binary -scan module ossprey
