@@ -156,8 +156,11 @@ tree was resolved. `unresolved_manifests` lists, relative to the scanned path,
 each manifest whose transitive dependencies were not resolved — its resolver
 failed, none was available, or resolving it would have meant building a
 package, which a scan never does (see [ecosystems](ecosystems.md#a-scan-never-runs-package-code)).
-Only the direct dependencies of those manifests were checked. `transitive` is
-`partial` when that list is non-empty and `complete` otherwise. Both are always
+Only the direct dependencies of those manifests were checked. When the scan
+stopped at its [`--timeout`](cli-reference.md) deadline, `deadline_reached` is
+`true`: manifests it never reached are in no list. `transitive` is `partial`
+when that list is non-empty or the deadline was reached, and `complete`
+otherwise. Both are always
 present on a `scan` report (`[]` when nothing is unresolved) and absent from a
 `check` report, which names its packages and has no tree. Neither changes the
 verdict or the exit code; [`--require-complete`](ci.md#requiring-complete-coverage)

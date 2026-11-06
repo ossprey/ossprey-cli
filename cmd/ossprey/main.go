@@ -303,7 +303,7 @@ func newScanCmd() *cobra.Command {
 				if err != nil {
 					if skipped, ok := printSkipped(err); ok {
 						r := scan.SkippedReport(sbom, resolveFloor(sbom.FailingSeverityFloor, override), skipped.Message, skipped.ResetAt)
-						r.SetCoverage(warn.Unresolved(cmd.Context()))
+						r.SetCoverage(warn.Unresolved(cmd.Context()), warn.Truncated(cmd.Context()))
 						if err := writeReport(reportPath, r); err != nil {
 							return err
 						}
@@ -337,7 +337,7 @@ func newScanCmd() *cobra.Command {
 			flushWarnings(cmd.Context())
 
 			report := scan.NewReport(sbom, floor)
-			report.SetCoverage(warn.Unresolved(cmd.Context()))
+			report.SetCoverage(warn.Unresolved(cmd.Context()), warn.Truncated(cmd.Context()))
 			if err := writeReport(reportPath, report); err != nil {
 				return err
 			}

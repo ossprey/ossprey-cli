@@ -78,6 +78,9 @@ type collector struct {
 	byClass map[string][]Entry
 	// unresolved outlives Drain: the report reads it after the warnings print.
 	unresolved map[string]struct{}
+	// truncated: the catalogue stopped at its deadline, so manifests after
+	// that point were never read, let alone marked.
+	truncated bool
 }
 
 type ctxKey struct{}
@@ -122,6 +125,27 @@ func Unresolved(ctx context.Context) []string {
 	}
 	slices.Sort(out)
 	return out
+}
+
+// MarkTruncated records that the catalogue stopped at its deadline. A no-op
+// without a collector.
+func MarkTruncated(ctx context.Context) {
+	if c, ok := ctx.Value(ctxKey{}).(*collector); ok {
+		c.mu.Lock()
+		c.truncated = true
+		c.mu.Unlock()
+	}
+}
+
+// Truncated reports whether MarkTruncated was called.
+func Truncated(ctx context.Context) bool {
+	c, ok := ctx.Value(ctxKey{}).(*collector)
+	if !ok {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.truncated
 }
 
 // Add records one occurrence. Safe for concurrent use: the catalogers that call
