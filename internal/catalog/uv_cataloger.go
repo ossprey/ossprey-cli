@@ -39,7 +39,9 @@ func lookupUV(ctx context.Context) (string, bool) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	if err := exec.CommandContext(ctx, path, "--version").Run(); err != nil {
+	cmd := exec.CommandContext(ctx, path, "--version")
+	cmd.Env = toolEnv()
+	if err := cmd.Run(); err != nil {
 		return "", false
 	}
 	return path, true
@@ -69,17 +71,33 @@ func (c *UVCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]pk
 
 	parse := func(absPath string, loc file.Location) ([]pkg.Package, error) {
 		dir := filepath.Dir(absPath)
+		if !hasUVLock(dir) {
+			// Without a [project] table uv can only learn the dependencies by
+			// building the project, which --no-build refuses.
+			if err := pyprojectNeedsBuild(absPath); err != nil || !hasPEP621Project(absPath) {
+				return nil, err
+			}
+		}
 		args := uvArgsForPyProject(dir)
 		return runUV(ctx, c.uv, cache, dir, args, loc)
 	}
-	out, err := catalogByGlob(ctx, resolver, c.root, "**/pyproject.toml", "uv", parse)
+	out, err := resolveByGlob(ctx, resolver, c.root, "**/pyproject.toml", "uv", parse)
 	return out, nil, err
+}
+
+func hasUVLock(dir string) bool {
+	_, err := os.Stat(filepath.Join(dir, "uv.lock"))
+	return err == nil
 }
 
 // uvArgsForPyProject picks the right uv invocation for a project dir.
 // Prefers uv.lock (faster, deterministic), falls back to pip compile.
+//
+// Every scan-path uv call carries --no-build: an sdist-only dependency would
+// otherwise have uv run its PEP 517 backend to read its metadata. Such a
+// manifest fails instead and is reported unresolved.
 func uvArgsForPyProject(dir string) []string {
-	if _, err := os.Stat(filepath.Join(dir, "uv.lock")); err == nil {
+	if hasUVLock(dir) {
 		return []string{
 			"export",
 			"--directory", dir,
@@ -88,10 +106,11 @@ func uvArgsForPyProject(dir string) []string {
 			"--no-hashes",
 			"--no-emit-project",
 			"--no-progress",
+			"--no-build",
 		}
 	}
 	pyproject := filepath.Join(dir, "pyproject.toml")
-	args := []string{"pip", "compile", "--universal", "--no-progress"}
+	args := []string{"pip", "compile", "--universal", "--no-progress", "--no-build"}
 	if floor := poetryPythonFloor(pyproject); floor != "" {
 		args = append(args, "--python-version", floor)
 	}
@@ -169,7 +188,7 @@ func runUV(ctx context.Context, uv, cache, dir string, args []string, loc file.L
 
 	cmd := exec.CommandContext(ctx, uv, args...)
 	cmd.Env = toolEnv("UV_CACHE_DIR=" + cache)
-	cmd.WaitDelay = 5 * time.Second // the kill lands on uv, but Output still waits on pipes a PEP 517 build backend may hold
+	cmd.WaitDelay = 5 * time.Second // the kill lands on uv, but Output still waits on pipes a grandchild may hold
 	stdout, err := cmd.Output()
 	if err != nil {
 		if ctx.Err() != nil {

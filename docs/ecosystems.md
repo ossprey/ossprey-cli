@@ -13,12 +13,39 @@ Python, JavaScript and Rust, via syft's static catalogers.
 Rust (crates.io) scanning is available on Teams and Enterprise plans.
 
 The CLI never installs your dependencies. It does run a resolver — `npm install
---package-lock-only` (in a temporary directory) or `uv pip compile` — when a
-project ships a manifest with no lockfile, purely to work out which versions an
-install would pull; nothing is installed and your project is not modified. When
-that resolver is missing from PATH or disabled, expect direct deps only —
-supply a lockfile for full transitive coverage. Rust has no resolver tier, so a
-crate with no `Cargo.lock` always catalogues direct dependencies only.
+--package-lock-only` (in a temporary directory), `uv pip compile`/`uv export`,
+or `pip install --dry-run` on a host with no uv — when a project ships a
+manifest with no lockfile, purely to work out which versions an install would
+pull; nothing is installed and your project is not modified. When that resolver
+is missing from PATH or disabled, expect direct deps only — supply a lockfile
+for full transitive coverage. Rust has no resolver tier, so a crate with no
+`Cargo.lock` always catalogues direct dependencies only.
+
+### A scan never runs package code
+
+Resolving a Python dependency that ships only a source distribution (no wheel
+for your platform) normally means running its build backend to read its
+metadata — code from the dependency tree being scanned for malware. The scan
+never does that:
+
+- npm runs with `--ignore-scripts`.
+- uv runs with `--no-build`.
+- pip runs with `--only-binary=:all:`, in isolated mode (`python -I`, so a
+  `pip.py` in your repository is never what runs), and is handed a copy of each
+  requirements file holding only registry requirements and index options. A
+  `--no-binary` option, a local path, an editable (`-e`) or a direct URL
+  (`name @ url`) is left out, since pip would build it whatever the flags say.
+- A legacy `setup.py` project is not resolved at all: that would run
+  `setup.py`. Its literal `install_requires` are still read.
+- A `pyproject.toml` whose dependencies are `dynamic`, or a poetry project with
+  no `poetry.lock`, would have to be built to learn them, so it is not resolved
+  either.
+- The resolvers do not see `OSSPREY_API_KEY`, `API_KEY`, `OSSPREY_MONITOR_ID` or
+  any other `OSSPREY_*` variable.
+
+A manifest that cannot be resolved this way keeps its direct dependencies and
+is reported **unresolved** by a warning naming it. Commit a lockfile (`uv.lock`,
+`poetry.lock`, a compiled `requirements.txt`) to cover its whole tree.
 
 Directories that hold installed or built packages rather than your project's
 own manifests are not read at all: `node_modules`, `bower_components`,

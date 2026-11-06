@@ -37,10 +37,10 @@ func (c *RequirementsCataloger) Catalog(ctx context.Context, resolver file.Resol
 
 	parse := func(absPath string, loc file.Location) ([]pkg.Package, error) {
 		dir := filepath.Dir(absPath)
-		args := []string{"pip", "compile", "--universal", "--no-progress", absPath}
+		args := []string{"pip", "compile", "--universal", "--no-progress", "--no-build", absPath}
 		return runUV(ctx, c.uv, cache, dir, args, loc)
 	}
-	out, err := catalogByGlob(ctx, resolver, c.root, requirementsGlob, "requirements", parse)
+	out, err := resolveByGlob(ctx, resolver, c.root, requirementsGlob, "requirements", parse)
 	return out, nil, err
 }
 

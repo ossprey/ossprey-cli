@@ -3,8 +3,10 @@ package catalog
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -36,6 +38,7 @@ type pyproject struct {
 		RequiresPython       string              `toml:"requires-python"`
 		Dependencies         []string            `toml:"dependencies"`
 		OptionalDependencies map[string][]string `toml:"optional-dependencies"`
+		Dynamic              []string            `toml:"dynamic"`
 	} `toml:"project"`
 	Tool struct {
 		Poetry struct {
@@ -202,4 +205,41 @@ func hasPEP621Project(path string) bool {
 		return false
 	}
 	return pp.Project.Name != "" || len(pp.Project.Dependencies) > 0
+}
+
+// pyprojectNeedsBuild reports, as an error, a pyproject.toml whose dependencies
+// can only be learned by building the project: no [project] table, poetry
+// dependencies, and no poetry.lock beside it to read them from instead.
+// Building runs the project's backend, which a scan never does, so the manifest
+// is reported unresolved. nil when there is nothing that needs it.
+func pyprojectNeedsBuild(path string) error {
+	pp, err := readPyProject(path)
+	if err != nil || pp == nil || hasPEP621Project(path) {
+		return nil
+	}
+	deps := 0
+	for name := range pp.Tool.Poetry.Dependencies {
+		if name != "python" {
+			deps++
+		}
+	}
+	if deps == 0 {
+		return nil
+	}
+	dir := filepath.Dir(path)
+	if _, err := os.Stat(filepath.Join(dir, "poetry.lock")); err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s: poetry dependencies with no poetry.lock; resolving them would build the project, so direct dependencies only", dir)
+}
+
+// dynamicDependencies reports whether a [project] table leaves its
+// dependencies to the build backend, which only a build would reveal.
+func dynamicDependencies(pp *pyproject) bool {
+	for _, d := range pp.Project.Dynamic {
+		if d == "dependencies" || d == "optional-dependencies" {
+			return true
+		}
+	}
+	return false
 }

@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 
@@ -75,6 +76,8 @@ type collector struct {
 	verbose bool
 	order   []string
 	byClass map[string][]Entry
+	// unresolved outlives Drain: the report reads it after the warnings print.
+	unresolved map[string]struct{}
 }
 
 type ctxKey struct{}
@@ -84,9 +87,41 @@ type ctxKey struct{}
 // forwarders parse no flags of their own and have no other way to ask.
 func NewContext(ctx context.Context, verbose bool) context.Context {
 	return context.WithValue(ctx, ctxKey{}, &collector{
-		verbose: verbose || env.Verbose(),
-		byClass: map[string][]Entry{},
+		verbose:    verbose || env.Verbose(),
+		byClass:    map[string][]Entry{},
+		unresolved: map[string]struct{}{},
 	})
+}
+
+// MarkUnresolved records a manifest whose transitive dependencies the scan
+// could not resolve, so it covers that manifest's direct dependencies at most.
+// It says nothing by itself; the caller adds the warning that explains why.
+// A no-op without a collector.
+func MarkUnresolved(ctx context.Context, manifest string) {
+	c, ok := ctx.Value(ctxKey{}).(*collector)
+	if !ok || manifest == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.unresolved[manifest] = struct{}{}
+}
+
+// Unresolved returns the manifests MarkUnresolved recorded, sorted. Unlike the
+// warnings it is not cleared by Drain.
+func Unresolved(ctx context.Context) []string {
+	c, ok := ctx.Value(ctxKey{}).(*collector)
+	if !ok {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]string, 0, len(c.unresolved))
+	for m := range c.unresolved {
+		out = append(out, m)
+	}
+	slices.Sort(out)
+	return out
 }
 
 // Add records one occurrence. Safe for concurrent use: the catalogers that call

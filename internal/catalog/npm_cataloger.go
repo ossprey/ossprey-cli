@@ -36,7 +36,18 @@ func (c *NpmResolveCataloger) Name() string { return "ossprey-npm-cataloger" }
 func (c *NpmResolveCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]pkg.Package, []artifact.Relationship, error) {
 	npm, err := lookTool("npm")
 	if err != nil {
-		return nil, nil, nil // no real npm on PATH — silently skip
+		// No real npm on PATH: the package.json fallback keeps the direct
+		// dependencies, and the manifests that needed resolving say so.
+		_, err := resolveByGlob(ctx, resolver, c.root, "**/package.json", "npm", func(absPath string, loc file.Location) ([]pkg.Package, error) {
+			if c.standsDown(absPath) {
+				return nil, nil
+			}
+			if direct, _ := parsePackageJSONFile(absPath, loc); len(direct) == 0 {
+				return nil, nil
+			}
+			return nil, fmt.Errorf("%s: no npm on PATH to resolve it, so direct dependencies only", filepath.Dir(absPath))
+		})
+		return nil, nil, err
 	}
 	// One shared cache for the whole scan
 	cache, err := os.MkdirTemp("", "ossprey-npm-cache-")
@@ -46,17 +57,20 @@ func (c *NpmResolveCataloger) Catalog(ctx context.Context, resolver file.Resolve
 	defer os.RemoveAll(cache)
 
 	parse := func(absPath string, loc file.Location) ([]pkg.Package, error) {
-		dir := filepath.Dir(absPath)
-		if hasNpmLockfile(dir) {
-			return nil, nil // syft's lock cataloger already resolves this project
-		}
-		if isWorkspaceMember(dir, c.root) {
-			return nil, nil // an ancestor lockfile already carries this member's full tree
+		if c.standsDown(absPath) {
+			return nil, nil
 		}
 		return runNpmResolve(ctx, npm, cache, absPath, loc)
 	}
-	out, err := catalogByGlob(ctx, resolver, c.root, "**/package.json", "npm", parse)
+	out, err := resolveByGlob(ctx, resolver, c.root, "**/package.json", "npm", parse)
 	return out, nil, err
+}
+
+// standsDown reports a package.json whose tree a lockfile already carries:
+// its own (syft reads it), or an ancestor's that declares it a workspace member.
+func (c *NpmResolveCataloger) standsDown(packageJSON string) bool {
+	dir := filepath.Dir(packageJSON)
+	return hasNpmLockfile(dir) || isWorkspaceMember(dir, c.root)
 }
 
 // hasNpmLockfile reports whether dir already ships a lockfile syft can read.

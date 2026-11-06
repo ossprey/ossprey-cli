@@ -3,7 +3,6 @@ package catalog
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 
 	"github.com/anchore/syft/syft/artifact"
@@ -11,43 +10,33 @@ import (
 	"github.com/anchore/syft/syft/pkg"
 )
 
-// SetupPyCataloger resolves transitive deps from a `setup.py` file by
-// invoking `uv pip compile setup.py`. Covers the case where pyproject.toml
-// is missing or doesn't declare a `[project]` table (e.g. legacy
-// setuptools projects, or pyprojects that only carry tool config like ruff).
+// SetupPyCataloger reports legacy setup.py projects as unresolved. It resolves
+// nothing: the only way to learn a setup.py's dependencies is to run it, which
+// is code from the tree being scanned. Syft's own setup.py parser still reads
+// the literal install_requires, so the project keeps its direct dependencies;
+// this makes the missing transitive tree visible rather than silent.
 //
-// uv reads setuptools metadata via PEP 517 build isolation without
-// executing project code beyond the build backend, then resolves the
-// transitive tree against PyPI.
+// It used to run `uv pip compile setup.py`, which builds the project through
+// its PEP 517 backend — executing setup.py.
 type SetupPyCataloger struct {
 	root string
-	uv   string
 }
 
-func NewSetupPyCataloger(root, uv string) *SetupPyCataloger {
-	return &SetupPyCataloger{root: root, uv: uv}
+func NewSetupPyCataloger(root string) *SetupPyCataloger {
+	return &SetupPyCataloger{root: root}
 }
 
 func (c *SetupPyCataloger) Name() string { return "ossprey-setuppy-cataloger" }
 
 func (c *SetupPyCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]pkg.Package, []artifact.Relationship, error) {
-	cache, err := os.MkdirTemp("", "ossprey-uv-cache-")
-	if err != nil {
-		return nil, nil, fmt.Errorf("uv cache: %w", err)
-	}
-	defer os.RemoveAll(cache)
-
 	parse := func(absPath string, loc file.Location) ([]pkg.Package, error) {
 		dir := filepath.Dir(absPath)
-		// Skip if pyproject.toml in same dir AND has [project] table — UVCataloger
-		// already covered it. We only run when the pyproject path failed (no
-		// [project]) or pyproject is absent.
+		// A [project] table beside it is resolved from the pyproject instead.
 		if hasPEP621Project(filepath.Join(dir, "pyproject.toml")) {
 			return nil, nil
 		}
-		args := []string{"pip", "compile", "--universal", "--no-progress", absPath}
-		return runUV(ctx, c.uv, cache, dir, args, loc)
+		return nil, fmt.Errorf("%s: resolving setup.py would run it, so direct dependencies only", dir)
 	}
-	out, err := catalogByGlob(ctx, resolver, c.root, "**/setup.py", "setup.py", parse)
+	out, err := resolveByGlob(ctx, resolver, c.root, "**/setup.py", "setup.py", parse)
 	return out, nil, err
 }

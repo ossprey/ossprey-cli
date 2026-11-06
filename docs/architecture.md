@@ -11,8 +11,10 @@ verdict; passive runs stop at the submission, and commands the forwarder does
 not recognise (or that `OSSPREY_SKIP_CI` disables) never enter this pipeline at
 all.
 
-Nothing here installs anything. The one exception is the resolver step marked
-below, which runs only when a manifest ships without a lockfile.
+Nothing here installs anything or runs package code. The one exception is the
+resolver step marked below, which runs only when a manifest ships without a
+lockfile, and never builds a package: a manifest it cannot resolve without a
+build is reported unresolved ([ecosystems](ecosystems.md)).
 
 ```mermaid
 flowchart LR
@@ -23,7 +25,7 @@ flowchart LR
     end
 
     A --> D["internal/catalog<br/>lockfiles + manifests"]
-    D -. "no lockfile" .-> E["uv / npm resolvers<br/>resolve ranges to versions"]
+    D -. "no lockfile" .-> E["uv / pip / npm resolvers<br/>resolve ranges to versions<br/>(no builds, no scripts)"]
     E --> R
     D --> R["Cargo source + config check<br/>(internal/catalog, crates only)"]
     R --> T{"trusted source?<br/>(internal/trust)"}

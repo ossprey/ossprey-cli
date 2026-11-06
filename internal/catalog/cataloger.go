@@ -120,6 +120,50 @@ func catalogByGlob(ctx context.Context, resolver file.Resolver, root, glob, labe
 	return out, nil
 }
 
+// resolveByGlob is catalogByGlob for the catalogers that resolve a manifest's
+// transitive tree. A manifest it did not resolve — the resolver failed, or the
+// scan deadline passed before its turn — is recorded as unresolved: the scan
+// still covers its direct dependencies through the fallback catalogers, but
+// the report has to say the tree is partial rather than let it read as whole.
+func resolveByGlob(ctx context.Context, resolver file.Resolver, root, glob, label string, parse fileParser) ([]pkg.Package, error) {
+	var (
+		mu   sync.Mutex
+		done = map[string]bool{}
+	)
+	out, err := catalogByGlob(ctx, resolver, root, glob, label, func(absPath string, loc file.Location) ([]pkg.Package, error) {
+		pkgs, err := parse(absPath, loc)
+		if err == nil {
+			mu.Lock()
+			done[absPath] = true
+			mu.Unlock()
+		}
+		return pkgs, err
+	})
+	if err != nil {
+		return out, err
+	}
+	locs, _ := resolver.FilesByGlob(glob)
+	for _, loc := range locs {
+		if isVendoredPath(loc.RealPath) {
+			continue
+		}
+		if p := hostPath(root, loc.RealPath); !done[p] {
+			markUnresolved(ctx, root, p)
+		}
+	}
+	return out, nil
+}
+
+// markUnresolved records a manifest as unresolved under its path relative to
+// the scan root, slash-separated so a report reads the same on every OS.
+func markUnresolved(ctx context.Context, root, absPath string) {
+	rel := absPath
+	if r, err := filepath.Rel(root, absPath); err == nil && !strings.HasPrefix(r, "..") {
+		rel = r
+	}
+	warn.MarkUnresolved(ctx, filepath.ToSlash(rel))
+}
+
 // catalogerEntry turns one manifest's failure into a warning. A subprocess
 // failure contributes its one actionable line to the headline and keeps the
 // rest for a verbose run; anything else is already a single sentence.
