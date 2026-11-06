@@ -236,6 +236,21 @@ func TestLeftOutNeverQuotesTheRequirement(t *testing.T) {
 	if strings.Count(strings.Join(s.dropped, "\n"), "a local archive") != 2 {
 		t.Errorf("an archive with extras was not described as one: %v", s.dropped)
 	}
+	// One warning alone prints its One line rather than a count, so that
+	// line is checked on its own for every kind of dropped item.
+	for _, d := range s.dropped {
+		ctx := warn.NewContext(context.Background(), false)
+		NewPipCataloger(src).leftOut(ctx, filepath.Join(src, "requirements.txt"), []string{d})
+		out := warn.Drain(ctx)
+		if !strings.Contains(out, d) {
+			t.Errorf("single warning does not carry its description %q:\n%s", d, out)
+		}
+		for _, secret := range []string{"hunter2", "s3cret", "ghp_abc123", "SECRET_TOKEN", "s3cr3t", "token-"} {
+			if strings.Contains(out, secret) {
+				t.Errorf("single warning leaked %q:\n%s", secret, out)
+			}
+		}
+	}
 	for _, verbose := range []bool{false, true} {
 		ctx := warn.NewContext(context.Background(), verbose)
 		c := NewPipCataloger(src)
@@ -369,9 +384,17 @@ func TestPipSanitizerConfinesIncludesToTheRoot(t *testing.T) {
 		if _, err := newPipSanitizer(context.Background(), t.TempDir(), src).file(filepath.Join(src, "requirements.txt")); !errors.Is(err, errOutsideRoot) {
 			t.Errorf("symlink: err = %v, want errOutsideRoot", err)
 		}
+		if err := uvExpandsEnv(context.Background(), filepath.Join(src, "requirements.txt"), src); !errors.Is(err, errOutsideRoot) {
+			t.Errorf("uv symlink: err = %v, want errOutsideRoot", err)
+		}
 	}
 	if _, _, err := sanitize(t, map[string]string{"requirements.txt": "-r sub/in.txt\n", "sub/in.txt": "idna\n"}); err != nil {
 		t.Errorf("an include inside the root failed: %v", err)
+	}
+	in := t.TempDir()
+	writeTree(t, in, map[string]string{"requirements.txt": "-r sub/in.txt\n", "sub/in.txt": "idna\n"})
+	if err := uvExpandsEnv(context.Background(), filepath.Join(in, "requirements.txt"), in); err != nil {
+		t.Errorf("uv: an include inside the root failed: %v", err)
 	}
 }
 
