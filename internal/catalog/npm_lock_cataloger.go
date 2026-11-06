@@ -115,17 +115,34 @@ func parseNpmLockFile(path string, loc file.Location) ([]pkg.Package, error) {
 		return nil, nil
 	}
 
-	var walk func(deps map[string]npmLockDep)
-	walk = func(deps map[string]npmLockDep) {
-		for name, d := range deps {
-			if n, v, ok := npmV1Version(name, d.Version); ok && !isLocalNpmResolved(d.Resolved) {
-				add(n, v, d.Resolved)
-			}
-			walk(d.Dependencies)
-		}
-	}
-	walk(doc.Dependencies)
+	walkNpmV1(doc.Dependencies, add)
 	return out, nil
+}
+
+// walkNpmV1 calls add for every registry entry of a lockfileVersion 1
+// "dependencies" tree, nested ones included.
+func walkNpmV1(deps map[string]npmLockDep, add func(name, version, resolved string)) {
+	for name, d := range deps {
+		if n, v, ok := npmV1Version(name, d.Version); ok && !isLocalNpmResolved(d.Resolved) {
+			add(n, v, d.Resolved)
+		}
+		walkNpmV1(d.Dependencies, add)
+	}
+}
+
+// npmLockLocksSomething reports an npm lock with a registry entry in its
+// v2/v3 "packages" or its v1 "dependencies".
+func npmLockLocksSomething(data []byte) bool {
+	if pkgs, err := parseNpmLock(data, file.Location{}); err == nil && len(pkgs) > 0 {
+		return true
+	}
+	var doc npmLockDoc
+	if json.Unmarshal(data, &doc) != nil {
+		return false
+	}
+	found := false
+	walkNpmV1(doc.Dependencies, func(string, string, string) { found = true })
+	return found
 }
 
 // npmV1Version reads a v1 entry's "version", which is a version for a registry
