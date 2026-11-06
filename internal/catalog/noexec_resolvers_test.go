@@ -413,3 +413,89 @@ func TestPipOnlyBinaryHoldsForTrustedConfig(t *testing.T) {
 		t.Errorf("unresolved = %v, want [requirements.txt]\n%s", got, warn.Drain(ctx))
 	}
 }
+
+// writeWheel writes a pure-Python wheel name-version into dir with the given
+// Requires-Dist lines.
+func writeWheel(t *testing.T, dir, name, version string, requires ...string) {
+	t.Helper()
+	meta := "Metadata-Version: 2.1\nName: " + name + "\nVersion: " + version + "\n"
+	for _, r := range requires {
+		meta += "Requires-Dist: " + r + "\n"
+	}
+	info := name + "-" + version + ".dist-info/"
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for n, body := range map[string]string{
+		name + "/__init__.py": "",
+		info + "METADATA":     meta,
+		info + "WHEEL":        "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+		info + "RECORD":       "",
+	} {
+		w, err := zw.Create(n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte(body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name+"-"+version+"-py3-none-any.whl"), buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// An unlocked pyproject's extras are resolved with their trees, since their
+// direct names reach the scan anyway. An extra that cannot resolve without a
+// build keeps the base tree and leaves the manifest unresolved.
+func TestUVResolvesOptionalDependencies(t *testing.T) {
+	realToolsOnly(t, "uv", "python3")
+	dist := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "marker")
+	writeWheel(t, dist, "basepkg", "1.0")
+	writeWheel(t, dist, "extrapkg", "1.0", "transdep==1.0")
+	writeWheel(t, dist, "transdep", "1.0")
+	evilSdist(t, dist, marker)
+	t.Setenv("UV_NO_INDEX", "1")
+	t.Setenv("UV_FIND_LINKS", dist)
+	pp := func(extra string) string {
+		return "[project]\nname = \"app\"\nversion = \"0.1.0\"\nrequires-python = \">=3.8\"\ndependencies = [\"basepkg==1.0\"]\n" +
+			"[project.optional-dependencies]\ncli = [\"" + extra + "\"]\n"
+	}
+	for name, tc := range map[string]struct {
+		extra      string
+		want       []string
+		unresolved []string
+	}{
+		"extra resolves":      {"extrapkg==1.0", []string{"basepkg", "extrapkg", "transdep"}, nil},
+		"extra needs a build": {"evilpkg==1.0", []string{"basepkg"}, []string{"pyproject.toml"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			proj := t.TempDir()
+			writeTree(t, proj, map[string]string{"pyproject.toml": pp(tc.extra)})
+			ctx := warn.NewContext(context.Background(), false)
+			pkgs, err := Catalog(ctx, proj, Options{SkipVersionLookup: true})
+			if err != nil {
+				t.Fatalf("Catalog: %v", err)
+			}
+			assertNotRun(t, marker)
+			got := map[string]string{}
+			for _, p := range pkgs {
+				got[p.Name] = p.Version
+			}
+			for _, w := range tc.want {
+				if got[w] != "1.0" {
+					t.Errorf("%s not resolved to 1.0: %v", w, got)
+				}
+			}
+			if u := warn.Unresolved(ctx); !slices.Equal(u, tc.unresolved) {
+				t.Errorf("unresolved = %v, want %v\n%s", u, tc.unresolved, warn.Drain(ctx))
+			}
+		})
+	}
+}

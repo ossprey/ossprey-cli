@@ -16,6 +16,8 @@ import (
 	"github.com/anchore/syft/syft/artifact"
 	"github.com/anchore/syft/syft/file"
 	"github.com/anchore/syft/syft/pkg"
+
+	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
 var uvReqLine = regexp.MustCompile(`^([A-Za-z0-9_.\-]+)==([^\s;]+)`)
@@ -87,11 +89,43 @@ func (c *UVCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]pk
 		if cacheErr != nil {
 			return nil, fmt.Errorf("uv cache: %w", cacheErr)
 		}
-		args := uvArgsForPyProject(dir)
-		return runUV(ctx, c.uv, cache, dir, args, loc)
+		// Extras are resolved too: their direct names reach the scan through
+		// the pyproject fallback, so leaving their trees out would read as
+		// complete. If they cannot resolve, the base tree still counts and
+		// the manifest is marked unresolved.
+		if !hasOptionalDependencies(absPath) {
+			return runUV(ctx, c.uv, cache, dir, uvArgsForPyProject(dir, false), loc)
+		}
+		pkgs, err := runUV(ctx, c.uv, cache, dir, uvArgsForPyProject(dir, true), loc)
+		if err == nil {
+			return pkgs, nil
+		}
+		pkgs, baseErr := runUV(ctx, c.uv, cache, dir, uvArgsForPyProject(dir, false), loc)
+		if baseErr != nil {
+			return nil, baseErr
+		}
+		if !pyprojectLockCovered(absPath) {
+			warn.Add(ctx, catalogerEntry("uv", fmt.Errorf("%s: optional dependencies not resolved: %w", absPath, err)))
+			markUnresolved(ctx, c.root, absPath)
+		}
+		return pkgs, nil
 	}
 	out, err := resolveByGlob(ctx, resolver, c.root, "**/pyproject.toml", "uv", pyprojectLockCovered, parse)
 	return out, nil, err
+}
+
+// hasOptionalDependencies reports a [project] table declaring any extra.
+func hasOptionalDependencies(path string) bool {
+	pp, err := readPyProject(path)
+	if err != nil || pp == nil {
+		return false
+	}
+	for _, deps := range pp.Project.OptionalDependencies {
+		if len(deps) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func hasUVLock(dir string) bool {
@@ -105,9 +139,13 @@ func hasUVLock(dir string) bool {
 // Every scan-path uv call carries --no-build: an sdist-only dependency would
 // otherwise have uv run its PEP 517 backend to read its metadata. Such a
 // manifest fails instead and is reported unresolved.
-func uvArgsForPyProject(dir string) []string {
+func uvArgsForPyProject(dir string, allExtras bool) []string {
+	var extras []string
+	if allExtras {
+		extras = []string{"--all-extras"}
+	}
 	if hasUVLock(dir) {
-		return []string{
+		return append([]string{
 			"export",
 			"--directory", dir,
 			"--format", "requirements.txt",
@@ -116,10 +154,10 @@ func uvArgsForPyProject(dir string) []string {
 			"--no-emit-project",
 			"--no-progress",
 			"--no-build",
-		}
+		}, extras...)
 	}
 	pyproject := filepath.Join(dir, "pyproject.toml")
-	args := []string{"pip", "compile", "--universal", "--no-progress", "--no-build"}
+	args := append([]string{"pip", "compile", "--universal", "--no-progress", "--no-build"}, extras...)
 	if floor := poetryPythonFloor(pyproject); floor != "" {
 		args = append(args, "--python-version", floor)
 	}
