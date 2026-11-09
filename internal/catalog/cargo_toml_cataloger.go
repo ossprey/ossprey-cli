@@ -48,7 +48,7 @@ func (c *CargoTomlCataloger) Catalog(ctx context.Context, resolver file.Resolver
 		// are just as unknown, so the declared tables decide. A manifest that
 		// cannot be read or parsed declares nothing we know of, so only a lock
 		// can cover it.
-		if c.coverage && (err != nil || len(pkgs) > 0 || cargoDeclaresDependencies(path)) && !cargoLockCovers(path, c.root) {
+		if c.coverage && (err != nil || len(pkgs) > 0 || cargoDeclaresDependencies(path)) && !cargoLockCoversWith(path, c.root, cache) {
 			markUnresolved(ctx, c.root, path)
 			dir := filepath.Dir(path)
 			warn.Add(ctx, warn.Entry{
@@ -228,7 +228,22 @@ func readManifest(path string) ([]byte, error) {
 }
 
 // manifestCache decodes each Cargo.toml a root search reads once per catalogue, since every member of a workspace climbs to the same root.
-type manifestCache struct{ m sync.Map }
+type manifestCache struct {
+	m sync.Map
+	// locks memoizes cargoLockReadable by root directory: every member of a
+	// workspace asks about the same lock.
+	locks sync.Map
+}
+
+// lockReadable is cargoLockReadable, judged once per directory.
+func (c *manifestCache) lockReadable(dir string) bool {
+	if v, ok := c.locks.Load(dir); ok {
+		return v.(bool)
+	}
+	ok := cargoLockReadable(dir)
+	c.locks.Store(dir, ok)
+	return ok
+}
 
 type cachedManifest struct {
 	once   sync.Once
@@ -547,14 +562,19 @@ func cargoExactVersion(spec string) string {
 // manifest that cannot be read is covered only by a lock beside it, and a
 // lock that does not parse covers nothing.
 func cargoLockCovers(manifestPath, scanRoot string) bool {
+	return cargoLockCoversWith(manifestPath, scanRoot, &manifestCache{})
+}
+
+// cargoLockCoversWith is cargoLockCovers sharing a catalogue's manifest cache,
+// so each manifest is decoded and each root's lock judged once.
+func cargoLockCoversWith(manifestPath, scanRoot string, cache *manifestCache) bool {
 	manifestPath = filepath.Clean(manifestPath)
-	cache := &manifestCache{}
 	m, isRoot, err := cache.read(manifestPath)
 	if err != nil {
-		return cargoLockReadable(filepath.Dir(manifestPath))
+		return cache.lockReadable(filepath.Dir(manifestPath))
 	}
 	_, rootDir, ok := workspacePool(m, isRoot, manifestPath, scanRoot, cache)
-	return ok && cargoLockReadable(rootDir)
+	return ok && cache.lockReadable(rootDir)
 }
 
 func cargoLockReadable(dir string) bool {

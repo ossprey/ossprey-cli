@@ -55,6 +55,9 @@ never does that:
   project outside the scanned directory is reported unresolved as well. Keep a private index's
   credentials in pip's or uv's own configuration, `PIP_INDEX_URL` /
   `UV_INDEX_URL`, keyring or `.netrc`, which a repository cannot write.
+- A `pyproject.toml` with `[dependency-groups]` or `[tool.uv]`
+  `dev-dependencies` and no lock beside it is reported unresolved: without
+  a `uv.lock` neither resolver reads those lists.
 - A legacy `setup.py` project is not resolved at all: that would run
   `setup.py`. Its literal `install_requires` are still read.
 - A `pyproject.toml` whose dependencies are `dynamic`, or a poetry project with

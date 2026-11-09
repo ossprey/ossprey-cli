@@ -14,6 +14,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
 // pip's --only-binary=:all: does not stop it building everything. Verified
@@ -715,6 +717,23 @@ func declaresUVDependencies(path string) bool {
 		return true
 	}
 	return anyString(l.Groups) || anyString(l.Tool.UV.Dev)
+}
+
+// groupsLeftOut marks a pyproject unresolved when it declares dependency
+// groups or uv dev-dependencies and no lock beside it holds their tree: a
+// resolver handed [project] (pip's requirement list, or uv pip compile with
+// no uv.lock) leaves them out.
+func groupsLeftOut(ctx context.Context, root, tool, manifest string) {
+	if !declaresUVDependencies(manifest) || pyprojectLockCovered(manifest) {
+		return
+	}
+	markUnresolved(ctx, root, manifest)
+	warn.Add(ctx, warn.Entry{
+		Class: tool + ":groups",
+		One:   fmt.Sprintf("%s: %s: dependency groups not resolved without a lock", tool, manifest),
+		Many:  tool + ": %d pyprojects' dependency groups not resolved without a lock (OSSPREY_VERBOSE=1 lists them)",
+		Item:  manifest,
+	})
 }
 
 // maxUVProjects bounds the pyprojects uvProjectExpandsEnv reads for one

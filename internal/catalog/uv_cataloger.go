@@ -75,6 +75,8 @@ func (c *UVCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]pk
 	parse := func(absPath string, loc file.Location) ([]pkg.Package, error) {
 		dir := filepath.Dir(absPath)
 		if !hasUVLock(dir) {
+			// uv pip compile reads [project] only.
+			groupsLeftOut(ctx, c.root, "uv", absPath)
 			// Without a [project] table uv can only learn the dependencies by
 			// building the project, which --no-build refuses.
 			if err := pyprojectNeedsBuild(absPath); err != nil || !hasPEP621Project(absPath) {

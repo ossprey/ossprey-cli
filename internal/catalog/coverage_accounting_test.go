@@ -360,3 +360,41 @@ func TestPyprojectDependencyGroupsNeedResolving(t *testing.T) {
 		t.Errorf("empty group: unresolved = %v, want none", got)
 	}
 }
+
+// A resolver handed [project] alone leaves dependency groups and uv's
+// dev-dependencies out, so a pyproject declaring them with no lock is not
+// complete on either resolver path.
+func TestResolversMarkUnlockedDependencyGroups(t *testing.T) {
+	pp := "[project]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependency-groups]\ndev = [\"pytest>=8\"]\n"
+	for name, tools := range map[string][]string{"uv": {"uv", "python3"}, "pip": {"python3"}} {
+		t.Run(name, func(t *testing.T) {
+			realToolsOnly(t, tools...)
+			if name == "pip" {
+				requirePip(t)
+			}
+			proj := t.TempDir()
+			writeTree(t, proj, map[string]string{"pyproject.toml": pp})
+			ctx := warn.NewContext(context.Background(), false)
+			if _, err := Catalog(ctx, proj, Options{SkipVersionLookup: true}); err != nil {
+				t.Fatal(err)
+			}
+			if got := warn.Unresolved(ctx); !slices.Equal(got, []string{"pyproject.toml"}) {
+				t.Errorf("unresolved = %v, want [pyproject.toml]\n%s", got, warn.Drain(ctx))
+			}
+		})
+	}
+}
+
+// The governing Cargo.lock is judged once per root for a whole catalogue.
+func TestCargoLockCheckIsMemoizedPerRoot(t *testing.T) {
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{"Cargo.lock": validCargoLock})
+	cache := &manifestCache{}
+	if !cache.lockReadable(dir) {
+		t.Fatal("a valid lock is not readable")
+	}
+	writeTree(t, dir, map[string]string{"Cargo.lock": "version = 3\n"})
+	if !cache.lockReadable(dir) {
+		t.Error("the lock was judged again")
+	}
+}

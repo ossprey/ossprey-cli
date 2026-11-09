@@ -125,6 +125,7 @@ func (c *PipCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]p
 		if pp, _ := readPyProject(absPath); pp != nil && dynamicDependencies(pp) {
 			c.leftOut(ctx, absPath, []string{"dynamic dependencies"})
 		}
+		groupsLeftOut(ctx, c.root, "pip", absPath)
 		if len(safe) == 0 {
 			return nil, nil
 		}
