@@ -44,6 +44,7 @@ speaks up only for a block (the full malware report) or a platform error; set
 | `ossprey shim install --agent claude` | Also put the shims on PATH for Claude Code's Bash commands |
 
 Useful flags: `--git` to also shim git (opt-in, see [git.md](git.md)), `--brew` to also shim brew (opt-in, see [brew.md](brew.md)),
+`--cargo` to also shim cargo (opt-in, see [forwarder.md](forwarder.md#cargo)),
 `--managers npm,pip` to shim a subset, `--all` to shim managers
 you have not installed yet, `--no-path` to write the shims but manage PATH
 yourself, `--dir` / `$OSSPREY_SHIM_DIR` to relocate them.

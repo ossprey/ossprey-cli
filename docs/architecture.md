@@ -48,7 +48,12 @@ install still works".
 
 ```mermaid
 flowchart TD
-    S["ossprey npm install ..."] --> T{"an install verb, or a<br/>tool run (npx, bunx, uvx)?"}
+    S["ossprey npm install ..."] --> CA{"cargo add, update,<br/>generate-lockfile or fetch?"}
+    CA -- "yes" --> CB["run cargo first:<br/>it builds nothing"]
+    CB --> CC{"malware in the<br/>Cargo.lock it left?"}
+    CC -- "yes" --> CD["put back the Cargo.toml and<br/>Cargo.lock files it changed, exit 1"]
+    CC -- "no" --> CE["keep cargo's changes"]
+    CA -- "no" --> T{"an install verb, or a<br/>tool run (npx, bunx, uvx)?"}
     T -- "no, e.g. npm run" --> U["exec the real manager"]
     T -- "yes" --> V{"OSSPREY_SKIP_CI?"}
     V -- "set" --> U
@@ -87,6 +92,11 @@ checked at once (`internal/catalog/install_resolve.go`, driven from
 `internal/forward/expand.go`). When that dry run cannot be had, the named
 packages are checked alone and one warning line says so; the install is never
 blocked for want of a prediction.
+
+`cargo add`, `update`, `generate-lockfile` and `fetch` are the one place the
+manager runs before the check: they compile nothing, so the `Cargo.lock` they
+leave is checked afterwards, and a block puts their files back
+(`internal/forward/cargo.go`). In passive mode the lock is posted instead.
 
 The passive branch is the one worth reading twice. It never gates, so it never
 sits in front of the install: where a lockfile will land, the install runs
