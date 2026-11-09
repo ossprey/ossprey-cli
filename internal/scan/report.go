@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
 	"github.com/ossprey/ossprey-cli/internal/severity"
@@ -81,6 +83,66 @@ type Report struct {
 	Findings      []Finding `json:"findings"`
 	Informational []Finding `json:"informational,omitempty"`
 	Skipped       *Skip     `json:"skipped,omitempty"`
+	// Transitive says whether every manifest's transitive tree was resolved:
+	// "complete", or "partial" when UnresolvedManifests is not empty. Set by
+	// scan only (SetCoverage); check names its packages, so it has no tree.
+	Transitive string `json:"transitive,omitempty"`
+	// UnresolvedManifests are the manifests, relative to the scanned path,
+	// whose transitive dependencies were not resolved — a resolver failed, or
+	// resolving would have meant building a package — so only their direct
+	// dependencies were checked. Always present on a scan report, [] when
+	// none; absent from check's.
+	UnresolvedManifests []string `json:"unresolved_manifests,omitzero"`
+	// DeadlineReached is set when the catalogue stopped at --timeout, so
+	// manifests it never reached are in neither list; Transitive is then
+	// "partial". Omitted when false.
+	DeadlineReached bool `json:"deadline_reached,omitempty"`
+}
+
+// Transitive coverage values.
+const (
+	TransitiveComplete = "complete"
+	TransitivePartial  = "partial"
+)
+
+// SetCoverage records which manifests a scan could not resolve, and whether
+// the catalogue stopped at its deadline before reaching them all.
+func (r *Report) SetCoverage(unresolved []string, deadlineReached bool) {
+	r.UnresolvedManifests = append([]string{}, unresolved...)
+	r.DeadlineReached = deadlineReached
+	r.Transitive = TransitiveComplete
+	if len(unresolved) > 0 || deadlineReached {
+		r.Transitive = TransitivePartial
+	}
+}
+
+// Incomplete explains why a report does not cover the whole project, or
+// returns "" when it does: a manifest left unresolved, a package the platform
+// did not scan, or a scan the platform skipped outright.
+func (r Report) Incomplete() string {
+	var why []string
+	if r.Verdict == VerdictSkipped {
+		why = append(why, "the scan was skipped")
+	}
+	if r.DeadlineReached {
+		why = append(why, "the scan deadline was reached before every manifest was catalogued")
+	}
+	if n := len(r.UnresolvedManifests); n > 0 {
+		// Quoted: a path is repository content, and may hold a newline or an
+		// escape sequence; the JSON keeps it raw.
+		names := make([]string, 0, 4)
+		for _, m := range r.UnresolvedManifests[:min(n, 3)] {
+			names = append(names, strconv.Quote(m))
+		}
+		if n > 3 {
+			names = append(names, fmt.Sprintf("and %d more", n-3))
+		}
+		why = append(why, fmt.Sprintf("%d manifest(s) not fully resolved (%s)", n, strings.Join(names, ", ")))
+	}
+	if r.Unscanned > 0 {
+		why = append(why, fmt.Sprintf("%d of %d package(s) not scanned", r.Unscanned, r.Components))
+	}
+	return strings.Join(why, "; ")
 }
 
 // NewReport summarises a scanned SBOM: "malware" when any finding is at or

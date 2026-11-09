@@ -86,6 +86,7 @@ ossprey scan [path] [flags]
 | `--url <url>` | Override the Ossprey API URL (default `https://api.ossprey.com`). |
 | `--api-key <key>` | Provide the API key on the command line instead of an env var. |
 | `--fail-on <level>` | Fail on findings at or above `<level>` (`Info`, `Low`, `Medium`, `High`, `Critical`), overriding the account's floor for this run. |
+| `--require-complete` | Exit 2 when coverage is incomplete: a manifest's dependency tree was not resolved, a package was not scanned, or the scan was skipped. Off by default. See [CI usage](ci.md#requiring-complete-coverage). |
 | `--dry-run-safe` | Skip the API; report an empty vulnerability list. |
 | `--dry-run-malicious` | Skip the API; inject a test finding against the first component. |
 | `--skip-ci` | Skip the Ossprey scan entirely and exit 0. Also settable as `OSSPREY_SKIP_CI=1`. |
