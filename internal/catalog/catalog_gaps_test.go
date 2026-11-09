@@ -168,7 +168,7 @@ func TestMergeVersionlessFoldsRegistries(t *testing.T) {
 	got := mergeVersionless([]Package{
 		{Name: "acme", Version: "1.0.0", Type: "pypi", Registries: []string{"https://internal/"}},
 		{Name: "Acme", Version: "", Type: "pypi", Registries: []string{"https://public/"}},
-	}, nil, nil)
+	})
 	if len(got) != 1 {
 		t.Fatalf("got %d packages, want 1: %+v", len(got), got)
 	}

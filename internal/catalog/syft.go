@@ -229,8 +229,7 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 	seenLocs := map[int]map[string]bool{}
 	locks := newNpmLockClassifier(absRoot)
 	pins := newRequirementPins(absRoot)
-	cargoRoots := map[string]string{}  // Cargo.toml location -> its workspace root
-	cargoReqs := map[string][]string{} // Cargo.toml location and crate -> the requirements it declares
+	cargoRanges := map[string]cargoRange{} // Cargo.toml location and crate -> the range it declares
 	var out []Package
 	for _, c := range catalogers {
 		// Per-cataloger errors are non-fatal AND partial: syft's generic
@@ -289,14 +288,13 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 				warn.Add(ctx, cargoDropEntry("cargolock", why, p.Name))
 				continue
 			}
-			for _, l := range p.Locations.ToSlice() {
-				if root, ok := l.Annotations[cargoRootAnnotation]; ok {
-					cargoRoots[l.RealPath] = root
+			// One manifest may spell a crate in two cases, and every requirement counts.
+			if r, ok := p.Metadata.(cargoRange); ok {
+				k := cargoReqKey(r.Manifest, p.Name)
+				if prev, ok := cargoRanges[k]; ok {
+					r.Reqs = append(slices.Clone(prev.Reqs), r.Reqs...)
 				}
-				if req, ok := l.Annotations[cargoReqAnnotation]; ok {
-					k := cargoReqKey(l.RealPath, p.Name)
-					cargoReqs[k] = append(cargoReqs[k], strings.Split(req, "\n")...)
-				}
+				cargoRanges[k] = r
 			}
 			registry := registryOf(p)
 			for _, qualifiers := range marks {
@@ -334,7 +332,7 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 	if opts.ReportCargoReplacement && slices.ContainsFunc(out, isCratesIoCrate) && cargoSourceReplaced(resolver, absRoot) {
 		warn.Add(ctx, cargoReplacedEntry)
 	}
-	merged := mergeVersionless(out, cargoRoots, cargoReqs)
+	merged := foldCargoRanges(mergeVersionless(out), cargoRanges)
 	markLocalPackages(merged, findLocalPackageNames(resolver, absRoot))
 	clearReplacedCrateRegistries(ctx, merged, opts.Trust, resolver, absRoot)
 	markTrustedPackages(merged, opts.Trust)
@@ -533,7 +531,7 @@ func registryOf(p pkg.Package) string {
 // lower-fidelity view. Drop versionless entries when a versioned sibling of the
 // same (type, name) exists, folding their Source/Locations into the siblings so
 // no attribution is lost. Entries with no versioned sibling are kept as-is.
-func mergeVersionless(pkgs []Package, cargoRoots map[string]string, cargoReqs map[string][]string) []Package {
+func mergeVersionless(pkgs []Package) []Package {
 	gkey := func(p Package) string {
 		if p.Type == "pypi" {
 			// PEP 503: "typing_extensions" as written is uv's "typing-extensions".
@@ -542,64 +540,84 @@ func mergeVersionless(pkgs []Package, cargoRoots map[string]string, cargoReqs ma
 		return p.Type + "@" + normalizeName(p.Name)
 	}
 
-	// A source-marked crate is its own component: it neither absorbs a sighting nor folds into one.
-	versioned := func(p Package) bool { return p.Version != "" && len(p.Qualifiers) == 0 }
-	siblings := map[string][]int{}
-	for i, p := range pkgs {
-		if versioned(p) {
-			siblings[gkey(p)] = append(siblings[gkey(p)], i)
+	// A crate folds per manifest, in foldCargoRanges.
+	hasVersioned := map[string]bool{}
+	for _, p := range pkgs {
+		if p.Version != "" && p.Type != "cargo" {
+			hasVersioned[gkey(p)] = true
 		}
 	}
+	folds := func(p Package) bool { return p.Version == "" && p.Type != "cargo" && hasVersioned[gkey(p)] }
+
+	// Keep versioned entries and versionless ones with no versioned sibling;
+	// remember where each versioned group landed so we can fold sources into it.
+	var out []Package
+	groupIdx := map[string][]int{}
+	for _, p := range pkgs {
+		if folds(p) {
+			continue // folded below
+		}
+		if p.Version != "" {
+			groupIdx[gkey(p)] = append(groupIdx[gkey(p)], len(out))
+		}
+		out = append(out, p)
+	}
+
+	for _, p := range pkgs {
+		if folds(p) {
+			for _, i := range groupIdx[gkey(p)] {
+				absorb(&out[i], p, p.Locations)
+			}
+		}
+	}
+	return out
+}
+
+// absorb folds a versionless sighting's sources, locations and registries into the release it resolves to.
+func absorb(into *Package, p Package, locs []string) {
+	into.Source = mergeUnique(into.Source, p.Source)
+	into.Locations = mergeUnique(into.Locations, locs)
+	into.Registries = mergeUnique(into.Registries, p.Registries)
+}
+
+// foldCargoRanges folds a versionless crate, manifest by manifest, only into a release its workspace root's Cargo.lock locks that meets every requirement the manifest declares; a source-marked crate neither absorbs a sighting nor folds into one.
+func foldCargoRanges(pkgs []Package, ranges map[string]cargoRange) []Package {
+	key := func(p Package) string { return normalizeName(p.Name) }
 	// Another manifest's pin or another directory's lock says nothing about the release this manifest builds.
 	locks := map[string][]int{}
 	for i, p := range pkgs {
-		if p.Type == "cargo" && versioned(p) {
+		if p.Type == "cargo" && p.Version != "" && len(p.Qualifiers) == 0 {
 			for _, l := range p.Locations {
 				if filepath.Base(l) == "Cargo.lock" {
-					k := gkey(p) + "\x00" + filepath.Clean(l)
+					k := key(p) + "\x00" + filepath.Clean(l)
 					locks[k] = append(locks[k], i)
 				}
 			}
 		}
 	}
-	lockedFor := func(p Package, manifest string) []int {
-		root, ok := cargoRoots[manifest]
-		if !ok {
-			return nil
-		}
-		return locks[gkey(p)+"\x00"+filepath.Join(root, "Cargo.lock")]
-	}
 
 	work := slices.Clone(pkgs)
 	drop := make([]bool, len(pkgs))
-	fold := func(i int, p Package, locs []string) {
-		work[i].Source = mergeUnique(work[i].Source, p.Source)
-		work[i].Locations = mergeUnique(work[i].Locations, locs)
-		work[i].Registries = mergeUnique(work[i].Registries, p.Registries)
-	}
 	for i, p := range pkgs {
-		if p.Version != "" || len(p.Qualifiers) > 0 {
+		if p.Type != "cargo" || p.Version != "" || len(p.Qualifiers) > 0 {
 			continue
 		}
-		if p.Type != "cargo" {
-			for _, s := range siblings[gkey(p)] {
-				fold(s, p, p.Locations)
-			}
-			drop[i] = len(siblings[gkey(p)]) > 0
-			continue
-		}
-		// A crate folds per manifest, only into a release its workspace root's Cargo.lock locks (cargoRoots) that meets its requirement there (cargoReqs).
 		var rest []string
 		into := map[int][]string{}
 		for _, l := range p.Locations {
-			reqs, ok := cargoReqs[cargoReqKey(l, p.Name)]
+			r, ok := ranges[cargoReqKey(l, p.Name)]
+			reqs := r.Reqs
 			if !ok {
 				reqs = []string{""}
+			}
+			var locked []int
+			if r.Root != "" {
+				locked = locks[key(p)+"\x00"+filepath.Join(r.Root, "Cargo.lock")]
 			}
 			met := 0
 			for _, req := range reqs {
 				found := false
-				for _, s := range lockedFor(p, l) {
+				for _, s := range locked {
 					if cargoAllows(req, pkgs[s].Version) {
 						into[s] = append(into[s], l)
 						found = true
@@ -615,7 +633,7 @@ func mergeVersionless(pkgs []Package, cargoRoots map[string]string, cargoReqs ma
 			}
 		}
 		for s, locs := range into {
-			fold(s, p, locs)
+			absorb(&work[s], p, locs)
 		}
 		if len(rest) < len(p.Locations) {
 			work[i].Locations = rest

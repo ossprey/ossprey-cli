@@ -104,8 +104,9 @@ func parseCargoTomlFile(ctx context.Context, path string, loc file.Location, sca
 
 	pool, rootDir, rootOK := workspacePool(m, md.IsDefined("workspace"), path, scanRoot)
 	// A root that cannot be read governs nothing here, so no lock is known to pin this manifest.
+	root := ""
 	if rootOK {
-		loc = withCargoRoot(loc, path, rootDir)
+		root = cargoRootSpelling(loc, path, rootDir)
 	}
 	// An excluded crate is its own root and a package.workspace member is not, as the resolved root says.
 	member := rootDir != filepath.Dir(filepath.Clean(path))
@@ -140,10 +141,9 @@ func parseCargoTomlFile(ctx context.Context, path string, loc file.Location, sca
 			add(n, spec)
 		}
 	}
-	// mergeVersionless folds a range only into a locked release that meets it.
+	// foldCargoRanges folds a range only into a locked release that meets it.
 	for _, name := range slices.Sorted(maps.Keys(reqs)) {
-		l := withAnnotation(loc, cargoReqAnnotation, strings.Join(reqs[name], "\n"))
-		out = append(out, pkg.Package{Name: name, Type: pkg.RustPkg, Locations: file.NewLocationSet(l)})
+		emit(name, "", cargoRange{Manifest: loc.RealPath, Root: root, Reqs: reqs[name]})
 	}
 	// Cargo reads [patch] and [replace] only at the workspace root.
 	if targets := cargoGitTargets(m); !member && len(targets) > 0 {
@@ -353,25 +353,20 @@ func covers(dir string, entries []string, manifestPath string) bool {
 	return false
 }
 
-// cargoRootAnnotation carries a manifest's workspace root to mergeVersionless.
-const cargoRootAnnotation = "ossprey-cargo-workspace-root"
-
-// cargoReqAnnotation carries a range's requirements in one manifest to mergeVersionless, one per line.
-const cargoReqAnnotation = "ossprey-cargo-requirement"
-
-// withAnnotation sets key on a copy of loc's annotations, which every package from one manifest shares.
-func withAnnotation(loc file.Location, key, value string) file.Location {
-	loc.Annotations = maps.Clone(loc.Annotations)
-	return loc.WithAnnotation(key, value)
+// cargoRange is a versionless crate one manifest declares, which foldCargoRanges folds only into a release its root's Cargo.lock locks.
+type cargoRange struct {
+	Manifest string   // the manifest's RealPath
+	Root     string   // its workspace root spelled as the resolver spells Manifest, "" when none can be read
+	Reqs     []string // every requirement the manifest declares for the crate
 }
 
-// withCargoRoot annotates loc with its workspace root, spelled as the resolver spells loc so it compares with a Cargo.lock's location.
-func withCargoRoot(loc file.Location, manifestPath, rootDir string) file.Location {
+// cargoRootSpelling is a manifest's workspace root spelled as the resolver spells loc, so it compares with a Cargo.lock's location.
+func cargoRootSpelling(loc file.Location, manifestPath, rootDir string) string {
 	rel, err := filepath.Rel(filepath.Dir(filepath.Clean(manifestPath)), rootDir)
 	if err != nil {
-		return loc
+		return ""
 	}
-	return loc.WithAnnotation(cargoRootAnnotation, filepath.Join(filepath.Dir(loc.RealPath), rel))
+	return filepath.Join(filepath.Dir(loc.RealPath), rel)
 }
 
 // cargoDep resolves one dependency entry to the crate name and version to

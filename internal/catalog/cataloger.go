@@ -115,8 +115,12 @@ func catalogByGlob(ctx context.Context, resolver file.Resolver, root, glob, labe
 			if e, ok := p.Metadata.(pkg.RustCargoLockEntry); ok {
 				key += "#" + e.Source
 			}
+			// A range carries its own manifest's requirements and root, so each manifest's stays apart.
+			if r, ok := p.Metadata.(cargoRange); ok {
+				key += "\x00" + r.Manifest
+			}
 			if i, ok := seen[key]; ok {
-				// mergeVersionless folds a crate per manifest, so a crate keeps every file's location, in a set copied once since a parser may share one.
+				// foldCargoRanges folds a crate per manifest, so a crate keeps every file's location, in a set copied once since a parser may share one.
 				if p.Type == pkg.RustPkg {
 					if !copied[i] {
 						out[i].Locations = file.NewLocationSet(out[i].Locations.ToUnorderedSlice()...)
