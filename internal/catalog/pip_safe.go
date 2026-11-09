@@ -895,7 +895,7 @@ func uvProjectRefs(path string) ([]string, error) {
 		if p, err = url.PathUnescape(p); err != nil {
 			return nil, fmt.Errorf("%s %w", path, errUVProjectUnplaced)
 		}
-		project(filepath.FromSlash(p))
+		project(filepath.FromSlash(fileURLDrive(u.Host, p)))
 	}
 	return out, nil
 }
