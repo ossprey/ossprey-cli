@@ -175,7 +175,7 @@ func (c *PipCataloger) markAllUnresolved(ctx context.Context, resolver file.Reso
 			continue // syft reads the lock beside it
 		}
 		pp, _ := readPyProject(p)
-		if specs, _ := pyprojectRequirementSpecs(p); len(specs) > 0 || pyprojectNeedsBuild(p) != nil || (pp != nil && dynamicDependencies(pp)) {
+		if specs, _ := pyprojectRequirementSpecs(p); len(specs) > 0 || declaresUVDependencies(p) || pyprojectNeedsBuild(p) != nil || (pp != nil && dynamicDependencies(pp)) {
 			locs = append(locs, loc)
 		}
 	}

@@ -539,52 +539,22 @@ func cargoExactVersion(spec string) string {
 }
 
 // cargoLockCovers reports whether a Cargo.lock syft reads holds the tree of
-// the crate at manifestPath: one beside it, or, for a workspace member, the
-// one at the nearest ancestor (inside the scan) that declares [workspace],
-// which is the only lock cargo writes for a member. A lock that does not
-// parse covers nothing.
+// the crate at manifestPath: the one at the workspace root cargo finds for it
+// (workspacePool: the root package.workspace names, else the nearest
+// ancestor [workspace] that does not exclude it), which for a crate outside
+// any workspace is its own directory. cargo locks a member at that root and
+// ignores a Cargo.lock beside the member (verified with cargo 1.99). A
+// manifest that cannot be read is covered only by a lock beside it, and a
+// lock that does not parse covers nothing.
 func cargoLockCovers(manifestPath, scanRoot string) bool {
-	dir := filepath.Dir(filepath.Clean(manifestPath))
-	if cargoLockReadable(dir) {
-		return true
+	manifestPath = filepath.Clean(manifestPath)
+	cache := &manifestCache{}
+	m, isRoot, err := cache.read(manifestPath)
+	if err != nil {
+		return cargoLockReadable(filepath.Dir(manifestPath))
 	}
-	if data, err := readManifest(manifestPath); err == nil && DeclaresCargoWorkspace(data) {
-		return false // a workspace root's lock is its own
-	}
-	root := filepath.Clean(scanRoot)
-	for {
-		parent := filepath.Dir(dir)
-		if parent == dir || !withinRoot(parent, root) {
-			return false
-		}
-		dir = parent
-		data, err := readManifest(filepath.Join(dir, "Cargo.toml"))
-		if err != nil || !DeclaresCargoWorkspace(data) {
-			continue
-		}
-		var m cargoManifest
-		if _, err := toml.Decode(string(data), &m); err != nil {
-			return false
-		}
-		if cargoExcludes(m, dir, manifestPath) {
-			continue // cargo looks further up for an excluded crate's root
-		}
-		return cargoLockReadable(dir)
-	}
-}
-
-// cargoExcludes is cargo's is_excluded: the crate sits under a workspace.exclude
-// path and under no members entry, each taken as a literal path prefix.
-func cargoExcludes(m cargoManifest, rootDir, manifestPath string) bool {
-	under := func(paths []string) bool {
-		for _, p := range paths {
-			if rel, err := filepath.Rel(filepath.Join(rootDir, p), manifestPath); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-				return true
-			}
-		}
-		return false
-	}
-	return under(m.Workspace.Exclude) && !under(m.Workspace.Members)
+	_, rootDir, ok := workspacePool(m, isRoot, manifestPath, scanRoot, cache)
+	return ok && cargoLockReadable(rootDir)
 }
 
 func cargoLockReadable(dir string) bool {

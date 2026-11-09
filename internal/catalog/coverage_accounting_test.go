@@ -57,6 +57,15 @@ func TestCargoCrateWithoutLockIsUnresolved(t *testing.T) {
 		{"private-registry dev dependency only", map[string]string{
 			"Cargo.toml": "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dev-dependencies]\nfoo = { version = \"1\", registry = \"corp\" }\n",
 		}, []string{"Cargo.toml"}},
+		// cargo locks a member at its workspace root and ignores a Cargo.lock
+		// beside the member (verified with cargo 1.99).
+		{"member with its own lock under a workspace root with no lock", map[string]string{
+			"Cargo.toml": root, "crates/core/Cargo.toml": member, "crates/core/Cargo.lock": validCargoLock,
+		}, []string{"crates/core/Cargo.toml"}},
+		{"member pointing at a locked root that is not its ancestor", map[string]string{
+			"ws/Cargo.toml": "[workspace]\nmembers = [\"../crates/core\"]\n", "ws/Cargo.lock": validCargoLock,
+			"crates/core/Cargo.toml": "[package]\nname = \"core\"\nversion = \"0.1.0\"\nworkspace = \"../../ws\"\n\n[dependencies]\nserde = \"=1.0.228\"\n",
+		}, nil},
 		{"manifest that does not parse", map[string]string{"Cargo.toml": "[package\nname = "}, []string{"Cargo.toml"}},
 		{"manifest that does not parse beside a lock", map[string]string{"Cargo.toml": "[package\nname = ", "Cargo.lock": validCargoLock}, nil},
 		{"manifest over the size limit", map[string]string{"Cargo.toml": crate + "# " + strings.Repeat("x", maxManifestBytes) + "\n"}, []string{"Cargo.toml"}},
@@ -329,5 +338,25 @@ func TestRootOnlyLockDoesNotCoverWorkspaceMembers(t *testing.T) {
 	full := `{"name":"mono","lockfileVersion":3,"packages":{"":{"name":"mono"},"node_modules/left-pad":{"version":"1.3.0","resolved":"https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"}}}`
 	if got := unresolvedFor(t, map[string]string{"package.json": root, "package-lock.json": full, "packages/web/package.json": member}); len(got) != 0 {
 		t.Errorf("full lock: unresolved = %v, want none", got)
+	}
+}
+
+// With no Python resolver at all, dependency groups and uv's dev-dependencies
+// are dependencies too: a lockless pyproject declaring only those is not
+// complete.
+func TestPyprojectDependencyGroupsNeedResolving(t *testing.T) {
+	for name, pp := range map[string]string{
+		"dependency-groups":        "[project]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependency-groups]\ndev = [\"pytest>=8\"]\n",
+		"tool.uv dev-dependencies": "[project]\nname = \"app\"\nversion = \"0.1.0\"\n\n[tool.uv]\ndev-dependencies = [\"pytest>=8\"]\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := unresolvedFor(t, map[string]string{"pyproject.toml": pp}); !slices.Equal(got, []string{"pyproject.toml"}) {
+				t.Errorf("unresolved = %v, want [pyproject.toml]", got)
+			}
+		})
+	}
+	// An empty group declares nothing.
+	if got := unresolvedFor(t, map[string]string{"pyproject.toml": "[project]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependency-groups]\ndev = []\n"}); len(got) != 0 {
+		t.Errorf("empty group: unresolved = %v, want none", got)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -561,23 +562,8 @@ func pyprojectExpandsEnv(path string) error {
 			return fmt.Errorf("%s %w", path, errNamesEnvVar)
 		}
 	}
-	// Decoded loosely: a group may hold {include-group = ...} tables.
-	data, err := os.ReadFile(path)
+	uvLists, err := readUVLists(path)
 	if err != nil {
-		return fmt.Errorf("%s: %w", path, err)
-	}
-	var uvLists struct {
-		Groups map[string]any `toml:"dependency-groups"`
-		Tool   struct {
-			UV struct {
-				Dev             any `toml:"dev-dependencies"`
-				Override        any `toml:"override-dependencies"`
-				Constraint      any `toml:"constraint-dependencies"`
-				BuildConstraint any `toml:"build-constraint-dependencies"`
-			} `toml:"uv"`
-		} `toml:"tool"`
-	}
-	if err := toml.Unmarshal(data, &uvLists); err != nil {
 		return fmt.Errorf("%s: %w", path, err)
 	}
 	uv := uvLists.Tool.UV
@@ -585,6 +571,210 @@ func pyprojectExpandsEnv(path string) error {
 		return fmt.Errorf("%s %w", path, errNamesEnvVar)
 	}
 	return nil
+}
+
+// uvLists is what uv reads from a pyproject besides [project]. Decoded
+// loosely: a group may hold {include-group = ...} tables, and a source may be
+// a table or a list of them.
+type uvLists struct {
+	Groups map[string]any `toml:"dependency-groups"`
+	Tool   struct {
+		UV struct {
+			Dev             any            `toml:"dev-dependencies"`
+			Override        any            `toml:"override-dependencies"`
+			Constraint      any            `toml:"constraint-dependencies"`
+			BuildConstraint any            `toml:"build-constraint-dependencies"`
+			Sources         map[string]any `toml:"sources"`
+			Workspace       *struct {
+				Members []string `toml:"members"`
+			} `toml:"workspace"`
+		} `toml:"uv"`
+	} `toml:"tool"`
+}
+
+// readUVLists reads a pyproject's uv tables; a missing file has none.
+func readUVLists(path string) (*uvLists, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return &uvLists{}, nil
+		}
+		return nil, err
+	}
+	var l uvLists
+	if err := toml.Unmarshal(data, &l); err != nil {
+		return nil, err
+	}
+	return &l, nil
+}
+
+// declaresUVDependencies reports a pyproject with a dependency group or uv
+// dev-dependencies naming anything: dependencies no [project] reader sees.
+// One that cannot be read counts as declaring some.
+func declaresUVDependencies(path string) bool {
+	l, err := readUVLists(path)
+	if err != nil {
+		return true
+	}
+	return anyString(l.Groups) || anyString(l.Tool.UV.Dev)
+}
+
+// maxUVProjects bounds the pyprojects uvProjectExpandsEnv reads for one
+// manifest; a workspace past it is refused rather than read without end.
+const maxUVProjects = 256
+
+// errUVProjectUnplaced refuses a manifest whose workspace or sources name
+// projects uvProjectExpandsEnv cannot list.
+var errUVProjectUnplaced = errors.New("names workspace members or sources that cannot be listed; not resolved")
+
+// uvProjectExpandsEnv is pyprojectExpandsEnv for every pyproject uv reads
+// when it resolves the one at path, not that one alone: uv locks every member
+// of the workspace (a stale root uv.lock re-locked by uv export), and reads
+// the pyproject of every path source and file: direct reference, expanding
+// ${VAR} in each (all verified against uv 0.11, export and pip compile).
+// A workspace root above path inside the scan is read with all its members,
+// since uv discovers it from a member. Members are listed by their globs
+// without applying exclude, so an excluded member can only refuse more.
+func uvProjectExpandsEnv(path, root string) error {
+	queue := []string{path}
+	for d := filepath.Dir(filepath.Dir(path)); withinRoot(d, root); d = filepath.Dir(d) {
+		if l, err := readUVLists(filepath.Join(d, "pyproject.toml")); err != nil || l.Tool.UV.Workspace != nil {
+			queue = append(queue, filepath.Join(d, "pyproject.toml"))
+		}
+		if d == filepath.Dir(d) {
+			break
+		}
+	}
+	seen := map[string]bool{}
+	for len(queue) > 0 {
+		p := queue[0]
+		queue = queue[1:]
+		if k := fileKey(p); seen[k] {
+			continue
+		} else {
+			seen[k] = true
+		}
+		if len(seen) > maxUVProjects {
+			return fmt.Errorf("%s: more than %d projects in its workspace and sources; not resolved", path, maxUVProjects)
+		}
+		if err := pyprojectExpandsEnv(p); err != nil {
+			return err
+		}
+		more, err := uvProjectRefs(p)
+		if err != nil {
+			return err
+		}
+		queue = append(queue, more...)
+	}
+	return nil
+}
+
+// uvProjectRefs lists the pyprojects uv reads on behalf of the one at path:
+// its workspace members, its path sources, and its file: direct references.
+func uvProjectRefs(path string) ([]string, error) {
+	l, err := readUVLists(path)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	dir := filepath.Dir(path)
+	var out []string
+	project := func(p string) {
+		if !filepath.IsAbs(p) {
+			p = dir + string(filepath.Separator) + p
+		}
+		if fi, err := os.Stat(p); err == nil && fi.IsDir() {
+			out = append(out, filepath.Join(p, "pyproject.toml"))
+		}
+	}
+	if ws := l.Tool.UV.Workspace; ws != nil {
+		for _, g := range ws.Members {
+			// Go's glob has no recursive **, which uv's has.
+			if strings.Contains(g, "**") {
+				return nil, fmt.Errorf("%s %w", path, errUVProjectUnplaced)
+			}
+			matches, err := filepath.Glob(filepath.Join(dir, g))
+			if err != nil {
+				return nil, fmt.Errorf("%s %w", path, errUVProjectUnplaced)
+			}
+			for _, m := range matches {
+				project(m)
+			}
+		}
+	}
+	var sources []any
+	for _, v := range l.Tool.UV.Sources {
+		if list, ok := v.([]any); ok {
+			sources = append(sources, list...)
+		} else {
+			sources = append(sources, v)
+		}
+	}
+	for _, v := range sources {
+		if t, ok := v.(map[string]any); ok {
+			if p, ok := t["path"].(string); ok {
+				project(p)
+			}
+		}
+	}
+	pp, err := readPyProject(path)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	var reqs []string
+	if pp != nil {
+		reqs = append(reqs, pp.Project.Dependencies...)
+		for _, g := range pp.Project.OptionalDependencies {
+			reqs = append(reqs, g...)
+		}
+	}
+	collectStrings(&reqs, l.Groups, l.Tool.UV.Dev)
+	for _, r := range reqs {
+		_, ref, ok := strings.Cut(r, "@")
+		if !ok {
+			continue
+		}
+		ref = strings.TrimSpace(ref)
+		ref, _, _ = strings.Cut(ref, ";")
+		if ref = strings.TrimSpace(ref); !strings.HasPrefix(strings.ToLower(ref), "file:") {
+			continue
+		}
+		u, err := url.Parse(ref)
+		if err != nil {
+			return nil, fmt.Errorf("%s %w", path, errUVProjectUnplaced)
+		}
+		p := u.Path
+		if p == "" {
+			p = u.Opaque
+		}
+		if p, err = url.PathUnescape(p); err != nil {
+			return nil, fmt.Errorf("%s %w", path, errUVProjectUnplaced)
+		}
+		project(filepath.FromSlash(p))
+	}
+	return out, nil
+}
+
+// collectStrings appends every string held, at any depth, by vs.
+func collectStrings(out *[]string, vs ...any) {
+	for _, v := range vs {
+		switch v := v.(type) {
+		case string:
+			*out = append(*out, v)
+		case []any:
+			collectStrings(out, v...)
+		case map[string]any:
+			for _, e := range v {
+				collectStrings(out, e)
+			}
+		}
+	}
+}
+
+// anyString reports whether vs hold any string at any depth.
+func anyString(vs ...any) bool {
+	var all []string
+	collectStrings(&all, vs...)
+	return len(all) > 0
 }
 
 // anyStringNamesEnv reports a ${ in any string held, at any depth, by vs.

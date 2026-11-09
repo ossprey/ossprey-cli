@@ -48,7 +48,9 @@ never does that:
   `[dependency-groups]`, or `[tool.uv]`'s dev, override and constraint lists)
   that names `${VAR}`, which uv fills in the same way, nor a requirements file
   including a URL (`-r https://…`), which uv would fetch and fill in; that
-  manifest is reported unresolved instead. Keep a private index's
+  manifest is reported unresolved instead. The same holds when any
+  `pyproject.toml` uv reads beside it names `${VAR}`: a member of its uv
+  workspace, a `[tool.uv.sources]` path source or a `file:` reference. Keep a private index's
   credentials in pip's or uv's own configuration, `PIP_INDEX_URL` /
   `UV_INDEX_URL`, keyring or `.netrc`, which a repository cannot write.
 - A legacy `setup.py` project is not resolved at all: that would run
@@ -60,7 +62,8 @@ never does that:
   any other `OSSPREY_*` variable.
 
 A Rust crate with dependencies (git and path ones included) and no
-`Cargo.lock` (beside it or at its workspace root) is unresolved too, as is a `package.json` whose
+`Cargo.lock` where cargo keeps it (beside the crate, or at its workspace root
+for a member, whose own `Cargo.lock` cargo ignores) is unresolved too, as is a `package.json` whose
 `package-lock.json` or `npm-shrinkwrap.json` cannot be parsed when no npm is
 available to resolve it instead. A manifest whose `uv.lock`, `poetry.lock`
 or `pdm.lock` parses is covered by that lock even when nothing could resolve it.

