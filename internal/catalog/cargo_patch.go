@@ -24,8 +24,9 @@ type lockedGit struct{ source, version string }
 // cargoLockGitSources reads the git sources the Cargo.lock beside manifestPath records as packages, or none without a readable lock.
 func cargoLockGitSources(manifestPath string) cargoLockGit {
 	// A FIFO or device named Cargo.lock may never end, so only a regular file is read, and only up to the limit.
-	data, ok := readRegularFile(filepath.Join(filepath.Dir(manifestPath), "Cargo.lock"), maxCargoProofBytes)
-	if !ok || proofTOMLError(data) != nil {
+	data, ok := readRegularFile(filepath.Join(filepath.Dir(manifestPath), "Cargo.lock"), maxLockBytes)
+	// Held to withBoundedLocks' caps, so a lock the scan hides never counts as recording a target.
+	if !ok || tomlDepthOver(data, maxLockDepth) || proofTOMLError(data) != nil {
 		return cargoLockGit{}
 	}
 	type entry struct {

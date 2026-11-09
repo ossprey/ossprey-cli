@@ -281,6 +281,14 @@ source = "git+https://github.com/evil/serde#` + patchRev + `"
 			"serde@1.0.100 Cargo.toml",
 			"serde@?vcs_url=git+https://github.com/evil/serde Cargo.toml",
 		}},
+		// A lock over the lockfile cap is hidden from the scan, so it records nothing and the manifest's target goes out.
+		{"lock over the lockfile size cap", map[string]string{
+			"Cargo.toml": lockless7,
+			"Cargo.lock": appLock(gitSerde("#"+patchRev)) + strings.Repeat("# padding\n", maxLockBytes/10+1),
+		}, []string{
+			"serde@1.0.100 Cargo.toml",
+			"serde@?vcs_url=git+https://github.com/evil/serde Cargo.toml",
+		}},
 		// A build without --locked rewrites a lock that predates the patch and fetches the fork, so the manifest's target still goes out.
 		{"lock that predates the patch", map[string]string{
 			"Cargo.toml": lockless7,
