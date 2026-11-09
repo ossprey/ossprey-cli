@@ -97,13 +97,13 @@ func (c *UVCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]pk
 		// complete. If they cannot resolve, the base tree still counts and
 		// the manifest is marked unresolved.
 		if !hasOptionalDependencies(absPath) {
-			return runUV(ctx, c.uv, cache, dir, uvArgsForPyProject(dir, false), loc)
+			return runUV(ctx, c.uv, cache, dir, c.root, absPath, uvArgsForPyProject(dir, false), loc)
 		}
-		pkgs, err := runUV(ctx, c.uv, cache, dir, uvArgsForPyProject(dir, true), loc)
+		pkgs, err := runUV(ctx, c.uv, cache, dir, c.root, absPath, uvArgsForPyProject(dir, true), loc)
 		if err == nil {
 			return pkgs, nil
 		}
-		pkgs, baseErr := runUV(ctx, c.uv, cache, dir, uvArgsForPyProject(dir, false), loc)
+		pkgs, baseErr := runUV(ctx, c.uv, cache, dir, c.root, absPath, uvArgsForPyProject(dir, false), loc)
 		if baseErr != nil {
 			return nil, baseErr
 		}
@@ -231,7 +231,10 @@ func pythonConstraintFloor(spec string) string {
 	return fmt.Sprintf("%d.%d", best[0], best[1])
 }
 
-func runUV(ctx context.Context, uv, cache, dir string, args []string, loc file.Location) ([]pkg.Package, error) {
+// runUV resolves with uv. root and manifest name the manifest for coverage: a
+// direct URL record in uv's output is left out of the catalogue, so the
+// manifest is marked unresolved unless a lock covers it.
+func runUV(ctx context.Context, uv, cache, dir, root, manifest string, args []string, loc file.Location) ([]pkg.Package, error) {
 	budget := resolverTimeout()
 	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
@@ -250,10 +253,29 @@ func runUV(ctx context.Context, uv, cache, dir string, args []string, loc file.L
 		}
 		return nil, fmt.Errorf("uv %s: %w", dir, err)
 	}
-	return parseUVOutput(stdout, loc), nil
+	pkgs, dropped := parseUVOutputCounting(stdout, loc)
+	if dropped > 0 && !(filepath.Base(manifest) == "pyproject.toml" && pythonCovered(root)(manifest)) {
+		markUnresolved(ctx, root, manifest)
+		warn.Add(ctx, warn.Entry{
+			Class: "uv:direct-url",
+			One:   fmt.Sprintf("uv: %s: %d direct URL dependencies have no version to check; not resolved", manifest, dropped),
+			Many:  "uv: %d manifests have direct URL dependencies with no version to check (OSSPREY_VERBOSE=1 lists them)",
+			Item:  manifest,
+		})
+	}
+	return pkgs, nil
 }
 
 func parseUVOutput(out []byte, loc file.Location) []pkg.Package {
+	pkgs, _ := parseUVOutputCounting(out, loc)
+	return pkgs
+}
+
+// parseUVOutputCounting is parseUVOutput, also counting the `name @ URL`
+// records it cannot catalog (a direct URL dependency has no version a
+// registry knows). A file: URL is the tree's own code and is not counted.
+func parseUVOutputCounting(out []byte, loc file.Location) ([]pkg.Package, int) {
+	dropped := 0
 	seen := make(map[string]struct{})
 	var pkgs []pkg.Package
 	scan := bufio.NewScanner(bytes.NewReader(out))
@@ -264,6 +286,9 @@ func parseUVOutput(out []byte, loc file.Location) []pkg.Package {
 		}
 		m := uvReqLine.FindStringSubmatch(line)
 		if m == nil {
+			if _, ref, ok := strings.Cut(line, " @ "); ok && !strings.HasPrefix(strings.ToLower(strings.TrimSpace(ref)), "file:") {
+				dropped++
+			}
 			continue
 		}
 		name := strings.ToLower(m[1])
@@ -280,5 +305,5 @@ func parseUVOutput(out []byte, loc file.Location) []pkg.Package {
 			Locations: file.NewLocationSet(loc),
 		})
 	}
-	return pkgs
+	return pkgs, dropped
 }

@@ -8,6 +8,11 @@ import (
 
 // treeLock is a root lock with a locked tree: a root-only lock covers no
 // workspace member.
+const (
+	treeYarnLock = "# yarn lockfile v1\n\nleft-pad@^1.3.0:\n  version \"1.3.0\"\n"
+	treePnpmLock = "lockfileVersion: '9.0'\n"
+)
+
 const treeLock = `{"lockfileVersion":3,"packages":{"":{},"node_modules/left-pad":{"version":"1.3.0","resolved":"https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"}}}`
 
 func TestMatchesWorkspaceGlobs(t *testing.T) {
@@ -147,7 +152,7 @@ func TestIsWorkspaceMember(t *testing.T) {
 			name: "yarn root lock counts",
 			files: map[string]string{
 				"package.json":            `{"workspaces":["packages/*"]}`,
-				"yarn.lock":               "",
+				"yarn.lock":               treeYarnLock,
 				"packages/a/package.json": `{"name":"a"}`,
 			},
 			dir:  "packages/a",
@@ -157,7 +162,7 @@ func TestIsWorkspaceMember(t *testing.T) {
 			name: "pnpm workspace member",
 			files: map[string]string{
 				"package.json":            `{"name":"root"}`,
-				"pnpm-lock.yaml":          "",
+				"pnpm-lock.yaml":          treePnpmLock,
 				"pnpm-workspace.yaml":     "packages:\n  - packages/*\n",
 				"packages/a/package.json": `{"name":"a"}`,
 			},
@@ -168,7 +173,7 @@ func TestIsWorkspaceMember(t *testing.T) {
 			name: "pnpm yaml wins over package.json workspaces",
 			files: map[string]string{
 				"package.json":            `{"workspaces":["examples/*"]}`,
-				"pnpm-lock.yaml":          "",
+				"pnpm-lock.yaml":          treePnpmLock,
 				"pnpm-workspace.yaml":     "packages:\n  - packages/*\n",
 				"examples/x/package.json": `{"name":"x"}`,
 			},
@@ -179,7 +184,7 @@ func TestIsWorkspaceMember(t *testing.T) {
 			name: "pnpm yaml with no packages key claims nothing",
 			files: map[string]string{
 				"package.json":            `{"name":"root"}`,
-				"pnpm-lock.yaml":          "",
+				"pnpm-lock.yaml":          treePnpmLock,
 				"pnpm-workspace.yaml":     "# nothing\n",
 				"packages/a/package.json": `{"name":"a"}`,
 			},
@@ -210,7 +215,7 @@ func TestIsWorkspaceMember(t *testing.T) {
 			files: map[string]string{
 				"package.json":                `{"name":"outer"}`,
 				"sub/package.json":            `{"workspaces":["packages/*"]}`,
-				"sub/yarn.lock":               "",
+				"sub/yarn.lock":               treeYarnLock,
 				"sub/packages/a/package.json": `{"name":"a"}`,
 			},
 			dir:  "sub/packages/a",

@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"github.com/anchore/syft/syft/artifact"
 	"github.com/anchore/syft/syft/file"
 	"github.com/anchore/syft/syft/pkg"
+	"github.com/goccy/go-yaml"
 )
 
 // NpmResolveCataloger resolves npm dependencies to concrete versions by running
@@ -159,11 +161,50 @@ func npmLockState(path string) npmLock {
 			_, err := parseNpmLock(data, file.Location{})
 			st = npmLock{parses: err == nil, locks: err == nil && npmLockLocksSomething(data)}
 		default:
-			st = npmLock{parses: true, locks: true}
+			st = yarnPnpmLockState(filepath.Base(path), data)
 		}
 	}
 	npmLockReadCache.Store(key, st)
 	return st
+}
+
+// yarnPnpmLockState judges a yarn.lock or pnpm-lock.yaml by its structure,
+// since syft has its own parsers for their several formats and presence alone
+// says nothing: an empty one parses and locks nothing (how a project with no
+// dependencies ships); a pnpm lock must be YAML with a lockfileVersion; a
+// yarn berry lock (one with __metadata) must be YAML, and a classic one must
+// have an entry header, an unindented line ending in a colon.
+func yarnPnpmLockState(name string, data []byte) npmLock {
+	if len(bytes.TrimSpace(data)) == 0 {
+		return npmLock{parses: true}
+	}
+	if name == "pnpm-lock.yaml" {
+		var doc map[string]any
+		if yaml.Unmarshal(data, &doc) != nil {
+			return npmLock{}
+		}
+		_, ok := doc["lockfileVersion"]
+		return npmLock{parses: ok, locks: ok}
+	}
+	headers, berry := 0, false
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimRight(line, "\r")
+		if line == "" || line[0] == ' ' || line[0] == '\t' || line[0] == '#' {
+			continue
+		}
+		if strings.HasPrefix(line, "__metadata:") {
+			berry = true
+		}
+		if strings.HasSuffix(line, ":") {
+			headers++
+		}
+	}
+	if berry {
+		var doc map[string]any
+		ok := yaml.Unmarshal(data, &doc) == nil
+		return npmLock{parses: ok, locks: ok && len(doc) > 1}
+	}
+	return npmLock{parses: headers > 0, locks: headers > 0}
 }
 
 // npmLockReadable reports whether the lockfile at path covers the package.json

@@ -613,7 +613,7 @@ func TestNpmResolveStandsDownOnlyForWorkspaceMembers(t *testing.T) {
 	root := t.TempDir()
 	writeTree(t, root, map[string]string{
 		"package.json":                 `{"name":"root-app","workspaces":{"packages":["packages/*","!packages/legacy"],"nohoist":["**/x"]}}`,
-		"yarn.lock":                    "",
+		"yarn.lock":                    treeYarnLock,
 		"packages/member/package.json": `{"name":"member-pkg"}`,
 		"packages/legacy/package.json": `{"name":"legacy-pkg"}`,
 		"examples/demo/package.json":   `{"name":"demo-pkg"}`,

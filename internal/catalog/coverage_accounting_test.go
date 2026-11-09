@@ -481,3 +481,83 @@ func TestUVWorkspaceRootLockCoversMembers(t *testing.T) {
 		}
 	}
 }
+
+// uv prints a direct URL dependency as `name @ URL`, which has no version to
+// catalog: the manifest keeps the rest of the output and is unresolved. A
+// local file: project is the tree's own code and leaves it complete.
+func TestUVDirectURLRecordsLeaveTheManifestUnresolved(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake-binary PATH interception uses shell scripts")
+	}
+	for name, record := range map[string]string{
+		"url":        "evil @ https://example.com/evil-1.0-py3-none-any.whl",
+		"local file": "lib @ file:///src/lib",
+	} {
+		t.Run(name, func(t *testing.T) {
+			bin := t.TempDir()
+			writeScript(t, bin, "uv", "#!/bin/sh\n[ \"$1\" = \"--version\" ] && { echo 'uv 0.5.0'; exit 0; }\n"+
+				"echo 'idna==3.7'\necho '"+record+"'\nexit 0\n")
+			t.Setenv("PATH", bin)
+			proj := t.TempDir()
+			writeTree(t, proj, map[string]string{
+				"requirements.txt": "idna\n",
+				"pyproject.toml":   "[project]\nname = \"app\"\nversion = \"0.1.0\"\ndependencies = [\"idna\"]\n",
+			})
+			ctx := warn.NewContext(context.Background(), false)
+			pkgs, err := Catalog(ctx, proj, Options{SkipVersionLookup: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			kept := false
+			for _, p := range pkgs {
+				if p.Name == "idna" && p.Version == "3.7" {
+					kept = true
+				}
+			}
+			if !kept {
+				t.Errorf("the resolved idna==3.7 was dropped: %v", pkgs)
+			}
+			got := warn.Unresolved(ctx)
+			want := []string(nil)
+			if name == "url" {
+				want = []string{"pyproject.toml", "requirements.txt"}
+			}
+			slices.Sort(got)
+			if !slices.Equal(got, want) {
+				t.Errorf("unresolved = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+// A yarn or pnpm lock is coverage only when it has the structure of one; an
+// empty one still covers a manifest that declares nothing.
+func TestMalformedYarnAndPnpmLocksCoverNothing(t *testing.T) {
+	pj := `{"name":"app","version":"1.0.0","dependencies":{"left-pad":"^1.3.0"}}`
+	for name, files := range map[string]map[string]string{
+		"pnpm not yaml":       {"pnpm-lock.yaml": "lockfileVersion: [\n"},
+		"pnpm no version":     {"pnpm-lock.yaml": "importers: {}\n"},
+		"yarn no entry":       {"yarn.lock": "# yarn lockfile v1\n\n  version \"1.3.0\"\n"},
+		"yarn berry not yaml": {"yarn.lock": "__metadata:\n  version: [\n"},
+	} {
+		files["package.json"] = pj
+		if got := unresolvedFor(t, files); !slices.Equal(got, []string{"package.json"}) {
+			t.Errorf("%s: unresolved = %v, want [package.json]", name, got)
+		}
+	}
+	for name, files := range map[string]map[string]string{
+		"pnpm":       {"pnpm-lock.yaml": "lockfileVersion: '9.0'\n\nimporters:\n  .:\n    dependencies:\n      left-pad:\n        specifier: ^1.3.0\n        version: 1.3.0\n"},
+		"yarn v1":    {"yarn.lock": "# yarn lockfile v1\n\nleft-pad@^1.3.0:\n  version \"1.3.0\"\n"},
+		"yarn berry": {"yarn.lock": "__metadata:\n  version: 8\n\n\"left-pad@npm:^1.3.0\":\n  version: 1.3.0\n"},
+	} {
+		files["package.json"] = pj
+		if got := unresolvedFor(t, files); len(got) != 0 {
+			t.Errorf("%s: unresolved = %v, want none", name, got)
+		}
+	}
+	for _, lock := range []string{"yarn.lock", "pnpm-lock.yaml"} {
+		if got := unresolvedFor(t, map[string]string{"package.json": `{"name":"app","version":"1.0.0"}`, lock: ""}); len(got) != 0 {
+			t.Errorf("empty %s, no dependencies: unresolved = %v, want none", lock, got)
+		}
+	}
+}
