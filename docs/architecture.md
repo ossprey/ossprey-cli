@@ -53,9 +53,9 @@ flowchart TD
     CV -- "set" --> U
     CV -- "unset" --> CB["run cargo first:<br/>it builds nothing"]
     CB --> CC{"malware in the Cargo.lock it<br/>left, even if cargo failed?"}
-    CC -- "yes, gating" --> CD["put back the Cargo.toml and<br/>Cargo.lock files it changed, exit 1"]
+    CC -- "yes, gating" --> CD["put back the Cargo.toml and<br/>Cargo.lock files it changed,<br/>unless changed again since, exit 1"]
     CC -- "no" --> CE["keep cargo's changes"]
-    CB -- "passive" --> AF
+    CB -- "passive" --> AE
     CA -- "no" --> T{"an install verb, or a<br/>tool run (npx, bunx, uvx)?"}
     T -- "no, e.g. npm run" --> U["exec the real manager"]
     T -- "yes" --> V{"OSSPREY_SKIP_CI?"}

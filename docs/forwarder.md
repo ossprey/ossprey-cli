@@ -108,6 +108,8 @@ found in N packages in Cargo.lock` after cargo's own output.
 If the lock holds malware you get the full malware report, every `Cargo.toml`
 and `Cargo.lock` the command changed is put back as it was (a `Cargo.lock` it
 created is removed), one line names those files, and the exit code is `1`.
+A file changed again after cargo exited, while the check ran, is left as it is,
+and a warning line names it.
 That includes `-p <member>`, `--manifest-path` and a member whose `Cargo.lock`
 sits at the workspace root. When cargo itself fails, its exit code is passed
 through, but a failure can still leave changes behind: `cargo fetch` writes
@@ -117,8 +119,10 @@ failure that changed only manifests gets one warning line naming them. Run
 `ossprey cargo fetch` once it resolves to check what they add. When the check
 cannot be made (the API unreachable, a workspace cargo cannot read, or a
 `resolver.lockfile-path` that may move the lock elsewhere, including one a
-config `include` could set), cargo's changes are kept and one warning line
-says so.
+config `include` could set or a config too large or too deeply nested to read),
+cargo's changes are kept and one warning line says so. A command that changes
+nothing and leaves no `Cargo.lock`, such as `cargo add --dry-run` in a project
+without one, has nothing to check.
 
 `cargo install` compiles the crate and runs its build scripts straight away, so
 the crates it names are checked first, and a block means cargo never starts.
@@ -129,8 +133,10 @@ An install with `--git`, `--path`, or a `--registry` or `--index` other than
 crates.io is not from crates.io and is forwarded unchecked, and so is one that
 names no source while cargo's default registry is elsewhere (`registry.default`
 in a `--config`, in `CARGO_REGISTRY_DEFAULT` or in the cargo configs under
-`CARGO_HOME`, or possibly set there by an `include`). `--registry crates-io`
-and crates.io's own index URL are checked like a plain install.
+`CARGO_HOME`, or possibly set there by an `include` or by a config too large
+or too deeply nested to read). `--registry crates-io` and crates.io's own index
+URL are checked like a plain install; an index URL with a non-ASCII host counts
+as another registry.
 `cargo install --list` is not an install.
 
 A rustup toolchain (`cargo +nightly add serde`) and cargo's options before the
