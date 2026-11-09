@@ -81,8 +81,9 @@ framework manage both.
   pins from the root it names with `package.workspace`, or from one further up
   when the nearest root excludes it, while the hook reads them from the nearest
   `[workspace]` above the crate. A pin there under the same name is looked up
-  in place of the one Cargo uses, and a dependency with no pin there is skipped
-  with a warning.
+  in place of the one Cargo uses, a range there is not looked up (see
+  unpinned ranges above), and a dependency that root does not declare is
+  skipped with a warning.
 - **A vendored crate's own `Cargo.lock`.** A crate `cargo vendor` copies
   keeps the `Cargo.lock` its author published, which your build never reads,
   so it is not looked up when your project's `Cargo.lock` pins that crate at
