@@ -191,25 +191,44 @@ func yarnPnpmLockState(name string, data []byte) npmLock {
 		snapshots, _ := doc["snapshots"].(map[string]any)
 		return npmLock{parses: ok, locks: ok && (len(packages) > 0 || len(snapshots) > 0)}
 	}
-	headers, berry := 0, false
+	// A tree needs a record, not just a header: a classic entry with an
+	// indented `version "..."` line, a berry key (not __metadata) whose
+	// value has a version.
+	headers, berry, inEntry, records := 0, false, false, 0
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimRight(line, "\r")
-		if line == "" || line[0] == ' ' || line[0] == '\t' || line[0] == '#' {
+		if line == "" || line[0] == '#' {
 			continue
 		}
+		if line[0] == ' ' || line[0] == '\t' {
+			if inEntry && strings.HasPrefix(strings.TrimSpace(line), "version ") {
+				records++
+				inEntry = false
+			}
+			continue
+		}
+		inEntry = false
 		if strings.HasPrefix(line, "__metadata:") {
 			berry = true
 		}
 		if strings.HasSuffix(line, ":") {
 			headers++
+			inEntry = true
 		}
 	}
 	if berry {
 		var doc map[string]any
-		ok := yaml.Unmarshal(data, &doc) == nil
-		return npmLock{parses: ok, locks: ok && len(doc) > 1}
+		if yaml.Unmarshal(data, &doc) != nil {
+			return npmLock{}
+		}
+		for key, v := range doc {
+			if entry, ok := v.(map[string]any); ok && key != "__metadata" && entry["version"] != nil {
+				return npmLock{parses: true, locks: true}
+			}
+		}
+		return npmLock{parses: true}
 	}
-	return npmLock{parses: headers > 0, locks: headers > 0}
+	return npmLock{parses: headers > 0, locks: records > 0}
 }
 
 // npmLockReadable reports whether the lockfile at path covers the package.json

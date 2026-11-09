@@ -535,12 +535,14 @@ func TestUVDirectURLRecordsLeaveTheManifestUnresolved(t *testing.T) {
 func TestMalformedYarnAndPnpmLocksCoverNothing(t *testing.T) {
 	pj := `{"name":"app","version":"1.0.0","dependencies":{"left-pad":"^1.3.0"}}`
 	for name, files := range map[string]map[string]string{
-		"pnpm not yaml":       {"pnpm-lock.yaml": "lockfileVersion: [\n"},
-		"pnpm no version":     {"pnpm-lock.yaml": "importers: {}\n"},
-		"pnpm header only":    {"pnpm-lock.yaml": "lockfileVersion: '9.0'\n"},
-		"pnpm importers only": {"pnpm-lock.yaml": "lockfileVersion: '9.0'\n\nimporters:\n  .:\n    dependencies:\n      left-pad:\n        specifier: ^1.3.0\n        version: 1.3.0\n"},
-		"yarn no entry":       {"yarn.lock": "# yarn lockfile v1\n\n  version \"1.3.0\"\n"},
-		"yarn berry not yaml": {"yarn.lock": "__metadata:\n  version: [\n"},
+		"pnpm not yaml":          {"pnpm-lock.yaml": "lockfileVersion: [\n"},
+		"pnpm no version":        {"pnpm-lock.yaml": "importers: {}\n"},
+		"pnpm header only":       {"pnpm-lock.yaml": "lockfileVersion: '9.0'\n"},
+		"pnpm importers only":    {"pnpm-lock.yaml": "lockfileVersion: '9.0'\n\nimporters:\n  .:\n    dependencies:\n      left-pad:\n        specifier: ^1.3.0\n        version: 1.3.0\n"},
+		"yarn no entry":          {"yarn.lock": "# yarn lockfile v1\n\n  version \"1.3.0\"\n"},
+		"yarn berry not yaml":    {"yarn.lock": "__metadata:\n  version: [\n"},
+		"yarn header only":       {"yarn.lock": "# yarn lockfile v1\n\nleft-pad@^1.3.0:\n  resolved \"https://registry.yarnpkg.com/left-pad/-/left-pad-1.3.0.tgz\"\n"},
+		"yarn berry header only": {"yarn.lock": "__metadata:\n  version: 8\n\n\"left-pad@npm:^1.3.0\":\n  resolution: \"left-pad@npm:1.3.0\"\n"},
 	} {
 		files["package.json"] = pj
 		if got := unresolvedFor(t, files); !slices.Equal(got, []string{"package.json"}) {
