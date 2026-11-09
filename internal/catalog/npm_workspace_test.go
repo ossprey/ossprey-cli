@@ -10,7 +10,7 @@ import (
 // workspace member.
 const (
 	treeYarnLock = "# yarn lockfile v1\n\nleft-pad@^1.3.0:\n  version \"1.3.0\"\n"
-	treePnpmLock = "lockfileVersion: '9.0'\n"
+	treePnpmLock = "lockfileVersion: '9.0'\n\npackages:\n  left-pad@1.3.0:\n    resolution: {integrity: sha512-x}\n"
 )
 
 const treeLock = `{"lockfileVersion":3,"packages":{"":{},"node_modules/left-pad":{"version":"1.3.0","resolved":"https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"}}}`

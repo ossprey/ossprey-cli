@@ -595,3 +595,35 @@ func TestUVProjectExpandsEnvFollowsOverrides(t *testing.T) {
 		}
 	}
 }
+
+// A local project's path is read as the OS reads it: past a symlink,
+// jump/../lib is the lib beside the link's target, not the lib beside jump
+// (filepath.Join cleans the .. away first and judges the wrong project).
+func TestLocalProjectPathsFollowTheLinkBeforeDotDot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks")
+	}
+	clean := "[project]\nname = \"lib\"\nversion = \"0.1.0\"\n"
+	dirty := "[project]\nname = \"lib\"\nversion = \"0.1.0\"\ndependencies = [\"x @ https://h/${SECRET}/x.whl\"]\n"
+	layout := func(t *testing.T, extra map[string]string) string {
+		dir := t.TempDir()
+		files := map[string]string{"lib/pyproject.toml": clean, "sub/lib/pyproject.toml": dirty, "sub/inner/.keep": ""}
+		for k, v := range extra {
+			files[k] = v
+		}
+		writeTree(t, dir, files)
+		if err := os.Symlink(filepath.Join(dir, "sub", "inner"), filepath.Join(dir, "jump")); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+	dir := layout(t, map[string]string{"pyproject.toml": "[project]\nname = \"app\"\nversion = \"0.1.0\"\ndependencies = [\"lib\"]\n\n[tool.uv.sources]\nlib = { path = \"jump/../lib\" }\n"})
+	if err := uvProjectExpandsEnv(filepath.Join(dir, "pyproject.toml"), dir); !errors.Is(err, errNamesEnvVar) {
+		t.Errorf("path source: err = %v, want errNamesEnvVar", err)
+	}
+	dir = layout(t, map[string]string{"requirements.txt": "-e ./jump/../lib\n"})
+	t.Chdir(dir)
+	if err := uvExpandsEnv(context.Background(), filepath.Join(dir, "requirements.txt"), dir); !errors.Is(err, errNamesEnvVar) {
+		t.Errorf("requirements local project: err = %v, want errNamesEnvVar", err)
+	}
+}

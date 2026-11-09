@@ -537,6 +537,8 @@ func TestMalformedYarnAndPnpmLocksCoverNothing(t *testing.T) {
 	for name, files := range map[string]map[string]string{
 		"pnpm not yaml":       {"pnpm-lock.yaml": "lockfileVersion: [\n"},
 		"pnpm no version":     {"pnpm-lock.yaml": "importers: {}\n"},
+		"pnpm header only":    {"pnpm-lock.yaml": "lockfileVersion: '9.0'\n"},
+		"pnpm importers only": {"pnpm-lock.yaml": "lockfileVersion: '9.0'\n\nimporters:\n  .:\n    dependencies:\n      left-pad:\n        specifier: ^1.3.0\n        version: 1.3.0\n"},
 		"yarn no entry":       {"yarn.lock": "# yarn lockfile v1\n\n  version \"1.3.0\"\n"},
 		"yarn berry not yaml": {"yarn.lock": "__metadata:\n  version: [\n"},
 	} {
@@ -546,7 +548,8 @@ func TestMalformedYarnAndPnpmLocksCoverNothing(t *testing.T) {
 		}
 	}
 	for name, files := range map[string]map[string]string{
-		"pnpm":       {"pnpm-lock.yaml": "lockfileVersion: '9.0'\n\nimporters:\n  .:\n    dependencies:\n      left-pad:\n        specifier: ^1.3.0\n        version: 1.3.0\n"},
+		"pnpm":       {"pnpm-lock.yaml": "lockfileVersion: '9.0'\n\nimporters:\n  .:\n    dependencies:\n      left-pad:\n        specifier: ^1.3.0\n        version: 1.3.0\n\npackages:\n  left-pad@1.3.0:\n    resolution: {integrity: sha512-x}\n"},
+		"pnpm v6":    {"pnpm-lock.yaml": "lockfileVersion: '6.0'\n\npackages:\n  /left-pad@1.3.0:\n    resolution: {integrity: sha512-x}\n"},
 		"yarn v1":    {"yarn.lock": "# yarn lockfile v1\n\nleft-pad@^1.3.0:\n  version \"1.3.0\"\n"},
 		"yarn berry": {"yarn.lock": "__metadata:\n  version: 8\n\n\"left-pad@npm:^1.3.0\":\n  version: 1.3.0\n"},
 	} {

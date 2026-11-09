@@ -184,7 +184,12 @@ func yarnPnpmLockState(name string, data []byte) npmLock {
 			return npmLock{}
 		}
 		_, ok := doc["lockfileVersion"]
-		return npmLock{parses: ok, locks: ok}
+		// Only package records are a tree: importers alone name the
+		// project's requirements, not what they resolved to (v9 keeps the
+		// records in packages and snapshots, earlier versions in packages).
+		packages, _ := doc["packages"].(map[string]any)
+		snapshots, _ := doc["snapshots"].(map[string]any)
+		return npmLock{parses: ok, locks: ok && (len(packages) > 0 || len(snapshots) > 0)}
 	}
 	headers, berry := 0, false
 	for _, line := range strings.Split(string(data), "\n") {

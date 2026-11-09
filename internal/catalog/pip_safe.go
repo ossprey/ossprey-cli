@@ -566,6 +566,21 @@ func uvExpandsEnv(ctx context.Context, path, root string) error {
 	return uvProjectsExpandEnv(projects, root)
 }
 
+// projectManifest is the pyproject.toml of the directory at dir as the OS
+// resolves it, symlinks first: past a link, jump/../lib names the lib beside
+// the link's target, which is what uv reads, while filepath.Join would clean
+// the .. away and name another directory. false when dir is not a directory.
+func projectManifest(dir string) (string, bool) {
+	real, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return "", false
+	}
+	if fi, err := os.Stat(real); err != nil || !fi.IsDir() {
+		return "", false
+	}
+	return filepath.Join(real, "pyproject.toml"), true
+}
+
 // localProjectRef returns the path a requirement line names as a local
 // project (./lib, lib/, /abs/lib, file:./lib, name @ file:///abs/lib), or ""
 // for a registry requirement or a remote URL. uv reads such a project's
@@ -642,13 +657,14 @@ func localProjects(src, ref, root string) ([]string, error) {
 	}
 	var out []string
 	for _, c := range candidates {
-		if fi, err := os.Stat(c); err != nil || !fi.IsDir() {
+		project, ok := projectManifest(c)
+		if !ok {
 			continue // a missing path fails uv, and a local archive is not read for metadata here
 		}
 		if !withinRoot(c, root) {
 			return nil, fmt.Errorf("%s %w", c, errOutsideRoot)
 		}
-		out = append(out, filepath.Join(c, "pyproject.toml"))
+		out = append(out, project)
 	}
 	return out, nil
 }
@@ -828,8 +844,8 @@ func uvProjectRefs(path string) ([]string, error) {
 		if !filepath.IsAbs(p) {
 			p = dir + string(filepath.Separator) + p
 		}
-		if fi, err := os.Stat(p); err == nil && fi.IsDir() {
-			out = append(out, filepath.Join(p, "pyproject.toml"))
+		if project, ok := projectManifest(p); ok {
+			out = append(out, project)
 		}
 	}
 	if ws := l.Tool.UV.Workspace; ws != nil {
