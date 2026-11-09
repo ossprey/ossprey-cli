@@ -22,6 +22,8 @@ func TestParsePipReport(t *testing.T) {
 	     "download_info": {"url": "https://files.pythonhosted.org/packages/y/idna-3.6-py3-none-any.whl"}},
 	    {"metadata": {"name": "mylib", "version": "0.1.0"},
 	     "download_info": {"url": "file:///repo/libs/mylib"}},
+	    {"metadata": {"name": "localwheel", "version": "1.0"},
+	     "download_info": {"url": "file:///wheels/localwheel-1.0-py3-none-any.whl"}},
 	    {"metadata": {"name": "requests", "version": "2.31.0"},
 	     "download_info": {"url": "https://files.pythonhosted.org/packages/x/requests-2.31.0.tar.gz"}},
 	    {"metadata": {"name": "", "version": "9.9.9"}},
@@ -38,7 +40,7 @@ func TestParsePipReport(t *testing.T) {
 	for _, p := range pkgs {
 		got[p.Name] = p.Version
 	}
-	want := map[string]string{"requests": "2.31.0", "idna": "3.6"}
+	want := map[string]string{"requests": "2.31.0", "idna": "3.6", "localwheel": "1.0"}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}

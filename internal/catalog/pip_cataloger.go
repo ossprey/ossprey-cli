@@ -338,9 +338,9 @@ type pipReport struct {
 }
 
 // parsePipReport turns an installation report into packages, dropping anything
-// resolved from a local path. A `file:` URL is the project itself or a path
-// dependency (`-e ./libs/foo`) — the repo's own code, not a registry package,
-// so emitting it would only yield a spurious NOT_FOUND finding.
+// resolved from a local project directory. Such a `file:` URL is the project
+// itself or a path dependency (`-e ./libs/foo`) — the repo's own code. A local
+// wheel or sdist (find-links) is a dependency and is kept (`localProjectURL`).
 func parsePipReport(data []byte, loc file.Location) ([]pkg.Package, error) {
 	var report pipReport
 	if err := json.Unmarshal(data, &report); err != nil {
@@ -354,7 +354,7 @@ func parsePipReport(data []byte, loc file.Location) ([]pkg.Package, error) {
 		if name == "" || version == "" {
 			continue
 		}
-		if strings.HasPrefix(strings.ToLower(entry.DownloadInfo.URL), "file:") {
+		if localProjectURL(entry.DownloadInfo.URL) {
 			continue
 		}
 		key := name + "@" + version
