@@ -627,3 +627,26 @@ func TestLocalProjectPathsFollowTheLinkBeforeDotDot(t *testing.T) {
 		t.Errorf("requirements local project: err = %v, want errNamesEnvVar", err)
 	}
 }
+
+// A setuptools project whose dependencies live in setup.cfg beside a
+// [build-system]-only pyproject needs a build, so it is unresolved.
+func TestSetupCfgDependenciesNeedBuild(t *testing.T) {
+	bs := "[build-system]\nrequires = [\"setuptools\"]\nbuild-backend = \"setuptools.build_meta\"\n"
+	for name, tc := range map[string]struct {
+		cfg  string
+		want bool
+	}{
+		"multi-line":    {"[metadata]\nname = app\n\n[options]\ninstall_requires =\n    requests\n", true},
+		"inline":        {"[options]\ninstall_requires = requests\n", true},
+		"empty":         {"[options]\ninstall_requires =\npackages = find:\n", false},
+		"other section": {"[options.extras_require]\ninstall_requires = x\n", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeTree(t, dir, map[string]string{"pyproject.toml": bs, "setup.cfg": tc.cfg})
+			if got := pyprojectNeedsBuild(filepath.Join(dir, "pyproject.toml")) != nil; got != tc.want {
+				t.Errorf("needs build = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

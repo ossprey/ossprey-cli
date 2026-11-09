@@ -9,6 +9,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/anchore/syft/syft/file"
+	"github.com/anchore/syft/syft/pkg"
+
 	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
@@ -567,5 +570,18 @@ func TestMalformedYarnAndPnpmLocksCoverNothing(t *testing.T) {
 		if got := unresolvedFor(t, map[string]string{"package.json": `{"name":"app","version":"1.0.0"}`, lock: ""}); len(got) != 0 {
 			t.Errorf("empty %s, no dependencies: unresolved = %v, want none", lock, got)
 		}
+	}
+}
+
+// A lockless poetry project's group dependencies are catalogued directly.
+func TestPoetryGroupDependenciesAreCatalogued(t *testing.T) {
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{"pyproject.toml": "[tool.poetry]\nname = \"app\"\nversion = \"0.1.0\"\n\n[tool.poetry.dependencies]\npython = \"^3.11\"\n\n[tool.poetry.group.dev.dependencies]\npytest = \"^8.0\"\n"})
+	pkgs, err := parsePyProjectFile(filepath.Join(dir, "pyproject.toml"), file.NewLocation("pyproject.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(pkgs, func(p pkg.Package) bool { return p.Name == "pytest" }) {
+		t.Errorf("pytest from a poetry group was dropped: %v", pkgs)
 	}
 }

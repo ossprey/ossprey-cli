@@ -133,6 +133,11 @@ func parsePyProjectFile(path string, loc file.Location) ([]pkg.Package, error) {
 	for n, spec := range pp.Tool.Poetry.DevDependencies {
 		add(n, poetryVersion(spec))
 	}
+	for _, g := range pp.Tool.Poetry.Group {
+		for n, spec := range g.Dependencies {
+			add(n, poetryVersion(spec))
+		}
+	}
 	return out, nil
 }
 
@@ -242,6 +247,9 @@ func pyprojectNeedsBuild(path string) error {
 	if pp == nil || hasPEP621Project(path) {
 		return nil
 	}
+	if setupCfgDeclaresDeps(filepath.Join(filepath.Dir(path), "setup.cfg")) && !pyprojectLockCovered(path) {
+		return fmt.Errorf("%s: setup.cfg dependencies with no lock; resolving them would build the project, so direct dependencies only", filepath.Dir(path))
+	}
 	deps := 0
 	count := func(table map[string]any) {
 		for name := range table {
@@ -263,6 +271,45 @@ func pyprojectNeedsBuild(path string) error {
 		return nil
 	}
 	return fmt.Errorf("%s: poetry dependencies with no poetry.lock; resolving them would build the project, so direct dependencies only", dir)
+}
+
+// setupCfgDeclaresDeps reports a setup.cfg whose [options] section has a
+// non-empty install_requires. Only a build reads it.
+func setupCfgDeclaresDeps(path string) bool {
+	data, err := readBoundedFile(path, maxManifestBytes)
+	if err != nil {
+		return false
+	}
+	inOptions, inReqs := false, false
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, ";") {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "[") {
+			inOptions = strings.EqualFold(trimmed, "[options]")
+			inReqs = false
+			continue
+		}
+		if inReqs && (line[0] == ' ' || line[0] == '\t') {
+			return true
+		}
+		inReqs = false
+		if !inOptions {
+			continue
+		}
+		key, val, ok := strings.Cut(trimmed, "=")
+		if !ok {
+			key, val, ok = strings.Cut(trimmed, ":")
+		}
+		if ok && strings.EqualFold(strings.TrimSpace(key), "install_requires") {
+			if strings.TrimSpace(val) != "" {
+				return true
+			}
+			inReqs = true
+		}
+	}
+	return false
 }
 
 // dynamicDependencies reports whether a [project] table leaves its
