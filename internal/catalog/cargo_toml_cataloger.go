@@ -239,6 +239,34 @@ func workspacePool(m cargoManifest, isRoot bool, manifestPath, scanRoot string, 
 	}
 }
 
+// DeclaresCargoWorkspace reports whether a Cargo.toml roots a workspace, as workspacePool reads one.
+func DeclaresCargoWorkspace(data []byte) bool {
+	if len(data) > maxManifestBytes {
+		return false
+	}
+	var m cargoManifest
+	md, err := toml.Decode(string(data), &m)
+	return err == nil && md.IsDefined("workspace")
+}
+
+// CargoWorkspacePins returns the crates.io crates a Cargo.toml's [workspace.dependencies] pins exactly, read as an inheriting member reads each entry.
+func CargoWorkspacePins(data []byte) []Package {
+	if len(data) > maxManifestBytes {
+		return nil
+	}
+	var m cargoManifest
+	if _, err := toml.Decode(string(data), &m); err != nil {
+		return nil
+	}
+	var out []Package
+	for alias, spec := range m.Workspace.Dependencies {
+		if name, version, ok, _ := cargoDep(alias, spec, nil); ok && version != "" {
+			out = append(out, Package{Type: "cargo", Name: name, Version: version})
+		}
+	}
+	return out
+}
+
 // withinRoot reports whether dir is root or sits inside it, resolving symlinks
 // first so a linked directory cannot walk the read outside the scan root.
 func withinRoot(dir, root string) bool {

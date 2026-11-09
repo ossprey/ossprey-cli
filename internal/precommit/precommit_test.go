@@ -2,8 +2,10 @@ package precommit
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/ossprey/ossprey-cli/internal/catalog"
 	"github.com/ossprey/ossprey-cli/internal/trust"
+	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
 // --- git scratch-repo helpers ---
@@ -91,6 +94,22 @@ func pyproject(deps ...string) string {
 	b.WriteString("]\n")
 	return b.String()
 }
+
+// cargoLock renders a v4 Cargo.lock: the project's own root crate, then one entry per {name, version, source}.
+func cargoLock(crates ...[3]string) string {
+	var b strings.Builder
+	b.WriteString("version = 4\n\n[[package]]\nname = \"app\"\nversion = \"0.1.0\"\n")
+	for _, c := range crates {
+		fmt.Fprintf(&b, "\n[[package]]\nname = %q\nversion = %q\nsource = %q\n", c[0], c[1], c[2])
+	}
+	return b.String()
+}
+
+const (
+	cratesIoSource = "registry+https://github.com/rust-lang/crates.io-index"
+	forkCommit     = "0123456789abcdef0123456789abcdef01234567"
+	forkSource     = "git+https://git.example.com/acme/forked-crate?branch=main#" + forkCommit
+)
 
 // --- tests ---
 
@@ -203,6 +222,33 @@ func TestStagedDelta(t *testing.T) {
 			},
 			want: []Package{{Type: "npm", Name: "is-odd", Version: "3.0.1", Path: "package-lock.json"}},
 		},
+		{
+			name: "new Cargo.lock: crates pinned, a git crate marked, the root crate left out",
+			setup: func(t *testing.T, dir string) {
+				writeRepoFile(t, dir, "README.md", "# hi\n")
+				commitAll(t, dir)
+				writeRepoFile(t, dir, "Cargo.lock", cargoLock(
+					[3]string{"serde", "1.0.228", cratesIoSource},
+					[3]string{"forked-crate", "2.0.0", forkSource},
+				))
+				gitT(t, dir, "add", "Cargo.lock")
+			},
+			want: []Package{
+				{Type: "cargo", Name: "forked-crate", Version: "2.0.0", Path: "Cargo.lock",
+					Qualifiers: map[string]string{"vcs_url": "git+https://git.example.com/acme/forked-crate@" + forkCommit}},
+				{Type: "cargo", Name: "serde", Version: "1.0.228", Path: "Cargo.lock"},
+			},
+		},
+		{
+			name: "a crate moved from git to crates.io at the same version is new",
+			setup: func(t *testing.T, dir string) {
+				writeRepoFile(t, dir, "Cargo.lock", cargoLock([3]string{"forked-crate", "2.0.0", forkSource}))
+				commitAll(t, dir)
+				writeRepoFile(t, dir, "Cargo.lock", cargoLock([3]string{"forked-crate", "2.0.0", cratesIoSource}))
+				gitT(t, dir, "add", "Cargo.lock")
+			},
+			want: []Package{{Type: "cargo", Name: "forked-crate", Version: "2.0.0", Path: "Cargo.lock"}},
+		},
 	}
 
 	for _, tc := range cases {
@@ -234,6 +280,440 @@ func TestStagedDeltaSubdirectoryPathPreserved(t *testing.T) {
 	want := []Package{{Type: "npm", Name: "is-odd", Version: "3.0.1", Path: "web/package-lock.json"}}
 	if !reflect.DeepEqual(got.Packages, want) {
 		t.Errorf("delta mismatch:\n got: %+v\nwant: %+v", got.Packages, want)
+	}
+}
+
+func TestStagedDeltaReadsAnUnstagedCargoWorkspaceRoot(t *testing.T) {
+	dir := initRepo(t)
+	writeRepoFile(t, dir, "Cargo.toml", "[workspace]\nmembers = [\"crates/*\"]\n\n[workspace.dependencies]\nserde = \"=1.0.228\"\nrand = \"=0.8.5\"\n")
+	member := "[package]\nname = \"core\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = { workspace = true }\n"
+	writeRepoFile(t, dir, "crates/core/Cargo.toml", member)
+	commitAll(t, dir)
+	writeRepoFile(t, dir, "crates/core/Cargo.toml", member+"rand = { workspace = true }\n")
+	gitT(t, dir, "add", "crates/core/Cargo.toml")
+
+	ctx := warn.NewContext(context.Background(), false)
+	got, err := StagedDelta(ctx, dir, trust.Policy{})
+	if err != nil {
+		t.Fatalf("StagedDelta: %v", err)
+	}
+	want := []Package{{Type: "cargo", Name: "rand", Version: "0.8.5", Path: "crates/core/Cargo.toml"}}
+	if !reflect.DeepEqual(got.Packages, want) {
+		t.Errorf("delta mismatch:\n got: %+v\nwant: %+v", got.Packages, want)
+	}
+	if out := warn.Drain(ctx); out != "" {
+		t.Errorf("a commit touching only a member warned:\n%s", out)
+	}
+}
+
+// stagedRootDelta commits files, stages the root Cargo.toml as next, and returns the delta with any warnings.
+func stagedRootDelta(t *testing.T, files map[string]string, next string) ([]Package, string) {
+	t.Helper()
+	dir := initRepo(t)
+	for rel, content := range files {
+		writeRepoFile(t, dir, rel, content)
+	}
+	commitAll(t, dir)
+	writeRepoFile(t, dir, "Cargo.toml", next)
+	gitT(t, dir, "add", "Cargo.toml")
+	ctx := warn.NewContext(context.Background(), false)
+	got, err := StagedDelta(ctx, dir, trust.Policy{})
+	if err != nil {
+		t.Fatalf("StagedDelta: %v", err)
+	}
+	return got.Packages, warn.Drain(ctx)
+}
+
+func TestStagedDeltaChecksAPinChangedOnlyInAStagedCargoWorkspacePool(t *testing.T) {
+	member := func(m string) string {
+		return "[package]\nname = \"" + m + "\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = { workspace = true }\nrand = { workspace = true }\n"
+	}
+	virtual := "[workspace]\nmembers = [\"crates/*\"]\n\n[workspace.dependencies]\nserde = \"=%s\"\nrand = \"=0.8.5\"\n"
+	// An empty [workspace] still roots one, and a path dependency under it is a member Cargo adds on its own.
+	implicit := "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nrand = { workspace = true }\nmylib = { path = \"mylib\" }\n\n[workspace]\n\n[workspace.dependencies]\nserde = \"=%s\"\nrand = \"=0.8.5\"\n"
+	for name, tc := range map[string]struct {
+		files map[string]string
+		root  string
+	}{
+		"virtual root":          {map[string]string{"crates/a/Cargo.toml": member("a"), "crates/b/Cargo.toml": member("b")}, virtual},
+		"empty workspace table": {map[string]string{"mylib/Cargo.toml": "[package]\nname = \"mylib\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = { workspace = true }\n"}, implicit},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tc.files["Cargo.toml"] = fmt.Sprintf(tc.root, "1.0.228")
+			got, warned := stagedRootDelta(t, tc.files, fmt.Sprintf(tc.root, "1.0.229"))
+			want := []Package{{Type: "cargo", Name: "serde", Version: "1.0.229", Path: "Cargo.toml"}}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("delta mismatch:\n got: %+v\nwant: %+v", got, want)
+			}
+			if warned != "" {
+				t.Errorf("a root-only pin change warned:\n%s", warned)
+			}
+		})
+	}
+}
+
+func TestStagedDeltaReportsNothingForACargoWorkspaceRootEditOutsideItsPool(t *testing.T) {
+	member := "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = { workspace = true }\n"
+	pool := "\n[workspace.dependencies]\nserde = \"=1.0.228\"\n"
+	got, warned := stagedRootDelta(t, map[string]string{
+		"Cargo.toml":          "[workspace]\nmembers = [\"crates/a\"]\n\n[workspace.package]\nversion = \"0.1.0\"\n" + pool,
+		"crates/a/Cargo.toml": member,
+		// A crate the edit makes a member brings no new pin, since its own were already committed.
+		"tools/x/Cargo.toml": "[package]\nname = \"x\"\nversion = \"0.1.0\"\n\n[dependencies]\nrand = \"=0.8.5\"\n",
+	}, "[workspace]\nmembers = [\"crates/a\", \"tools/x\"]\n\n[workspace.package]\nversion = \"0.2.0\"\n"+pool)
+	if len(got) != 0 || warned != "" {
+		t.Errorf("a root edit outside the pool reported %+v, warned %q", got, warned)
+	}
+}
+
+func TestStagedDeltaReportsNothingForAPathGitOrRegistryPoolEntryChange(t *testing.T) {
+	root := "[workspace]\nmembers = [\"crates/*\"]\n\n[workspace.dependencies]\n" +
+		"bar = { path = \"crates/bar\", version = \"=%[1]s\" }\n" +
+		"foo = { git = \"https://github.com/example/foo\", version = \"=%[1]s\" }\n" +
+		"baz = { version = \"=%[1]s\", registry = \"internal\" }\n" +
+		"qux = { version = \"=%[1]s\", registry-index = \"sparse+https://cargo.example.com/index/\" }\n"
+	member := "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\n[dependencies]\nfoo = { workspace = true }\nbaz = { workspace = true }\nqux = { workspace = true }\n"
+	got, warned := stagedRootDelta(t, map[string]string{
+		"Cargo.toml":            fmt.Sprintf(root, "0.1.0"),
+		"crates/a/Cargo.toml":   member,
+		"crates/bar/Cargo.toml": "[package]\nname = \"bar\"\nversion = \"0.1.0\"\n",
+	}, fmt.Sprintf(root, "0.2.0"))
+	if len(got) != 0 || warned != "" {
+		t.Errorf("a path, git or registry pool entry change reported %+v, warned %q", got, warned)
+	}
+}
+
+// lockedCrates renders a Cargo.lock of crates.io crates, each {name, version, checksum}.
+func lockedCrates(crates ...[3]string) string {
+	var b strings.Builder
+	b.WriteString("version = 4\n")
+	for _, c := range crates {
+		fmt.Fprintf(&b, "\n[[package]]\nname = %q\nversion = %q\nsource = %q\nchecksum = %q\n", c[0], c[1], cratesIoSource, c[2])
+	}
+	return b.String()
+}
+
+// vendorCrate writes dir as `cargo vendor` does: the crate's manifest, a marker recording sum, and the crate's own lock.
+func vendorCrate(t *testing.T, repo, dir, name, version, sum, lock string) {
+	t.Helper()
+	writeRepoFile(t, repo, dir+"/Cargo.toml", fmt.Sprintf("[package]\nname = %q\nversion = %q\n", name, version))
+	writeRepoFile(t, repo, dir+"/.cargo-checksum.json", `{"files":{},"package":"`+sum+`"}`)
+	writeRepoFile(t, repo, dir+"/Cargo.lock", lock)
+}
+
+// appManifest is the Cargo.toml of the project that vendors.
+const appManifest = "[package]\nname = \"app\"\nversion = \"0.1.0\"\n"
+
+// stageSymlink stages p as a symlink whose target text is target.
+func stageSymlink(t *testing.T, dir, p, target string) {
+	t.Helper()
+	cmd := exec.Command("git", "-C", dir, "hash-object", "-w", "--stdin")
+	cmd.Stdin = strings.NewReader(target)
+	blob, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git hash-object: %v", err)
+	}
+	gitT(t, dir, "update-index", "--add", "--cacheinfo", "120000,"+strings.TrimSpace(string(blob))+","+p)
+}
+
+// vendorConfig is the .cargo/config.toml `cargo vendor` prints, replacing crates.io with dir.
+func vendorConfig(dir string) string {
+	return "[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.vendored-sources]\ndirectory = \"" + dir + "\"\n"
+}
+
+func TestStagedDeltaVendoredCrateLocks(t *testing.T) {
+	sumOld, sumSerde, sumOther := strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64)
+	devLock := lockedCrates([3]string{"criterion", "0.5.1", strings.Repeat("d", 64)})
+	evilLock := lockedCrates([3]string{"evil-crate", "6.6.6", strings.Repeat("e", 64)})
+	serdeBump := func(t *testing.T, dir, project, marker string) {
+		writeRepoFile(t, dir, path.Join(project, "Cargo.toml"), appManifest)
+		writeRepoFile(t, dir, path.Join(project, "Cargo.lock"), lockedCrates([3]string{"serde", "1.0.228", sumOld}))
+		commitAll(t, dir)
+		writeRepoFile(t, dir, path.Join(project, "Cargo.lock"), lockedCrates([3]string{"serde", "1.0.229", sumSerde}))
+		vendorCrate(t, dir, path.Join(project, "vendor/serde"), "serde", "1.0.229", marker, devLock)
+		gitT(t, dir, "add", "-A")
+	}
+	// plantedProject stages a nested project at tools/x with a marker matching the root lock's pin of x.
+	plantedProject := func(t *testing.T, dir string) {
+		writeRepoFile(t, dir, "Cargo.toml", appManifest)
+		writeRepoFile(t, dir, "Cargo.lock", lockedCrates([3]string{"x", "1.0.0", sumSerde}))
+		commitAll(t, dir)
+		vendorCrate(t, dir, "tools/x", "x", "1.0.0", sumSerde, evilLock)
+		gitT(t, dir, "add", "-A")
+	}
+	serde := Package{Type: "cargo", Name: "serde", Version: "1.0.229", Path: "Cargo.lock"}
+	criterion := Package{Type: "cargo", Name: "criterion", Version: "0.5.1", Path: "vendor/serde/Cargo.lock"}
+	plantedEvil := []Package{{Type: "cargo", Name: "evil-crate", Version: "6.6.6", Path: "tools/x/Cargo.lock"}}
+
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, dir string)
+		want  []Package
+	}{
+		{
+			name: "a vendored crate's own lock is skipped and the project's lock still checked",
+			setup: func(t *testing.T, dir string) {
+				writeRepoFile(t, dir, ".cargo/config.toml", vendorConfig("vendor"))
+				serdeBump(t, dir, ".", sumSerde)
+			},
+			want: []Package{serde},
+		},
+		{
+			name: "a marker whose checksum the project's lock does not pin skips nothing",
+			setup: func(t *testing.T, dir string) {
+				writeRepoFile(t, dir, ".cargo/config.toml", vendorConfig("vendor"))
+				serdeBump(t, dir, ".", sumOther)
+			},
+			want: []Package{criterion, serde},
+		},
+		{
+			name: "a nested project's nearest config sets the vendor directory, relative to that project",
+			setup: func(t *testing.T, dir string) {
+				writeRepoFile(t, dir, ".cargo/config.toml", vendorConfig("third_party"))
+				writeRepoFile(t, dir, "app/.cargo/config.toml", "[source.vendored-sources]\ndirectory = \"vendor\"\n")
+				serdeBump(t, dir, "app", sumSerde)
+			},
+			want: []Package{{Type: "cargo", Name: "serde", Version: "1.0.229", Path: "app/Cargo.lock"}},
+		},
+		{
+			name:  "a planted marker beside a nested project the root lock pins skips nothing without a cargo config",
+			setup: plantedProject,
+			want:  plantedEvil,
+		},
+		{
+			name: "a planted marker beside a nested project outside the configured vendor directory skips nothing",
+			setup: func(t *testing.T, dir string) {
+				writeRepoFile(t, dir, ".cargo/config.toml", vendorConfig("vendor"))
+				plantedProject(t, dir)
+			},
+			want: plantedEvil,
+		},
+		{
+			name: "a project lock nested past the bound proves nothing and does not crash the hook",
+			setup: func(t *testing.T, dir string) {
+				deep := strings.Repeat("[", 4<<20) + strings.Repeat("]", 4<<20)
+				writeRepoFile(t, dir, ".cargo/config.toml", vendorConfig("vendor"))
+				writeRepoFile(t, dir, "Cargo.toml", appManifest)
+				writeRepoFile(t, dir, "Cargo.lock", "deep = "+deep+"\n"+lockedCrates([3]string{"serde", "1.0.229", sumSerde}))
+				commitAll(t, dir)
+				vendorCrate(t, dir, "vendor/serde", "serde", "1.0.229", sumSerde, devLock)
+				gitT(t, dir, "add", "-A")
+			},
+			want: []Package{criterion},
+		},
+		{
+			name: "a marker at the repo root does not hide the root lock, even with a config vendoring into the root",
+			setup: func(t *testing.T, dir string) {
+				writeRepoFile(t, dir, ".cargo/config.toml", vendorConfig("."))
+				commitAll(t, dir)
+				vendorCrate(t, dir, ".", "app", "0.1.0", sumOther, lockedCrates([3]string{"app", "0.1.0", sumOther}, [3]string{"evil-crate", "6.6.6", sumOld}))
+				gitT(t, dir, "add", "-A")
+			},
+			want: []Package{
+				{Type: "cargo", Name: "app", Version: "0.1.0", Path: "Cargo.lock"},
+				{Type: "cargo", Name: "evil-crate", Version: "6.6.6", Path: "Cargo.lock"},
+			},
+		},
+		{
+			name: "a marker copying a vendored crate's checksum does not hide a crate of another name",
+			setup: func(t *testing.T, dir string) {
+				writeRepoFile(t, dir, ".cargo/config.toml", vendorConfig("vendor"))
+				writeRepoFile(t, dir, "Cargo.toml", appManifest)
+				writeRepoFile(t, dir, "Cargo.lock", lockedCrates([3]string{"serde", "1.0.229", sumSerde}))
+				commitAll(t, dir)
+				vendorCrate(t, dir, "vendor/x", "x", "1.0.229", sumSerde, evilLock)
+				gitT(t, dir, "add", "-A")
+			},
+			want: []Package{{Type: "cargo", Name: "evil-crate", Version: "6.6.6", Path: "vendor/x/Cargo.lock"}},
+		},
+		{
+			name: "a lock with no Cargo.toml beside it proves nothing, even with its own config",
+			setup: func(t *testing.T, dir string) {
+				writeRepoFile(t, dir, ".cargo/config.toml", vendorConfig("vendor"))
+				writeRepoFile(t, dir, "Cargo.toml", appManifest)
+				writeRepoFile(t, dir, "tools/Cargo.lock", lockedCrates([3]string{"x", "1.0.0", sumSerde}))
+				writeRepoFile(t, dir, "tools/.cargo/config.toml", vendorConfig("."))
+				commitAll(t, dir)
+				vendorCrate(t, dir, "tools/x", "x", "1.0.0", sumSerde, evilLock)
+				gitT(t, dir, "add", "-A")
+			},
+			want: plantedEvil,
+		},
+		{
+			name: "a lock in a directory holding a marker proves nothing",
+			setup: func(t *testing.T, dir string) {
+				vendorCrate(t, dir, "tools", "tools", "0.1.0", sumOther, lockedCrates([3]string{"x", "1.0.0", sumSerde}))
+				writeRepoFile(t, dir, "tools/.cargo/config.toml", vendorConfig("."))
+				commitAll(t, dir)
+				vendorCrate(t, dir, "tools/x", "x", "1.0.0", sumSerde, evilLock)
+				gitT(t, dir, "add", "-A")
+			},
+			want: plantedEvil,
+		},
+		{
+			name: "a cargo config staged as a symlink proves nothing, though its target text vendors into tools",
+			setup: func(t *testing.T, dir string) {
+				plantedProject(t, dir)
+				stageSymlink(t, dir, ".cargo/config.toml", vendorConfig("tools"))
+			},
+			want: plantedEvil,
+		},
+		{
+			name: "a vendor directory with .. after a named directory proves nothing",
+			setup: func(t *testing.T, dir string) {
+				writeRepoFile(t, dir, ".cargo/config.toml", vendorConfig("vendor/../tools"))
+				plantedProject(t, dir)
+			},
+			want: plantedEvil,
+		},
+		{
+			name: "a crate whose Cargo.toml declares [workspace] keeps its own lock checked, though it passes every other proof",
+			setup: func(t *testing.T, dir string) {
+				writeRepoFile(t, dir, ".cargo/config.toml", vendorConfig("vendor"))
+				writeRepoFile(t, dir, "Cargo.toml", appManifest)
+				writeRepoFile(t, dir, "Cargo.lock", lockedCrates([3]string{"serde", "1.0.229", sumSerde}))
+				commitAll(t, dir)
+				vendorCrate(t, dir, "vendor/serde", "serde", "1.0.229", sumSerde, evilLock)
+				writeRepoFile(t, dir, "vendor/serde/Cargo.toml", "[package]\nname = \"serde\"\nversion = \"1.0.229\"\n\n[workspace]\n\n[dependencies]\nevil-crate = \"6\"\n")
+				gitT(t, dir, "add", "-A")
+			},
+			want: []Package{{Type: "cargo", Name: "evil-crate", Version: "6.6.6", Path: "vendor/serde/Cargo.lock"}},
+		},
+		{
+			name: "an exact pin hand-added to a vendored manifest is still checked",
+			setup: func(t *testing.T, dir string) {
+				writeRepoFile(t, dir, ".cargo/config.toml", vendorConfig("vendor"))
+				writeRepoFile(t, dir, "Cargo.toml", appManifest)
+				writeRepoFile(t, dir, "Cargo.lock", lockedCrates([3]string{"serde", "1.0.229", sumSerde}))
+				vendorCrate(t, dir, "vendor/serde", "serde", "1.0.229", sumSerde, devLock)
+				commitAll(t, dir)
+				writeRepoFile(t, dir, "vendor/serde/Cargo.toml", "[package]\nname = \"serde\"\nversion = \"1.0.229\"\n\n[dependencies]\nanyhow = \"=1.0.100\"\n")
+				gitT(t, dir, "add", "-A")
+			},
+			want: []Package{{Type: "cargo", Name: "anyhow", Version: "1.0.100", Path: "vendor/serde/Cargo.toml"}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := initRepo(t)
+			tc.setup(t, dir)
+			got, err := StagedDelta(context.Background(), dir, trust.Policy{})
+			if err != nil {
+				t.Fatalf("StagedDelta: %v", err)
+			}
+			if !reflect.DeepEqual(got.Packages, tc.want) {
+				t.Errorf("delta mismatch:\n got: %+v\nwant: %+v", got.Packages, tc.want)
+			}
+		})
+	}
+}
+
+func TestStagedDeltaNeverReadsAProofLockOverItsBound(t *testing.T) {
+	ctx := context.Background()
+	sum := strings.Repeat("b", 64)
+	dir := initRepo(t)
+	writeRepoFile(t, dir, ".cargo/config.toml", vendorConfig("vendor"))
+	writeRepoFile(t, dir, "Cargo.toml", appManifest)
+	// A lock that would otherwise prove the vendored copy, one byte over the bound.
+	writeRepoFile(t, dir, "Cargo.lock", padTOML(t, lockedCrates([3]string{"serde", "1.0.229", sum}), catalog.CargoProofLimit+1))
+	commitAll(t, dir)
+	vendorCrate(t, dir, "vendor/serde", "serde", "1.0.229", sum, lockedCrates([3]string{"criterion", "0.5.1", strings.Repeat("d", 64)}))
+	gitT(t, dir, "add", "-A")
+	oid, err := gitOutput(ctx, dir, "rev-parse", ":Cargo.lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	trace := filepath.Join(t.TempDir(), "trace")
+	t.Setenv("GIT_TRACE", trace)
+	got, err := StagedDelta(ctx, dir, trust.Policy{})
+	if err != nil {
+		t.Fatalf("StagedDelta: %v", err)
+	}
+	want := []Package{{Type: "cargo", Name: "criterion", Version: "0.5.1", Path: "vendor/serde/Cargo.lock"}}
+	if !reflect.DeepEqual(got.Packages, want) {
+		t.Errorf("delta mismatch:\n got: %+v\nwant: %+v", got.Packages, want)
+	}
+	log, err := os.ReadFile(trace)
+	if err != nil || !strings.Contains(string(log), "cat-file blob") {
+		t.Fatalf("git trace holds no blob read (%v):\n%s", err, log)
+	}
+	if strings.Contains(string(log), strings.TrimSpace(string(oid))) {
+		t.Errorf("the hook read the lock over the bound:\n%s", log)
+	}
+}
+
+// padTOML pads s with comment lines to exactly n bytes.
+func padTOML(t *testing.T, s string, n int) string {
+	t.Helper()
+	line := "#" + strings.Repeat(" ", 1022) + "\n"
+	pad := n - len(s)
+	s += strings.Repeat(line, pad/len(line))
+	if r := pad % len(line); r > 0 {
+		s += "#" + strings.Repeat(" ", r-1)
+	}
+	if len(s) != n {
+		t.Fatalf("padded file is %d bytes, want %d", len(s), n)
+	}
+	return s
+}
+
+func TestStagedDeltaNeverReadsAWorkspaceRootOverItsBound(t *testing.T) {
+	dir := initRepo(t)
+	// A committed root whose pool the member inherits, one byte over the manifest bound.
+	root := "[workspace]\nmembers = [\"crates/*\"]\n\n[workspace.dependencies]\nserde = \"=1.0.228\"\n"
+	writeRepoFile(t, dir, "Cargo.toml", padTOML(t, root, catalog.CargoManifestLimit+1))
+	member := "[package]\nname = \"core\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = { workspace = true }\n"
+	writeRepoFile(t, dir, "crates/core/Cargo.toml", member)
+	commitAll(t, dir)
+	writeRepoFile(t, dir, "crates/core/Cargo.toml", member+"tokio = \"=1.40.0\"\n")
+	gitT(t, dir, "add", "crates/core/Cargo.toml")
+	ctx := warn.NewContext(context.Background(), false)
+	oid, err := gitOutput(ctx, dir, "rev-parse", ":Cargo.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	trace := filepath.Join(t.TempDir(), "trace")
+	t.Setenv("GIT_TRACE", trace)
+	got, err := StagedDelta(ctx, dir, trust.Policy{})
+	if err != nil {
+		t.Fatalf("StagedDelta: %v", err)
+	}
+	want := []Package{{Type: "cargo", Name: "tokio", Version: "1.40.0", Path: "crates/core/Cargo.toml"}}
+	if !reflect.DeepEqual(got.Packages, want) {
+		t.Errorf("delta mismatch:\n got: %+v\nwant: %+v", got.Packages, want)
+	}
+	// As with an unreadable root, the inherited pin is skipped out loud.
+	if out := warn.Drain(ctx); !strings.Contains(out, "workspace root could not be read") {
+		t.Errorf("no warning for the inherited pin:\n%s", out)
+	}
+	log, err := os.ReadFile(trace)
+	if err != nil || !strings.Contains(string(log), "cat-file --batch-check") {
+		t.Fatalf("git trace holds no sizing call (%v):\n%s", err, log)
+	}
+	for _, read := range []string{strings.TrimSpace(string(oid)), "show :Cargo.toml", "show HEAD:Cargo.toml"} {
+		if strings.Contains(string(log), read) {
+			t.Errorf("the hook read the root over the bound (%s):\n%s", read, log)
+		}
+	}
+}
+
+func TestReadBlobStopsAtItsLimit(t *testing.T) {
+	ctx := context.Background()
+	dir := initRepo(t)
+	// Larger than a pipe's buffer, so git is still writing when the read stops.
+	content := strings.Repeat("x", 1<<20)
+	writeRepoFile(t, dir, "f", content)
+	gitT(t, dir, "add", "f")
+	oid, err := gitOutput(ctx, dir, "rev-parse", ":f")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := strings.TrimSpace(string(oid))
+	if _, ok := readBlob(ctx, dir, id, int64(len(content))-1); ok {
+		t.Error("read a blob one byte over its limit")
+	}
+	if blob, ok := readBlob(ctx, dir, id, int64(len(content))); !ok || string(blob) != content {
+		t.Errorf("refused a blob at its limit (ok %v, %d bytes)", ok, len(blob))
 	}
 }
 
@@ -337,6 +817,9 @@ func TestIsManifestPath(t *testing.T) {
 		{"README.md", false},
 		{"main.go", false},
 		{"requirements.in", false},
+		{"Cargo.toml", true},
+		{"crates/core/Cargo.lock", true},
+		{"Cargo.toml.orig", false}, // cargo package's copy of the manifest, which no cataloger reads
 	}
 	for _, tc := range cases {
 		if got := isManifestPath(tc.p); got != tc.want {

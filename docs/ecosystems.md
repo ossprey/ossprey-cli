@@ -10,6 +10,8 @@ Python, JavaScript and Rust, via syft's static catalogers.
 | JavaScript | `package.json`, `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml` |
 | Rust | `Cargo.lock`, and `Cargo.toml` direct dependencies (one its workspace's `Cargo.lock` pins is sent at that locked version) |
 
+Rust (crates.io) scanning is available on Teams and Enterprise plans.
+
 The CLI never installs your dependencies. It does run a resolver — `npm install
 --package-lock-only` (in a temporary directory) or `uv pip compile` — when a
 project ships a manifest with no lockfile, purely to work out which versions an
@@ -124,7 +126,7 @@ treated as a range.
 When a dependency's version can't be determined — an unpinned range in a
 manifest (`click = "^8"`, or a bare `requests` in a requirements file) with no
 lockfile or resolver to pin it against — the scan defaults that component to
-the **latest published version** from its registry (PyPI / npm): the version a
+the **latest published version** from its registry (PyPI, npm or crates.io): the version a
 fresh install would pull today. Registry
 lookups fail open, so a component whose version can't be resolved (offline,
 private, or removed package) is left unversioned rather than dropped or failing

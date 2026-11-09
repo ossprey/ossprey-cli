@@ -163,6 +163,10 @@ func runPrecommit(ctx context.Context, apiURL, apiKey string, verbose bool, w io
 		if p.Version == "" || p.Name == "" {
 			continue
 		}
+		// A git or private-registry crate has no crates.io advisory, and its bare purl would be matched against one.
+		if len(p.Qualifiers) > 0 {
+			continue
+		}
 		// Same purl shape as ossbom.ToMiniBOM: pkg:<type>/<name>@<version>,
 		// with npm scoped names (@scope/name) passed through verbatim.
 		purl := "pkg:" + p.Type + "/" + p.Name + "@" + p.Version
