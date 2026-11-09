@@ -102,12 +102,12 @@ func TestCargoIsOptIn(t *testing.T) {
 	}
 
 	o := s.opts()
-	o.Managers = []string{"cargo"}
+	o.Cargo = true
 	if res, err = Install(o); err != nil {
 		t.Fatal(err)
 	}
-	if got := names(res.Done); len(got) != 1 || got[0] != "cargo" {
-		t.Fatalf("--managers cargo installed %v, want cargo alone", got)
+	if !contains(names(res.Done), "cargo") || !contains(names(res.Done), "npm") {
+		t.Fatalf("--cargo installed %v, want cargo plus the defaults", names(res.Done))
 	}
 	if st, err = Load(s.opts()); err != nil {
 		t.Fatal(err)
@@ -128,13 +128,15 @@ func TestCargoIsOptIn(t *testing.T) {
 		t.Fatalf("re-run installed %v, want cargo kept beside the defaults", names(res.Done))
 	}
 
+	s = newSandbox(t)
+	writeExec(t, filepath.Join(s.realDir, "cargo"), "#!/bin/sh\nexit 0\n")
 	o = s.opts()
-	o.Cargo = true
+	o.Managers = []string{"cargo"}
 	if res, err = Install(o); err != nil {
 		t.Fatal(err)
 	}
-	if !contains(names(res.Done), "cargo") || !contains(names(res.Done), "npm") {
-		t.Fatalf("--cargo installed %v, want cargo plus the defaults", names(res.Done))
+	if got := names(res.Done); len(got) != 1 || got[0] != "cargo" {
+		t.Fatalf("--managers cargo installed %v, want cargo alone", got)
 	}
 }
 
