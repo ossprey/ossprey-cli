@@ -342,7 +342,7 @@ func TestCatalogCargoRangeFoldsOnlyIntoItsWorkspaceLock(t *testing.T) {
 	}
 }
 
-// A crate keeps every manifest it is declared in for the fold, but npm and PyPI keep one location, so a monorepo's SBOM does not grow with its lockfile count.
+// A crate keeps every manifest it is declared in but one lock, and npm and PyPI keep one location, so a monorepo's SBOM does not grow with its lockfile count.
 func TestCatalogMergesLocationsOnlyForCargo(t *testing.T) {
 	t.Setenv("OSSPREY_RESOLVE_LATEST", "")
 	withResolveLatest(t, func(context.Context, string, string) (string, error) { return "9.9.9", nil })
@@ -364,7 +364,7 @@ func TestCatalogMergesLocationsOnlyForCargo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Catalog: %v", err)
 	}
-	want := map[string]int{"npm/left-pad": 1, "npm/is-odd": 1, "pypi/requests": 1, "pypi/click": 1, "cargo/rand": 3, "cargo/serde": 3}
+	want := map[string]int{"npm/left-pad": 1, "npm/is-odd": 1, "pypi/requests": 1, "pypi/click": 1, "cargo/rand": 1, "cargo/serde": 3}
 	for _, p := range got {
 		n, ok := want[p.Type+"/"+p.Name]
 		if !ok {
@@ -380,7 +380,7 @@ func TestCatalogMergesLocationsOnlyForCargo(t *testing.T) {
 	}
 }
 
-// Merging a crate's locations must stay linear in its sightings: quadrupling the manifests and locks that share crates must not do much more than quadruple the bytes Catalog allocates.
+// Merging a crate's locations must stay linear in its sightings: quadrupling the manifests and locks that share crates must not do much more than quadruple the bytes Catalog allocates, and the locks add no location.
 func TestCatalogLocationMergeIsLinear(t *testing.T) {
 	t.Setenv("OSSPREY_RESOLVE_LATEST", "")
 	withResolveLatest(t, func(context.Context, string, string) (string, error) { return "9.9.9", nil })
@@ -414,8 +414,8 @@ func TestCatalogLocationMergeIsLinear(t *testing.T) {
 			t.Fatalf("got %d crates, want 20", len(got))
 		}
 		for _, p := range got {
-			if p.Version != "1.0.0" || len(p.Locations) != 2*n+1 {
-				t.Fatalf("%s@%s at %d locations, want 1.0.0 at %d", p.Name, p.Version, len(p.Locations), 2*n+1)
+			if p.Version != "1.0.0" || len(p.Locations) != n+1 {
+				t.Fatalf("%s@%s at %d locations, want 1.0.0 at %d", p.Name, p.Version, len(p.Locations), n+1)
 			}
 		}
 		return after.TotalAlloc - before.TotalAlloc
