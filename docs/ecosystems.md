@@ -44,8 +44,11 @@ never does that:
   file resolves. An include (`-r`, `-c`) outside the scanned directory is not
   read by either resolver, and its manifest is reported unresolved.
 - uv is never handed a requirements file (or one it includes) or a
-  `pyproject.toml` dependency that names `${VAR}`, which uv fills in the same
-  way; that manifest is reported unresolved instead. Keep a private index's
+  `pyproject.toml` dependency list (`[project]` dependencies and extras,
+  `[dependency-groups]`, or `[tool.uv]`'s dev, override and constraint lists)
+  that names `${VAR}`, which uv fills in the same way, nor a requirements file
+  including a URL (`-r https://…`), which uv would fetch and fill in; that
+  manifest is reported unresolved instead. Keep a private index's
   credentials in pip's or uv's own configuration, `PIP_INDEX_URL` /
   `UV_INDEX_URL`, keyring or `.netrc`, which a repository cannot write.
 - A legacy `setup.py` project is not resolved at all: that would run

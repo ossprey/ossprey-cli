@@ -41,8 +41,10 @@ func (c *CargoTomlCataloger) Catalog(ctx context.Context, resolver file.Resolver
 		// Without a Cargo.lock, here or at its workspace root, only the
 		// direct dependencies are known: Rust has no resolver tier. Git, path
 		// and private-registry dependencies are not emitted, but their trees
-		// are just as unknown, so the declared tables decide.
-		if c.coverage && err == nil && (len(pkgs) > 0 || cargoDeclaresDependencies(path)) && !cargoLockCovers(path, c.root) {
+		// are just as unknown, so the declared tables decide. A manifest that
+		// cannot be read or parsed declares nothing we know of, so only a lock
+		// can cover it.
+		if c.coverage && (err != nil || len(pkgs) > 0 || cargoDeclaresDependencies(path)) && !cargoLockCovers(path, c.root) {
 			markUnresolved(ctx, c.root, path)
 			dir := filepath.Dir(path)
 			warn.Add(ctx, warn.Entry{
@@ -414,5 +416,5 @@ func cargoLockReadable(dir string) bool {
 	if err != nil {
 		return false
 	}
-	return tomlLockHasPackages(data) // a lock always holds the crate itself
+	return tomlLockHasPackages(data, true) // a lock always holds the crate itself
 }

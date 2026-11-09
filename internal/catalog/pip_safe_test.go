@@ -307,19 +307,34 @@ func TestUVNeverExpandsRepositoryEnvVars(t *testing.T) {
 		mu.Lock()
 		seen = append(seen, r.URL.String())
 		mu.Unlock()
+		if r.URL.Path == "/deps.txt" {
+			// A remote include: uv fetches it and expands what it holds.
+			fmt.Fprintf(w, "requests @ http://%s/${LEAKTEST_SECRET}/requests-2.31.0-py3-none-any.whl\n", r.Host)
+			return
+		}
 		http.NotFound(w, r)
 	}))
 	defer srv.Close()
 	t.Setenv("LEAKTEST_SECRET", "topsecret123")
 	cases := map[string]map[string]string{
-		"index url":     {"requirements.txt": "--index-url " + srv.URL + "/${LEAKTEST_SECRET}/simple\nrequests\n"},
-		"direct url":    {"requirements.txt": "requests @ " + srv.URL + "/${LEAKTEST_SECRET}/requests-2.31.0-py3-none-any.whl\n"},
-		"included file": {"requirements.txt": "-r more.txt\n", "more.txt": "--extra-index-url=" + srv.URL + "/${LEAKTEST_SECRET}/simple\nrequests\n"},
-		"pyproject":     {"pyproject.toml": "[project]\nname = \"app\"\nversion = \"0.1.0\"\ndependencies = [\"requests @ " + srv.URL + "/${LEAKTEST_SECRET}/requests-2.31.0-py3-none-any.whl\"]\n"},
+		"index url":         {"requirements.txt": "--index-url " + srv.URL + "/${LEAKTEST_SECRET}/simple\nrequests\n"},
+		"direct url":        {"requirements.txt": "requests @ " + srv.URL + "/${LEAKTEST_SECRET}/requests-2.31.0-py3-none-any.whl\n"},
+		"included file":     {"requirements.txt": "-r more.txt\n", "more.txt": "--extra-index-url=" + srv.URL + "/${LEAKTEST_SECRET}/simple\nrequests\n"},
+		"pyproject":         {"pyproject.toml": "[project]\nname = \"app\"\nversion = \"0.1.0\"\ndependencies = [\"requests @ " + srv.URL + "/${LEAKTEST_SECRET}/requests-2.31.0-py3-none-any.whl\"]\n"},
+		"remote include":    {"requirements.txt": "-r " + srv.URL + "/deps.txt\n"},
+		"remote constraint": {"requirements.txt": "-c " + srv.URL + "/deps.txt\nrequests\n"},
+		// uv export re-locks a stale uv.lock from every list uv locks, not
+		// only [project]'s (verified against uv 0.11).
+		"dependency group (export)":              {"pyproject.toml": exportProject("[dependency-groups]\ndev = [\"requests @ " + srv.URL + "/${LEAKTEST_SECRET}/requests-2.31.0-py3-none-any.whl\"]\n"), "uv.lock": staleUVLock},
+		"tool.uv dev-dependencies (export)":      {"pyproject.toml": exportProject("[tool.uv]\ndev-dependencies = [\"requests @ " + srv.URL + "/${LEAKTEST_SECRET}/requests-2.31.0-py3-none-any.whl\"]\n"), "uv.lock": staleUVLock},
+		"tool.uv override-dependencies (export)": {"pyproject.toml": exportProject("[tool.uv]\noverride-dependencies = [\"idna @ " + srv.URL + "/${LEAKTEST_SECRET}/idna-3.7-py3-none-any.whl\"]\n"), "uv.lock": staleUVLock},
 	}
 	for name, files := range cases {
 		t.Run(name, func(t *testing.T) {
 			realToolsOnly(t, "uv", "python3")
+			mu.Lock()
+			seen = nil // each case judged on its own requests
+			mu.Unlock()
 			proj := t.TempDir()
 			writeTree(t, proj, files)
 			ctx := warn.NewContext(context.Background(), false)
@@ -346,6 +361,14 @@ func TestUVNeverExpandsRepositoryEnvVars(t *testing.T) {
 		})
 	}
 }
+
+// exportProject is a pyproject uv exports from a uv.lock, plus extra tables.
+func exportProject(extra string) string {
+	return "[project]\nname = \"app\"\nversion = \"0.1.0\"\nrequires-python = \">=3.9\"\ndependencies = [\"idna\"]\n\n" + extra
+}
+
+// staleUVLock locks nothing, so uv export re-locks from the pyproject.
+const staleUVLock = "version = 1\nrequires-python = \">=3.9\"\n"
 
 // An include is read only inside the scan root: an absolute path, a .. or a
 // symlink out of it would send another file's lines to the index.
@@ -386,6 +409,25 @@ func TestPipSanitizerConfinesIncludesToTheRoot(t *testing.T) {
 		}
 		if err := uvExpandsEnv(context.Background(), filepath.Join(src, "requirements.txt"), src); !errors.Is(err, errOutsideRoot) {
 			t.Errorf("uv symlink: err = %v, want errOutsideRoot", err)
+		}
+	}
+	if runtime.GOOS != "windows" {
+		// pip and uv apply a .. after following the link before it (both
+		// verified), so jump/../deps.txt is the file beside the link's
+		// target, here outside the root, not the deps.txt beside jump.
+		src := t.TempDir()
+		writeTree(t, src, map[string]string{"requirements.txt": "-r jump/../secret.txt\n", "secret.txt": "idna\n"})
+		if err := os.MkdirAll(filepath.Join(outside, "inner"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join(outside, "inner"), filepath.Join(src, "jump")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := newPipSanitizer(context.Background(), t.TempDir(), src).file(filepath.Join(src, "requirements.txt")); !errors.Is(err, errOutsideRoot) {
+			t.Errorf("link then ..: err = %v, want errOutsideRoot", err)
+		}
+		if err := uvExpandsEnv(context.Background(), filepath.Join(src, "requirements.txt"), src); !errors.Is(err, errOutsideRoot) {
+			t.Errorf("uv link then ..: err = %v, want errOutsideRoot", err)
 		}
 	}
 	if _, _, err := sanitize(t, map[string]string{"requirements.txt": "-r sub/in.txt\n", "sub/in.txt": "idna\n"}); err != nil {

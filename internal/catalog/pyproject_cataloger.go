@@ -266,14 +266,27 @@ func dynamicDependencies(pp *pyproject) bool {
 var pythonLockfiles = []string{"uv.lock", "poetry.lock", "pdm.lock"}
 
 // tomlLockHasPackages reports a TOML lockfile (uv, poetry, pdm, Cargo) that
-// parses and locks at least one [[package]]. A stub such as `version = 1`
-// parses but supplies no tree, so it must not stand in for one.
-func tomlLockHasPackages(data []byte) bool {
+// parses and locks at least one [[package]] with a name, and a version when
+// needVersion says the format always records one (uv omits it for a project
+// with a dynamic version). A stub such as `version = 1`, or an empty
+// [[package]] table, parses but supplies no tree, so it must not stand in
+// for one.
+func tomlLockHasPackages(data []byte, needVersion bool) bool {
 	var doc struct {
-		Package []map[string]any `toml:"package"`
+		Package []struct {
+			Name    string `toml:"name"`
+			Version string `toml:"version"`
+		} `toml:"package"`
 	}
-	_, err := toml.Decode(string(data), &doc)
-	return err == nil && len(doc.Package) > 0
+	if _, err := toml.Decode(string(data), &doc); err != nil {
+		return false
+	}
+	for _, p := range doc.Package {
+		if p.Name != "" && (p.Version != "" || !needVersion) {
+			return true
+		}
+	}
+	return false
 }
 
 // pyprojectLockCovered reports whether a lockfile beside the pyproject.toml
@@ -286,7 +299,7 @@ func pyprojectLockCovered(path string) bool {
 		if err != nil {
 			continue
 		}
-		if tomlLockHasPackages(data) {
+		if tomlLockHasPackages(data, name != "uv.lock") {
 			return true
 		}
 	}

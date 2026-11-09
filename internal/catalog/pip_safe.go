@@ -11,6 +11,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/BurntSushi/toml"
 )
 
 // pip's --only-binary=:all: does not stop it building everything. Verified
@@ -130,7 +132,8 @@ func (s *pipSanitizer) file(src string) (string, error) {
 }
 
 func (s *pipSanitizer) fileAt(src string, depth int) (string, error) {
-	if out, ok := s.written[src]; ok {
+	key := fileKey(src)
+	if out, ok := s.written[key]; ok {
 		return out, nil // an include cycle points at the copy in progress
 	}
 	if err := s.ctx.Err(); err != nil {
@@ -145,7 +148,7 @@ func (s *pipSanitizer) fileAt(src string, depth int) (string, error) {
 		id = id[:40] // the counter keeps it unique; this only keeps it readable
 	}
 	out := filepath.Join(s.dir, fmt.Sprintf("req-%d-%s.txt", len(s.written), id))
-	s.written[src] = out
+	s.written[key] = out
 	// An include may name any path, through .. or a link; what it reads
 	// would go to pip as requirements, and on to the index.
 	if !withinRoot(src, s.root) {
@@ -268,9 +271,9 @@ func (s *pipSanitizer) options(src, line string, depth int) ([]string, error) {
 				s.dropped = append(s.dropped, "a remote include ("+name+" <url>)") // fetched, not read from the tree
 				continue
 			}
-			path := value
-			if !filepath.IsAbs(path) {
-				path = filepath.Join(filepath.Dir(src), path) // pip reads includes beside the including file
+			path, err := includePath(src, value) // pip reads includes beside the including file
+			if err != nil {
+				return nil, err
 			}
 			copyPath, err := s.fileAt(path, depth+1)
 			if err != nil {
@@ -421,6 +424,43 @@ func describeUnsafeRequirement(line string) string {
 // environment.
 var errNamesEnvVar = errors.New("names an environment variable (${...}), which the resolver would fill in from this machine; not resolved")
 
+// errRemoteInclude refuses a requirements file including a URL: uv fetches it
+// (verified against uv 0.11) and expands any ${VAR} in what comes back, so the
+// repository's host would choose what this machine's environment fills in.
+var errRemoteInclude = errors.New("includes a URL, where uv would expand environment variables; not resolved")
+
+// fileKey names the file at path as the OS resolves it, so one file reached
+// by two spellings (./r.txt, a link, a ..) is one entry when spotting cycles.
+func fileKey(path string) string {
+	if real, err := filepath.EvalSymlinks(path); err == nil {
+		return real
+	}
+	return filepath.Clean(path)
+}
+
+// includePath is where pip and uv read an include named value in the file at
+// src: os.path.join of the including file's directory and value, with no
+// lexical cleaning, so the OS applies a .. after following the link before it
+// (both verified: jump/../deps.txt reads the deps.txt beside jump's target).
+// filepath.Join cleans the .. away first and reads another file. The
+// directory is resolved here, as the OS resolves it, so the result can be
+// read and judged as it stands.
+func includePath(src, value string) (string, error) {
+	if filepath.IsAbs(value) {
+		return value, nil
+	}
+	cut := strings.LastIndexAny(src, "/"+string(filepath.Separator))
+	dir := src[:max(cut, 0)]
+	if cut == 0 {
+		dir = src[:1]
+	}
+	real, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return "", fmt.Errorf("%s %w", dir, errOutsideRoot)
+	}
+	return real + string(filepath.Separator) + value, nil
+}
+
 // uvExpandsEnv reports, as an error, a requirements file (or any file it
 // includes) with a ${VAR} on any line. uv expands those from its environment
 // in requirement and option lines alike (verified against uv 0.11: an
@@ -434,7 +474,7 @@ func uvExpandsEnv(ctx context.Context, path, root string) error {
 	seen := map[string]bool{}
 	var walk func(p string, depth int) error
 	walk = func(p string, depth int) error {
-		if seen[p] {
+		if seen[fileKey(p)] {
 			return nil
 		}
 		if err := ctx.Err(); err != nil {
@@ -443,7 +483,7 @@ func uvExpandsEnv(ctx context.Context, path, root string) error {
 		if depth > maxPipIncludeDepth || len(seen) >= maxPipIncludeFiles {
 			return fmt.Errorf("%s: includes nest deeper than %d or number over %d", p, maxPipIncludeDepth, maxPipIncludeFiles)
 		}
-		seen[p] = true
+		seen[fileKey(p)] = true
 		if !withinRoot(p, root) {
 			return fmt.Errorf("%s %w", p, errOutsideRoot)
 		}
@@ -481,10 +521,11 @@ func uvExpandsEnv(ctx context.Context, path, root string) error {
 					value = tokens[i+1]
 				}
 				if strings.Contains(value, "://") {
-					continue
+					return fmt.Errorf("%s %w", p, errRemoteInclude)
 				}
-				if !filepath.IsAbs(value) {
-					value = filepath.Join(filepath.Dir(p), value)
+				value, err := includePath(p, value)
+				if err != nil {
+					return err
 				}
 				if err := walk(value, depth+1); err != nil {
 					return err
@@ -496,8 +537,11 @@ func uvExpandsEnv(ctx context.Context, path, root string) error {
 	return walk(path, 0)
 }
 
-// pyprojectExpandsEnv is uvExpandsEnv for a pyproject's [project]
-// dependencies, which uv expands the same way.
+// pyprojectExpandsEnv is uvExpandsEnv for a pyproject's dependency lists,
+// which uv expands the same way: [project] dependencies and extras, and what
+// uv export re-locks a stale uv.lock from besides them, [dependency-groups]
+// and [tool.uv]'s dev, override and constraint lists (verified against uv
+// 0.11; [tool.uv.sources] URLs are not expanded).
 // It reads the raw lists: an entry naming the project itself, which
 // pyprojectRequirementSpecs drops, is still read by uv.
 func pyprojectExpandsEnv(path string) error {
@@ -517,5 +561,51 @@ func pyprojectExpandsEnv(path string) error {
 			return fmt.Errorf("%s %w", path, errNamesEnvVar)
 		}
 	}
+	// Decoded loosely: a group may hold {include-group = ...} tables.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	var uvLists struct {
+		Groups map[string]any `toml:"dependency-groups"`
+		Tool   struct {
+			UV struct {
+				Dev             any `toml:"dev-dependencies"`
+				Override        any `toml:"override-dependencies"`
+				Constraint      any `toml:"constraint-dependencies"`
+				BuildConstraint any `toml:"build-constraint-dependencies"`
+			} `toml:"uv"`
+		} `toml:"tool"`
+	}
+	if err := toml.Unmarshal(data, &uvLists); err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	uv := uvLists.Tool.UV
+	if anyStringNamesEnv(uvLists.Groups, uv.Dev, uv.Override, uv.Constraint, uv.BuildConstraint) {
+		return fmt.Errorf("%s %w", path, errNamesEnvVar)
+	}
 	return nil
+}
+
+// anyStringNamesEnv reports a ${ in any string held, at any depth, by vs.
+func anyStringNamesEnv(vs ...any) bool {
+	for _, v := range vs {
+		switch v := v.(type) {
+		case string:
+			if strings.Contains(v, "${") {
+				return true
+			}
+		case []any:
+			if anyStringNamesEnv(v...) {
+				return true
+			}
+		case map[string]any:
+			for _, e := range v {
+				if anyStringNamesEnv(e) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }

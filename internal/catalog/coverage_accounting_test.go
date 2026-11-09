@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/ossprey/ossprey-cli/internal/warn"
@@ -56,6 +57,9 @@ func TestCargoCrateWithoutLockIsUnresolved(t *testing.T) {
 		{"private-registry dev dependency only", map[string]string{
 			"Cargo.toml": "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dev-dependencies]\nfoo = { version = \"1\", registry = \"corp\" }\n",
 		}, []string{"Cargo.toml"}},
+		{"manifest that does not parse", map[string]string{"Cargo.toml": "[package\nname = "}, []string{"Cargo.toml"}},
+		{"manifest that does not parse beside a lock", map[string]string{"Cargo.toml": "[package\nname = ", "Cargo.lock": validCargoLock}, nil},
+		{"manifest over the size limit", map[string]string{"Cargo.toml": crate + "# " + strings.Repeat("x", maxManifestBytes) + "\n"}, []string{"Cargo.toml"}},
 		{"path dependency only", map[string]string{
 			"Cargo.toml": "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[target.'cfg(unix)'.dependencies]\nfoo = { path = \"../foo\" }\n",
 		}, []string{"Cargo.toml"}},
@@ -268,11 +272,15 @@ func TestStubLockCoversNothing(t *testing.T) {
 		files map[string]string
 		want  string
 	}{
-		"Cargo.lock":           {map[string]string{"Cargo.toml": crate, "Cargo.lock": "version = 3\n"}, "Cargo.toml"},
-		"uv.lock":              {map[string]string{"pyproject.toml": pp, "uv.lock": "version = 1\n"}, "pyproject.toml"},
-		"poetry.lock":          {map[string]string{"pyproject.toml": pp, "poetry.lock": "[metadata]\nlock-version = \"2.0\"\n"}, "pyproject.toml"},
-		"package-lock.json":    {map[string]string{"package.json": pj, "package-lock.json": stubNpm}, "package.json"},
-		"v1 package-lock.json": {map[string]string{"package.json": pj, "package-lock.json": `{"name":"app","lockfileVersion":1,"dependencies":{}}`}, "package.json"},
+		"Cargo.lock":                             {map[string]string{"Cargo.toml": crate, "Cargo.lock": "version = 3\n"}, "Cargo.toml"},
+		"uv.lock":                                {map[string]string{"pyproject.toml": pp, "uv.lock": "version = 1\n"}, "pyproject.toml"},
+		"poetry.lock":                            {map[string]string{"pyproject.toml": pp, "poetry.lock": "[metadata]\nlock-version = \"2.0\"\n"}, "pyproject.toml"},
+		"package-lock.json":                      {map[string]string{"package.json": pj, "package-lock.json": stubNpm}, "package.json"},
+		"Cargo.lock with an empty package":       {map[string]string{"Cargo.toml": crate, "Cargo.lock": "version = 3\n\n[[package]]\n"}, "Cargo.toml"},
+		"Cargo.lock with a nameless package":     {map[string]string{"Cargo.toml": crate, "Cargo.lock": "version = 3\n\n[[package]]\nversion = \"1.0.0\"\n"}, "Cargo.toml"},
+		"uv.lock with an empty package":          {map[string]string{"pyproject.toml": pp, "uv.lock": "version = 1\n\n[[package]]\n"}, "pyproject.toml"},
+		"poetry.lock with a versionless package": {map[string]string{"pyproject.toml": pp, "poetry.lock": "[[package]]\nname = \"requests\"\n"}, "pyproject.toml"},
+		"v1 package-lock.json":                   {map[string]string{"package.json": pj, "package-lock.json": `{"name":"app","lockfileVersion":1,"dependencies":{}}`}, "package.json"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if got := unresolvedFor(t, tc.files); !slices.Equal(got, []string{tc.want}) {
@@ -314,7 +322,7 @@ func TestRootOnlyLockDoesNotCoverWorkspaceMembers(t *testing.T) {
 	member := `{"name":"web","version":"1.0.0","dependencies":{"left-pad":"^1.3.0"}}`
 	stub := `{"name":"mono","lockfileVersion":3,"packages":{"":{"name":"mono"}}}`
 	got := unresolvedFor(t, map[string]string{"package.json": root, "package-lock.json": stub, "packages/web/package.json": member})
-	if want := []string{filepath.Join("packages", "web", "package.json")}; !slices.Equal(got, want) {
+	if want := []string{"packages/web/package.json"}; !slices.Equal(got, want) {
 		t.Errorf("unresolved = %v, want %v", got, want)
 	}
 	// A lock with a real tree still covers its members.
