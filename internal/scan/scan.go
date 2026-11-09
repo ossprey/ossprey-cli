@@ -40,6 +40,8 @@ type Options struct {
 	// Trust names the sources whose packages are left out of the SBOM: not
 	// checked, and not sent. See internal/trust.
 	Trust trust.Policy
+	// CargoConfigDir is catalog.Options.CargoConfigDir.
+	CargoConfigDir string
 }
 
 // ErrNoComponents is returned by InjectTestVulnerability when nothing was catalogued.
@@ -63,6 +65,7 @@ func Run(ctx context.Context, opts Options) (*ossbom.SBOM, error) {
 		SkipVersionLookup: opts.SkipVersionLookup,
 		NoExec:            opts.NoExec,
 		Trust:             opts.Trust,
+		CargoConfigDir:    opts.CargoConfigDir,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("catalog: %w", err)

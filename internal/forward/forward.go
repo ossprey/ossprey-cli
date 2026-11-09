@@ -1,5 +1,5 @@
 // Package forward implements the package-manager forwarder: it inspects an
-// install command (npm/yarn/bun/pip/poetry/uv), checks the packages it would
+// install command (npm/yarn/bun/pip/poetry/uv/cargo), checks the packages it would
 // install against the Ossprey API, blocks the install if any are malicious,
 // and otherwise execs the real package manager with the original arguments
 // untouched.
@@ -118,6 +118,8 @@ type Manager struct {
 	// parseRun classifies a tool run's arguments from start on. Unset means
 	// uv's syntax, parseToolRun.
 	parseRun func(args []string) installArgs
+	// runFirstAt matches a command that only rewrites the lockfile (`cargo add`), checked after it runs.
+	runFirstAt func(args []string) (start int, ok bool)
 }
 
 // noLocalLockfileFlags name the options that stop an install from updating a
@@ -236,6 +238,8 @@ var managers = map[string]*Manager{
 	// uvx is `uv tool run` under its own name: every invocation fetches and runs.
 	"uvx": {Bin: "uvx", Ecosystem: "pypi", installAt: noInstall,
 		toolRunAt: func([]string) (int, bool) { return 0, true }},
+	// cargo: `install` is checked before it builds, the verbs that only lock after they run (cargo.go).
+	"cargo": {Bin: "cargo", Ecosystem: "cargo", installAt: cargoInstallAt, runFirstAt: cargoRunFirstAt},
 }
 
 func noInstall([]string) (int, bool) { return 0, false }
@@ -283,7 +287,11 @@ func verbAt(bin string, verbs ...string) func([]string) (int, bool) {
 // script run rather than becoming an install of a package called "add".
 func verbIndex(bin string, args []string) int {
 	global := globalValueFlags[bin]
-	for i := 0; i < len(args); i++ {
+	start := 0
+	if bin == "cargo" && len(args) > 0 && strings.HasPrefix(args[0], "+") {
+		start = 1 // rustup's toolchain override, read only as the first argument
+	}
+	for i := start; i < len(args); i++ {
 		a := args[i]
 		if a == "" {
 			continue
@@ -405,6 +413,8 @@ var globalValueFlags = map[string]map[string]bool{
 	"poetry": flagSet("-C", "--directory", "--project", "-P"),
 	"uv": flagSet("--directory", "--project", "--cache-dir", "--python", "-p",
 		"--config-file", "--color", "--allow-insecure-host"),
+	// From `cargo --help` (cargo 1.99); TestCargoFlagTablesMatchCargo holds it there.
+	"cargo": flagSet("--explain", "--color", "-C", "--config", "-Z"),
 }
 
 // Options configures a forwarder Run.
@@ -486,6 +496,17 @@ func Run(ctx context.Context, opts Options) error {
 		}
 	}
 
+	if m.runFirstAt != nil {
+		if _, ok := m.runFirstAt(opts.Args); ok {
+			if opts.SkipCI {
+				note("ossprey: skip-ci set; forwarding `%s %s` without checking\n",
+					m.Bin, strings.Join(opts.Args, " "))
+				return forwardTo()
+			}
+			return checkCargoAfter(ctx, m, opts)
+		}
+	}
+
 	start, isInstall := m.installAt(opts.Args)
 	toolRun := false
 	if !isInstall && m.toolRunAt != nil {
@@ -555,6 +576,12 @@ func Run(ctx context.Context, opts Options) error {
 		// `uvx --help`) has nothing to check, and it is not a manifest install:
 		// scanning the project here would check something it never runs.
 		note("ossprey: no registry package to check; forwarding `%s %s` unchecked\n",
+			m.Bin, strings.Join(opts.Args, " "))
+		return forwardTo()
+	}
+	if m.Ecosystem == "cargo" && len(parsed.Specs) == 0 {
+		// `cargo install` builds only what it names, never the project's manifest.
+		note("ossprey: no crates.io crate named; forwarding `%s %s` unchecked\n",
 			m.Bin, strings.Join(opts.Args, " "))
 		return forwardTo()
 	}
@@ -744,14 +771,7 @@ func reportAndForward(ctx context.Context, m *Manager, opts Options, sbom *ossbo
 		note("ossprey: %s\n", msg)
 	}
 	if hasMalware {
-		// The full report even when quiet: a block is the one outcome worth
-		// more than a line.
-		profile := ansi.Detect(errOut)
-		fmt.Fprint(errOut, alert.Malware(summary.Alert(), "Installation blocked.", profile))
-		for _, msg := range summary.Failing {
-			fmt.Fprintln(errOut, profile.Red("Error: "+msg))
-		}
-		fmt.Fprintf(errOut, "ossprey: blocked `%s %s`\n", m.Bin, strings.Join(opts.Args, " "))
+		printBlock(m, opts, summary)
 		return ErrBlocked
 	}
 	// Both messages sit after the malware check, never in front of it: gating the
@@ -779,6 +799,16 @@ func reportAndForward(ctx context.Context, m *Manager, opts Options, sbom *ossbo
 	}
 	// Already drained at the top of this function, ahead of the verdict.
 	return handoffFn(ctx, m.Bin, opts.Args)
+}
+
+// printBlock prints the full malware report, even when quiet.
+func printBlock(m *Manager, opts Options, summary scan.MalwareSummary) {
+	profile := ansi.Detect(errOut)
+	fmt.Fprint(errOut, alert.Malware(summary.Alert(), "Installation blocked.", profile))
+	for _, msg := range summary.Failing {
+		fmt.Fprintln(errOut, profile.Red("Error: "+msg))
+	}
+	fmt.Fprintf(errOut, "ossprey: blocked `%s %s`\n", m.Bin, strings.Join(opts.Args, " "))
 }
 
 // CleanVerdict words a passed check without overstating it, for every
@@ -941,10 +971,13 @@ type scanRequest struct {
 	// Specs are packages named on the command line beside a requirements
 	// file. They are submitted with the scan, so one verdict covers both.
 	Specs []check.Spec
+	// CargoConfigDir is scan.Options.CargoConfigDir.
+	CargoConfigDir string
 }
 
 func scanProject(ctx context.Context, req scanRequest) (*ossbom.SBOM, error) {
-	sbom, err := scan.Run(ctx, scan.Options{Path: req.Dir, NoExec: req.Installed, Trust: req.Trust})
+	sbom, err := scan.Run(ctx, scan.Options{Path: req.Dir, NoExec: req.Installed, Trust: req.Trust,
+		CargoConfigDir: req.CargoConfigDir})
 	if err != nil {
 		return nil, err
 	}
@@ -953,7 +986,8 @@ func scanProject(ctx context.Context, req scanRequest) (*ossbom.SBOM, error) {
 		// a failed install). Fall back to the declaring scan rather than
 		// reporting a project with no dependencies: passive mode's whole job is
 		// to see this machine's installs.
-		if sbom, err = scan.Run(ctx, scan.Options{Path: req.Dir, Trust: req.Trust}); err != nil {
+		if sbom, err = scan.Run(ctx, scan.Options{Path: req.Dir, Trust: req.Trust,
+			CargoConfigDir: req.CargoConfigDir}); err != nil {
 			return nil, err
 		}
 	}
@@ -1175,6 +1209,9 @@ func ParseSpecs(m *Manager, args []string) installArgs {
 // parseInstallArgs is ParseSpecs, except that with positionalReqFiles every
 // positional argument is a requirements file (`uv pip sync req.txt`).
 func parseInstallArgs(m *Manager, args []string, positionalReqFiles bool) installArgs {
+	if m.Ecosystem == "cargo" {
+		return parseCargoInstall(args)
+	}
 	valFlags := valueFlags[m.Bin]
 	if m.Ecosystem == "pypi" {
 		args = splitAttachedShorts(args, pythonOptionFlags(m), clapEquals(m))
@@ -1565,6 +1602,11 @@ var valueFlags = map[string]map[string]bool{
 		"--config-setting", "--config-settings-package", "--no-build-isolation-package",
 		"--no-build-package", "--no-binary-package", "--refresh-package", "--color",
 		"--allow-insecure-host", "--directory", "--config-file"),
+	// `cargo install --help`'s (TestCargoFlagTablesMatchCargo), plus --version's hidden alias --vers.
+	"cargo": flagSet("--version", "--vers", "--index", "--registry", "--git", "--branch",
+		"--tag", "--rev", "--path", "--root", "--message-format", "--color", "--config", "-Z",
+		"--bin", "--example", "-F", "--features", "-j", "--jobs", "--profile", "--target",
+		"--target-dir"),
 }
 
 // packageValueFlags name the flags whose value is itself a package being

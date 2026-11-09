@@ -22,13 +22,13 @@ import (
 )
 
 func TestLookup(t *testing.T) {
-	for _, bin := range []string{"npm", "npx", "pnpm", "yarn", "bun", "bunx", "pip", "pip3", "poetry", "uv", "uvx"} {
+	for _, bin := range []string{"npm", "npx", "pnpm", "yarn", "bun", "bunx", "pip", "pip3", "poetry", "uv", "uvx", "cargo"} {
 		if _, ok := Lookup(bin); !ok {
 			t.Errorf("Lookup(%q): not found", bin)
 		}
 	}
-	if _, ok := Lookup("cargo"); ok {
-		t.Error("Lookup(cargo): expected not found")
+	if _, ok := Lookup("gem"); ok {
+		t.Error("Lookup(gem): expected not found")
 	}
 }
 
