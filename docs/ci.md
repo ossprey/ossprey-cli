@@ -99,8 +99,10 @@ and the error line says which. Malware still exits 1 first. The report is
 written either way. It is off by default, and it is refused with `--passive`
 and `--local`, which reach no verdict; passive mode set in the environment
 makes it a no-op with a warning. The usual fix for an unresolved manifest is to
-commit its lockfile (`uv.lock`, `poetry.lock`, a compiled `requirements.txt`,
-`package-lock.json`).
+commit its lockfile (`uv.lock`, `poetry.lock`, `package-lock.json`). A legacy
+`setup.py` stays unresolved whatever sits beside it: move its dependencies to a
+`[project]` table and lock them. A requirements file, even fully pinned, still
+needs uv or pip on the runner to resolve.
 
 Inside GitHub Actions or Azure Pipelines the scan also picks up the repository,
 organisation and branch from the runner's environment and sends them with the

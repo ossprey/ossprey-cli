@@ -67,7 +67,9 @@ is reported **unresolved**: a warning names it, the
 [`--report`](output.md#machine-readable-verdict---report) file lists it in
 `unresolved_manifests`, and [`--require-complete`](ci.md#requiring-complete-coverage)
 fails the scan over it. Commit a lockfile (`uv.lock`,
-`poetry.lock`, a compiled `requirements.txt`) to cover its whole tree.
+`poetry.lock`) to cover its whole tree. A legacy `setup.py` stays unresolved
+until its dependencies move to a `[project]` table, and a requirements file,
+even fully pinned, needs uv or pip to resolve.
 
 Directories that hold installed or built packages rather than your project's
 own manifests are not read at all: `node_modules`, `bower_components`,
