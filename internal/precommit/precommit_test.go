@@ -351,6 +351,33 @@ func TestStagedDeltaReadsAWorkspaceRootWhosePathHoldsANewline(t *testing.T) {
 	}
 }
 
+// A name holding a newline that has no object is unsized, but one git fails to look up fails the call, since its root's pins would drop unseen.
+func TestBlobSizesSkipsOnlyAMissingNameHoldingANewline(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a newline cannot be in a Windows file name")
+	}
+	ctx := context.Background()
+	dir := initRepo(t)
+	writeRepoFile(t, dir, "a\nb/Cargo.toml", "[workspace]\n")
+	commitAll(t, dir)
+	present := []string{":0:a\nb/Cargo.toml", "HEAD:a\nb/Cargo.toml"}
+	missing := []string{":0:x\ny/Cargo.toml", "HEAD:x\ny/Cargo.toml"}
+	got, err := blobSizes(ctx, dir, append(slices.Clone(present), missing...))
+	if err != nil {
+		t.Fatalf("blobSizes: %v", err)
+	}
+	if len(got) != len(present) || got[present[0]].oid == "" || got[present[1]].oid == "" {
+		t.Errorf("sized %+v, want %q alone", got, present)
+	}
+	// rev-parse exits 128 on a corrupt index, where a missing name exits 1.
+	if err := os.WriteFile(filepath.Join(dir, ".git", "index"), []byte("corrupt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := blobSizes(ctx, dir, missing[:1]); err == nil {
+		t.Errorf("a failed lookup sized %+v with no error", got)
+	}
+}
+
 // stagedRootDelta commits files, stages the root Cargo.toml as next, and returns the delta with any warnings.
 func stagedRootDelta(t *testing.T, files map[string]string, next string) ([]Package, string) {
 	t.Helper()

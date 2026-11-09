@@ -14,6 +14,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -451,8 +452,12 @@ func blobSizes(ctx context.Context, repoDir string, names []string) (proofFiles,
 		// cat-file reads one name per line, so a name holding a newline is resolved by a git of its own first.
 		if strings.Contains(n, "\n") {
 			oid, err := gitOutput(ctx, repoDir, "rev-parse", "--verify", "-q", n)
+			var exit *exec.ExitError
+			if errors.As(err, &exit) && exit.ExitCode() == 1 {
+				continue // --verify -q exits 1 only for a name with no object, as cat-file answers "missing"
+			}
 			if err != nil {
-				continue // no object, as cat-file answers "missing"
+				return nil, err
 			}
 			sized, err := blobSizes(ctx, repoDir, []string{strings.TrimSpace(string(oid))})
 			if err != nil {
