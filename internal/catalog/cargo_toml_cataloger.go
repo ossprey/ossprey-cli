@@ -111,7 +111,7 @@ func parseCargoTomlFile(ctx context.Context, path string, loc file.Location, sca
 		root = cargoRootSpelling(loc, path, rootDir)
 	}
 	// An excluded crate is its own root and a package.workspace member is not; one whose root cannot be found counts as a root, so its git targets still go out.
-	member := rootDir != "" && rootDir != filepath.Dir(filepath.Clean(path))
+	member := rootOK && rootDir != filepath.Dir(filepath.Clean(path))
 	var out []pkg.Package
 	// catalogByGlob dedups what this returns, across every manifest.
 	emit := func(name, version string, metadata any) {

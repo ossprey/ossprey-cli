@@ -223,6 +223,13 @@ itoa = { version = "=1.0.16", registry = "company" }
 			"serde@1.0.100 app/Cargo.toml",
 			"serde@?vcs_url=git+https://github.com/evil/serde app/Cargo.toml",
 		}},
+		// A package.workspace root that cannot be read governs nothing, so the member counts as its own root.
+		{"patch under a pointed root that cannot be read", map[string]string{
+			"Cargo.toml": strings.Replace(lockless7, "version = \"0.1.0\"\n", "version = \"0.1.0\"\nworkspace = \"../ws\"\n", 1),
+		}, []string{
+			"serde@1.0.100 Cargo.toml",
+			"serde@?vcs_url=git+https://github.com/evil/serde Cargo.toml",
+		}},
 		{"locked patch", map[string]string{
 			"Cargo.toml": lockless7,
 			"Cargo.lock": `version = 4
