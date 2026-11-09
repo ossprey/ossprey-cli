@@ -687,6 +687,7 @@ type uvLists struct {
 			Sources         map[string]any `toml:"sources"`
 			Workspace       *struct {
 				Members []string `toml:"members"`
+				Exclude []string `toml:"exclude"`
 			} `toml:"workspace"`
 		} `toml:"uv"`
 	} `toml:"tool"`
@@ -694,12 +695,12 @@ type uvLists struct {
 
 // readUVLists reads a pyproject's uv tables; a missing file has none.
 func readUVLists(path string) (*uvLists, error) {
-	data, err := os.ReadFile(path)
+	data, err := readPyProjectData(path)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return &uvLists{}, nil
-		}
 		return nil, err
+	}
+	if data == nil {
+		return &uvLists{}, nil
 	}
 	var l uvLists
 	if err := toml.Unmarshal(data, &l); err != nil {
@@ -724,7 +725,7 @@ func declaresUVDependencies(path string) bool {
 // resolver handed [project] (pip's requirement list, or uv pip compile with
 // no uv.lock) leaves them out.
 func groupsLeftOut(ctx context.Context, root, tool, manifest string) {
-	if !declaresUVDependencies(manifest) || pyprojectLockCovered(manifest) {
+	if !declaresUVDependencies(manifest) || pythonCovered(root)(manifest) {
 		return
 	}
 	markUnresolved(ctx, root, manifest)

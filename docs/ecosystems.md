@@ -71,7 +71,8 @@ A Rust crate with dependencies (git and path ones included) and no
 for a member, whose own `Cargo.lock` cargo ignores) is unresolved too, as is a `package.json` whose
 `package-lock.json` or `npm-shrinkwrap.json` cannot be parsed when no npm is
 available to resolve it instead. A manifest whose `uv.lock`, `poetry.lock`
-or `pdm.lock` parses is covered by that lock even when nothing could resolve it.
+or `pdm.lock` parses is covered by that lock even when nothing could resolve it,
+as is a member of a uv workspace whose root `uv.lock` parses.
 
 A manifest that cannot be resolved this way keeps its direct dependencies and
 is reported **unresolved**: a warning names it, the

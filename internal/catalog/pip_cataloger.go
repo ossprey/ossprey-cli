@@ -135,7 +135,7 @@ func (c *PipCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]p
 		}
 		return runPipResolve(ctx, python, cache, cache, filepath.Dir(absPath), []string{"-r", reqFile}, loc)
 	}
-	projs, err := resolveByGlob(ctx, resolver, c.root, "**/pyproject.toml", "pip", pyprojectLockCovered, projParse)
+	projs, err := resolveByGlob(ctx, resolver, c.root, "**/pyproject.toml", "pip", pythonCovered(c.root), projParse)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -150,7 +150,7 @@ func (c *PipCataloger) leftOut(ctx context.Context, manifest string, lines []str
 	if len(lines) == 0 {
 		return
 	}
-	if filepath.Base(manifest) != "pyproject.toml" || !pyprojectLockCovered(manifest) {
+	if filepath.Base(manifest) != "pyproject.toml" || !pythonCovered(c.root)(manifest) {
 		markUnresolved(ctx, c.root, manifest)
 	}
 	// lines describe what was left out, never quote it (see
@@ -172,8 +172,8 @@ func (c *PipCataloger) markAllUnresolved(ctx context.Context, resolver file.Reso
 	projs, _ := resolver.FilesByGlob("**/pyproject.toml")
 	for _, loc := range projs {
 		p := hostPath(c.root, loc.RealPath)
-		if pyprojectLockCovered(p) {
-			continue // syft reads the lock beside it
+		if pythonCovered(c.root)(p) {
+			continue // syft reads the lock beside it, or the workspace root's
 		}
 		pp, _ := readPyProject(p)
 		if specs, _ := pyprojectRequirementSpecs(p); len(specs) > 0 || declaresUVDependencies(p) || pyprojectNeedsBuild(p) != nil || (pp != nil && dynamicDependencies(pp)) {

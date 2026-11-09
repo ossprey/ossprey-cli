@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -56,11 +56,8 @@ var pep508 = regexp.MustCompile(`^([A-Za-z0-9_.\-]+)(?:\[[^\]]+\])?\s*(.*)$`)
 // readPyProject parses one pyproject.toml. A file that has vanished since the
 // resolver globbed it yields (nil, nil) rather than an error.
 func readPyProject(path string) (*pyproject, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return nil, nil
-		}
+	data, err := readPyProjectData(path)
+	if err != nil || data == nil {
 		return nil, err
 	}
 	var pp pyproject
@@ -68,6 +65,24 @@ func readPyProject(path string) (*pyproject, error) {
 		return nil, err
 	}
 	return &pp, nil
+}
+
+// readPyProjectData reads a pyproject.toml as a regular file of at most
+// maxManifestBytes that passes the structural TOML guard: it is repository
+// content, and one linked to /dev/zero or nested without end must fail the
+// manifest rather than the scan. A missing file is (nil, nil).
+func readPyProjectData(path string) ([]byte, error) {
+	data, err := readBoundedFile(path, maxManifestBytes)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if err := proofTOMLError(data); err != nil {
+		return nil, fmt.Errorf("%s %w", path, err)
+	}
+	return data, nil
 }
 
 func parsePyProjectFile(path string, loc file.Location) ([]pkg.Package, error) {
@@ -278,12 +293,73 @@ func tomlLockHasPackages(data []byte, needVersion bool) bool {
 			Version string `toml:"version"`
 		} `toml:"package"`
 	}
+	// The structural guard runs first: a byte bound does not stop deeply
+	// nested keys from exhausting the decoder.
+	if proofTOMLError(data) != nil {
+		return false
+	}
 	if _, err := toml.Decode(string(data), &doc); err != nil {
 		return false
 	}
 	for _, p := range doc.Package {
 		if p.Name != "" && (p.Version != "" || !needVersion) {
 			return true
+		}
+	}
+	return false
+}
+
+// pythonCovered is pyprojectLockCovered, and for a uv workspace member also
+// the root uv.lock (uvWorkspaceLockCovers), bounded by the scan root.
+func pythonCovered(root string) func(string) bool {
+	return func(path string) bool {
+		return pyprojectLockCovered(path) || uvWorkspaceLockCovers(path, root)
+	}
+}
+
+// uvWorkspaceLockCovers reports a pyproject that is a member of the nearest
+// uv workspace above it inside the scan, whose root uv.lock locks every
+// member's tree, so syft reads it from there. The nearest ancestor declaring
+// [tool.uv.workspace] decides: one whose members globs do not list the
+// project, whose exclude does, or that has no readable uv.lock covers
+// nothing. An exclude glob with ** is not matched here, so it covers nothing.
+func uvWorkspaceLockCovers(manifest, root string) bool {
+	member := filepath.Dir(filepath.Clean(manifest))
+	if member == filepath.Dir(member) {
+		return false
+	}
+	for d := filepath.Dir(member); withinRoot(d, root); d = filepath.Dir(d) {
+		l, err := readUVLists(filepath.Join(d, "pyproject.toml"))
+		if err != nil {
+			return false
+		}
+		if ws := l.Tool.UV.Workspace; ws != nil {
+			rel, err := filepath.Rel(d, member)
+			if err != nil {
+				return false
+			}
+			rel = filepath.ToSlash(rel)
+			match := func(globs []string) bool {
+				for _, g := range globs {
+					if ok, _ := path.Match(strings.TrimSuffix(filepath.ToSlash(g), "/"), rel); ok {
+						return true
+					}
+				}
+				return false
+			}
+			for _, g := range ws.Exclude {
+				if strings.Contains(g, "**") {
+					return false
+				}
+			}
+			if !match(ws.Members) || match(ws.Exclude) {
+				return false
+			}
+			data, err := readBoundedFile(filepath.Join(d, "uv.lock"), maxLockfileBytes)
+			return err == nil && tomlLockHasPackages(data, false)
+		}
+		if d == filepath.Dir(d) {
+			break
 		}
 	}
 	return false

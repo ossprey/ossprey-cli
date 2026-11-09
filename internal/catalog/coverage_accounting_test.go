@@ -398,3 +398,80 @@ func TestCargoLockCheckIsMemoizedPerRoot(t *testing.T) {
 		t.Error("the lock was judged again")
 	}
 }
+
+// A lock that fails the structural TOML guard covers nothing, whatever it
+// also holds: the decoder recurses once per level of a deeply nested key.
+func TestLockFailingTheTOMLGuardCoversNothing(t *testing.T) {
+	deep := "\n[" + strings.Repeat("a.", maxProofNesting+4) + "b]\nx = 1\n"
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{
+		"Cargo.lock": validCargoLock + deep,
+		"uv.lock":    "version = 1\n\n[[package]]\nname = \"requests\"\nversion = \"2.31.0\"\n" + deep,
+	})
+	if cargoLockReadable(dir) {
+		t.Error("Cargo.lock: a guarded-out lock covers")
+	}
+	if pyprojectLockCovered(filepath.Join(dir, "pyproject.toml")) {
+		t.Error("uv.lock: a guarded-out lock covers")
+	}
+}
+
+// pyproject reads are bounded and guarded: an oversized or deeply nested
+// file is an error, so the preflight refuses it rather than reading on.
+func TestPyprojectReadsAreBounded(t *testing.T) {
+	dir := t.TempDir()
+	big := "[project]\nname = \"app\"\n" + strings.Repeat("# filler\n", maxManifestBytes/9+1)
+	deep := "[project]\nname = \"app\"\n[" + strings.Repeat("a.", maxProofNesting+4) + "b]\nx = 1\n"
+	for name, body := range map[string]string{"oversized": big, "nested": deep} {
+		writeTree(t, dir, map[string]string{"pyproject.toml": body})
+		p := filepath.Join(dir, "pyproject.toml")
+		if _, err := readPyProject(p); err == nil {
+			t.Errorf("%s: readPyProject read it", name)
+		}
+		if _, err := readUVLists(p); err == nil {
+			t.Errorf("%s: readUVLists read it", name)
+		}
+		if err := uvProjectExpandsEnv(p, dir); err == nil {
+			t.Errorf("%s: the preflight passed it", name)
+		}
+	}
+	if runtime.GOOS != "windows" {
+		writeTree(t, dir, map[string]string{"requirements.txt": "-e ./lib\n"})
+		if err := os.MkdirAll(filepath.Join(dir, "lib"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("/dev/zero", filepath.Join(dir, "lib", "pyproject.toml")); err != nil {
+			t.Fatal(err)
+		}
+		if err := uvExpandsEnv(context.Background(), filepath.Join(dir, "requirements.txt"), dir); err == nil {
+			t.Error("a local project linked to /dev/zero passed")
+		}
+	}
+}
+
+// A uv workspace keeps one uv.lock at its root, and syft reads every
+// member's tree from it.
+func TestUVWorkspaceRootLockCoversMembers(t *testing.T) {
+	uvLock := "version = 1\n\n[[package]]\nname = \"requests\"\nversion = \"2.31.0\"\nsource = { registry = \"https://pypi.org/simple\" }\n"
+	root := "[project]\nname = \"root\"\nversion = \"0.1.0\"\n\n[tool.uv.workspace]\nmembers = [\"packages/*\"]\nexclude = [\"packages/skip\"]\n"
+	member := "[project]\nname = \"a\"\nversion = \"0.1.0\"\ndependencies = [\"requests>=2\"]\n"
+	if got := unresolvedFor(t, map[string]string{"pyproject.toml": root, "uv.lock": uvLock, "packages/a/pyproject.toml": member}); len(got) != 0 {
+		t.Errorf("member: unresolved = %v, want none", got)
+	}
+	// Not a member: excluded, or outside the globs, or no root lock.
+	for name, files := range map[string]map[string]string{
+		"excluded":   {"pyproject.toml": root, "uv.lock": uvLock, "packages/skip/pyproject.toml": member},
+		"not listed": {"pyproject.toml": root, "uv.lock": uvLock, "tools/x/pyproject.toml": member},
+		"no lock":    {"pyproject.toml": root, "packages/a/pyproject.toml": member},
+	} {
+		want := ""
+		for k := range files {
+			if k != "pyproject.toml" && k != "uv.lock" {
+				want = k
+			}
+		}
+		if got := unresolvedFor(t, files); !slices.Contains(got, want) {
+			t.Errorf("%s: unresolved = %v, want %s in it", name, got, want)
+		}
+	}
+}

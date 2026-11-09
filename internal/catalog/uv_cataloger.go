@@ -107,13 +107,13 @@ func (c *UVCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]pk
 		if baseErr != nil {
 			return nil, baseErr
 		}
-		if !pyprojectLockCovered(absPath) {
+		if !pythonCovered(c.root)(absPath) {
 			warn.Add(ctx, catalogerEntry("uv", fmt.Errorf("%s: optional dependencies not resolved: %w", absPath, err)))
 			markUnresolved(ctx, c.root, absPath)
 		}
 		return pkgs, nil
 	}
-	out, err := resolveByGlob(ctx, resolver, c.root, "**/pyproject.toml", "uv", pyprojectLockCovered, parse)
+	out, err := resolveByGlob(ctx, resolver, c.root, "**/pyproject.toml", "uv", pythonCovered(c.root), parse)
 	return out, nil, err
 }
 

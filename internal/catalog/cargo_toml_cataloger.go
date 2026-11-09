@@ -199,6 +199,9 @@ func cargoDeclaresDependencies(path string) bool {
 	if err != nil {
 		return false
 	}
+	if proofTOMLError(data) != nil {
+		return true // unread, so only a lock can cover it
+	}
 	var m cargoManifest
 	if _, err := toml.Decode(string(data), &m); err != nil {
 		return false
