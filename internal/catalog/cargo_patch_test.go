@@ -46,6 +46,31 @@ func appLock(entries ...string) string {
 	return "version = 4\n\n[[package]]\nname = \"app\"\nversion = \"0.1.0\"\n\n" + strings.Join(entries, "\n")
 }
 
+// itoaReplaceLock is the lock cargo 1.99 writes for replacedItoa("1.0.10"): the crates.io entry names the fork it is replaced by.
+const itoaReplaceLock = `version = 4
+
+[[package]]
+name = "app"
+version = "0.1.0"
+dependencies = ["itoa 1.0.10 (registry+https://github.com/rust-lang/crates.io-index)"]
+
+[[package]]
+name = "itoa"
+version = "1.0.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+replace = "itoa 1.0.10 (git+https://git.example.com/acme/itoa?branch=main)"
+
+[[package]]
+name = "itoa"
+version = "1.0.10"
+source = "git+https://git.example.com/acme/itoa?branch=main#` + patchRev + `"
+`
+
+// replacedItoa pins itoa at version and replaces that release with a fork's main branch.
+func replacedItoa(version string) string {
+	return "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nitoa = \"=" + version + "\"\n\n[replace]\n\"itoa:" + version + "\" = { git = \"https://git.example.com/acme/itoa\", branch = \"main\" }\n"
+}
+
 // patchedSerde is lockless7 with more keys on its serde patch.
 func patchedSerde(keys string) string {
 	return strings.Replace(lockless7, `git = "https://github.com/evil/serde" }`, `git = "https://github.com/evil/serde"`+keys+` }`, 1)
@@ -288,6 +313,49 @@ source = "git+https://github.com/evil/serde#` + patchRev + `"
 		}, []string{
 			"serde@1.0.100 Cargo.toml",
 			"serde@1.0.100?vcs_url=git+https://github.com/evil/serde@" + patchRev + " Cargo.lock",
+		}},
+		// Cargo fetches the branch afresh for a patch version the locked release does not meet, so the manifest's target goes out.
+		{"lock below the patch's version", map[string]string{
+			"Cargo.toml": strings.Replace(patchedSerde(`, branch = "main", version = "=1.0.200"`), `"=1.0.100"`, `"=1.0.200"`, 1),
+			"Cargo.lock": appLock(gitSerde("?branch=main#" + patchRev)),
+		}, []string{
+			"serde@1.0.100?vcs_url=git+https://github.com/evil/serde@" + patchRev + " Cargo.lock",
+			"serde@1.0.200 Cargo.toml",
+			"serde@1.0.200?vcs_url=git+https://github.com/evil/serde Cargo.toml",
+		}},
+		{"lock meeting the patch's version", map[string]string{
+			"Cargo.toml": patchedSerde(`, branch = "main", version = "1.0"`),
+			"Cargo.lock": appLock(gitSerde("?branch=main#" + patchRev)),
+		}, []string{
+			"serde@1.0.100 Cargo.toml",
+			"serde@1.0.100?vcs_url=git+https://github.com/evil/serde@" + patchRev + " Cargo.lock",
+		}},
+		// cargo 1.99 fetches afresh when the [replace] spec names another version than the locked replacement.
+		{"lock below the replaced version", map[string]string{
+			"Cargo.toml": replacedItoa("1.0.11"),
+			"Cargo.lock": itoaReplaceLock,
+		}, []string{
+			"itoa@1.0.10 Cargo.lock",
+			"itoa@1.0.10?vcs_url=git+https://git.example.com/acme/itoa@" + patchRev + " Cargo.lock",
+			"itoa@1.0.11 Cargo.toml",
+			"itoa@1.0.11?vcs_url=git+https://git.example.com/acme/itoa Cargo.toml",
+		}},
+		// cargo 1.99 reads a [replace] version padded with a space, which we cannot, so the lock does not hide it.
+		{"replaced version padded with a space", map[string]string{
+			"Cargo.toml": strings.Replace(replacedItoa("1.0.11"), `"itoa:1.0.11"`, `"itoa: 1.0.11"`, 1),
+			"Cargo.lock": itoaReplaceLock,
+		}, []string{
+			"itoa@1.0.10 Cargo.lock",
+			"itoa@1.0.10?vcs_url=git+https://git.example.com/acme/itoa@" + patchRev + " Cargo.lock",
+			"itoa@1.0.11 Cargo.toml",
+			"itoa@?vcs_url=git+https://git.example.com/acme/itoa Cargo.toml",
+		}},
+		{"lock holding the replaced version", map[string]string{
+			"Cargo.toml": replacedItoa("1.0.10"),
+			"Cargo.lock": itoaReplaceLock,
+		}, []string{
+			"itoa@1.0.10 Cargo.lock,Cargo.toml",
+			"itoa@1.0.10?vcs_url=git+https://git.example.com/acme/itoa@" + patchRev + " Cargo.lock",
 		}},
 		{"lock at another commit than rev", map[string]string{
 			"Cargo.toml": patchedSerde(`, rev = "` + patchRev + `"`),

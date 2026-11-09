@@ -83,8 +83,9 @@ crate, since Cargo reads some such hosts as crates.io. A dependency that `[patch
 or `[replace]` redirects to git is sent both ways: the git crate, marked, and the
 crates.io crate `Cargo.toml` declares. When your workspace root's `Cargo.lock`
 records the git crate from the same URL with the same `branch`, `tag` or `rev`,
-it comes from the lock at its locked commit. Otherwise, as when there is no
-lock, the lock predates the patch or names another branch, tag or rev, or the
+at a version the patch's `version` or the replaced release accepts, it comes
+from the lock at its locked commit. Otherwise, as when there is no lock, the
+lock predates the patch or names another branch, tag, rev or version, or the
 lock is not a regular file, it comes from the root's `Cargo.toml`, with the
 commit when `rev` names a full one. A
 workspace member scanned on its own counts as its own workspace root, so its
