@@ -338,6 +338,16 @@ func TestUVNeverExpandsRepositoryEnvVars(t *testing.T) {
 			"pyproject.toml":                "[project]\nname = \"app\"\nversion = \"0.1.0\"\nrequires-python = \">=3.9\"\ndependencies = [\"lib\"]\n\n[tool.uv.sources]\nlib = { path = \"vendor-src/lib\" }\n",
 			"vendor-src/lib/pyproject.toml": "[project]\nname = \"lib\"\nversion = \"0.1.0\"\ndependencies = [\"requests @ " + srv.URL + "/${LEAKTEST_SECRET}/requests-2.31.0-py3-none-any.whl\"]\n",
 		},
+		// A local project named in a requirements file is read by uv, its
+		// pyproject expanded like any other (verified against uv 0.11).
+		"local project":    localProjectCase(srv.URL, "./lib\n"),
+		"editable project": localProjectCase(srv.URL, "-e ./lib\n"),
+		"file reference":   localProjectCase(srv.URL, "lib @ file:./lib\n"),
+		"included local project": func() map[string]string {
+			files := localProjectCase(srv.URL, "-r sub/more.txt\n")
+			files["sub/more.txt"] = "./lib\n" // read against the working directory, not sub
+			return files
+		}(),
 		"tool.uv override-dependencies (export)": {"pyproject.toml": exportProject("[tool.uv]\noverride-dependencies = [\"idna @ " + srv.URL + "/${LEAKTEST_SECRET}/idna-3.7-py3-none-any.whl\"]\n"), "uv.lock": staleUVLock},
 	}
 	for name, files := range cases {
@@ -348,6 +358,10 @@ func TestUVNeverExpandsRepositoryEnvVars(t *testing.T) {
 			mu.Unlock()
 			proj := t.TempDir()
 			writeTree(t, proj, files)
+			// uv reads a relative local project against its working
+			// directory, which is the scan's: run from the project, as
+			// `ossprey scan .` does.
+			t.Chdir(proj)
 			ctx := warn.NewContext(context.Background(), true) // verbose: two manifests fail where a member or source does
 			if _, err := Catalog(ctx, proj, Options{SkipVersionLookup: true}); err != nil {
 				t.Fatal(err)
@@ -370,6 +384,17 @@ func TestUVNeverExpandsRepositoryEnvVars(t *testing.T) {
 				t.Errorf("no warning says why:\n%s", out)
 			}
 		})
+	}
+}
+
+// localProjectCase is a requirements file naming the project in lib, whose
+// own dependencies name ${LEAKTEST_SECRET}.
+func localProjectCase(srv, requirements string) map[string]string {
+	return map[string]string{
+		"requirements.txt": requirements,
+		"lib/pyproject.toml": "[project]\nname = \"lib\"\nversion = \"0.1.0\"\ndependencies = [\"requests @ " + srv + "/${LEAKTEST_SECRET}/requests-2.31.0-py3-none-any.whl\"]\n" +
+			// uv reads static metadata only with a declared backend.
+			"[build-system]\nrequires = [\"hatchling\"]\nbuild-backend = \"hatchling.build\"\n",
 	}
 }
 
@@ -516,5 +541,22 @@ func TestUVProjectExpandsEnvFollowsTheWorkspace(t *testing.T) {
 	writeTree(t, other, map[string]string{"pyproject.toml": strings.Replace(ws, "packages/*", "packages/**", 1)})
 	if err := uvProjectExpandsEnv(filepath.Join(other, "pyproject.toml"), other); !errors.Is(err, errUVProjectUnplaced) {
 		t.Errorf("** glob: err = %v, want errUVProjectUnplaced", err)
+	}
+}
+
+// A local project outside the scan is refused like an include outside it, and
+// a clean one inside resolves.
+func TestUVExpandsEnvConfinesLocalProjects(t *testing.T) {
+	outside := t.TempDir()
+	writeTree(t, outside, map[string]string{"lib/pyproject.toml": "[project]\nname = \"lib\"\nversion = \"0.1.0\"\n"})
+	src := t.TempDir()
+	writeTree(t, src, map[string]string{"requirements.txt": filepath.Join(outside, "lib") + "\n"})
+	if err := uvExpandsEnv(context.Background(), filepath.Join(src, "requirements.txt"), src); !errors.Is(err, errOutsideRoot) {
+		t.Errorf("project outside the root: err = %v, want errOutsideRoot", err)
+	}
+	in := t.TempDir()
+	writeTree(t, in, map[string]string{"requirements.txt": "-e ./lib\nrequests\n", "lib/pyproject.toml": "[project]\nname = \"lib\"\nversion = \"0.1.0\"\ndependencies = [\"idna\"]\n"})
+	if err := uvExpandsEnv(context.Background(), filepath.Join(in, "requirements.txt"), in); err != nil {
+		t.Errorf("clean project inside the root: %v", err)
 	}
 }

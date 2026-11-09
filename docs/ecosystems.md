@@ -50,7 +50,9 @@ never does that:
   including a URL (`-r https://…`), which uv would fetch and fill in; that
   manifest is reported unresolved instead. The same holds when any
   `pyproject.toml` uv reads beside it names `${VAR}`: a member of its uv
-  workspace, a `[tool.uv.sources]` path source or a `file:` reference. Keep a private index's
+  workspace, a `[tool.uv.sources]` path source, a `file:` reference, or a
+  local project a requirements file names (`./lib`, `-e ./lib`); a local
+  project outside the scanned directory is reported unresolved as well. Keep a private index's
   credentials in pip's or uv's own configuration, `PIP_INDEX_URL` /
   `UV_INDEX_URL`, keyring or `.netrc`, which a repository cannot write.
 - A legacy `setup.py` project is not resolved at all: that would run

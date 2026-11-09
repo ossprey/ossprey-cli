@@ -472,6 +472,12 @@ func includePath(src, value string) (string, error) {
 // Includes outside root are refused the same way: uv would read them and send
 // their lines to the index as requirements.
 func uvExpandsEnv(ctx context.Context, path, root string) error {
+	var projects []string
+	project := func(p, ref string) error {
+		found, err := localProjects(p, ref, root)
+		projects = append(projects, found...)
+		return err
+	}
 	seen := map[string]bool{}
 	var walk func(p string, depth int) error
 	walk = func(p string, depth int) error {
@@ -502,6 +508,11 @@ func uvExpandsEnv(ctx context.Context, path, root string) error {
 			}
 			line = strings.TrimSpace(line)
 			if !strings.HasPrefix(line, "-") {
+				if ref := localProjectRef(line); ref != "" {
+					if err := project(p, ref); err != nil {
+						return err
+					}
+				}
 				continue
 			}
 			tokens, err := shlexSplit(line)
@@ -511,7 +522,7 @@ func uvExpandsEnv(ctx context.Context, path, root string) error {
 			for i, tok := range tokens {
 				name, value, attached := splitPipToken(tok)
 				switch name {
-				case "-r", "--requirement", "-c", "--constraint":
+				case "-r", "--requirement", "-c", "--constraint", "-e", "--editable":
 				default:
 					continue
 				}
@@ -520,6 +531,18 @@ func uvExpandsEnv(ctx context.Context, path, root string) error {
 						continue
 					}
 					value = tokens[i+1]
+				}
+				if name == "-e" || name == "--editable" {
+					ref := localProjectRef(value)
+					if ref == "" && !strings.Contains(value, "://") {
+						ref = value // an editable is a path whatever it looks like
+					}
+					if ref != "" {
+						if err := project(p, ref); err != nil {
+							return err
+						}
+					}
+					continue
 				}
 				if strings.Contains(value, "://") {
 					return fmt.Errorf("%s %w", p, errRemoteInclude)
@@ -535,7 +558,82 @@ func uvExpandsEnv(ctx context.Context, path, root string) error {
 		}
 		return nil
 	}
-	return walk(path, 0)
+	if err := walk(path, 0); err != nil {
+		return err
+	}
+	return uvProjectsExpandEnv(projects, root)
+}
+
+// localProjectRef returns the path a requirement line names as a local
+// project (./lib, lib/, /abs/lib, file:./lib, name @ file:///abs/lib), or ""
+// for a registry requirement or a remote URL. uv reads such a project's
+// pyproject and expands ${VAR} in it (verified against uv 0.11).
+func localProjectRef(v string) string {
+	v, _, _ = strings.Cut(v, " #")
+	v = strings.TrimSpace(v)
+	if i := strings.Index(v, "@"); i > 0 && !strings.ContainsAny(v[:i], `/\`) {
+		v = strings.TrimSpace(v[i+1:])
+	}
+	v, _, _ = strings.Cut(v, ";")
+	v = strings.TrimSpace(v)
+	if strings.HasSuffix(v, "]") {
+		if i := strings.LastIndex(v, "["); i > 0 {
+			v = v[:i] // extras
+		}
+	}
+	if strings.HasPrefix(strings.ToLower(v), "file:") {
+		u, err := url.Parse(v)
+		if err != nil {
+			return v // judged as a path, so it is looked for rather than skipped
+		}
+		p := u.Path
+		if p == "" {
+			p = u.Opaque
+		}
+		if unescaped, err := url.PathUnescape(p); err == nil {
+			p = unescaped
+		}
+		return filepath.FromSlash(p)
+	}
+	if strings.Contains(v, "://") {
+		return ""
+	}
+	if strings.HasPrefix(v, ".") || strings.HasPrefix(v, "~") || strings.ContainsAny(v, `/\`) || filepath.IsAbs(v) {
+		return v
+	}
+	return ""
+}
+
+// localProjects returns the pyproject of each directory a local project ref,
+// named in the requirements file at src, can mean: uv reads a relative one
+// against its working directory, which is the scan's (verified: runUV sets
+// no directory), and the file's own directory is checked as well. A project
+// outside root is refused like an include outside it.
+func localProjects(src, ref, root string) ([]string, error) {
+	if strings.HasPrefix(ref, "~") {
+		return nil, fmt.Errorf("%s %w", ref, errOutsideRoot)
+	}
+	candidates := []string{ref}
+	if !filepath.IsAbs(ref) {
+		candidates = nil
+		if wd, err := os.Getwd(); err == nil {
+			candidates = append(candidates, wd+string(filepath.Separator)+ref)
+		}
+		if p, err := includePath(src, ref); err == nil {
+			candidates = append(candidates, p)
+		}
+	}
+	var out []string
+	for _, c := range candidates {
+		if fi, err := os.Stat(c); err != nil || !fi.IsDir() {
+			continue // a missing path fails uv, and a local archive is not read for metadata here
+		}
+		if !withinRoot(c, root) {
+			return nil, fmt.Errorf("%s %w", c, errOutsideRoot)
+		}
+		out = append(out, filepath.Join(c, "pyproject.toml"))
+	}
+	return out, nil
 }
 
 // pyprojectExpandsEnv is uvExpandsEnv for a pyproject's dependency lists,
@@ -636,13 +734,26 @@ var errUVProjectUnplaced = errors.New("names workspace members or sources that c
 // since uv discovers it from a member. Members are listed by their globs
 // without applying exclude, so an excluded member can only refuse more.
 func uvProjectExpandsEnv(path, root string) error {
-	queue := []string{path}
-	for d := filepath.Dir(filepath.Dir(path)); withinRoot(d, root); d = filepath.Dir(d) {
-		if l, err := readUVLists(filepath.Join(d, "pyproject.toml")); err != nil || l.Tool.UV.Workspace != nil {
-			queue = append(queue, filepath.Join(d, "pyproject.toml"))
-		}
-		if d == filepath.Dir(d) {
-			break
+	return uvProjectsExpandEnv([]string{path}, root)
+}
+
+// uvProjectsExpandEnv is uvProjectExpandsEnv for several pyprojects at once,
+// under one cap.
+func uvProjectsExpandEnv(paths []string, root string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	path := paths[0]
+	var queue []string
+	for _, p := range paths {
+		queue = append(queue, p)
+		for d := filepath.Dir(filepath.Dir(p)); withinRoot(d, root); d = filepath.Dir(d) {
+			if l, err := readUVLists(filepath.Join(d, "pyproject.toml")); err != nil || l.Tool.UV.Workspace != nil {
+				queue = append(queue, filepath.Join(d, "pyproject.toml"))
+			}
+			if d == filepath.Dir(d) {
+				break
+			}
 		}
 	}
 	seen := map[string]bool{}
