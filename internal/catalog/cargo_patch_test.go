@@ -215,6 +215,14 @@ itoa = { version = "=1.0.16", registry = "company" }
 		}, []string{
 			"serde@1.0.100 crates/app/Cargo.toml",
 		}},
+		// A crate whose root cannot be found counts as its own root, so its [patch] still goes out.
+		{"patch under an ancestor that is no manifest", map[string]string{
+			"Cargo.toml":     "[profile.release]\nopt-level = 3\n",
+			"app/Cargo.toml": lockless7,
+		}, []string{
+			"serde@1.0.100 app/Cargo.toml",
+			"serde@?vcs_url=git+https://github.com/evil/serde app/Cargo.toml",
+		}},
 		{"locked patch", map[string]string{
 			"Cargo.toml": lockless7,
 			"Cargo.lock": `version = 4
