@@ -42,10 +42,16 @@ var cargoRunFirstShorts = flagSet("-F", "-m", "-p", "-Z")
 // cargoRunFirstAt matches the cargo verbs that resolve and lock but build nothing, unless asked for --help.
 func cargoRunFirstAt(args []string) (int, bool) {
 	start, ok := verbAt("cargo", "add", "update", "generate-lockfile", "fetch")(args)
-	if !ok || cargoHas(cargoSplitShorts(args[start:], cargoRunFirstShorts), "-h", "--help") {
+	if !ok || cargoPrintsOnly(args, start, cargoRunFirstShorts) {
 		return 0, false
 	}
 	return start, true
+}
+
+// cargoPrintsOnly reports whether cargo would print help or its version and run nothing: -h or --help after the verb, or either or -V/--version before it (verified with cargo 1.99.1).
+func cargoPrintsOnly(args []string, start int, verbShorts map[string]bool) bool {
+	return cargoHas(cargoSplitShorts(args[:start-1], globalValueFlags["cargo"]), "-h", "--help", "-V", "--version") ||
+		cargoHas(cargoSplitShorts(args[start:], verbShorts), "-h", "--help")
 }
 
 // cargoShorts splits a group of short options as clap reads it: switches up to one in takes, which takes the rest less one leading `=`, else the next token (owes).
@@ -85,10 +91,10 @@ func cargoSplitShorts(args []string, takes map[string]bool) []string {
 	return out
 }
 
-// cargoInstallAt matches `cargo install`, but not `cargo install --list`.
+// cargoInstallAt matches `cargo install`, but not `cargo install --list` or a line that only prints help or the version.
 func cargoInstallAt(args []string) (int, bool) {
 	start, ok := verbAt("cargo", "install")(args)
-	if !ok || cargoHas(args[start:], "--list") {
+	if !ok || cargoHas(args[start:], "--list") || cargoPrintsOnly(args, start, valueFlags["cargo"]) {
 		return 0, false
 	}
 	return start, true

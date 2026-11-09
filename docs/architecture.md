@@ -48,7 +48,7 @@ install still works".
 
 ```mermaid
 flowchart TD
-    S["ossprey npm install ..."] --> CA{"cargo add, update,<br/>generate-lockfile or fetch,<br/>without --help?"}
+    S["ossprey npm install ..."] --> CA{"cargo add, update,<br/>generate-lockfile or fetch,<br/>not only printing help?"}
     CA -- "yes" --> CV{"OSSPREY_SKIP_CI?"}
     CV -- "set" --> U
     CV -- "unset" --> CW{"gating, with a workspace cargo<br/>cannot read or a lock that<br/>lockfile-path may move?"}

@@ -146,7 +146,9 @@ possibly set there by an `include` or by a config too large
 or too deeply nested to read). `--registry crates-io` and crates.io's own index
 URL are checked like a plain install; an index URL with a non-ASCII host counts
 as another registry.
-`cargo install --list` is not an install.
+`cargo install --list` is not an install, and nothing is checked for a line
+that only prints help or the version: `-h` or `--help` after the subcommand,
+or either or `-V`/`--version` before it.
 
 A rustup toolchain (`cargo +nightly add serde`) and cargo's options before the
 subcommand (`--config`, `-Z`, `--color`, `-C`) are understood, and so are short
