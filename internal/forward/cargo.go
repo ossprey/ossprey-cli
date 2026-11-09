@@ -671,7 +671,8 @@ func reportRestore(command string, changes []fileChange) {
 		switch {
 		case f.is(now):
 			continue
-		case !c.after.is(now):
+		case !c.after.is(now) || c.after.mode != now.mode:
+			// A permission change since cargo exited is the user's too, so the file is left as it stands.
 			kept = append(kept, displayPath(f.path))
 		case !f.existed:
 			if err := os.Remove(f.path); err != nil {

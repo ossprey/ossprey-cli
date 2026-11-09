@@ -108,8 +108,8 @@ found in N packages in Cargo.lock` after cargo's own output.
 If the lock holds malware you get the full malware report, every `Cargo.toml`
 and `Cargo.lock` the command changed is put back as it was (a `Cargo.lock` it
 created is removed), one line names those files, and the exit code is `1`.
-A file changed again after cargo exited, while the check ran, is left as it is,
-and a warning line names it. A file that could not be read before cargo ran is
+A file changed again after cargo exited, while the check ran, in its contents or
+its permissions, is left as it is, and a warning line names it. A file that could not be read before cargo ran is
 never touched, and one that cannot be written back or removed is left as it is
 with a warning line.
 That includes `-p <member>`, `--manifest-path` and a member whose `Cargo.lock`

@@ -571,6 +571,38 @@ func TestRunCargoAdd_BlockLeavesFilesChangedAgain(t *testing.T) {
 	}
 }
 
+// A permission change made while the check ran counts as a change, so a block leaves that file alone (OSS-2553).
+func TestRunCargoAdd_BlockLeavesAFileWhoseModeChangedAgain(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows keeps no POSIX permission bits")
+	}
+	member := filepath.Join("a", "Cargo.toml")
+	root, _ := cargoProject(t)
+	ran := false
+	swap(t, addEvil(t, root, &ran), cleanSBOM)
+	swapScan(t, func(context.Context, scanRequest) (*ossbom.SBOM, error) {
+		if err := os.Chmod(filepath.Join(root, member), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return evilSBOM(), nil
+	})
+
+	out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"add", "-p", "a", "evil"}})
+	if !errors.Is(err, ErrBlocked) {
+		t.Fatalf("Run = %v, want ErrBlocked", err)
+	}
+	fi, err := os.Stat(filepath.Join(root, member))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Errorf("%s mode = %v, want the 0600 set after cargo exited kept", member, fi.Mode().Perm())
+	}
+	if line := "ossprey: warning: did not undo `cargo add -p a evil` in " + member + ", changed again after cargo exited\n"; !strings.Contains(out, line) {
+		t.Errorf("output lacks %q:\n%s", line, out)
+	}
+}
+
 // cargo add --dry-run with no lock writes nothing, so nothing is checked or posted and nothing is said unless verbose.
 func TestRunCargoAdd_DryRunWithNoLockSaysNothing(t *testing.T) {
 	cargoProject(t)
