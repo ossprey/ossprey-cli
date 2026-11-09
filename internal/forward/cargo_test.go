@@ -77,6 +77,12 @@ func TestCargoDetection(t *testing.T) {
 		{"-h add serde", "through"},
 		{"-V add serde", "through"},
 		{"install --vers 14.1.0 -F h ripgrep", "before"},
+		// An attached value is the option's, so -C-h names a directory called -h (cargo 1.99.1, nightly -C).
+		{"-Zunstable-options -C-h install ripgrep", "before"},
+		{"-qZunstable-options -C-h install ripgrep", "before"},
+		{"install -F-h ripgrep", "before"},
+		{"-Zunstable-options -C-h add serde", "after"},
+		{"add -p-h serde", "after"},
 		{"build", "through"},
 		{"+nightly build", "through"},
 		{"check", "through"},

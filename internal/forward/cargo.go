@@ -50,8 +50,24 @@ func cargoRunFirstAt(args []string) (int, bool) {
 
 // cargoPrintsOnly reports whether cargo would print help or its version and run nothing: -h or --help after the verb, or either or -V/--version before it (verified with cargo 1.99.1).
 func cargoPrintsOnly(args []string, start int, verbShorts map[string]bool) bool {
-	return cargoHas(cargoSplitShorts(args[:start-1], globalValueFlags["cargo"]), "-h", "--help", "-V", "--version") ||
-		cargoHas(cargoSplitShorts(args[start:], verbShorts), "-h", "--help")
+	globals := globalValueFlags["cargo"]
+	return cargoOptionsHave(cargoSplitShorts(args[:start-1], globals), globals, "-h", "--help", "-V", "--version") ||
+		cargoOptionsHave(cargoSplitShorts(args[start:], verbShorts), verbShorts, "-h", "--help")
+}
+
+// cargoOptionsHave reports whether one of flags is among split args' options before `--`, never a value an option took (`-C-h` names a directory).
+func cargoOptionsHave(split []string, takes map[string]bool, flags ...string) bool {
+	for i := 0; i < len(split); i++ {
+		switch a := split[i]; {
+		case a == "--":
+			return false
+		case slices.Contains(flags, a):
+			return true
+		case takes[a]:
+			i++
+		}
+	}
+	return false
 }
 
 // cargoShorts splits a group of short options as clap reads it: switches up to one in takes, which takes the rest less one leading `=`, else the next token (owes).
