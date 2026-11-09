@@ -123,10 +123,10 @@ cannot be made (the API unreachable, a workspace cargo cannot read, or a
 `resolver.lockfile-path` that may move the lock elsewhere, including one a
 config `include` could set or a config too large or too deeply nested to read),
 cargo's changes are kept and one warning line says so. When cargo itself
-failed, only a `resolver.lockfile-path` gets that line, since a failed
-`cargo fetch` can still write the moved lock; a failure in a workspace cargo
-cannot read, such as a directory with no `Cargo.toml`, changed nothing and
-shows cargo's own error alone.
+failed in a workspace cargo cannot read, such as a directory with no
+`Cargo.toml`, nothing changed and cargo's own error is the only line; a
+`resolver.lockfile-path` still gets the warning after a failure, since a failed
+`cargo fetch` can still write the moved lock.
 A command that changes nothing and leaves no `Cargo.lock`, such as
 `cargo add --dry-run` in a project without one, has nothing to check.
 
