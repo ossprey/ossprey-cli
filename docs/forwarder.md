@@ -120,7 +120,8 @@ the same way, and `cargo add` edits `Cargo.toml` before it resolves, so a
 failure that changed only manifests gets one warning line naming them. Run
 `ossprey cargo fetch` once it resolves to check what they add. When the check
 cannot be made (the API unreachable, a workspace cargo cannot read, or a
-`resolver.lockfile-path` that may move the lock elsewhere, including one a
+`resolver.lockfile-path` setting, in the environment, a `--config` or a cargo
+config, that may move the lock elsewhere, including one a
 config `include` could set or a config too large or too deeply nested to read),
 cargo's changes are kept and one warning line says so. When cargo itself
 failed in a workspace cargo cannot read, such as a directory with no

@@ -1208,6 +1208,70 @@ func TestLockfileMoved(t *testing.T) {
 	}
 }
 
+// Only the setting moves the lock: cargo 1.99.1 reads none of these as one, so naming the words must not skip the check (OSS-2553).
+func TestLockfileMovedReadsOnlyTheSetting(t *testing.T) {
+	home, project := t.TempDir(), t.TempDir()
+	t.Setenv("CARGO_HOME", home)
+	unsetEnv(t, "CARGO_RESOLVER_LOCKFILE_PATH")
+	t.Chdir(project)
+	if err := os.Mkdir(filepath.Join(project, ".cargo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(project, "lockfile-path.toml"), "[net]\nretry = 2\n")
+	set := `resolver.lockfile-path="alt/Cargo.lock"`
+	for _, args := range [][]string{
+		{"add", "lockfile-path-helper"},
+		{"add", "-p", "lockfile-path", "itoa"},
+		{"generate-lockfile", "--manifest-path", "lockfile-path/Cargo.toml"},
+		{"generate-lockfile", "--manifest-path=lockfile-path/Cargo.toml"},
+		{"generate-lockfile", "--config", "lockfile-path.toml"},
+		{"generate-lockfile", "--config", `alias.lp="lockfile-path"`},
+		{"generate-lockfile", "--config", "resolver.lockfile_path=\"alt/Cargo.lock\""},
+		{"-Zlockfile-path", "generate-lockfile"},
+		{"update", "--", "--config", set},
+		{"add", "--", "--config=" + set},
+	} {
+		if lockfileMoved(args, project) {
+			t.Errorf("cargo %v moves no lock", args)
+		}
+	}
+	for _, config := range []string{
+		"# lockfile-path = \"alt/Cargo.lock\"\n[resolver]\n# lockfile-path = \"alt/Cargo.lock\"\n",
+		"[alias]\nlp = \"lockfile-path\"\n\n[env]\nX = \"resolver.lockfile-path = alt\"\n",
+	} {
+		writeFile(t, filepath.Join(project, ".cargo", "config.toml"), config)
+		if lockfileMoved([]string{"generate-lockfile"}, project) {
+			t.Errorf("config %q moves no lock", config)
+		}
+		writeFile(t, filepath.Join(home, "config.toml"), config)
+		if lockfileMoved([]string{"generate-lockfile", "--config", filepath.Join(home, "config.toml")}, project) {
+			t.Errorf("--config file %q moves no lock", config)
+		}
+	}
+	// Each spelling cargo 1.99.1 moved the lock for, before the verb and after it.
+	for _, args := range [][]string{
+		{"--config", set, "generate-lockfile"},
+		{"generate-lockfile", "--config", set},
+		{"generate-lockfile", "--config=" + set},
+		{"add", "itoa", "--config", `resolver."lockfile-path"="alt/Cargo.lock"`},
+		{"-q", "--config", set, "update", "-p", "itoa"},
+	} {
+		if !lockfileMoved(args, project) {
+			t.Errorf("missed cargo %v", args)
+		}
+	}
+	for _, config := range []string{
+		"[resolver]\nlockfile-path = \"alt/Cargo.lock\"\n",
+		"resolver = { lockfile-path = \"alt/Cargo.lock\" }\n",
+		"resolver.lockfile-path = \"alt/Cargo.lock\"\n",
+	} {
+		writeFile(t, filepath.Join(project, ".cargo", "config.toml"), config)
+		if !lockfileMoved([]string{"generate-lockfile"}, project) {
+			t.Errorf("missed config %q", config)
+		}
+	}
+}
+
 // A relative CARGO_HOME is joined to where cargo runs, -C's directory included, as cargo 1.99.1 joins it.
 func TestLockfileMovedReadsARelativeHomeWhereCargoRuns(t *testing.T) {
 	project := t.TempDir()

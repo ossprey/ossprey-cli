@@ -452,21 +452,16 @@ func cargoConfigDir(globals []string) string {
 	return filepath.Clean(dir)
 }
 
-// lockfileMoved reports a resolver.lockfile-path cargo may read: from the environment, the command line, or a config file or one it includes.
+// lockfileMoved reports a resolver.lockfile-path cargo may read: from the environment, a --config on the line, or a config file or one it includes.
 func lockfileMoved(args []string, configDir string) bool {
 	if os.Getenv("CARGO_RESOLVER_LOCKFILE_PATH") != "" {
 		return true
 	}
-	for _, a := range args {
-		if strings.Contains(a, "lockfile-path") {
-			return true
-		}
-	}
-	// A quoted key may spell it with escapes, and a config the bounded parser refuses may set it too.
+	// Only the decoded key counts, escapes included, though a config the bounded parser refuses may set it too.
 	moves := func(data []byte) bool {
 		doc, ok := cargoConfigDoc(data)
 		resolver, _ := doc["resolver"].(map[string]any)
-		return !ok || bytes.Contains(data, []byte("lockfile-path")) || resolver["lockfile-path"] != nil || doc["include"] != nil
+		return !ok || resolver["lockfile-path"] != nil || doc["include"] != nil
 	}
 	for _, c := range cargoConfigArgs(args) {
 		if data, ok := cargoConfigArg(c); ok && moves(data) {

@@ -237,3 +237,26 @@ func TestCargoInstallReadsTheRegistryAboveARelativeHome(t *testing.T) {
 		t.Errorf("cargo did not try the corp registry:\n%s", res.stderr)
 	}
 }
+
+// A path naming lockfile-path sets nothing, so cargo 1.99.1's lock is still checked and a block undoes the add.
+func TestCargoAddInALockfilePathDirectoryIsChecked(t *testing.T) {
+	api := newFakeAPI(t, "pkg:cargo/itoa@1.0.15")
+	env := cargoEnv(t, api.URL)
+	dir, manifest := cargoCrate(t)
+	parent := t.TempDir()
+	if err := os.Rename(dir, filepath.Join(parent, "lockfile-path")); err != nil {
+		t.Fatal(err)
+	}
+	dir = filepath.Join(parent, "lockfile-path")
+
+	res := runForwardEnv(t, parent, env, binPath, "cargo", "add", "--manifest-path", "lockfile-path/Cargo.toml", "itoa@=1.0.15")
+	if res.exitCode != 1 {
+		t.Fatalf("exit %d, want 1\nstderr: %s", res.exitCode, res.stderr)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dir, "Cargo.toml")); string(got) != manifest {
+		t.Errorf("Cargo.toml = %q, want it restored", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "Cargo.lock")); !os.IsNotExist(err) {
+		t.Errorf("the Cargo.lock cargo created is still there (%v)", err)
+	}
+}
