@@ -597,6 +597,32 @@ func TestRunCargoAdd_FailureAfterEditingTheManifestWarns(t *testing.T) {
 	}
 }
 
+// A failed command with no workspace to check (here a moved lock, which a failed fetch --offline still writes) warns and keeps cargo's error.
+func TestRunCargoFetch_FailureWithNoWorkspaceStillWarns(t *testing.T) {
+	exit101 := errors.New("exit status 101")
+	for _, tc := range []struct {
+		passive bool
+		want    string
+	}{
+		{false, "ossprey: warning: Cargo.lock not checked after `cargo fetch --offline` (a resolver.lockfile-path may move it); cargo's changes are kept\n"},
+		{true, "ossprey: warning: could not post scan (a resolver.lockfile-path may move it); the install was not blocked (passive)\n"},
+	} {
+		root, _ := cargoProject(t)
+		cargoWorkspaceFn = func(context.Context, []string) (cargoWorkspace, error) { return cargoWorkspace{}, errLockfileMoved }
+		swap(t, func(context.Context, string, []string) error {
+			if err := os.MkdirAll(filepath.Join(root, "alt"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			writeFile(t, filepath.Join(root, "alt", "Cargo.lock"), evilLock)
+			return exit101
+		}, cleanSBOM)
+		out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"fetch", "--offline"}, Passive: tc.passive})
+		if !errors.Is(err, exit101) || out != tc.want {
+			t.Errorf("passive %v: Run = %v, output %q; want cargo's error and %q", tc.passive, err, out, tc.want)
+		}
+	}
+}
+
 // Passive posts the lock a failed command left, and still returns cargo's error.
 func TestRunCargoFetch_PassiveFailurePostsTheLock(t *testing.T) {
 	_, ws := cargoProject(t)

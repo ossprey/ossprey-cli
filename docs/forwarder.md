@@ -122,9 +122,9 @@ failure that changed only manifests gets one warning line naming them. Run
 cannot be made (the API unreachable, a workspace cargo cannot read, or a
 `resolver.lockfile-path` that may move the lock elsewhere, including one a
 config `include` could set or a config too large or too deeply nested to read),
-cargo's changes are kept and one warning line says so. A command that changes
-nothing and leaves no `Cargo.lock`, such as `cargo add --dry-run` in a project
-without one, has nothing to check.
+cargo's changes are kept and one warning line says so, even when cargo failed.
+A command that changes nothing and leaves no `Cargo.lock`, such as
+`cargo add --dry-run` in a project without one, has nothing to check.
 
 `cargo install` compiles the crate and runs its build scripts straight away, so
 the crates it names are checked first, and a block means cargo never starts.

@@ -187,10 +187,7 @@ func checkCargoAfter(ctx context.Context, m *Manager, opts Options) error {
 			note("ossprey: `%s` left no Cargo.lock; nothing posted\n", command)
 			return runErr
 		}
-		// A failed command may still have locked (cargo fetch locks, then downloads), so its lock is posted if there is one.
-		if runErr != nil && err != nil {
-			return runErr
-		}
+		// A failed command may still have locked (cargo fetch locks, then downloads), so its lock is posted, or a warning says why not.
 		stop := progress.Submit(progressTo(), 0)
 		var sbom *ossbom.SBOM
 		if err == nil {
@@ -216,10 +213,8 @@ func checkCargoAfter(ctx context.Context, m *Manager, opts Options) error {
 	runErr := execFn(ctx, m.Bin, opts.Args)
 	// Read as cargo exits, so a block undoes cargo's changes and never an edit made while the check runs.
 	changes := changedFiles(saved)
-	if runErr != nil {
-		if err != nil {
-			return runErr
-		}
+	// With no workspace there is no snapshot, so a failed command still gets the warning below.
+	if runErr != nil && err == nil {
 		// cargo writes before it can fail: fetch locks before it downloads, add edits Cargo.toml before it resolves.
 		if !slices.ContainsFunc(changes, func(c fileChange) bool { return c.before.path == ws.Lock }) {
 			var changed []string

@@ -6,6 +6,7 @@ package smoke
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -146,5 +147,41 @@ func TestCargoInstallGroupedShortsAreNotCrates(t *testing.T) {
 	}
 	if !dirEmpty(t, root) {
 		t.Error("a blocked install must not reach cargo")
+	}
+}
+
+// A failed fetch --offline still writes a lock that resolver.lockfile-path moved, so the unchecked change is named.
+func TestCargoFetchFailingAfterAMovedLockWarns(t *testing.T) {
+	api := newFakeAPI(t, "")
+	env := cargoEnv(t, api.URL)
+	dir, manifest := cargoCrate(t)
+	if err := os.WriteFile(filepath.Join(dir, "Cargo.toml"), []byte(manifest+"itoa = \"=1.0.15\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The index is cached and the crate is not, so offline cargo locks and then fails to download.
+	lock := exec.Command("cargo", "generate-lockfile")
+	lock.Dir, lock.Env = dir, env
+	if out, err := lock.CombinedOutput(); err != nil {
+		t.Fatalf("cargo generate-lockfile: %v\n%s", err, out)
+	}
+	if err := os.Remove(filepath.Join(dir, "Cargo.lock")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, ".cargo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".cargo", "config.toml"), []byte("[resolver]\nlockfile-path = \"alt/Cargo.lock\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res := runForwardEnv(t, dir, env, binPath, "cargo", "fetch", "--offline")
+	if res.exitCode != 101 {
+		t.Fatalf("exit %d, want cargo's 101\nstderr: %s", res.exitCode, res.stderr)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "alt", "Cargo.lock")); err != nil {
+		t.Errorf("cargo left no moved lock (%v)", err)
+	}
+	if want := "ossprey: warning: Cargo.lock not checked after `cargo fetch --offline` (a resolver.lockfile-path may move it); cargo's changes are kept"; !strings.Contains(res.stderr, want) {
+		t.Errorf("stderr lacks %q:\n%s", want, res.stderr)
 	}
 }
