@@ -437,6 +437,24 @@ func TestRunCargoAdd_BlockLeavesFilesChangedAgain(t *testing.T) {
 	}
 }
 
+// cargo add --dry-run with no lock writes nothing, so nothing is checked or posted and nothing is said unless verbose.
+func TestRunCargoAdd_DryRunWithNoLockSaysNothing(t *testing.T) {
+	cargoProject(t)
+	args := []string{"add", "--dry-run", "serde"}
+	for _, passive := range []bool{false, true} {
+		ex := &stubExec{}
+		swap(t, ex.fn, cleanSBOM)
+		out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: args, Passive: passive})
+		if err != nil || !ex.called || out != "" {
+			t.Errorf("passive %v: Run = %v, cargo ran = %v, output %q; want cargo run and nothing printed", passive, err, ex.called, out)
+		}
+		out, _ = verboseOutput(t, context.Background(), Options{Bin: "cargo", Args: args, Passive: passive})
+		if !strings.Contains(out, "ossprey: `cargo add --dry-run serde` left no Cargo.lock; nothing ") {
+			t.Errorf("passive %v: verbose output lacks the reason:\n%s", passive, out)
+		}
+	}
+}
+
 // A clean add keeps what cargo wrote and prints the one verdict line.
 func TestRunCargoAdd_CleanKeepsTheChanges(t *testing.T) {
 	root, ws := cargoProject(t)

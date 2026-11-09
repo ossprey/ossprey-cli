@@ -129,8 +129,13 @@ func checkCargoAfter(ctx context.Context, m *Manager, opts Options) error {
 		flushWarnings(ctx)
 		runErr := execFn(ctx, m.Bin, opts.Args)
 		ws, err := cargoWorkspaceFn(ctx, opts.Args)
+		if err == nil && !exists(ws.Lock) {
+			// cargo add --dry-run with no lock writes nothing, so there is nothing to post.
+			note("ossprey: `%s` left no Cargo.lock; nothing posted\n", command)
+			return runErr
+		}
 		// A failed command may still have locked (cargo fetch locks, then downloads), so its lock is posted if there is one.
-		if runErr != nil && (err != nil || !exists(ws.Lock)) {
+		if runErr != nil && err != nil {
 			return runErr
 		}
 		stop := progress.Submit(progressTo(), 0)
@@ -168,6 +173,11 @@ func checkCargoAfter(ctx context.Context, m *Manager, opts Options) error {
 			}
 			return runErr
 		}
+	}
+	if err == nil && len(changes) == 0 && !exists(ws.Lock) {
+		// cargo add --dry-run with no lock writes nothing, so there is nothing to check.
+		note("ossprey: `%s` left no Cargo.lock; nothing to check\n", command)
+		return runErr
 	}
 	var sbom *ossbom.SBOM
 	if err == nil {
