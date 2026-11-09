@@ -394,8 +394,15 @@ func cargoConfigLevels(configLocs []file.Location, configs map[string]cargoFile,
 	return levels
 }
 
-// cargoSourceReplaced reports whether cargo run beside a manifest or a config in the scan takes crates.io from anything but a vendor directory the filter proved.
-func cargoSourceReplaced(r file.Resolver, root string) bool {
+// cargoSourceReplaced reports whether cargo run beside a manifest or a config in the scan, or in configDir when set, takes crates.io from anything but a vendor directory the filter proved.
+func cargoSourceReplaced(r file.Resolver, root, configDir string) bool {
+	if configDir != "" {
+		// A lock copied out of its workspace is judged where cargo runs, from the configs there and above and CARGO_HOME's.
+		dir := resolvedRoot(configDir)
+		_, above, ok := cargoFilesAbove(filepath.Join(dir, "Cargo.lock"), false, false)
+		dirSlash := filepath.ToSlash(dir)
+		return ok && cratesIoReplacement(cargoConfigLevels(nil, nil, above, dirSlash), dirSlash) != ""
+	}
 	vendored, _ := r.(cargoVendored)
 	root = resolvedRoot(root)
 	rootSlash := filepath.ToSlash(root)

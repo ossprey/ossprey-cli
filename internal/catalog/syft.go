@@ -343,7 +343,7 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 		}
 	}
 
-	if opts.ReportCargoReplacement && slices.ContainsFunc(out, isCratesIoCrate) && cargoSourceReplaced(resolver, absRoot) {
+	if opts.ReportCargoReplacement && slices.ContainsFunc(out, isCratesIoCrate) && cargoSourceReplaced(resolver, absRoot, opts.CargoConfigDir) {
 		warn.Add(ctx, cargoReplacedEntry)
 	}
 	// The fold runs first because cargoLocks indexes out; mergeVersionless leaves crates alone.

@@ -521,7 +521,9 @@ config that redirects the vendored source without restating `replace-with`,
 and warned about a `CARGO_HOME` mirror that the project's own vendor config
 overrides everywhere in the project; judging a scan root holding neither file
 warned about that mirror in a monorepo whose Rust project, in a subdirectory,
-builds from a proven vendor tree. It runs only when a
+builds from a proven vendor tree. A lock copied out of its workspace (`CargoConfigDir`, the cargo forwarder's
+check) is judged where cargo runs instead, from the configs there and above
+and `CARGO_HOME`'s. It runs only when a
 crate goes out unmarked, so a scan with no Rust never mentions cargo.
 
 #### Why the npm resolve skips workspace members (OSS-1353)
