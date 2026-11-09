@@ -105,15 +105,32 @@ func catalogByGlob(ctx context.Context, resolver file.Resolver, root, glob, labe
 	_ = g.Wait() // workers never return non-nil; Wait is just the barrier
 
 	sort.Slice(results, func(a, b int) bool { return results[a].idx < results[b].idx })
-	seen := make(map[string]struct{})
+	seen := make(map[string]int)
+	copied := make(map[int]bool)
 	var out []pkg.Package
 	for _, r := range results {
 		for _, p := range r.pkgs {
 			key := p.Name + "@" + p.Version
-			if _, ok := seen[key]; ok {
+			// A crate Cargo builds from git is not the crates.io crate of its name.
+			if e, ok := p.Metadata.(pkg.RustCargoLockEntry); ok {
+				key += "#" + e.Source
+			}
+			// A range carries its own manifest's requirements and root, so each manifest's stays apart.
+			if r, ok := p.Metadata.(cargoRange); ok {
+				key += "\x00" + r.Manifest
+			}
+			if i, ok := seen[key]; ok {
+				// foldCargoRanges folds a crate per manifest, so a crate keeps every file's location, in a set copied once since a parser may share one.
+				if p.Type == pkg.RustPkg {
+					if !copied[i] {
+						out[i].Locations = file.NewLocationSet(out[i].Locations.ToUnorderedSlice()...)
+						copied[i] = true
+					}
+					out[i].Locations.Add(p.Locations.ToUnorderedSlice()...)
+				}
 				continue
 			}
-			seen[key] = struct{}{}
+			seen[key] = len(out)
 			out = append(out, p)
 		}
 	}

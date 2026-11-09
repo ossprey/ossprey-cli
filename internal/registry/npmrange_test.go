@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"testing"
 )
 
@@ -69,7 +71,7 @@ console.log(JSON.stringify(out))
 		t.Fatal(err)
 	}
 	for _, rs := range rangeCases {
-		r, ok := parseNpmRange(rs)
+		r, ok := parseNpmRange(rs, false)
 		if ok != want[rs].Valid {
 			t.Errorf("range %q: valid = %v, node-semver says %v", rs, ok, want[rs].Valid)
 			continue
@@ -82,10 +84,29 @@ console.log(JSON.stringify(out))
 			sat[v] = true
 		}
 		for _, vs := range versionCases {
-			v, _ := parseSemver(vs)
+			v, _ := parseSemver(vs, false)
 			if got := r.satisfies(v); got != sat[vs] {
 				t.Errorf("satisfies(%q, %q) = %v, node-semver says %v", vs, rs, got, sat[vs])
 			}
+		}
+	}
+}
+
+// A bound one past an npm core number at int's limit stays above it rather than wrapping around.
+func TestPickNpmVersionAtIntLimit(t *testing.T) {
+	limit := strconv.Itoa(math.MaxInt)
+	for _, c := range []struct {
+		spec, latest string
+		versions     []string
+		want         string
+	}{
+		{">" + limit, "1.0.0", []string{"1.0.0"}, ""},
+		{">99999999999999999999", "1.0.0", []string{"1.0.0"}, ""},
+		{"<=" + limit, "1.0.0", []string{"1.0.0"}, "1.0.0"},
+		{"^" + limit + ".0.0", "", []string{"1.0.0", limit + ".1.0"}, limit + ".1.0"},
+	} {
+		if got, _ := pickNpmVersion(c.spec, c.latest, c.versions, nil); got != c.want {
+			t.Errorf("pickNpmVersion(%q) = %q, want %q", c.spec, got, c.want)
 		}
 	}
 }

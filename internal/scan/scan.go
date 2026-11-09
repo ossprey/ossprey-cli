@@ -62,10 +62,11 @@ func Run(ctx context.Context, opts Options) (*ossbom.SBOM, error) {
 	}
 
 	pkgs, err := catalog.Catalog(ctx, opts.Path, catalog.Options{
-		SkipVersionLookup: opts.SkipVersionLookup,
-		NoExec:            opts.NoExec,
-		Trust:             opts.Trust,
-		CargoConfigDir:    opts.CargoConfigDir,
+		SkipVersionLookup:      opts.SkipVersionLookup,
+		NoExec:                 opts.NoExec,
+		Trust:                  opts.Trust,
+		CargoConfigDir:         opts.CargoConfigDir,
+		ReportCargoReplacement: true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("catalog: %w", err)
