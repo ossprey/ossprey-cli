@@ -135,8 +135,9 @@ named crates are checked, not their dependencies, and one warning line says so.
 An install with `--git`, `--path`, or a `--registry` or `--index` other than
 crates.io is not from crates.io and is forwarded unchecked, and so is one that
 names no source while cargo's default registry is elsewhere (`registry.default`
-in a `--config`, in `CARGO_REGISTRY_DEFAULT` or in the cargo configs under
-`CARGO_HOME`, or possibly set there by an `include` or by a config too large
+in a `--config`, in `CARGO_REGISTRY_DEFAULT` or in the cargo configs from
+`CARGO_HOME` up, a relative `CARGO_HOME` counting from where cargo runs, or
+possibly set there by an `include` or by a config too large
 or too deeply nested to read). `--registry crates-io` and crates.io's own index
 URL are checked like a plain install; an index URL with a non-ASCII host counts
 as another registry.

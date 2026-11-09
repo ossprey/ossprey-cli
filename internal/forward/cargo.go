@@ -452,7 +452,7 @@ func lockfileMoved(args []string, configDir string) bool {
 		}
 	}
 	files := cargoConfigFiles(configDir)
-	if home := cargoHome(); home != "" {
+	if home := cargoHome(configDir); home != "" {
 		files = append(files, cargoConfigFile(home))
 	}
 	for _, f := range files {
@@ -497,7 +497,7 @@ func cargoDefaultRegistry(args []string) string {
 	if v := os.Getenv("CARGO_REGISTRY_DEFAULT"); v != "" {
 		return found(v)
 	}
-	home := cargoHome()
+	home := cargoHome(cargoConfigDir(args[:max(verbIndex("cargo", args), 0)]))
 	if home == "" {
 		return ""
 	}
@@ -565,10 +565,13 @@ func cargoConfigDoc(data []byte) (map[string]any, bool) {
 	return doc, err == nil
 }
 
-// cargoHome is CARGO_HOME, else ~/.cargo, else "".
-func cargoHome() string {
+// cargoHome is CARGO_HOME, a relative one joined to cwd (where cargo runs) and cleaned as cargo does, else ~/.cargo, else "".
+func cargoHome(cwd string) string {
 	if home := os.Getenv("CARGO_HOME"); home != "" {
-		return home
+		if !filepath.IsAbs(home) {
+			home = filepath.Join(cwd, home)
+		}
+		return filepath.Clean(home)
 	}
 	if h, err := os.UserHomeDir(); err == nil {
 		return filepath.Join(h, ".cargo")

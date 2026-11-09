@@ -185,3 +185,36 @@ func TestCargoFetchFailingAfterAMovedLockWarns(t *testing.T) {
 		t.Errorf("stderr lacks %q:\n%s", want, res.stderr)
 	}
 }
+
+// cargo 1.99.1 joins a relative CARGO_HOME to its working directory and reads registry.default from the configs above it.
+func TestCargoInstallReadsTheRegistryAboveARelativeHome(t *testing.T) {
+	api := newFakeAPI(t, "pkg:cargo/ripgrep@14.1.1")
+	var env []string
+	for _, kv := range cargoEnv(t, api.URL) {
+		if k, _, _ := strings.Cut(kv, "="); k != "CARGO_HOME" {
+			env = append(env, kv)
+		}
+	}
+	env = append(env, "CARGO_HOME=.cargo", "CARGO_NET_RETRY=0")
+	parent := t.TempDir()
+	project := filepath.Join(parent, "project")
+	if err := os.MkdirAll(filepath.Join(parent, ".cargo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	corp := "[registry]\ndefault = \"corp\"\n[registries.corp]\nindex = \"sparse+https://corp.invalid/\"\n"
+	if err := os.WriteFile(filepath.Join(parent, ".cargo", "config.toml"), []byte(corp), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+
+	res := runForwardEnv(t, project, env, binPath, "cargo", "install", "--root", root, "ripgrep@14.1.1")
+	if n, _ := api.stats(); n != 0 || res.exitCode == 1 {
+		t.Fatalf("exit %d after %d API requests, want the corp crate forwarded unchecked\nstderr: %s", res.exitCode, n, res.stderr)
+	}
+	if !strings.Contains(res.stderr, "corp.invalid") {
+		t.Errorf("cargo did not try the corp registry:\n%s", res.stderr)
+	}
+}

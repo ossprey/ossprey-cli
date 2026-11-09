@@ -204,6 +204,53 @@ func TestCargoDefaultRegistry(t *testing.T) {
 	}
 }
 
+// cargo 1.99.1 joins a relative CARGO_HOME to its physical working directory, after -C, cleans `..` without following links, and reads the configs from there up.
+func TestCargoDefaultRegistryRelativeHome(t *testing.T) {
+	corp := "[registry]\ndefault = \"corp\"\n"
+	for _, tc := range []struct {
+		name  string
+		files map[string]string
+		links map[string]string
+		cwd   string
+		home  string
+		args  []string
+		want  string
+	}{
+		{"the configs above it", map[string]string{".cargo/config.toml": corp}, nil, "cwd", ".cargo", []string{"install", "x"}, "corp"},
+		{"its own config", map[string]string{"cwd/.cargo/config.toml": corp}, nil, "cwd", ".cargo", []string{"install", "x"}, "corp"},
+		{"joined after -C", map[string]string{"cwd/sub/h/config.toml": corp}, nil, "cwd", "h", []string{"-Z", "unstable-options", "-qC", "sub", "install", "x"}, "corp"},
+		{"not joined to the -C-less cwd", map[string]string{"cwd/sub/h/config.toml": corp}, nil, "cwd", "h", []string{"install", "x"}, ""},
+		{"from the physical working directory", map[string]string{"real/.cargo/config.toml": corp}, map[string]string{"link": "real/proj"}, "link", ".cargo", []string{"install", "x"}, "corp"},
+		{"with .. cleaned before links", map[string]string{".cargo/config.toml": corp, "other/.cargo/config.toml": "[registry]\ndefault = \"crates-io\"\n"}, map[string]string{"cwd/lnk": "other/deep"}, "cwd", "lnk/../h", []string{"install", "x"}, "corp"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := t.TempDir()
+			for _, d := range []string{"cwd/sub", "real/proj", "other/deep"} {
+				if err := os.MkdirAll(filepath.Join(base, d), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for name, data := range tc.files {
+				if err := os.MkdirAll(filepath.Dir(filepath.Join(base, name)), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				writeFile(t, filepath.Join(base, name), data)
+			}
+			for link, target := range tc.links {
+				if err := os.Symlink(filepath.Join(base, target), filepath.Join(base, link)); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+			}
+			t.Setenv("CARGO_HOME", tc.home)
+			unsetEnv(t, "CARGO_REGISTRY_DEFAULT")
+			t.Chdir(filepath.Join(base, tc.cwd))
+			if got := cargoDefaultRegistry(tc.args); got != tc.want {
+				t.Errorf("CARGO_HOME=%s cargo %v: %q, want %q", tc.home, tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
 // clapHelpFlags reads clap's help, short-only options included: the options taking a value, those whose value is optional, and those taking none.
 func clapHelpFlags(help string) (takes, optional, switches map[string]bool) {
 	takes, optional, switches = map[string]bool{}, map[string]bool{}, map[string]bool{}
@@ -1094,6 +1141,25 @@ func TestLockfileMoved(t *testing.T) {
 	t.Setenv("CARGO_RESOLVER_LOCKFILE_PATH", "x/Cargo.lock")
 	if !lockfileMoved([]string{"add", "serde"}, sub) {
 		t.Error("missed CARGO_RESOLVER_LOCKFILE_PATH")
+	}
+}
+
+// A relative CARGO_HOME is joined to where cargo runs, -C's directory included, as cargo 1.99.1 joins it.
+func TestLockfileMovedReadsARelativeHomeWhereCargoRuns(t *testing.T) {
+	project := t.TempDir()
+	sub := filepath.Join(project, "sub")
+	if err := os.MkdirAll(filepath.Join(sub, "h"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(sub, "h", "config.toml"), "[resolver]\nlockfile-path = \"x/Cargo.lock\"\n")
+	t.Setenv("CARGO_HOME", "h")
+	unsetEnv(t, "CARGO_RESOLVER_LOCKFILE_PATH")
+	t.Chdir(project)
+	if !lockfileMoved([]string{"-Z", "unstable-options", "-C", "sub", "fetch"}, sub) {
+		t.Error("missed the lockfile-path in the relative CARGO_HOME under -C's directory")
+	}
+	if lockfileMoved([]string{"fetch"}, project) {
+		t.Error("read a relative CARGO_HOME from a directory cargo does not run in")
 	}
 }
 
