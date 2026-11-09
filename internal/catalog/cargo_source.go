@@ -86,13 +86,13 @@ func isCratesIo(source string) (is, maybe bool) {
 	return strings.ToLower(host) == want[0], false
 }
 
-// IsCratesIoIndex reports whether cargo may read an `--index` URL as crates.io's.
+// IsCratesIoIndex reports whether an `--index` URL is certainly crates.io's; one only IDNA could map there is not.
 func IsCratesIoIndex(index string) bool {
 	if !strings.HasPrefix(index, "sparse+") {
 		index = "registry+" + index
 	}
-	is, maybe := isCratesIo(index)
-	return is || maybe
+	is, _ := isCratesIo(index)
+	return is
 }
 
 func nonASCII(r rune) bool { return r > unicode.MaxASCII }

@@ -101,6 +101,8 @@ func TestParseCargoInstall(t *testing.T) {
 		{"--index=sparse+https://index.crates.io/ ripgrep", "", ripgrep, nil},
 		{"--index https://github.com/rust-lang/crates.io-index ripgrep", "", ripgrep, nil},
 		{"--index https://index.crates.io/ ripgrep", "", nil, []string{"ripgrep", "--index https://index.crates.io/"}},
+		// Only IDNA could say whether a non-ASCII host is github.com, so crates.io is never assumed.
+		{"--index https://例子.test/rust-lang/crates.io-index ripgrep", "", nil, []string{"ripgrep", "--index https://例子.test/rust-lang/crates.io-index"}},
 		{"ripgrep", "corp", nil, []string{"ripgrep", "registry.default corp"}},
 		{"--registry crates-io ripgrep", "corp", ripgrep, nil},
 		{"--registry other ripgrep", "corp", nil, []string{"ripgrep", "--registry other"}},
@@ -694,6 +696,7 @@ func TestRunCargoInstall_FromElsewhereForwardsUnchecked(t *testing.T) {
 		{"install", "--path", "."},
 		{"install", "--registry", "corp", "tool"},
 		{"install", "--index", "sparse+https://crates.corp.example/", "tool"},
+		{"install", "--index", "https://例子.test/rust-lang/crates.io-index", "tool"},
 		{"install"},
 	} {
 		ex := &stubExec{}
