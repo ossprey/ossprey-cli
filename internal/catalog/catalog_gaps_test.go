@@ -426,6 +426,39 @@ func TestCatalogLocationMergeIsLinear(t *testing.T) {
 	}
 }
 
+// One manifest may spell a crate in thousands of cases, and gathering their requirements must stay linear.
+func TestCatalogCaseVariantRequirementsAreLinear(t *testing.T) {
+	t.Setenv("OSSPREY_RESOLVE_LATEST", "")
+	withResolveLatest(t, func(context.Context, string, string) (string, error) { return "9.9.9", nil })
+	allocated := func(n int) uint64 {
+		var manifest strings.Builder
+		manifest.WriteString("[package]\nname = \"m\"\nversion = \"0.1.0\"\n[dependencies]\n")
+		for i := range n {
+			name := []byte("abcdefghijklmnop")
+			for b := range name {
+				if i>>b&1 == 1 {
+					name[b] -= 'a' - 'A'
+				}
+			}
+			fmt.Fprintf(&manifest, "%s = \"1\"\n", name)
+		}
+		dir := t.TempDir()
+		writeTree(t, dir, map[string]string{"Cargo.toml": manifest.String()})
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		if _, err := Catalog(context.Background(), dir, Options{NoExec: true}); err != nil {
+			t.Fatalf("Catalog: %v", err)
+		}
+		runtime.ReadMemStats(&after)
+		return after.TotalAlloc - before.TotalAlloc
+	}
+	small, large := allocated(1000), allocated(4000)
+	if ratio := float64(large) / float64(small); ratio > 5.5 {
+		t.Errorf("4x the spellings allocated %.1fx the bytes (%d vs %d), want about 4x", ratio, large, small)
+	}
+}
+
 func TestPinnedRequirementsGaps(t *testing.T) {
 	cases := []struct {
 		name string

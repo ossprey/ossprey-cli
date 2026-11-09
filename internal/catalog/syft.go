@@ -292,8 +292,11 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 			// One manifest may spell a crate in two cases, and every requirement counts.
 			if r, ok := p.Metadata.(cargoRange); ok {
 				k := cargoReqKey(r.Manifest, p.Name)
+				// The map owns its copy, so a manifest spelling a crate many ways appends in linear time.
 				if prev, ok := cargoRanges[k]; ok {
-					r.Reqs = append(slices.Clone(prev.Reqs), r.Reqs...)
+					r.Reqs = append(prev.Reqs, r.Reqs...)
+				} else {
+					r.Reqs = slices.Clone(r.Reqs)
 				}
 				cargoRanges[k] = r
 			}
