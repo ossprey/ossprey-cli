@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -291,7 +292,7 @@ func TestMalformedPyprojectNeedsBuild(t *testing.T) {
 	if pyprojectNeedsBuild(p) == nil {
 		t.Error("a malformed pyproject read as needing nothing")
 	}
-	writeTree(t, dir, map[string]string{"uv.lock": "version = 1\n\n[[package]]\nname = \"app\"\nversion = \"0.1.0\"\n"})
+	writeTree(t, dir, map[string]string{"uv.lock": "version = 1\n\n[[package]]\nname = \"requests\"\nversion = \"2.31.0\"\nsource = { registry = \"https://pypi.org/simple\" }\n"})
 	if err := pyprojectNeedsBuild(p); err != nil {
 		t.Errorf("a lock beside it covers it: %v", err)
 	}
@@ -558,5 +559,22 @@ func TestUVExpandsEnvConfinesLocalProjects(t *testing.T) {
 	writeTree(t, in, map[string]string{"requirements.txt": "-e ./lib\nrequests\n", "lib/pyproject.toml": "[project]\nname = \"lib\"\nversion = \"0.1.0\"\ndependencies = [\"idna\"]\n"})
 	if err := uvExpandsEnv(context.Background(), filepath.Join(in, "requirements.txt"), in); err != nil {
 		t.Errorf("clean project inside the root: %v", err)
+	}
+}
+
+// uv reads the local projects [tool.uv]'s override and constraint lists name,
+// as it does a dependency's (verified against uv 0.11 with an override).
+func TestUVProjectExpandsEnvFollowsOverrides(t *testing.T) {
+	for _, key := range []string{"override-dependencies", "constraint-dependencies", "build-constraint-dependencies"} {
+		dir := t.TempDir()
+		lib := filepath.Join(dir, "lib")
+		u := (&url.URL{Scheme: "file", Path: filepath.ToSlash(lib)}).String()
+		writeTree(t, dir, map[string]string{
+			"pyproject.toml":     "[project]\nname = \"app\"\nversion = \"0.1.0\"\n\n[tool.uv]\n" + key + " = [\"lib @ " + u + "\"]\n",
+			"lib/pyproject.toml": "[project]\nname = \"lib\"\nversion = \"0.1.0\"\ndependencies = [\"x @ https://h/${SECRET}/x.whl\"]\n",
+		})
+		if err := uvProjectExpandsEnv(filepath.Join(dir, "pyproject.toml"), dir); !errors.Is(err, errNamesEnvVar) {
+			t.Errorf("%s: err = %v, want errNamesEnvVar", key, err)
+		}
 	}
 }

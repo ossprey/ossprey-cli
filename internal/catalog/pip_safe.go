@@ -858,7 +858,7 @@ func uvProjectRefs(path string) ([]string, error) {
 			reqs = append(reqs, g...)
 		}
 	}
-	collectStrings(&reqs, l.Groups, l.Tool.UV.Dev)
+	collectStrings(&reqs, l.Groups, l.Tool.UV.Dev, l.Tool.UV.Override, l.Tool.UV.Constraint, l.Tool.UV.BuildConstraint)
 	for _, r := range reqs {
 		_, ref, ok := strings.Cut(r, "@")
 		if !ok {

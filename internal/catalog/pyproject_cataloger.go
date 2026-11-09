@@ -280,18 +280,17 @@ func dynamicDependencies(pp *pyproject) bool {
 // for the project's whole tree.
 var pythonLockfiles = []string{"uv.lock", "poetry.lock", "pdm.lock"}
 
-// tomlLockHasPackages reports a TOML lockfile (uv, poetry, pdm, Cargo) that
-// parses and locks at least one [[package]] with a name, and a version when
-// needVersion says the format always records one (uv omits it for a project
-// with a dynamic version). A stub such as `version = 1`, or an empty
-// [[package]] table, parses but supplies no tree, so it must not stand in
-// for one.
-func tomlLockHasPackages(data []byte, needVersion bool) bool {
+// tomlLockHasPackages reports a TOML lockfile (uv, poetry, pdm, Cargo; lock
+// is its file name) that parses and locks at least one [[package]] with a
+// name, and a version except in uv.lock (which omits it for a project with a
+// dynamic version), fetched from outside the tree (lockedFromOutside). A stub
+// such as `version = 1`, an empty [[package]] table, or a lock holding only
+// the project itself and its local or workspace packages parses but supplies
+// no tree for a registry or git dependency, so it must not stand in for one.
+// Coverage is asked about only for a manifest that declares dependencies.
+func tomlLockHasPackages(data []byte, lock string) bool {
 	var doc struct {
-		Package []struct {
-			Name    string `toml:"name"`
-			Version string `toml:"version"`
-		} `toml:"package"`
+		Package []map[string]any `toml:"package"`
 	}
 	// The structural guard runs first: a byte bound does not stop deeply
 	// nested keys from exhausting the decoder.
@@ -302,11 +301,48 @@ func tomlLockHasPackages(data []byte, needVersion bool) bool {
 		return false
 	}
 	for _, p := range doc.Package {
-		if p.Name != "" && (p.Version != "" || !needVersion) {
+		name, _ := p["name"].(string)
+		version, _ := p["version"].(string)
+		if name == "" || (version == "" && lock != "uv.lock") {
+			continue
+		}
+		if lockedFromOutside(lock, p) {
 			return true
 		}
 	}
 	return false
+}
+
+// lockedFromOutside reports a lock entry fetched from a registry, a git
+// repository or a URL, rather than the project's own code: Cargo records no
+// source for the root crate or a path crate; uv records editable, virtual,
+// path or directory for local ones; poetry a directory or file source; pdm a
+// path.
+func lockedFromOutside(lock string, p map[string]any) bool {
+	switch lock {
+	case "Cargo.lock":
+		source, _ := p["source"].(string)
+		return source != ""
+	case "uv.lock":
+		source, _ := p["source"].(map[string]any)
+		for _, k := range []string{"registry", "git", "url"} {
+			if _, ok := source[k]; ok {
+				return true
+			}
+		}
+		return false
+	case "poetry.lock":
+		source, ok := p["source"].(map[string]any)
+		if !ok {
+			return true // a PyPI package records no source
+		}
+		kind, _ := source["type"].(string)
+		return kind != "directory" && kind != "file"
+	case "pdm.lock":
+		_, local := p["path"]
+		return !local
+	}
+	return true
 }
 
 // pythonCovered is pyprojectLockCovered, and for a uv workspace member also
@@ -356,7 +392,7 @@ func uvWorkspaceLockCovers(manifest, root string) bool {
 				return false
 			}
 			data, err := readBoundedFile(filepath.Join(d, "uv.lock"), maxLockfileBytes)
-			return err == nil && tomlLockHasPackages(data, false)
+			return err == nil && tomlLockHasPackages(data, "uv.lock")
 		}
 		if d == filepath.Dir(d) {
 			break
@@ -375,7 +411,7 @@ func pyprojectLockCovered(path string) bool {
 		if err != nil {
 			continue
 		}
-		if tomlLockHasPackages(data, name != "uv.lock") {
+		if tomlLockHasPackages(data, name) {
 			return true
 		}
 	}

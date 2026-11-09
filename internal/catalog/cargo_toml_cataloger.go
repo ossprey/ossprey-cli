@@ -585,5 +585,5 @@ func cargoLockReadable(dir string) bool {
 	if err != nil {
 		return false
 	}
-	return tomlLockHasPackages(data, true) // a lock always holds the crate itself
+	return tomlLockHasPackages(data, "Cargo.lock")
 }

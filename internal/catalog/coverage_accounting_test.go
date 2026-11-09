@@ -289,7 +289,13 @@ func TestStubLockCoversNothing(t *testing.T) {
 		"Cargo.lock with a nameless package":     {map[string]string{"Cargo.toml": crate, "Cargo.lock": "version = 3\n\n[[package]]\nversion = \"1.0.0\"\n"}, "Cargo.toml"},
 		"uv.lock with an empty package":          {map[string]string{"pyproject.toml": pp, "uv.lock": "version = 1\n\n[[package]]\n"}, "pyproject.toml"},
 		"poetry.lock with a versionless package": {map[string]string{"pyproject.toml": pp, "poetry.lock": "[[package]]\nname = \"requests\"\n"}, "pyproject.toml"},
-		"v1 package-lock.json":                   {map[string]string{"package.json": pj, "package-lock.json": `{"name":"app","lockfileVersion":1,"dependencies":{}}`}, "package.json"},
+		// A lock holding only the project itself, or workspace members, has
+		// no tree for the dependencies the manifest declares.
+		"uv.lock with only the project":         {map[string]string{"pyproject.toml": pp, "uv.lock": "version = 1\n\n[[package]]\nname = \"app\"\nversion = \"0.1.0\"\nsource = { virtual = \".\" }\n"}, "pyproject.toml"},
+		"uv.lock with only workspace members":   {map[string]string{"pyproject.toml": pp, "uv.lock": "version = 1\n\n[[package]]\nname = \"app\"\nversion = \"0.1.0\"\nsource = { editable = \".\" }\n\n[[package]]\nname = \"lib\"\nversion = \"0.1.0\"\nsource = { editable = \"lib\" }\n"}, "pyproject.toml"},
+		"Cargo.lock with only the crate":        {map[string]string{"Cargo.toml": crate, "Cargo.lock": "version = 3\n\n[[package]]\nname = \"app\"\nversion = \"0.1.0\"\n"}, "Cargo.toml"},
+		"poetry.lock with only a local package": {map[string]string{"pyproject.toml": pp, "poetry.lock": "[[package]]\nname = \"lib\"\nversion = \"0.1.0\"\n\n[package.source]\ntype = \"directory\"\nurl = \"lib\"\n"}, "pyproject.toml"},
+		"v1 package-lock.json":                  {map[string]string{"package.json": pj, "package-lock.json": `{"name":"app","lockfileVersion":1,"dependencies":{}}`}, "package.json"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if got := unresolvedFor(t, tc.files); !slices.Equal(got, []string{tc.want}) {
