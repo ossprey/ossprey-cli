@@ -595,7 +595,7 @@ func localProjectRef(v string) string {
 		if unescaped, err := url.PathUnescape(p); err == nil {
 			p = unescaped
 		}
-		return filepath.FromSlash(p)
+		return filepath.FromSlash(fileURLDrive(u.Host, p))
 	}
 	if strings.Contains(v, "://") {
 		return ""
@@ -604,6 +604,21 @@ func localProjectRef(v string) string {
 		return v
 	}
 	return ""
+}
+
+// fileURLDrive puts a Windows drive back on a file URL's path: file:///C:/x
+// parses to /C:/x and file://C:/x to host C:, neither of which names C:\x.
+func fileURLDrive(host, p string) string {
+	isDrive := func(s string) bool {
+		return len(s) == 2 && s[1] == ':' && (s[0]|0x20) >= 'a' && (s[0]|0x20) <= 'z'
+	}
+	if isDrive(host) {
+		return host + p
+	}
+	if len(p) >= 3 && p[0] == '/' && isDrive(p[1:3]) {
+		return p[1:]
+	}
+	return p
 }
 
 // localProjects returns the pyproject of each directory a local project ref,

@@ -562,13 +562,30 @@ func TestUVExpandsEnvConfinesLocalProjects(t *testing.T) {
 	}
 }
 
+func TestFileURLDrive(t *testing.T) {
+	for _, c := range []struct{ host, p, want string }{
+		{"", "/C:/x/lib", "C:/x/lib"},
+		{"C:", "/x/lib", "C:/x/lib"},
+		{"", "/tmp/lib", "/tmp/lib"},
+		{"", "./lib", "./lib"},
+	} {
+		if got := fileURLDrive(c.host, c.p); got != c.want {
+			t.Errorf("fileURLDrive(%q, %q) = %q, want %q", c.host, c.p, got, c.want)
+		}
+	}
+}
+
 // uv reads the local projects [tool.uv]'s override and constraint lists name,
 // as it does a dependency's (verified against uv 0.11 with an override).
 func TestUVProjectExpandsEnvFollowsOverrides(t *testing.T) {
 	for _, key := range []string{"override-dependencies", "constraint-dependencies", "build-constraint-dependencies"} {
 		dir := t.TempDir()
 		lib := filepath.Join(dir, "lib")
-		u := (&url.URL{Scheme: "file", Path: filepath.ToSlash(lib)}).String()
+		p := filepath.ToSlash(lib)
+		if !strings.HasPrefix(p, "/") {
+			p = "/" + p // file:///C:/... on Windows
+		}
+		u := (&url.URL{Scheme: "file", Path: p}).String()
 		writeTree(t, dir, map[string]string{
 			"pyproject.toml":     "[project]\nname = \"app\"\nversion = \"0.1.0\"\n\n[tool.uv]\n" + key + " = [\"lib @ " + u + "\"]\n",
 			"lib/pyproject.toml": "[project]\nname = \"lib\"\nversion = \"0.1.0\"\ndependencies = [\"x @ https://h/${SECRET}/x.whl\"]\n",
