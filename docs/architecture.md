@@ -1,4 +1,4 @@
-# How it works — diagrams
+# How it works
 
 What happens between your command and a verdict.
 
