@@ -245,7 +245,7 @@ func cargoReplacement(ctx context.Context, r file.Resolver, root, configDir stri
 		}
 	}
 	// A manifest above the root names no source, so only configs decide trust.
-	_, above, ok := cargoFilesAbove(root, false, true)
+	_, above, ok := cargoFilesAbove(root, CargoHome(cargoCwd(configDir)), false, true)
 	if !ok {
 		return configUnread
 	}
