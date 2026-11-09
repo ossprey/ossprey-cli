@@ -266,6 +266,24 @@ func runUV(ctx context.Context, uv, cache, dir, root, manifest string, args []st
 	return pkgs, nil
 }
 
+// localProjectURL reports a file: URL naming a directory, not an archive.
+func localProjectURL(ref string) bool {
+	ref = strings.ToLower(strings.TrimSpace(ref))
+	if !strings.HasPrefix(ref, "file:") {
+		return false
+	}
+	if i := strings.IndexAny(ref, "?#"); i >= 0 {
+		ref = ref[:i]
+	}
+	ref = strings.TrimRight(ref, "/")
+	for _, suf := range pipArchiveSuffixes {
+		if strings.HasSuffix(ref, suf) {
+			return false
+		}
+	}
+	return true
+}
+
 func parseUVOutput(out []byte, loc file.Location) []pkg.Package {
 	pkgs, _ := parseUVOutputCounting(out, loc)
 	return pkgs
@@ -273,7 +291,8 @@ func parseUVOutput(out []byte, loc file.Location) []pkg.Package {
 
 // parseUVOutputCounting is parseUVOutput, also counting the `name @ URL`
 // records it cannot catalog (a direct URL dependency has no version a
-// registry knows). A file: URL is the tree's own code and is not counted.
+// registry knows). A file: URL is the tree's own code and is not counted,
+// unless it names an archive: a local wheel or sdist is a dependency.
 func parseUVOutputCounting(out []byte, loc file.Location) ([]pkg.Package, int) {
 	dropped := 0
 	seen := make(map[string]struct{})
@@ -286,7 +305,7 @@ func parseUVOutputCounting(out []byte, loc file.Location) ([]pkg.Package, int) {
 		}
 		m := uvReqLine.FindStringSubmatch(line)
 		if m == nil {
-			if _, ref, ok := strings.Cut(line, " @ "); ok && !strings.HasPrefix(strings.ToLower(strings.TrimSpace(ref)), "file:") {
+			if _, ref, ok := strings.Cut(line, " @ "); ok && !localProjectURL(ref) {
 				dropped++
 			}
 			continue

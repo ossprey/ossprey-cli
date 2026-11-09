@@ -484,14 +484,17 @@ func TestUVWorkspaceRootLockCoversMembers(t *testing.T) {
 
 // uv prints a direct URL dependency as `name @ URL`, which has no version to
 // catalog: the manifest keeps the rest of the output and is unresolved. A
-// local file: project is the tree's own code and leaves it complete.
+// local file: project is the tree's own code and leaves it complete; a local
+// wheel or sdist is a dependency and does not.
 func TestUVDirectURLRecordsLeaveTheManifestUnresolved(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("fake-binary PATH interception uses shell scripts")
 	}
 	for name, record := range map[string]string{
-		"url":        "evil @ https://example.com/evil-1.0-py3-none-any.whl",
-		"local file": "lib @ file:///src/lib",
+		"url":         "evil @ https://example.com/evil-1.0-py3-none-any.whl",
+		"local file":  "lib @ file:///src/lib",
+		"local wheel": "evil @ file:///tmp/evil-1.0-py3-none-any.whl",
+		"local sdist": "evil @ file:///tmp/evil-1.0.tar.gz",
 	} {
 		t.Run(name, func(t *testing.T) {
 			bin := t.TempDir()
@@ -519,7 +522,7 @@ func TestUVDirectURLRecordsLeaveTheManifestUnresolved(t *testing.T) {
 			}
 			got := warn.Unresolved(ctx)
 			want := []string(nil)
-			if name == "url" {
+			if name != "local file" {
 				want = []string{"pyproject.toml", "requirements.txt"}
 			}
 			slices.Sort(got)
