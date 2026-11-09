@@ -25,8 +25,9 @@ A `Cargo.toml` range takes its version only from its own workspace's
 beside the manifest itself when it has none, and only from a release there that
 the range allows. A lockfile anywhere else, a locked release outside the range,
 or an exact `=` pin of the same crate in another manifest or another dependency
-table does not set it, so that range is sent at the latest published release
-like any other unpinned dependency (below).
+table does not set it, and no lockfile does when the search for the workspace
+root ends at a `Cargo.toml` it cannot use (below), so that range is sent at the
+latest published release like any other unpinned dependency (below).
 
 Directories that hold installed or built packages rather than your project's
 own manifests are not read at all: `node_modules`, `bower_components`,
@@ -110,13 +111,10 @@ root that a package manifest on the way up names in its own
 `exclude` entry, is compared by real path, so a symlink or another spelling of
 the same directory still matches. A `Cargo.toml` on the way up that cannot be
 read or parsed, that is a symlink leading out of the directory you scan, or
-that has no `[package]`, `[project]` or `[workspace]` table, is passed over
-only for a higher `[workspace]` whose `members` list names the member and whose
-`exclude` list leaves it in. If no root is found inside the directory you scan,
-the inherited dependency is skipped with a warning. Past such a `Cargo.toml`, a
-crate that joins the workspace only as a path dependency of a listed member,
-without being named in `members` itself, also has its inherited dependency
-skipped with that warning.
+that has no `[package]`, `[project]` or `[workspace]` table ends the search,
+even when a higher `[workspace]` lists the member, and the inherited dependency
+is skipped with a warning. It is skipped the same way when no root is found
+inside the directory you scan.
 A dependency whose `registry-index` points at crates.io is read as a
 crates.io dependency. A `=` requirement is sent as a pinned version only when
 it is a valid semver release, with no leading zeros and no empty parts, and
