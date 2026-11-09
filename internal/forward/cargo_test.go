@@ -670,6 +670,30 @@ func TestRunCargoFetch_FailureWithNoWorkspaceStillWarns(t *testing.T) {
 	}
 }
 
+// cargo failing for want of a workspace changed nothing, so its error is the only line, gating or passive; a command that succeeded still warns.
+func TestRunCargoAdd_FailureWithNoWorkspaceSaysNothing(t *testing.T) {
+	exit101 := errors.New("exit status 101")
+	noWorkspace := errors.New("cargo metadata: error: could not find `Cargo.toml` in `/empty` or any parent directory")
+	for _, tc := range []struct {
+		passive bool
+		runErr  error
+		want    string
+	}{
+		{false, exit101, ""},
+		{true, exit101, ""},
+		{false, nil, "ossprey: warning: Cargo.lock not checked after `cargo add itoa --offline` (" + noWorkspace.Error() + "); cargo's changes are kept\n"},
+		{true, nil, "ossprey: warning: could not post scan (" + noWorkspace.Error() + "); the install was not blocked (passive)\n"},
+	} {
+		cargoProject(t)
+		cargoWorkspaceFn = func(context.Context, []string) (cargoWorkspace, error) { return cargoWorkspace{}, noWorkspace }
+		swap(t, func(context.Context, string, []string) error { return tc.runErr }, cleanSBOM)
+		out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"add", "itoa", "--offline"}, Passive: tc.passive})
+		if !errors.Is(err, tc.runErr) || out != tc.want {
+			t.Errorf("passive %v, cargo %v: Run = %v, output %q; want %q", tc.passive, tc.runErr, err, out, tc.want)
+		}
+	}
+}
+
 // Passive posts the lock a failed command left, and still returns cargo's error.
 func TestRunCargoFetch_PassiveFailurePostsTheLock(t *testing.T) {
 	_, ws := cargoProject(t)

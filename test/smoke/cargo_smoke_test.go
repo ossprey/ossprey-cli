@@ -186,6 +186,25 @@ func TestCargoFetchFailingAfterAMovedLockWarns(t *testing.T) {
 	}
 }
 
+// cargo add in a directory with no Cargo.toml fails before it writes anything, so cargo's error is the only line, gating or passive.
+func TestCargoAddWithNoWorkspaceSaysNothing(t *testing.T) {
+	api := newFakeAPI(t, "")
+	env := cargoEnv(t, api.URL)
+	dir := t.TempDir()
+	for _, passive := range []string{"", "1"} {
+		res := runForwardEnv(t, dir, append(slices.Clone(env), "OSSPREY_PASSIVE="+passive), binPath, "cargo", "add", "itoa", "--offline")
+		if res.exitCode != 101 || !strings.Contains(res.stderr, "could not find `Cargo.toml`") {
+			t.Fatalf("passive %q: exit %d, want cargo's 101 and its error\nstderr: %s", passive, res.exitCode, res.stderr)
+		}
+		if strings.Contains(res.stderr, "ossprey:") {
+			t.Errorf("passive %q: ossprey spoke after cargo's own error:\n%s", passive, res.stderr)
+		}
+	}
+	if n, _ := api.stats(); n != 0 {
+		t.Errorf("%d API requests, want none", n)
+	}
+}
+
 // cargo 1.99.1 joins a relative CARGO_HOME to its working directory and reads registry.default from the configs above it.
 func TestCargoInstallReadsTheRegistryAboveARelativeHome(t *testing.T) {
 	api := newFakeAPI(t, "pkg:cargo/ripgrep@14.1.1")

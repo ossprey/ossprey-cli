@@ -182,6 +182,9 @@ func checkCargoAfter(ctx context.Context, m *Manager, opts Options) error {
 		flushWarnings(ctx)
 		runErr := execFn(ctx, m.Bin, opts.Args)
 		ws, err := cargoWorkspaceFn(ctx, opts.Args)
+		if cargoFailedOnItsWorkspace(command, runErr, err) {
+			return runErr
+		}
 		if err == nil && !exists(ws.Lock) {
 			// cargo add --dry-run with no lock writes nothing, so there is nothing to post.
 			note("ossprey: `%s` left no Cargo.lock; nothing posted\n", command)
@@ -213,7 +216,10 @@ func checkCargoAfter(ctx context.Context, m *Manager, opts Options) error {
 	runErr := execFn(ctx, m.Bin, opts.Args)
 	// Read as cargo exits, so a block undoes cargo's changes and never an edit made while the check runs.
 	changes := changedFiles(saved)
-	// With no workspace there is no snapshot, so a failed command still gets the warning below.
+	if cargoFailedOnItsWorkspace(command, runErr, err) {
+		return runErr
+	}
+	// A moved lock has no snapshot, so a failed command still gets the warning below.
 	if runErr != nil && err == nil {
 		// cargo writes before it can fail: fetch locks before it downloads, add edits Cargo.toml before it resolves.
 		if !slices.ContainsFunc(changes, func(c fileChange) bool { return c.before.path == ws.Lock }) {
@@ -264,6 +270,15 @@ func checkCargoAfter(ctx context.Context, m *Manager, opts Options) error {
 		fmt.Fprintf(errOut, "ossprey: %s\n", verdict)
 	}
 	return runErr
+}
+
+// cargoFailedOnItsWorkspace is a failed command whose workspace cargo metadata cannot read either: cargo's error says why, and only a moved lock may have been written.
+func cargoFailedOnItsWorkspace(command string, runErr, wsErr error) bool {
+	if runErr == nil || wsErr == nil || errors.Is(wsErr, errLockfileMoved) {
+		return false
+	}
+	note("ossprey: `%s` failed and its workspace could not be read (%v); nothing to check\n", command, wsErr)
+	return true
 }
 
 // scanCargoLock scans a copy of the workspace's Cargo.lock alone, so nothing else in the tree is checked with it.
