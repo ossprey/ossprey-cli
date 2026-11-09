@@ -91,6 +91,32 @@ func TestCargoAddCleanKeepsTheLock(t *testing.T) {
 	}
 }
 
+func TestCargoAddWithoutACredentialStopsBeforeCargo(t *testing.T) {
+	api := newFakeAPI(t, "")
+	var env []string
+	for _, kv := range cargoEnv(t, api.URL) {
+		if k, _, _ := strings.Cut(kv, "="); k != "OSSPREY_API_KEY" && k != "OSSPREY_CONFIG_DIR" {
+			env = append(env, kv)
+		}
+	}
+	env = append(env, "OSSPREY_CONFIG_DIR="+t.TempDir())
+	dir, manifest := cargoCrate(t)
+
+	res := runForwardEnv(t, dir, env, binPath, "cargo", "add", "itoa@=1.0.15")
+	if res.exitCode != 2 || !strings.Contains(res.stderr, "error: no credentials") {
+		t.Fatalf("exit %d, want 2 on the credentials error\nstderr: %s", res.exitCode, res.stderr)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dir, "Cargo.toml")); string(got) != manifest {
+		t.Errorf("Cargo.toml = %q, want cargo never run", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "Cargo.lock")); !os.IsNotExist(err) {
+		t.Errorf("a Cargo.lock was written (%v), want cargo never run", err)
+	}
+	if n, _ := api.stats(); n != 0 {
+		t.Errorf("the API got %d requests, want none", n)
+	}
+}
+
 func TestCargoInstallBlockedBeforeItBuilds(t *testing.T) {
 	api := newFakeAPI(t, "pkg:cargo/ripgrep@14.1.1")
 	env := cargoEnv(t, api.URL)

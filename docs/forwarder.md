@@ -351,7 +351,12 @@ listed above, since `ossprey <anything else>` isn't a command.
 An intercepted install needs credentials exactly like `ossprey scan` does, so
 run `ossprey login` once (or export `OSSPREY_API_KEY`) before relying on the
 aliases. With neither, a gating install stops on a credentials error rather
-than being quietly forwarded. (A passive install never stops for anything, so
+than being quietly forwarded. That includes the cargo commands checked after
+they run (`cargo add`, `update`, `generate-lockfile` and `fetch`): the
+credential is looked up first, so they stop on the same error before cargo
+changes anything. If the check then fails once cargo has run (the API
+unreachable, timing out or refusing the credential), cargo's changes are kept
+and one warning line says so. (A passive install never stops for anything, so
 there the same failure is a warning and the install proceeds.)
 
 To check they took, run `type npm`. Non-install commands (`npm run build`, `pip

@@ -258,6 +258,10 @@ func cargoProject(t *testing.T) (string, cargoWorkspace) {
 	writeFile(t, filepath.Join(root, "Cargo.toml"), "[workspace]\nmembers = [\"a\"]\n")
 	writeFile(t, filepath.Join(root, "a", "Cargo.toml"), memberManifest)
 	t.Chdir(root)
+	// A gating check resolves its credential before cargo runs: an API key here, with no stored login to refresh.
+	t.Setenv("OSSPREY_CONFIG_DIR", t.TempDir())
+	t.Setenv("OSSPREY_API_KEY", "test-key")
+	unsetEnv(t, "API_KEY")
 	ws := cargoWorkspace{
 		Lock:      filepath.Join(root, "Cargo.lock"),
 		Manifests: []string{filepath.Join(root, "Cargo.toml"), filepath.Join(root, "a", "Cargo.toml")},
@@ -587,6 +591,74 @@ func TestRunCargoAdd_PlatformErrorFailsOpenOutLoud(t *testing.T) {
 	}
 	if got := readFile(t, ws.Lock); got != evilLock {
 		t.Errorf("lock = %q, want cargo's kept", got)
+	}
+}
+
+// With no credential a gating cargo add stops before cargo runs, on the error a gating npm install stops on.
+func TestRunCargoAdd_NoCredentialStopsBeforeCargoRuns(t *testing.T) {
+	root, ws := cargoProject(t)
+	unsetEnv(t, "OSSPREY_API_KEY")
+	ex := &stubExec{}
+	swap(t, ex.fn, check.Run)
+	_, want := quietOutput(t, context.Background(), Options{Bin: "npm", Args: []string{"install", "left-pad@1.0.0"}})
+	if want == nil || ex.called {
+		t.Fatalf("npm install = %v, npm ran = %v; want a credentials error before npm", want, ex.called)
+	}
+
+	ran := false
+	swap(t, addEvil(t, root, &ran), check.Run)
+	out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"add", "-p", "a", "evil"}})
+	if err == nil || err.Error() != want.Error() {
+		t.Fatalf("Run = %v, want %v", err, want)
+	}
+	if ran {
+		t.Error("cargo ran with no credential to check its lock")
+	}
+	if _, err := os.Stat(ws.Lock); !errors.Is(err, os.ErrNotExist) || out != "" {
+		t.Errorf("lock %v, output %q; want nothing written and nothing printed", err, out)
+	}
+}
+
+// The credential is resolved from the forwarder's own API settings, and a run that checks nothing never asks for one.
+func TestRunCargoAdd_AsksForACredentialOnlyToCheck(t *testing.T) {
+	for _, tc := range []struct {
+		name                   string
+		passive, skip, unknown bool
+		want                   []string
+	}{
+		{"gating", false, false, false, []string{"credential for https://api.test with k"}},
+		{"passive", true, false, false, []string{"cargo"}},
+		{"skip-ci", false, true, false, []string{"cargo"}},
+		{"unreadable workspace", false, false, true, []string{"cargo"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, _ := cargoProject(t)
+			if tc.unknown {
+				cargoWorkspaceFn = func(context.Context, []string) (cargoWorkspace, error) { return cargoWorkspace{}, errLockfileMoved }
+			}
+			var order []string
+			old := cargoCredentialFn
+			cargoCredentialFn = func(_ context.Context, apiURL, apiKey string) error {
+				order = append(order, "credential for "+apiURL+" with "+apiKey)
+				return errors.New("no credentials")
+			}
+			t.Cleanup(func() { cargoCredentialFn = old })
+			add := addEvil(t, root, new(bool))
+			swap(t, func(ctx context.Context, bin string, args []string) error {
+				order = append(order, "cargo")
+				return add(ctx, bin, args)
+			}, cleanSBOM)
+			swapScan(t, func(context.Context, scanRequest) (*ossbom.SBOM, error) { return cleanCrates(), nil })
+
+			opts := Options{Bin: "cargo", Args: []string{"add", "serde"}, APIURL: "https://api.test", APIKey: "k", Passive: tc.passive, SkipCI: tc.skip}
+			_, err := quietOutput(t, context.Background(), opts)
+			if gating := !tc.passive && !tc.skip && !tc.unknown; (err != nil) != gating {
+				t.Errorf("Run = %v, want an error only when the credential stops it", err)
+			}
+			if !reflect.DeepEqual(order, tc.want) {
+				t.Errorf("order = %v, want %v", order, tc.want)
+			}
+		})
 	}
 }
 

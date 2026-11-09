@@ -22,10 +22,17 @@ import (
 	"github.com/ossprey/ossprey-cli/internal/scan"
 	"github.com/ossprey/ossprey-cli/internal/severity"
 	"github.com/ossprey/ossprey-cli/internal/shim"
+	"github.com/ossprey/ossprey-cli/internal/submit"
 )
 
 // cargoWorkspaceFn finds the files a cargo command may rewrite; a test seam.
 var cargoWorkspaceFn = readCargoWorkspace
+
+// cargoCredentialFn resolves the credential a gating check submits with, as submit.Validate does; a test seam.
+var cargoCredentialFn = func(ctx context.Context, apiURL, apiKey string) error {
+	_, err := submit.NewClient(ctx, apiURL, apiKey)
+	return err
+}
 
 // cargoRunFirstAt matches the cargo verbs that resolve and lock but build nothing, unless asked for --help.
 func cargoRunFirstAt(args []string) (int, bool) {
@@ -152,6 +159,11 @@ func checkCargoAfter(ctx context.Context, m *Manager, opts Options) error {
 	ws, err := cargoWorkspaceFn(ctx, opts.Args)
 	var saved []savedFile
 	if err == nil {
+		// A missing credential stops here, before cargo changes anything, as it stops any gating install.
+		if credErr := cargoCredentialFn(ctx, opts.APIURL, opts.APIKey); credErr != nil {
+			flushWarnings(ctx)
+			return credErr
+		}
 		saved = snapshot(ws.files())
 	}
 	flushWarnings(ctx)
