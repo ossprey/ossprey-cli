@@ -404,6 +404,18 @@ func TestCatalogWarnsWhenCargoReplacesCratesIo(t *testing.T) {
 		{name: "mirror registry", files: map[string]string{"Cargo.toml": project, ".cargo/config.toml": mirrorConfig}, want: 1},
 		{name: "git source", files: map[string]string{"Cargo.toml": project, ".cargo/config": "[source.crates-io]\nreplace-with = \"fork\"\n\n[source.fork]\ngit = \"https://git.example.com/acme/crates\"\nbranch = \"main\"\n"}, want: 1},
 		{name: "unproven directory", files: map[string]string{"Cargo.toml": project, ".cargo/config.toml": vendorConfig("vendor")}, want: 1},
+		// Cargo opens .cargo/config.toml as Config.toml on a case-insensitive filesystem.
+		{name: "config named in another case", files: map[string]string{"Cargo.toml": project, "tools/.cargo/Config.toml": mirrorConfig}, want: 1},
+		{name: "config in a .cargo named in another case", files: map[string]string{"Cargo.toml": project, "tools/.Cargo/config.toml": mirrorConfig}, want: 1},
+		// Cargo reads a config through a linked .cargo directory, whose real path is not a .cargo.
+		{name: "config in a linked .cargo", tree: func(t *testing.T) string {
+			dir := t.TempDir()
+			writeTree(t, dir, map[string]string{"Cargo.toml": project, "cargo-config/config.toml": mirrorConfig})
+			if err := os.Symlink(filepath.Join(dir, "cargo-config"), filepath.Join(dir, ".cargo")); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+			return dir
+		}, want: 1},
 		{name: "above the scan root", files: map[string]string{"proj/Cargo.toml": project, ".cargo/config.toml": mirrorConfig}, scan: "proj", want: 1},
 		{name: "CARGO_HOME", files: map[string]string{"Cargo.toml": project}, home: mirrorConfig, want: 1},
 		{name: "two configs", files: map[string]string{"Cargo.toml": project, ".cargo/config.toml": mirrorConfig, "tools/.cargo/config.toml": vendorConfig("vendor")}, want: 1},
@@ -490,7 +502,9 @@ func TestCargoSourceReplacedLooksUpConfigsByName(t *testing.T) {
 		t.Fatal("mirror in tools/.cargo not reported")
 	}
 	for _, g := range log.globs {
-		if strings.ContainsAny(path.Base(g), "*?[]{}") {
+		// A literal name, or every file in a literally named directory, is answered from syft's index.
+		dir, base := path.Split(g)
+		if strings.ContainsAny(base, "*?[]{}") && (base != "*" || strings.ContainsAny(path.Base(dir), "*?[]{}")) {
 			t.Errorf("asked for %q, which syft answers by walking every file", g)
 		}
 	}

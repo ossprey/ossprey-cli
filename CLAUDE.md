@@ -454,13 +454,16 @@ developer's own `CARGO_HOME` mirror, on every commit, against a hook whose clean
 output is nothing. The entry has no `Many`, which `warn.Drain` renders as `One`
 however often it is added, so a caller cataloguing twice still prints one
 accurate line. It finds
-configs in the scan by name (`cargoConfigLocs` on `**/config` and
-`**/config.toml`, which syft answers from its basename index, so a config file
-named in another case is not found), not with the vendor filter's `**/.*/*`,
+configs in the scan through syft's index of names (`cargoConfigGlobs`:
+`**/config`, `**/config.toml`, and `**/.cargo/*` for a config named in another
+case, which cargo opens on a case-insensitive filesystem; `isCargoConfig` folds
+the directory's case too, so only a config whose `.cargo` directory and file name
+are both in another case, such as `.Cargo/Config.toml`, is missed in the scan,
+while above it both are read in any case), not with the vendor filter's `**/.*/*`,
 which walks every file and added about 40% to a large scan's catalogue time
 when it ran for every crate. It files them with the vendor filter's own
 `cargoConfigLevels`, and reads `cargoFilesAbove` without manifests and
-through symlinks, as the vendor filter does (every ancestor and `CARGO_HOME`). Configs in the scan are read one at a time, so one
+through symlinks, as the vendor filter does (every ancestor and `CARGO_HOME`); when the filter proved a tree it reuses the levels the proof read (`cargoVendored.levels`), which cover the same configs, all readable. Otherwise configs in the scan are read one at a time, so one
 that cannot be parsed does not hide another's replacement. Above the scan only
 configs are read, so an ancestor `Cargo.toml` that cannot be parsed hides
 nothing, while a config there that cannot be parsed hides the others, as cargo

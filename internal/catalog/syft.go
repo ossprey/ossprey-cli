@@ -75,7 +75,7 @@ type Options struct {
 	// value trusts nothing.
 	Trust trust.Policy
 
-	// ReportCargoReplacement warns when a cargo config replaces crates.io; scan.Run sets it, and a caller cataloguing temp trees leaves it off.
+	// ReportCargoReplacement warns when a cargo config replaces crates.io; scan.Run sets it, and the pre-commit hook (precommit.catalogFn) leaves it off, since its temp trees hold no repository config.
 	ReportCargoReplacement bool
 }
 
