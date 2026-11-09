@@ -76,12 +76,13 @@ framework manage both.
 - **Crates from git or a private registry.** A `Cargo.lock` crate that Cargo
   fetches from anywhere but crates.io is not the crates.io crate of that name,
   so it is left out of the lookup; `-v` reports how many.
-- **Pins inherited from a workspace root outside the crate's parent
-  directories.** Cargo takes the `{ workspace = true }` pins of a crate that
-  names its root with `package.workspace` from that root, while the hook reads
-  them from the nearest `[workspace]` above the crate. A pin there under the
-  same name is looked up in place of the one Cargo uses, and a dependency with
-  no pin there is skipped with a warning.
+- **Pins inherited from a workspace root other than the nearest
+  `[workspace]` above the crate.** Cargo takes a crate's `{ workspace = true }`
+  pins from the root it names with `package.workspace`, or from one further up
+  when the nearest root excludes it, while the hook reads them from the nearest
+  `[workspace]` above the crate. A pin there under the same name is looked up
+  in place of the one Cargo uses, and a dependency with no pin there is skipped
+  with a warning.
 - **A vendored crate's own `Cargo.lock`.** A crate `cargo vendor` copies
   keeps the `Cargo.lock` its author published, which your build never reads,
   so it is not looked up when your project's `Cargo.lock` pins that crate at
