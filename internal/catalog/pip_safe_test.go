@@ -650,3 +650,24 @@ func TestSetupCfgDependenciesNeedBuild(t *testing.T) {
 		})
 	}
 }
+
+// A file URL is decoded once, as uv decodes it: %256cib names the
+// directory %6cib, not lib.
+func TestFileURLPathDecodesOnce(t *testing.T) {
+	for in, want := range map[string]string{
+		"file:///scan/%256cib": "/scan/%6cib",
+		"file:///scan/a%20b":   "/scan/a b",
+		"file:lib%2Fx":         "lib/x",
+	} {
+		u, err := url.Parse(in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, err := fileURLPath(u); err != nil || got != want {
+			t.Errorf("fileURLPath(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	if got := localProjectRef("file:///scan/%256cib"); got != filepath.FromSlash("/scan/%6cib") {
+		t.Errorf("localProjectRef = %q", got)
+	}
+}

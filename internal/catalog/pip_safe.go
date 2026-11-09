@@ -603,12 +603,9 @@ func localProjectRef(v string) string {
 		if err != nil {
 			return v // judged as a path, so it is looked for rather than skipped
 		}
-		p := u.Path
-		if p == "" {
-			p = u.Opaque
-		}
-		if unescaped, err := url.PathUnescape(p); err == nil {
-			p = unescaped
+		p, err := fileURLPath(u)
+		if err != nil {
+			return v
 		}
 		return filepath.FromSlash(fileURLDrive(u.Host, p))
 	}
@@ -619,6 +616,16 @@ func localProjectRef(v string) string {
 		return v
 	}
 	return ""
+}
+
+// fileURLPath returns a file URL's path decoded once. url.Parse has already
+// decoded Path; only Opaque is still escaped. Decoding Path again would read
+// %256cib as lib.
+func fileURLPath(u *url.URL) (string, error) {
+	if u.Path != "" {
+		return u.Path, nil
+	}
+	return url.PathUnescape(u.Opaque)
 }
 
 // fileURLDrive puts a Windows drive back on a file URL's path: file:///C:/x
@@ -904,11 +911,8 @@ func uvProjectRefs(path string) ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%s %w", path, errUVProjectUnplaced)
 		}
-		p := u.Path
-		if p == "" {
-			p = u.Opaque
-		}
-		if p, err = url.PathUnescape(p); err != nil {
+		p, err := fileURLPath(u)
+		if err != nil {
 			return nil, fmt.Errorf("%s %w", path, errUVProjectUnplaced)
 		}
 		project(filepath.FromSlash(fileURLDrive(u.Host, p)))
