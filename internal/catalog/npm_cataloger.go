@@ -153,7 +153,7 @@ func npmLockState(path string) npmLock {
 		return v.(npmLock)
 	}
 	var st npmLock
-	if data, err := readRegularFile(path, maxLockfileBytes); err == nil {
+	if data, err := readBoundedFile(path, maxLockfileBytes); err == nil {
 		switch filepath.Base(path) {
 		case "package-lock.json", "npm-shrinkwrap.json":
 			_, err := parseNpmLock(data, file.Location{})

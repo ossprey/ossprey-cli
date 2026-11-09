@@ -193,7 +193,7 @@ func TestLockLinkedToADeviceCoversNothing(t *testing.T) {
 			if err := os.Symlink("/dev/zero", filepath.Join(dir, tc.lock)); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := readRegularFile(filepath.Join(dir, tc.lock), maxLockfileBytes); err == nil {
+			if _, err := readBoundedFile(filepath.Join(dir, tc.lock), maxLockfileBytes); err == nil {
 				t.Fatal("a device read as a lockfile")
 			}
 			switch tc.lock {

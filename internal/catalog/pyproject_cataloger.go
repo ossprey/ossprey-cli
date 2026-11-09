@@ -295,7 +295,7 @@ func tomlLockHasPackages(data []byte, needVersion bool) bool {
 func pyprojectLockCovered(path string) bool {
 	dir := filepath.Dir(path)
 	for _, name := range pythonLockfiles {
-		data, err := readRegularFile(filepath.Join(dir, name), maxLockfileBytes)
+		data, err := readBoundedFile(filepath.Join(dir, name), maxLockfileBytes)
 		if err != nil {
 			continue
 		}

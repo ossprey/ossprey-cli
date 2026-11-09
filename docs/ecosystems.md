@@ -8,7 +8,7 @@ Python, JavaScript and Rust, via syft's static catalogers.
 |-----------|--------------|
 | Python | `requirements.txt` (and any `*requirements*.txt`, e.g. `requirements-dev.txt`), `Pipfile.lock`, `poetry.lock`, `uv.lock`, `pdm.lock`, `setup.py`, `pyproject.toml`, wheel / egg metadata |
 | JavaScript | `package.json`, `package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml` |
-| Rust | `Cargo.lock`, and `Cargo.toml` direct dependencies (one a lockfile pins is sent at its locked version) |
+| Rust | `Cargo.lock`, and `Cargo.toml` direct dependencies (one its workspace's `Cargo.lock` pins is sent at that locked version) |
 
 Rust (crates.io) scanning is available on Teams and Enterprise plans.
 
@@ -74,6 +74,15 @@ fails the scan over it. Commit a lockfile (`uv.lock`,
 until its dependencies move to a `[project]` table, and a requirements file,
 even fully pinned, needs uv or pip to resolve.
 
+A `Cargo.toml` range takes its version only from its own workspace's
+`Cargo.lock`, the one beside its workspace root (chosen as described below) or
+beside the manifest itself when it has none, and only from a release there that
+the range allows. A lockfile anywhere else, a locked release outside the range,
+or an exact `=` pin of the same crate in another manifest or another dependency
+table does not set it, and no lockfile does when the search for the workspace
+root ends at a `Cargo.toml` it cannot use (below), so that range is sent at the
+latest published release like any other unpinned dependency (below).
+
 Directories that hold installed or built packages rather than your project's
 own manifests are not read at all: `node_modules`, `bower_components`,
 `.pnpm-store`, `.yarn`, `.venv`, `venv`, `site-packages`, `dist-packages`,
@@ -124,10 +133,48 @@ purl qualifier with credentials removed (a registry by its origin only, and a
 source too long to send by its origin or scheme), so the platform can tell it
 apart from the crates.io crate of that name. A crate from a registry host
 spelled with non-ASCII characters is sent both marked and as the crates.io
-crate, since Cargo reads some such hosts as crates.io. A dependency that `[patch.crates-io]`
-redirects to git is sent both ways when its `Cargo.lock` is committed: the git
-crate from the lock, and the crates.io crate `Cargo.toml` declares. Without the
-lock, the git crate is not seen and only the crates.io declaration is sent.
+crate, since Cargo reads some such hosts as crates.io. A dependency that `[patch]`
+or `[replace]` redirects to git is sent both ways: the git crate, marked, and the
+crates.io crate `Cargo.toml` declares. When your workspace root's `Cargo.lock`
+records the git crate from the same URL with the same `branch`, `tag` or `rev`,
+at a version the patch's `version` or the replaced release accepts, it comes
+from the lock at its locked commit. Otherwise, as when there is no lock, the
+lock predates the patch or names another branch, tag, rev or version, or the
+lock is not a regular file, it comes from the root's `Cargo.toml`, with the
+commit when `rev` names a full one. A
+workspace member scanned on its own counts as its own workspace root, so its
+git patches are sent too, although Cargo ignores them when it builds the whole
+workspace. A patch or replacement by `path` is your own code and is not sent.
+An exact `=`
+pin in `Cargo.toml` that disagrees with `Cargo.lock` is sent at both versions,
+since Cargo rebuilds to the pin unless run with `--locked`.
+
+A cargo config (`.cargo/config.toml` in your project or a directory above it,
+or the one in `CARGO_HOME`) can replace crates.io with another source, such as
+a mirror, a git repository or a vendor directory. `Cargo.lock` still names
+crates.io releases, and those are what the scan checks, not the code that
+source serves. When the scan finds such a replacement it says so once, unless
+the replacement is a `cargo vendor` directory it verified as described above.
+
+A dependency a Cargo workspace member inherits with `{ workspace = true }`
+takes its version from the member's workspace root. That is the root the
+member's `package.workspace` names (or `workspace` in a legacy `[project]`
+table). Otherwise it is the first `Cargo.toml` on the way up from the member
+that has a `[workspace]` table whose `exclude` list leaves the member in, or the
+root that a package manifest on the way up names in its own
+`package.workspace`. A `package.workspace` path, and an absolute `members` or
+`exclude` entry, is compared by real path, so a symlink or another spelling of
+the same directory still matches. A `Cargo.toml` on the way up that cannot be
+read or parsed, that is a symlink leading out of the directory you scan, or
+that has no `[package]`, `[project]` or `[workspace]` table ends the search,
+even when a higher `[workspace]` lists the member, and the inherited dependency
+is skipped with a warning. It is skipped the same way when no root is found
+inside the directory you scan.
+A dependency whose `registry-index` points at crates.io is read as a
+crates.io dependency. A `=` requirement is sent as a pinned version only when
+it is a valid semver release, with no leading zeros and no empty parts, and
+any build metadata after `+` is kept as written. Any other requirement is
+treated as a range.
 
 When a dependency's version can't be determined — an unpinned range in a
 manifest (`click = "^8"`, or a bare `requests` in a requirements file) with no

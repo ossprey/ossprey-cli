@@ -193,7 +193,7 @@ func (s *pipSanitizer) fileAt(src string, depth int) (string, error) {
 // readRequirementsFile reads a regular file of bounded size. A device or FIFO
 // named by an include could otherwise never end or never answer.
 func readRequirementsFile(path string) ([]byte, error) {
-	return readRegularFile(path, maxPipRequirementsBytes)
+	return readBoundedFile(path, maxPipRequirementsBytes)
 }
 
 // pipPassOptions are the requirements-file options that only say where to

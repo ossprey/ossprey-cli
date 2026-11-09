@@ -1173,6 +1173,26 @@ func TestCatalogCargoOnlyFullSemverIsAPin(t *testing.T) {
 	}
 }
 
+// A pin is a release cargo's parser accepts, the grammar `check` holds a typed crate to as well.
+func TestCatalogCargoPinIsWhatCargoParses(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "Cargo.toml", "[package]\nname = \"app\"\n\n[dependencies]\nleading-zero = \"=01.2.3\"\nzero-prerelease = \"=1.2.3-01\"\noverflow = \"=18446744073709551616.0.0\"\nexact = \"=1.2.3\"\n")
+	got, err := Catalog(context.Background(), dir, Options{SkipVersionLookup: true, NoExec: true})
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	want := map[string]string{"leading-zero": "", "zero-prerelease": "", "overflow": "", "exact": "1.2.3"}
+	for _, p := range got {
+		if v, ok := want[p.Name]; ok && p.Version != v {
+			t.Errorf("%s: version = %q, want %q", p.Name, p.Version, v)
+		}
+		delete(want, p.Name)
+	}
+	if len(want) != 0 {
+		t.Errorf("not catalogued: %v", want)
+	}
+}
+
 func TestCatalogCargoResolvesRangesToLatest(t *testing.T) {
 	// The shipping path: version lookup is on by default, so every Cargo.toml
 	// range reaches the registry. This pins current behaviour rather than
@@ -1367,6 +1387,8 @@ longver = "=1.0.0-`+strings.Repeat("x", 300)+`"
 func TestCatalogCargoExplicitDefaultRegistryIsStillPublic(t *testing.T) {
 	// "crates-io" is Cargo's reserved name for the default registry, so naming
 	// it is not the same as naming a private one.
+	t.Setenv("OSSPREY_RESOLVE_LATEST", "")
+	withResolveLatest(t, func(context.Context, string, string) (string, error) { return "9.9.9", nil })
 	dir := t.TempDir()
 	writeFile(t, dir, "Cargo.toml", `[package]
 name = "ok"
@@ -1374,8 +1396,15 @@ name = "ok"
 [dependencies]
 explicit-default = { version = "=1.0.0", registry = "crates-io" }
 private = { version = "=9.0.0", registry = "company-internal" }
+rand = { version = "=0.8.5", registry-index = "https://github.com/rust-lang/crates.io-index" }
+sparse-index = { version = "=0.8.5", registry-index = "sparse+https://index.crates.io/" }
+cased-sparse-index = { version = "=0.8.5", registry-index = " SPARSE+https://index.crates.io/" }
+idna-index = { version = "=0.8.5", registry-index = "https://ｇithub.com/rust-lang/crates.io-index" }
+idna-foreign-index = { version = "=0.8.5", registry-index = "https://gİthub.com/rust-lang/crates.io-index" }
+private-index = { version = "=9.0.0", registry-index = "https://internal.example/index" }
+private-sparse-index = { version = "=9.0.0", registry-index = "sparse+https://internal.example/index/" }
 `)
-	got, err := Catalog(context.Background(), dir, Options{SkipVersionLookup: true, NoExec: true})
+	got, err := Catalog(context.Background(), dir, Options{NoExec: true})
 	if err != nil {
 		t.Fatalf("Catalog: %v", err)
 	}
@@ -1383,11 +1412,25 @@ private = { version = "=9.0.0", registry = "company-internal" }
 	for _, p := range got {
 		byName[p.Name] = p
 	}
-	if p := byName["explicit-default"]; p.Version != "1.0.0" {
-		t.Errorf("explicit crates-io: version = %q, want 1.0.0", p.Version)
-	}
-	if _, ok := byName["private"]; ok {
-		t.Error("an alternate-registry dependency should not be emitted as cargo")
+	// A registry-index that is definitely crates.io is the public registry too, so its crate must not vanish; a non-ASCII host IDNA may send elsewhere is another registry.
+	for name, want := range map[string]string{
+		"explicit-default":     "1.0.0",
+		"rand":                 "0.8.5",
+		"sparse-index":         "0.8.5",
+		"cased-sparse-index":   "0.8.5",
+		"idna-index":           "",
+		"idna-foreign-index":   "",
+		"private":              "",
+		"private-index":        "",
+		"private-sparse-index": "",
+	} {
+		p, ok := byName[name]
+		switch {
+		case want == "" && ok:
+			t.Errorf("%s: emitted %+v from a registry other than crates.io", name, p)
+		case want != "" && p.Version != want:
+			t.Errorf("%s: version = %q, want %s", name, p.Version, want)
+		}
 	}
 }
 
