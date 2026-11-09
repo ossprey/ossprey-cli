@@ -8,7 +8,9 @@ named install is checked together with everything it brings in — `ossprey npm
 install express` checks express and the 64 packages it depends on, not just the
 one you typed — because that is where a planted package usually lives. If any
 are flagged, the install is blocked (exit `1`) and the real package manager
-is never invoked; otherwise the command is forwarded unchanged.
+is never invoked; otherwise the command is forwarded unchanged. The cargo
+commands that only lock are the exception: cargo runs first and a block undoes
+its changes ([below](#cargo)).
 
 > Everything on this page describes the default, **gating** mode. In
 > [passive mode](passive-monitoring.md) nothing is checked in front of the
@@ -108,23 +110,34 @@ and `Cargo.lock` the command changed is put back as it was (a `Cargo.lock` it
 created is removed), one line names those files, and the exit code is `1`.
 That includes `-p <member>`, `--manifest-path` and a member whose `Cargo.lock`
 sits at the workspace root. When cargo itself fails, its exit code is passed
-through and nothing is checked. When the check cannot be made (the API
-unreachable, a workspace cargo cannot read, or a `resolver.lockfile-path` that
-moves the lock elsewhere), cargo's changes are kept and one warning line says
-so.
+through, but a failure can still leave changes behind: `cargo fetch` writes
+`Cargo.lock` before it downloads, so a lock a failed command changed is checked
+the same way, and `cargo add` edits `Cargo.toml` before it resolves, so a
+failure that changed only manifests gets one warning line naming them. Run
+`ossprey cargo fetch` once it resolves to check what they add. When the check
+cannot be made (the API unreachable, a workspace cargo cannot read, or a
+`resolver.lockfile-path` that may move the lock elsewhere, including one a
+config `include` could set), cargo's changes are kept and one warning line
+says so.
 
 `cargo install` compiles the crate and runs its build scripts straight away, so
 the crates it names are checked first, and a block means cargo never starts.
 `--version` (or `--vers`) and `name@1.2.3` pin a release; anything else,
 `name@^1` included, is checked at the latest release on crates.io. Only the
 named crates are checked, not their dependencies, and one warning line says so.
-An install with `--git`, `--path`, `--registry` or `--index` is not from
-crates.io and is forwarded unchecked. `cargo install --list` is not an install.
+An install with `--git`, `--path`, or a `--registry` or `--index` other than
+crates.io is not from crates.io and is forwarded unchecked, and so is one that
+names no source while cargo's default registry is elsewhere (`registry.default`
+in a `--config`, in `CARGO_REGISTRY_DEFAULT` or in the cargo configs under
+`CARGO_HOME`, or possibly set there by an `include`). `--registry crates-io`
+and crates.io's own index URL are checked like a plain install.
+`cargo install --list` is not an install.
 
 A rustup toolchain (`cargo +nightly add serde`) and cargo's options before the
 subcommand (`--config`, `-Z`, `--color`, `-C`) are understood. In passive mode
 `cargo add` and the others run and the `Cargo.lock` they leave is then posted,
-and `cargo install` posts its crates alongside the build.
+even when cargo failed, and `cargo install` posts its crates alongside the
+build.
 
 ## What is not checked
 
@@ -357,7 +370,8 @@ platform scanned none of the packages, there is no verdict line.
 
 The verdict is ossprey's last line, not the terminal's: the forwarder replaces
 itself with the manager once the check passes, so it cannot print after the
-manager finishes. An install that was not checked (no dependencies found,
+manager finishes. The cargo commands checked after they run are the
+exception, and print theirs after cargo's output. An install that was not checked (no dependencies found,
 `skip-ci`, a passive scan) prints no verdict, since there is none to give.
 
 Otherwise a forwarder speaks only for a malware block (below) or a platform
@@ -369,7 +383,8 @@ verdict is in; a CI log or a pipe gets nothing.
 If a check comes back dirty you get the full malware report on stderr — the
 alert box, an `Error: WARNING:` line per finding, and a blocked line naming
 the command (see [Output](output.md)) — and an exit code of `1`. The real
-manager never starts.
+manager never starts, except for the cargo commands checked after they run,
+whose changes are undone instead.
 
 Set `OSSPREY_VERBOSE=1` for everything else: why an install
 was not checked (`skip-ci set`, `found no dependencies to check`, a passive

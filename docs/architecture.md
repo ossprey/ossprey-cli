@@ -48,11 +48,14 @@ install still works".
 
 ```mermaid
 flowchart TD
-    S["ossprey npm install ..."] --> CA{"cargo add, update,<br/>generate-lockfile or fetch?"}
-    CA -- "yes" --> CB["run cargo first:<br/>it builds nothing"]
-    CB --> CC{"malware in the<br/>Cargo.lock it left?"}
-    CC -- "yes" --> CD["put back the Cargo.toml and<br/>Cargo.lock files it changed, exit 1"]
+    S["ossprey npm install ..."] --> CA{"cargo add, update,<br/>generate-lockfile or fetch,<br/>without --help?"}
+    CA -- "yes" --> CV{"OSSPREY_SKIP_CI?"}
+    CV -- "set" --> U
+    CV -- "unset" --> CB["run cargo first:<br/>it builds nothing"]
+    CB --> CC{"malware in the Cargo.lock it<br/>left, even if cargo failed?"}
+    CC -- "yes, gating" --> CD["put back the Cargo.toml and<br/>Cargo.lock files it changed, exit 1"]
     CC -- "no" --> CE["keep cargo's changes"]
+    CB -- "passive" --> AF
     CA -- "no" --> T{"an install verb, or a<br/>tool run (npx, bunx, uvx)?"}
     T -- "no, e.g. npm run" --> U["exec the real manager"]
     T -- "yes" --> V{"OSSPREY_SKIP_CI?"}
@@ -105,7 +108,8 @@ than predicting the tree beforehand. Where one will not — pip, `uv pip
 install`, `uv tool install`, bun (whose `bun.lock` is not read yet), a tool
 run, a global or redirected install — there would be nothing to read, so
 the named packages are submitted beside the install instead (`writesLocalLockfile`
-in `internal/forward/forward.go` is the one place that decides).
+in `internal/forward/forward.go` is the one place that decides, for every
+command but the cargo ones above).
 
 ```mermaid
 sequenceDiagram
