@@ -51,10 +51,12 @@ flowchart TD
     S["ossprey npm install ..."] --> CA{"cargo add, update,<br/>generate-lockfile or fetch,<br/>without --help?"}
     CA -- "yes" --> CV{"OSSPREY_SKIP_CI?"}
     CV -- "set" --> U
-    CV -- "unset" --> CK{"gating, with no<br/>credential to check with?"}
+    CV -- "unset" --> CW{"gating, with a workspace cargo<br/>cannot read or a lock that<br/>lockfile-path may move?"}
+    CW -- "yes" --> CN["run cargo, keep its changes,<br/>one warning: not checked"]
+    CW -- "no" --> CK{"gating, with no<br/>credential to check with?"}
     CK -- "yes" --> CX["stop on the credentials<br/>error, exit 2: cargo never runs"]
     CK -- "no" --> CB["run cargo first:<br/>it builds nothing"]
-    CB --> CC{"malware in the Cargo.lock it<br/>left, even if cargo failed?"}
+    CB -- "gating" --> CC{"malware in the Cargo.lock it<br/>left, even if cargo failed?"}
     CC -- "yes, gating" --> CD["put back the Cargo.toml and<br/>Cargo.lock files it changed,<br/>unless changed again since, exit 1"]
     CC -- "no" --> CE["keep cargo's changes"]
     CB -- "passive" --> AE

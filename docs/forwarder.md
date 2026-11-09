@@ -109,10 +109,12 @@ If the lock holds malware you get the full malware report, every `Cargo.toml`
 and `Cargo.lock` the command changed is put back as it was (a `Cargo.lock` it
 created is removed), one line names those files, and the exit code is `1`.
 A file changed again after cargo exited, while the check ran, is left as it is,
-and a warning line names it.
+and a warning line names it. A file that could not be read before cargo ran is
+never touched, and one that cannot be written back or removed is left as it is
+with a warning line.
 That includes `-p <member>`, `--manifest-path` and a member whose `Cargo.lock`
 sits at the workspace root. When cargo itself fails, its exit code is passed
-through, but a failure can still leave changes behind: `cargo fetch` writes
+through (unless the lock it changed holds malware, which exits `1` as above), but a failure can still leave changes behind: `cargo fetch` writes
 `Cargo.lock` before it downloads, so a lock a failed command changed is checked
 the same way, and `cargo add` edits `Cargo.toml` before it resolves, so a
 failure that changed only manifests gets one warning line naming them. Run
@@ -126,8 +128,9 @@ without one, has nothing to check.
 
 `cargo install` compiles the crate and runs its build scripts straight away, so
 the crates it names are checked first, and a block means cargo never starts.
-`--version` (or `--vers`) and `name@1.2.3` pin a release; anything else,
-`name@^1` included, is checked at the latest release on crates.io. Only the
+An exact version given to `--version` (or `--vers`), or `name@1.2.3`, pins a
+release; anything else, a range given to `--version` or `name@^1` included, is
+checked at the latest release on crates.io. Only the
 named crates are checked, not their dependencies, and one warning line says so.
 An install with `--git`, `--path`, or a `--registry` or `--index` other than
 crates.io is not from crates.io and is forwarded unchecked, and so is one that

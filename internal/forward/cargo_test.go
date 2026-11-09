@@ -835,9 +835,9 @@ func TestRunCargoInstall_RegistryDecidesTheCheck(t *testing.T) {
 func TestRunCargoInstall_Passive(t *testing.T) {
 	ex := &stubExec{}
 	var submitted check.Options
-	swap(t, ex.fn, func(_ context.Context, o check.Options) (*ossbom.SBOM, error) {
+	swap(t, ex.fn, func(ctx context.Context, o check.Options) (*ossbom.SBOM, error) {
 		submitted = o
-		return malwareSBOM(context.Background(), o)
+		return malwareSBOM(ctx, o)
 	})
 	latest := func(context.Context, string, string) (string, error) { return "14.1.1", nil }
 	if err := Run(context.Background(), Options{Bin: "cargo", Args: []string{"install", "ripgrep"}, Passive: true, ResolveLatest: latest}); err != nil {
