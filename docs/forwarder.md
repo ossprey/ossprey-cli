@@ -354,7 +354,10 @@ aliases. With neither, a gating install stops on a credentials error rather
 than being quietly forwarded. That includes the cargo commands checked after
 they run (`cargo add`, `update`, `generate-lockfile` and `fetch`): the
 credential is looked up first, so they stop on the same error before cargo
-changes anything. If the check then fails once cargo has run (the API
+changes anything, unless the check cannot be made at all (a lock that
+`resolver.lockfile-path` may move, or a workspace cargo cannot read), where
+cargo runs and the warning described under cargo above is printed instead. If
+the check then fails once cargo has run (the API
 unreachable, timing out or refusing the credential), cargo's changes are kept
 and one warning line says so. (A passive install never stops for anything, so
 there the same failure is a warning and the install proceeds.)
