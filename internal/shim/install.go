@@ -33,6 +33,8 @@ type Options struct {
 	Git bool
 	// Brew adds the opt-in brew shim likewise.
 	Brew bool
+	// Cargo adds the opt-in cargo shim likewise.
+	Cargo bool
 	// Agents names coding agents whose own settings get the PATH entry, for
 	// agents that run shells reading no profile. See AgentClaude.
 	Agents []string
@@ -413,6 +415,9 @@ func managersFor(o Options) (names []string, explicit bool, err error) {
 	}
 	if o.Brew && !slices.Contains(names, "brew") {
 		names = append(names, "brew")
+	}
+	if o.Cargo && !slices.Contains(names, "cargo") {
+		names = append(names, "cargo")
 	}
 	return names, len(o.Managers) > 0, nil
 }
