@@ -45,6 +45,11 @@ func TestCargoSatisfies(t *testing.T) {
 		{">=1.0.0-alpha.10", "1.0.0-alpha.9", false, true},
 		{">=1.0.0-99999999999999999999", "1.0.0-alpha", true, true},
 		{">=1.0.0-alpha", "1.0.0-99999999999999999999", false, true},
+		// Cargo rejects a version npm's loose grammar reads: a leading zero in a numeric identifier, a v or = prefix, or no - before the prerelease.
+		{">=1.0.0-1", "1.0.0-01", false, false},
+		{"*", "v1.0.0", false, false},
+		{"*", "=1.0.0", false, false},
+		{"*", "1.0.0alpha", false, false},
 		// Core numbers are u64 as in Cargo's semver crate, nothing lies past u64::MAX, and a larger number is refused.
 		{">=18446744073709551615.0.0", "9223372036854775807.0.0", false, true},
 		{">=18446744073709551615.0.0", "18446744073709551615.0.0", true, true},

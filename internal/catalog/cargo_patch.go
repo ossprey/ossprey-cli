@@ -11,6 +11,7 @@ import (
 	"github.com/BurntSushi/toml"
 
 	"github.com/anchore/syft/syft/pkg"
+	"github.com/ossprey/ossprey-cli/internal/registry"
 )
 
 // cargoLockGit is what the Cargo.lock beside a manifest records of git crates: each name's sources, and whether its version form-encodes their query.
@@ -182,7 +183,7 @@ func cargoSpecCrate(spec string) (name, version string) {
 	if i := strings.IndexAny(id, ":@"); i >= 0 {
 		name, version = id[:i], id[i+1:]
 	}
-	if !isCargoRelease(version) {
+	if !registry.IsCargoRelease(version) {
 		version = ""
 	}
 	return name, version

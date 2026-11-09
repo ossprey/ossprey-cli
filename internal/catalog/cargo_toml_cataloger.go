@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -18,6 +17,7 @@ import (
 	"github.com/anchore/syft/syft/artifact"
 	"github.com/anchore/syft/syft/file"
 	"github.com/anchore/syft/syft/pkg"
+	"github.com/ossprey/ossprey-cli/internal/registry"
 	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
@@ -484,9 +484,6 @@ func cargoDropEntry(file, why, alias string) warn.Entry {
 // maxCargoVersion mirrors the API's version cap; a longer one rejects the SBOM.
 const maxCargoVersion = 256
 
-// cargoRelease matches a concrete crates.io release, which is always full three-component semver with no leading zero or empty identifier, so "=1.0" is a range rather than a pin.
-var cargoRelease = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$`)
-
 // cargoExactVersion returns the version only when the spec pins one exactly.
 // Cargo's bare "1.0" means caret, i.e. a range, so it resolves to nothing and
 // the component goes out versionless. Guessing the lower bound would ship a
@@ -497,22 +494,8 @@ func cargoExactVersion(spec string) string {
 		return ""
 	}
 	s = strings.TrimSpace(s[1:])
-	if len(s) > maxCargoVersion || !isCargoRelease(s) {
+	if len(s) > maxCargoVersion || !registry.IsCargoRelease(s) {
 		return ""
 	}
 	return s
-}
-
-// isCargoRelease reports whether s is a release cargo's semver parser accepts, whose core numbers fit in a u64.
-func isCargoRelease(s string) bool {
-	if !cargoRelease.MatchString(s) {
-		return false
-	}
-	core, _, _ := strings.Cut(strings.SplitN(s, "+", 2)[0], "-")
-	for _, n := range strings.Split(core, ".") {
-		if _, err := strconv.ParseUint(n, 10, 64); err != nil {
-			return false
-		}
-	}
-	return true
 }
