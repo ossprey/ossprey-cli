@@ -1173,6 +1173,26 @@ func TestCatalogCargoOnlyFullSemverIsAPin(t *testing.T) {
 	}
 }
 
+// A pin is a release cargo's parser accepts, the grammar `check` holds a typed crate to as well.
+func TestCatalogCargoPinIsWhatCargoParses(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "Cargo.toml", "[package]\nname = \"app\"\n\n[dependencies]\nleading-zero = \"=01.2.3\"\nzero-prerelease = \"=1.2.3-01\"\noverflow = \"=18446744073709551616.0.0\"\nexact = \"=1.2.3\"\n")
+	got, err := Catalog(context.Background(), dir, Options{SkipVersionLookup: true, NoExec: true})
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	want := map[string]string{"leading-zero": "", "zero-prerelease": "", "overflow": "", "exact": "1.2.3"}
+	for _, p := range got {
+		if v, ok := want[p.Name]; ok && p.Version != v {
+			t.Errorf("%s: version = %q, want %q", p.Name, p.Version, v)
+		}
+		delete(want, p.Name)
+	}
+	if len(want) != 0 {
+		t.Errorf("not catalogued: %v", want)
+	}
+}
+
 func TestCatalogCargoResolvesRangesToLatest(t *testing.T) {
 	// The shipping path: version lookup is on by default, so every Cargo.toml
 	// range reaches the registry. This pins current behaviour rather than

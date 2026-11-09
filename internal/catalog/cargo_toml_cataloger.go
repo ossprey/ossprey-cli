@@ -8,7 +8,6 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -444,21 +443,17 @@ func indexIsCratesIo(index any) bool {
 	return is
 }
 
-// cargoName is the crates.io name shape, which the Ossprey API enforces too: one
-// component failing it rejects the whole SBOM, taking every other ecosystem with it.
-var cargoName = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
-
 // validCargoComponent reports whether a crate name and version can survive the
 // API's validator. One that cannot rejects the whole SBOM, so every cargo
 // source is held to this, not just the manifest cataloguer.
 func validCargoComponent(name, version string) bool {
-	return cargoName.MatchString(name) && len(version) <= maxCargoVersion
+	return registry.IsCargoName(name) && len(version) <= registry.MaxCargoVersion
 }
 
 // cargoDropReason names which half of validCargoComponent failed, so a real
 // crate carrying an over-long version is not reported as an impossible name.
 func cargoDropReason(name string) string {
-	if cargoName.MatchString(name) {
+	if registry.IsCargoName(name) {
 		return "its version is over the API's length limit"
 	}
 	return "it cannot be a crates.io crate name"
@@ -466,7 +461,7 @@ func cargoDropReason(name string) string {
 
 // vouched drops a dependency whose key cannot name a crate on crates.io.
 func vouched(name, version string) (string, string, bool, string) {
-	if !cargoName.MatchString(name) {
+	if !registry.IsCargoName(name) {
 		return "", "", false, "it cannot be a crates.io crate name"
 	}
 	return name, version, true, ""
@@ -481,9 +476,6 @@ func cargoDropEntry(file, why, alias string) warn.Entry {
 	}
 }
 
-// maxCargoVersion mirrors the API's version cap; a longer one rejects the SBOM.
-const maxCargoVersion = 256
-
 // cargoExactVersion returns the version only when the spec pins one exactly.
 // Cargo's bare "1.0" means caret, i.e. a range, so it resolves to nothing and
 // the component goes out versionless. Guessing the lower bound would ship a
@@ -494,7 +486,7 @@ func cargoExactVersion(spec string) string {
 		return ""
 	}
 	s = strings.TrimSpace(s[1:])
-	if len(s) > maxCargoVersion || !registry.IsCargoRelease(s) {
+	if len(s) > registry.MaxCargoVersion || !registry.IsCargoRelease(s) {
 		return ""
 	}
 	return s
