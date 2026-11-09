@@ -24,7 +24,7 @@ type cargoLockGit struct {
 func cargoLockGitSources(manifestPath string) cargoLockGit {
 	// A FIFO or device named Cargo.lock may never end, so only a regular file is read, and only up to the limit.
 	data, ok := readRegularFile(filepath.Join(filepath.Dir(manifestPath), "Cargo.lock"), maxCargoProofBytes)
-	if !ok {
+	if !ok || proofTOMLError(data) != nil {
 		return cargoLockGit{}
 	}
 	type entry struct {

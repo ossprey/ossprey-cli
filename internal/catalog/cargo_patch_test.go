@@ -240,6 +240,15 @@ source = "git+https://github.com/evil/serde#` + patchRev + `"
 			"serde@1.0.100 Cargo.toml",
 			"serde@1.0.100?vcs_url=git+https://github.com/evil/serde@" + patchRev + " Cargo.lock",
 		}},
+		// A lock the decoder cannot read in bounded memory records nothing, so the manifest's target goes out.
+		{"lock refused for a long dotted key", map[string]string{
+			"Cargo.toml": lockless7,
+			"Cargo.lock": "version = 4\n" + strings.Repeat("a.", 2100) + "a = 1\n\n" + gitSerde("#"+patchRev),
+		}, []string{
+			"serde@1.0.100 Cargo.toml",
+			"serde@1.0.100?vcs_url=git+https://github.com/evil/serde@" + patchRev + " Cargo.lock",
+			"serde@?vcs_url=git+https://github.com/evil/serde Cargo.toml",
+		}},
 		// A build without --locked rewrites a lock that predates the patch and fetches the fork, so the manifest's target still goes out.
 		{"lock that predates the patch", map[string]string{
 			"Cargo.toml": lockless7,
