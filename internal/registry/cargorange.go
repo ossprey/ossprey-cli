@@ -23,9 +23,12 @@ func IsCargoRelease(s string) bool {
 	return true
 }
 
-// CargoSatisfies reports whether version meets a Cargo requirement via the npm port; ok is false if unreadable.
+// CargoSatisfies reports whether version meets a Cargo requirement via the npm port; ok is false if either is unreadable, including a version cargo rejects.
 func CargoSatisfies(req, version string) (match, ok bool) {
-	v, ok := parseSemver(version)
+	if !IsCargoRelease(version) {
+		return false, false
+	}
+	v, ok := parseSemver(version, true)
 	if !ok || strings.ContainsAny(req, "|") {
 		return false, false
 	}
@@ -41,9 +44,29 @@ func CargoSatisfies(req, version string) (match, ok bool) {
 		}
 		parts = append(parts, c)
 	}
-	r, ok := parseNpmRange(strings.Join(parts, " "))
+	r, ok := parseNpmRange(strings.Join(parts, " "), true)
 	if !ok {
 		return false, false
 	}
 	return r.satisfies(v), true
+}
+
+// cargoIdentCompare orders two prerelease identifiers as Cargo's semver crate does, numeric ones by length then lexically so none overflows, and below any other.
+func cargoIdentCompare(x, y string) int {
+	xn, yn := allDigits(x), allDigits(y)
+	switch {
+	case xn && yn:
+		if c := cmpInt(len(x), len(y)); c != 0 {
+			return c
+		}
+	case xn:
+		return -1
+	case yn:
+		return 1
+	}
+	return strings.Compare(x, y)
+}
+
+func allDigits(s string) bool {
+	return s != "" && strings.Trim(s, "0123456789") == ""
 }
