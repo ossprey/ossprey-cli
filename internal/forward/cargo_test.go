@@ -392,6 +392,51 @@ func TestRunCargoAdd_BlockRestoresWhatItChanged(t *testing.T) {
 	}
 }
 
+// A block undoes only what is still as cargo left it, and names a file changed again while the check ran.
+func TestRunCargoAdd_BlockLeavesFilesChangedAgain(t *testing.T) {
+	member := filepath.Join("a", "Cargo.toml")
+	for _, tc := range []struct {
+		name, again, kept, undid string
+	}{
+		{"the manifest edited again", member, member, "removed Cargo.lock"},
+		{"a newer lock", "Cargo.lock", "Cargo.lock", "restored " + member},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, _ := cargoProject(t)
+			ran := false
+			swap(t, addEvil(t, root, &ran), cleanSBOM)
+			mine := "# written while the check ran\n"
+			swapScan(t, func(context.Context, scanRequest) (*ossbom.SBOM, error) {
+				writeFile(t, filepath.Join(root, tc.again), mine)
+				return evilSBOM(), nil
+			})
+
+			out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"add", "-p", "a", "evil"}})
+			if !errors.Is(err, ErrBlocked) {
+				t.Fatalf("Run = %v, want ErrBlocked", err)
+			}
+			if got := readFile(t, filepath.Join(root, tc.again)); got != mine {
+				t.Errorf("%s = %q, want the edit made after cargo exited kept", tc.again, got)
+			}
+			if tc.again == member {
+				if _, err := os.Stat(filepath.Join(root, "Cargo.lock")); !errors.Is(err, os.ErrNotExist) {
+					t.Errorf("the lock cargo created is still there (%v)", err)
+				}
+			} else if got := readFile(t, filepath.Join(root, member)); got != memberManifest {
+				t.Errorf("member manifest = %q, want it restored", got)
+			}
+			for _, line := range []string{
+				"ossprey: undid `cargo add -p a evil`: " + tc.undid + "\n",
+				"ossprey: warning: did not undo `cargo add -p a evil` in " + tc.kept + ", changed again after cargo exited\n",
+			} {
+				if !strings.Contains(out, line) {
+					t.Errorf("output lacks %q:\n%s", line, out)
+				}
+			}
+		})
+	}
+}
+
 // A clean add keeps what cargo wrote and prints the one verdict line.
 func TestRunCargoAdd_CleanKeepsTheChanges(t *testing.T) {
 	root, ws := cargoProject(t)

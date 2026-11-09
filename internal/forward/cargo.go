@@ -151,15 +151,17 @@ func checkCargoAfter(ctx context.Context, m *Manager, opts Options) error {
 	}
 	flushWarnings(ctx)
 	runErr := execFn(ctx, m.Bin, opts.Args)
+	// Read as cargo exits, so a block undoes cargo's changes and never an edit made while the check runs.
+	changes := changedFiles(saved)
 	if runErr != nil {
 		if err != nil {
 			return runErr
 		}
 		// cargo writes before it can fail: fetch locks before it downloads, add edits Cargo.toml before it resolves.
-		changed := changedFiles(saved)
-		if !slices.Contains(changed, ws.Lock) {
-			for i, p := range changed {
-				changed[i] = displayPath(p)
+		if !slices.ContainsFunc(changes, func(c fileChange) bool { return c.before.path == ws.Lock }) {
+			var changed []string
+			for _, c := range changes {
+				changed = append(changed, displayPath(c.before.path))
 			}
 			if len(changed) > 0 {
 				fmt.Fprintf(errOut, "ossprey: warning: `%s` failed after changing %s, which was not checked\n", command, strings.Join(changed, ", "))
@@ -186,7 +188,7 @@ func checkCargoAfter(ctx context.Context, m *Manager, opts Options) error {
 	lock := displayPath(ws.Lock)
 	if hasMalware {
 		printBlock(m, opts, summary)
-		reportRestore(command, saved)
+		reportRestore(command, changes)
 		return ErrBlocked
 	}
 	verdict, checked := CleanVerdict(sbom, len(summary.Informational), " in "+lock)
@@ -533,63 +535,77 @@ func exists(p string) bool {
 	return err == nil
 }
 
-// savedFile is a manifest or lock as it was before cargo ran.
+// savedFile is a manifest or lock as it stood, or that it did not exist; unread is one there that could not be read.
 type savedFile struct {
 	path    string
 	existed bool
 	data    []byte
 	mode    fs.FileMode
+	unread  bool
+}
+
+// stateOf saves p as it stands now.
+func stateOf(p string) savedFile {
+	fi, err := os.Stat(p)
+	if errors.Is(err, fs.ErrNotExist) {
+		return savedFile{path: p}
+	}
+	if err != nil || !fi.Mode().IsRegular() {
+		return savedFile{path: p, existed: true, unread: true}
+	}
+	data, err := os.ReadFile(p)
+	if err != nil {
+		return savedFile{path: p, existed: true, unread: true}
+	}
+	return savedFile{path: p, existed: true, data: data, mode: fi.Mode().Perm()}
+}
+
+// is reports whether f and g hold the same state; an unread one matches nothing.
+func (f savedFile) is(g savedFile) bool {
+	return !f.unread && !g.unread && f.existed == g.existed && bytes.Equal(f.data, g.data)
 }
 
 // snapshot saves each file, or that it did not exist; one it cannot read is left out, and so never touched.
 func snapshot(paths []string) []savedFile {
 	var out []savedFile
 	for _, p := range paths {
-		fi, err := os.Stat(p)
-		if errors.Is(err, fs.ErrNotExist) {
-			out = append(out, savedFile{path: p})
-			continue
-		}
-		if err != nil || !fi.Mode().IsRegular() {
-			continue
-		}
-		data, err := os.ReadFile(p)
-		if err != nil {
-			continue
-		}
-		out = append(out, savedFile{path: p, existed: true, data: data, mode: fi.Mode().Perm()})
-	}
-	return out
-}
-
-// changedFiles are the saved files the command changed, created or removed.
-func changedFiles(saved []savedFile) []string {
-	var out []string
-	for _, f := range saved {
-		now, err := os.ReadFile(f.path)
-		if f.existed != (err == nil) || f.existed && !bytes.Equal(now, f.data) {
-			out = append(out, f.path)
+		if f := stateOf(p); !f.unread {
+			out = append(out, f)
 		}
 	}
 	return out
 }
 
-// reportRestore puts back every saved file the command changed, removes those it created, and says so.
-func reportRestore(command string, saved []savedFile) {
-	var done []string
+// fileChange is a saved file the command changed, created or removed, and what the command left there.
+type fileChange struct{ before, after savedFile }
+
+// changedFiles are the saved files the command changed, created or removed, each with what it left.
+func changedFiles(saved []savedFile) []fileChange {
+	var out []fileChange
 	for _, f := range saved {
-		now, err := os.ReadFile(f.path)
+		if now := stateOf(f.path); !f.is(now) {
+			out = append(out, fileChange{f, now})
+		}
+	}
+	return out
+}
+
+// reportRestore undoes each change still as the command left it, leaves alone one changed again since, and says so.
+func reportRestore(command string, changes []fileChange) {
+	var done, kept []string
+	for _, c := range changes {
+		f, now := c.before, stateOf(c.before.path)
 		switch {
-		case !f.existed && errors.Is(err, fs.ErrNotExist):
+		case f.is(now):
 			continue
+		case !c.after.is(now):
+			kept = append(kept, displayPath(f.path))
 		case !f.existed:
 			if err := os.Remove(f.path); err != nil {
 				fmt.Fprintf(errOut, "ossprey: warning: could not remove %s (%v)\n", displayPath(f.path), err)
 				continue
 			}
 			done = append(done, "removed "+displayPath(f.path))
-		case err == nil && bytes.Equal(now, f.data):
-			continue
 		default:
 			if err := os.WriteFile(f.path, f.data, f.mode); err != nil {
 				fmt.Fprintf(errOut, "ossprey: warning: could not restore %s (%v)\n", displayPath(f.path), err)
@@ -599,11 +615,15 @@ func reportRestore(command string, saved []savedFile) {
 			done = append(done, "restored "+displayPath(f.path))
 		}
 	}
-	if len(done) == 0 {
-		fmt.Fprintf(errOut, "ossprey: `%s` changed no Cargo.toml or Cargo.lock; nothing to restore\n", command)
-		return
+	if len(done) > 0 {
+		fmt.Fprintf(errOut, "ossprey: undid `%s`: %s\n", command, strings.Join(done, ", "))
 	}
-	fmt.Fprintf(errOut, "ossprey: undid `%s`: %s\n", command, strings.Join(done, ", "))
+	if len(kept) > 0 {
+		fmt.Fprintf(errOut, "ossprey: warning: did not undo `%s` in %s, changed again after cargo exited\n", command, strings.Join(kept, ", "))
+	}
+	if len(done) == 0 && len(kept) == 0 {
+		fmt.Fprintf(errOut, "ossprey: `%s` changed no Cargo.toml or Cargo.lock; nothing to restore\n", command)
+	}
 }
 
 // displayPath is p relative to the working directory, preferring whichever spelling of it, physical or as typed, holds p.
