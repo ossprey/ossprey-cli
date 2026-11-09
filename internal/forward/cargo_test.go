@@ -16,6 +16,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ossprey/ossprey-cli/internal/catalog"
 	"github.com/ossprey/ossprey-cli/internal/check"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
 	"github.com/ossprey/ossprey-cli/internal/trust"
@@ -140,6 +141,12 @@ func TestCargoDefaultRegistry(t *testing.T) {
 		{"the last --config wins", nil, "", []string{"--config", `registry.default="corp"`, "install", "--config", `registry.default="crates-io"`, "x"}, ""},
 		{"--config over the environment", nil, "corp", []string{"--config", `registry.default="crates-io"`, "install", "x"}, ""},
 		{"a --config file", map[string]string{"corp.toml": corp}, "", []string{"install", "--config", "@corp.toml", "x"}, "corp"},
+		{"config.toml beside config is ignored", map[string]string{"home/.cargo/config": "[build]\njobs = 2\n", "home/.cargo/config.toml": corp}, "", []string{"install", "x"}, ""},
+		{"config is read beside config.toml", map[string]string{"home/.cargo/config": corp, "home/.cargo/config.toml": "[build]\njobs = 2\n"}, "", []string{"install", "x"}, "corp"},
+		{"config.toml beside config is ignored above CARGO_HOME", map[string]string{".cargo/config": "[build]\njobs = 2\n", ".cargo/config.toml": corp}, "", []string{"install", "x"}, ""},
+		{"a config too deep to read may set it", map[string]string{"home/.cargo/config.toml": "x = " + strings.Repeat("[", 17) + strings.Repeat("]", 17) + "\n"}, "", []string{"install", "x"}, "a config it cannot read"},
+		{"a config too large to read may set it", map[string]string{"home/.cargo/config.toml": "# " + strings.Repeat("x", catalog.CargoManifestLimit) + "\n"}, "", []string{"install", "x"}, "a config it cannot read"},
+		{"a --config file too deep to read may set it", map[string]string{"deep.toml": "x = " + strings.Repeat("[", 17) + strings.Repeat("]", 17) + "\n"}, "", []string{"install", "--config", "@deep.toml", "x"}, "a config it cannot read"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			base := t.TempDir()
@@ -807,6 +814,53 @@ func TestLockfileMoved(t *testing.T) {
 	writeFile(t, filepath.Join(project, ".cargo", "config.toml"), "[build]\njobs = 4\n# include nothing\n")
 	if lockfileMoved([]string{"add", "serde"}, sub) {
 		t.Error("a config with no include or lockfile-path moves nothing")
+	}
+	// TOML decodes escapes in a quoted key, and cargo 1.99.1 moved the lock for each of these.
+	for _, escaped := range []string{
+		"[resolver]\n\"lockfile\\u002dpath\" = \"x/Cargo.lock\"\n",
+		"[\"resolv\\u0065r\"]\n\"lockfile\\u002dpath\" = \"x/Cargo.lock\"\n",
+		"resolver.\"lockfile\\u002dpath\" = \"x/Cargo.lock\"\n",
+	} {
+		writeFile(t, filepath.Join(project, ".cargo", "config.toml"), escaped)
+		if !lockfileMoved([]string{"add", "serde"}, sub) {
+			t.Errorf("missed an escaped key: %q", escaped)
+		}
+	}
+	if !lockfileMoved([]string{"--config", `resolver."lockfile\u002dpath"="x/Cargo.lock"`, "add", "serde"}, sub) {
+		t.Error("missed an escaped key on the command line")
+	}
+	// cargo 1.99.1 reads only the legacy config when both are at one level.
+	writeFile(t, filepath.Join(project, ".cargo", "config.toml"), "[resolver]\nlockfile-path = \"x/Cargo.lock\"\n")
+	writeFile(t, filepath.Join(project, ".cargo", "config"), "[build]\njobs = 4\n")
+	if lockfileMoved([]string{"add", "serde"}, sub) {
+		t.Error("a config.toml beside config is not read, so it moves nothing")
+	}
+	writeFile(t, filepath.Join(project, ".cargo", "config"), "[resolver]\nlockfile-path = \"x/Cargo.lock\"\n")
+	writeFile(t, filepath.Join(project, ".cargo", "config.toml"), "[build]\njobs = 4\n")
+	if !lockfileMoved([]string{"add", "serde"}, sub) {
+		t.Error("missed the legacy config beside config.toml")
+	}
+	if err := os.Remove(filepath.Join(project, ".cargo", "config")); err != nil {
+		t.Fatal(err)
+	}
+	// A config the bounded parser refuses may set it.
+	for name, refused := range map[string]string{
+		"too deep":  "x = " + strings.Repeat("[", 17) + strings.Repeat("]", 17) + "\n",
+		"too long":  "x = \"" + strings.Repeat("a", 5000) + "\"\n",
+		"too large": "# " + strings.Repeat("x", catalog.CargoManifestLimit) + "\n",
+	} {
+		writeFile(t, filepath.Join(project, ".cargo", "config.toml"), refused)
+		if !lockfileMoved([]string{"add", "serde"}, sub) {
+			t.Errorf("a config %s to read may move it", name)
+		}
+		writeFile(t, file, refused)
+		if !lockfileMoved([]string{"add", "--config", file, "serde"}, sub) {
+			t.Errorf("a --config file %s to read may move it", name)
+		}
+	}
+	writeFile(t, filepath.Join(project, ".cargo", "config.toml"), "[build]\njobs = 4\n")
+	if lockfileMoved([]string{"add", "serde"}, sub) {
+		t.Error("a readable config with no lockfile-path moves nothing")
 	}
 	t.Setenv("CARGO_RESOLVER_LOCKFILE_PATH", "x/Cargo.lock")
 	if !lockfileMoved([]string{"add", "serde"}, sub) {

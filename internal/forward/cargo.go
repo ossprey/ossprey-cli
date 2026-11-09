@@ -6,14 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
-
-	"github.com/BurntSushi/toml"
 
 	"github.com/ossprey/ossprey-cli/internal/catalog"
 	"github.com/ossprey/ossprey-cli/internal/check"
@@ -373,30 +372,25 @@ func lockfileMoved(args []string, configDir string) bool {
 	if os.Getenv("CARGO_RESOLVER_LOCKFILE_PATH") != "" {
 		return true
 	}
-	moves := func(data []byte) bool {
-		doc, ok := cargoConfigDoc(data)
-		return bytes.Contains(data, []byte("lockfile-path")) || ok && doc["include"] != nil
-	}
-	var files []string
-	for _, c := range cargoConfigArgs(args) {
-		if moves([]byte(c)) {
-			return true
-		}
-		files = append(files, c)
-	}
 	for _, a := range args {
 		if strings.Contains(a, "lockfile-path") {
 			return true
 		}
 	}
-	for d := configDir; ; d = filepath.Dir(d) {
-		files = append(files, filepath.Join(d, ".cargo", "config.toml"), filepath.Join(d, ".cargo", "config"))
-		if filepath.Dir(d) == d {
-			break
+	// A quoted key may spell it with escapes, and a config the bounded parser refuses may set it too.
+	moves := func(data []byte) bool {
+		doc, ok := cargoConfigDoc(data)
+		resolver, _ := doc["resolver"].(map[string]any)
+		return !ok || bytes.Contains(data, []byte("lockfile-path")) || resolver["lockfile-path"] != nil || doc["include"] != nil
+	}
+	for _, c := range cargoConfigArgs(args) {
+		if data, ok := cargoConfigArg(c); ok && moves(data) {
+			return true
 		}
 	}
+	files := cargoConfigFiles(configDir)
 	if home := cargoHome(); home != "" {
-		files = append(files, filepath.Join(home, "config.toml"), filepath.Join(home, "config"))
+		files = append(files, cargoConfigFile(home))
 	}
 	for _, f := range files {
 		if data, ok := readRegular(f); ok && moves(data) {
@@ -408,11 +402,11 @@ func lockfileMoved(args []string, configDir string) bool {
 
 // cargoDefaultRegistry is the registry other than crates.io that `cargo install` takes a crate from when the line names none, or "".
 func cargoDefaultRegistry(args []string) string {
-	// The value set nearest the line wins; an include may set it too.
+	// The value set nearest the line wins; an include, or a config the bounded parser refuses, may set it too.
 	pick := func(data []byte) (string, bool) {
 		doc, ok := cargoConfigDoc(data)
 		if !ok {
-			return "", false
+			return "a config it cannot read", true
 		}
 		if reg, _ := doc["registry"].(map[string]any); reg != nil {
 			if v, ok := reg["default"].(string); ok {
@@ -430,12 +424,8 @@ func cargoDefaultRegistry(args []string) string {
 		}
 		return v
 	}
-	configs := cargoConfigArgs(args)
-	for _, c := range slices.Backward(configs) {
-		if v, ok := pick([]byte(c)); ok {
-			return found(v)
-		}
-		if data, ok := readRegular(c); ok {
+	for _, c := range slices.Backward(cargoConfigArgs(args)) {
+		if data, ok := cargoConfigArg(c); ok {
 			if v, ok := pick(data); ok {
 				return found(v)
 			}
@@ -449,15 +439,7 @@ func cargoDefaultRegistry(args []string) string {
 		return ""
 	}
 	// cargo install reads no project config, only those from CARGO_HOME up.
-	var files []string
-	for d := home; ; d = filepath.Dir(d) {
-		files = append(files, filepath.Join(d, ".cargo", "config.toml"), filepath.Join(d, ".cargo", "config"))
-		if filepath.Dir(d) == d {
-			break
-		}
-	}
-	files = append(files, filepath.Join(home, "config.toml"), filepath.Join(home, "config"))
-	for _, f := range files {
+	for _, f := range append(cargoConfigFiles(home), cargoConfigFile(home)) {
 		if data, ok := readRegular(f); ok {
 			if v, ok := pick(data); ok {
 				return found(v)
@@ -481,10 +463,42 @@ func cargoConfigArgs(args []string) []string {
 	return out
 }
 
-// cargoConfigDoc parses a cargo config, or a --config KEY=VALUE, as TOML.
+// cargoConfigArg is what cargo reads for a --config value: the file it names when that exists, else the value as TOML.
+func cargoConfigArg(c string) ([]byte, bool) {
+	if c != "" && exists(c) {
+		return readRegular(c)
+	}
+	return []byte(c), true
+}
+
+// cargoConfigFiles are the configs cargo reads from dir up, one per level.
+func cargoConfigFiles(dir string) []string {
+	var out []string
+	for d := dir; ; d = filepath.Dir(d) {
+		out = append(out, cargoConfigFile(filepath.Join(d, ".cargo")))
+		if filepath.Dir(d) == d {
+			return out
+		}
+	}
+}
+
+// cargoConfigFile is the one config cargo reads in dir: the legacy config when it opens, else config.toml.
+func cargoConfigFile(dir string) string {
+	legacy := filepath.Join(dir, "config")
+	// cargo opens anything there, but a FIFO may never open, so only a regular file is opened here.
+	if fi, err := os.Stat(legacy); err == nil && !fi.Mode().IsRegular() {
+		return legacy
+	}
+	if f, err := os.Open(legacy); err == nil {
+		f.Close()
+		return legacy
+	}
+	return filepath.Join(dir, "config.toml")
+}
+
+// cargoConfigDoc parses a cargo config, or a --config KEY=VALUE, with the catalog's bounded parser; false is one it refuses or cannot decode.
 func cargoConfigDoc(data []byte) (map[string]any, bool) {
-	var doc map[string]any
-	err := toml.Unmarshal(data, &doc)
+	doc, err := catalog.ParseCargoConfig(data)
 	return doc, err == nil
 }
 
@@ -499,12 +513,17 @@ func cargoHome() string {
 	return ""
 }
 
-// readRegular reads p only when it is a regular file, since a FIFO may never end.
+// readRegular reads p only when it is a regular file, since a FIFO may never end, and stops one byte past the bounded parser's limit.
 func readRegular(p string) ([]byte, bool) {
 	if fi, err := os.Stat(p); err != nil || !fi.Mode().IsRegular() {
 		return nil, false
 	}
-	data, err := os.ReadFile(p)
+	f, err := os.Open(p)
+	if err != nil {
+		return nil, false
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, catalog.CargoManifestLimit+1))
 	return data, err == nil
 }
 
