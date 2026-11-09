@@ -1,8 +1,6 @@
 //go:build smoke
 
 // The cargo forwarder against the real cargo and a fake API: add runs first and is undone on a block, install is blocked before it builds.
-//
-// Run with: go test -tags smoke -run TestCargo -v ./test/smoke/...
 
 package smoke
 

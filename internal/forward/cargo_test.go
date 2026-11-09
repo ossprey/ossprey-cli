@@ -2,7 +2,10 @@ package forward
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +18,7 @@ import (
 
 	"github.com/ossprey/ossprey-cli/internal/check"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
+	"github.com/ossprey/ossprey-cli/internal/trust"
 )
 
 // cargoMode is the path a cargo command takes: checked after it runs, before it runs, or passed straight through.
@@ -71,38 +75,101 @@ func TestCargoDetection(t *testing.T) {
 	}
 }
 
-func TestParseSpecsCargoInstall(t *testing.T) {
-	m, _ := Lookup("cargo")
+func TestParseCargoInstall(t *testing.T) {
 	crate := func(name, version string) []check.Spec {
 		return []check.Spec{{Ecosystem: "cargo", Name: name, Version: version}}
 	}
 	ripgrep := crate("ripgrep", "")
 	for _, tc := range []struct {
-		args    string
-		specs   []check.Spec
-		nonPkgs []string
+		args, defaultRegistry string
+		specs                 []check.Spec
+		nonPkgs               []string
 	}{
-		{"ripgrep", ripgrep, nil},
-		{"--vers 14.1.0 ripgrep", crate("ripgrep", "14.1.0"), nil},
-		{"--version=14.1.0 ripgrep fd-find", append(crate("ripgrep", "14.1.0"), crate("fd-find", "14.1.0")...), nil},
-		{"ripgrep@14.1.0", crate("ripgrep", "14.1.0"), nil},
-		{"ripgrep@=14.1.0", crate("ripgrep", "14.1.0"), nil},
-		{"ripgrep@^14", []check.Spec{{Ecosystem: "cargo", Name: "ripgrep", Constraint: "^14"}}, nil},
-		{"--version ^14 ripgrep", []check.Spec{{Ecosystem: "cargo", Name: "ripgrep", Constraint: "^14"}}, nil},
-		{"--path .", nil, []string{"--path ."}},
-		{"--git https://github.com/BurntSushi/ripgrep ripgrep", nil, []string{"ripgrep", "--git https://github.com/BurntSushi/ripgrep"}},
-		{"--registry corp ripgrep", nil, []string{"ripgrep", "--registry corp"}},
-		{"--index sparse+https://crates.corp.example/ ripgrep", nil, []string{"ripgrep", "--index sparse+https://crates.corp.example/"}},
-		{"--bin rg ripgrep", ripgrep, nil},
-		{"--target x86_64-unknown-linux-gnu --root /opt -F a,b -j 4 --profile release ripgrep", ripgrep, nil},
-		{"--features=derive --locked --force -f ripgrep", ripgrep, nil},
-		{"--config k=v -Z unstable-options ripgrep", ripgrep, nil},
-		{"./local", nil, []string{"./local"}},
+		{"ripgrep", "", ripgrep, nil},
+		{"--vers 14.1.0 ripgrep", "", crate("ripgrep", "14.1.0"), nil},
+		{"--version=14.1.0 ripgrep fd-find", "", append(crate("ripgrep", "14.1.0"), crate("fd-find", "14.1.0")...), nil},
+		{"ripgrep@14.1.0", "", crate("ripgrep", "14.1.0"), nil},
+		{"ripgrep@=14.1.0", "", crate("ripgrep", "14.1.0"), nil},
+		{"ripgrep@^14", "", []check.Spec{{Ecosystem: "cargo", Name: "ripgrep", Constraint: "^14"}}, nil},
+		{"--version ^14 ripgrep", "", []check.Spec{{Ecosystem: "cargo", Name: "ripgrep", Constraint: "^14"}}, nil},
+		{"--path .", "", nil, []string{"--path ."}},
+		{"--git https://github.com/BurntSushi/ripgrep ripgrep", "", nil, []string{"ripgrep", "--git https://github.com/BurntSushi/ripgrep"}},
+		{"--registry corp ripgrep", "", nil, []string{"ripgrep", "--registry corp"}},
+		{"--index sparse+https://crates.corp.example/ ripgrep", "", nil, []string{"ripgrep", "--index sparse+https://crates.corp.example/"}},
+		{"--registry crates-io ripgrep", "", ripgrep, nil},
+		{"--index=sparse+https://index.crates.io/ ripgrep", "", ripgrep, nil},
+		{"--index https://github.com/rust-lang/crates.io-index ripgrep", "", ripgrep, nil},
+		{"--index https://index.crates.io/ ripgrep", "", nil, []string{"ripgrep", "--index https://index.crates.io/"}},
+		{"ripgrep", "corp", nil, []string{"ripgrep", "registry.default corp"}},
+		{"--registry crates-io ripgrep", "corp", ripgrep, nil},
+		{"--registry other ripgrep", "corp", nil, []string{"ripgrep", "--registry other"}},
+		{"--bin rg ripgrep", "", ripgrep, nil},
+		{"--target x86_64-unknown-linux-gnu --root /opt -F a,b -j 4 --profile release ripgrep", "", ripgrep, nil},
+		{"--features=derive --locked --force -f ripgrep", "", ripgrep, nil},
+		{"--config k=v -Z unstable-options ripgrep", "", ripgrep, nil},
+		{"./local", "", nil, []string{"./local"}},
 	} {
-		got := ParseSpecs(m, strings.Fields(tc.args))
+		got := parseCargoInstall(strings.Fields(tc.args), tc.defaultRegistry)
 		if !reflect.DeepEqual(got.Specs, tc.specs) || !reflect.DeepEqual(got.NonPackages, tc.nonPkgs) {
-			t.Errorf("cargo install %s: specs %+v, non-packages %q; want %+v, %q", tc.args, got.Specs, got.NonPackages, tc.specs, tc.nonPkgs)
+			t.Errorf("cargo install %s (default %q): specs %+v, non-packages %q; want %+v, %q", tc.args, tc.defaultRegistry, got.Specs, got.NonPackages, tc.specs, tc.nonPkgs)
 		}
+	}
+}
+
+// cargo install reads the last --config, then CARGO_REGISTRY_DEFAULT, then the configs from CARGO_HOME up, and never the project's.
+func TestCargoDefaultRegistry(t *testing.T) {
+	corp := "[registry]\ndefault = \"corp\"\n"
+	for _, tc := range []struct {
+		name  string
+		files map[string]string
+		env   string
+		args  []string
+		want  string
+	}{
+		{"nothing set", nil, "", []string{"install", "x"}, ""},
+		{"CARGO_HOME", map[string]string{"home/.cargo/config.toml": corp}, "", []string{"install", "x"}, "corp"},
+		{"CARGO_HOME's config without extension", map[string]string{"home/.cargo/config": corp}, "", []string{"install", "x"}, "corp"},
+		{"above CARGO_HOME", map[string]string{".cargo/config.toml": corp}, "", []string{"install", "x"}, "corp"},
+		{"crates-io named", map[string]string{"home/.cargo/config.toml": "[registry]\ndefault = \"crates-io\"\n"}, "", []string{"install", "x"}, ""},
+		{"the project's config is not read", map[string]string{"cwd/.cargo/config.toml": corp}, "", []string{"install", "x"}, ""},
+		{"an include may set it", map[string]string{"home/.cargo/config.toml": "include = [\"corp.toml\"]\n"}, "", []string{"install", "x"}, "an included config"},
+		{"the environment", nil, "corp", []string{"install", "x"}, "corp"},
+		{"the environment over CARGO_HOME", map[string]string{"home/.cargo/config.toml": corp}, "crates-io", []string{"install", "x"}, ""},
+		{"--config before the verb", nil, "", []string{"--config", `registry.default="corp"`, "install", "x"}, "corp"},
+		{"--config after the verb", nil, "", []string{"install", "--config=registry.default='corp'", "x"}, "corp"},
+		{"the last --config wins", nil, "", []string{"--config", `registry.default="corp"`, "install", "--config", `registry.default="crates-io"`, "x"}, ""},
+		{"--config over the environment", nil, "corp", []string{"--config", `registry.default="crates-io"`, "install", "x"}, ""},
+		{"a --config file", map[string]string{"corp.toml": corp}, "", []string{"install", "--config", "@corp.toml", "x"}, "corp"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := t.TempDir()
+			for _, d := range []string{"home/.cargo", "cwd/.cargo"} {
+				if err := os.MkdirAll(filepath.Join(base, d), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for name, data := range tc.files {
+				if err := os.MkdirAll(filepath.Dir(filepath.Join(base, name)), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				writeFile(t, filepath.Join(base, name), data)
+			}
+			t.Setenv("CARGO_HOME", filepath.Join(base, "home", ".cargo"))
+			t.Setenv("CARGO_REGISTRY_DEFAULT", tc.env)
+			if tc.env == "" {
+				unsetEnv(t, "CARGO_REGISTRY_DEFAULT")
+			}
+			t.Chdir(filepath.Join(base, "cwd"))
+			args := slices.Clone(tc.args)
+			for i, a := range args {
+				if strings.HasPrefix(a, "@") {
+					args[i] = filepath.Join(base, a[1:])
+				}
+			}
+			if got := cargoDefaultRegistry(args); got != tc.want {
+				t.Errorf("cargo %v: %q, want %q", args, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -342,13 +409,93 @@ func TestRunCargoAdd_CleanKeepsTheChanges(t *testing.T) {
 	}
 }
 
-// cargo's own failure is its exit code, and nothing is scanned.
+// cargo's own failure that changed nothing is its exit code, and nothing is scanned.
 func TestRunCargoAdd_FailurePassesThrough(t *testing.T) {
-	cargoProject(t)
+	_, ws := cargoProject(t)
+	writeFile(t, ws.Lock, evilLock)
 	exit101 := errors.New("exit status 101")
 	swap(t, func(context.Context, string, []string) error { return exit101 }, cleanSBOM)
-	if err := Run(context.Background(), Options{Bin: "cargo", Args: []string{"add", "nope"}}); !errors.Is(err, exit101) {
+	for _, passive := range []bool{false, true} {
+		if passive {
+			// Passive posts the lock even so, but only when there is one.
+			if err := os.Remove(ws.Lock); err != nil {
+				t.Fatal(err)
+			}
+		}
+		out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"update"}, Passive: passive})
+		if !errors.Is(err, exit101) || out != "" {
+			t.Errorf("passive %v: Run = %v, output %q; want cargo's own error alone", passive, err, out)
+		}
+	}
+}
+
+// cargo fetch locks before it downloads, so a lock a failed command wrote is checked, and undone on a block.
+func TestRunCargoFetch_FailureAfterLockingIsChecked(t *testing.T) {
+	exit101 := errors.New("exit status 101")
+	for _, tc := range []struct {
+		name    string
+		sbom    func() *ossbom.SBOM
+		want    error
+		wantOut string
+	}{
+		{"blocked", evilSBOM, ErrBlocked, "ossprey: undid `cargo fetch`: removed Cargo.lock\n"},
+		{"clean", cleanCrates, exit101, "ossprey: no malware found in 2 packages in Cargo.lock\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, ws := cargoProject(t)
+			swap(t, func(context.Context, string, []string) error {
+				writeFile(t, ws.Lock, evilLock)
+				return exit101
+			}, cleanSBOM)
+			var req scanRequest
+			var scanned string
+			swapScan(t, lockScan(t, &req, &scanned, tc.sbom))
+
+			out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"fetch"}})
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("Run = %v, want %v", err, tc.want)
+			}
+			if scanned != evilLock || !strings.HasSuffix(out, tc.wantOut) {
+				t.Errorf("scanned %q, output:\n%s\nwant it to end %q", scanned, out, tc.wantOut)
+			}
+		})
+	}
+}
+
+// cargo add edits Cargo.toml before it resolves, so a failure that changed only manifests says they were not checked.
+func TestRunCargoAdd_FailureAfterEditingTheManifestWarns(t *testing.T) {
+	root, _ := cargoProject(t)
+	exit101 := errors.New("exit status 101")
+	swap(t, func(context.Context, string, []string) error {
+		writeFile(t, filepath.Join(root, "a", "Cargo.toml"), memberManifest+"\n[dependencies]\nevil = \"1\"\n")
+		return exit101
+	}, cleanSBOM)
+	out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"add", "-p", "a", "evil"}})
+	if !errors.Is(err, exit101) {
 		t.Fatalf("Run = %v, want cargo's own error", err)
+	}
+	want := "ossprey: warning: `cargo add -p a evil` failed after changing " + filepath.Join("a", "Cargo.toml") + ", which was not checked\n"
+	if out != want {
+		t.Errorf("output = %q, want %q", out, want)
+	}
+}
+
+// Passive posts the lock a failed command left, and still returns cargo's error.
+func TestRunCargoFetch_PassiveFailurePostsTheLock(t *testing.T) {
+	_, ws := cargoProject(t)
+	exit101 := errors.New("exit status 101")
+	swap(t, func(context.Context, string, []string) error {
+		writeFile(t, ws.Lock, evilLock)
+		return exit101
+	}, cleanSBOM)
+	var req scanRequest
+	var scanned string
+	swapScan(t, lockScan(t, &req, &scanned, evilSBOM))
+	if err := Run(context.Background(), Options{Bin: "cargo", Args: []string{"fetch"}, Passive: true}); !errors.Is(err, exit101) {
+		t.Fatalf("Run = %v, want cargo's own error", err)
+	}
+	if !req.SubmitOnly || scanned != evilLock {
+		t.Errorf("scan request %+v of %q, want the lock posted", req, scanned)
 	}
 }
 
@@ -381,7 +528,7 @@ func TestRunCargoAdd_UnreadableWorkspaceRunsCargoAndWarns(t *testing.T) {
 	if err != nil || !ex.called {
 		t.Fatalf("Run = %v, cargo ran = %v; want cargo run and nil", err, ex.called)
 	}
-	if want := "ossprey: warning: Cargo.lock not checked after `cargo update` (resolver.lockfile-path moves it); cargo's changes are kept\n"; out != want {
+	if want := "ossprey: warning: Cargo.lock not checked after `cargo update` (a resolver.lockfile-path may move it); cargo's changes are kept\n"; out != want {
 		t.Errorf("output = %q, want %q", out, want)
 	}
 }
@@ -491,6 +638,52 @@ func TestRunCargoInstall_FromElsewhereForwardsUnchecked(t *testing.T) {
 		if !strings.Contains(out, "no crates.io crate named") {
 			t.Errorf("cargo %v: verbose output lacks the reason:\n%s", args, out)
 		}
+		if out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: args}); err != nil || out != "" {
+			t.Errorf("cargo %v: quiet Run = %v, output %q; want nothing printed", args, err, out)
+		}
+	}
+}
+
+// crates.io named by --registry or --index, or by no flag at all, is checked; a default registry elsewhere is not.
+func TestRunCargoInstall_RegistryDecidesTheCheck(t *testing.T) {
+	corp := "[registries.corp]\nindex = \"sparse+https://crates.corp.example/\"\n"
+	for _, tc := range []struct {
+		name, config, env string
+		args              []string
+		checked           bool
+	}{
+		{"crates.io by name", "", "", []string{"install", "--registry", "crates-io", "itoa"}, true},
+		{"crates.io by name, joined", "", "", []string{"install", "--registry=crates-io", "itoa"}, true},
+		{"crates.io's sparse index", "", "", []string{"install", "--index", "sparse+https://index.crates.io/", "itoa"}, true},
+		{"crates.io's git index", "", "", []string{"install", "--index=https://github.com/rust-lang/crates.io-index", "itoa"}, true},
+		{"corp by default in CARGO_HOME", corp + "[registry]\ndefault = \"corp\"\n", "", []string{"install", "itoa"}, false},
+		{"corp by default, crates.io by name", corp + "[registry]\ndefault = \"corp\"\n", "", []string{"install", "--registry", "crates-io", "itoa"}, true},
+		{"corp by CARGO_REGISTRY_DEFAULT", corp, "corp", []string{"install", "itoa"}, false},
+		{"corp by --config", corp, "", []string{"--config", `registry.default="corp"`, "install", "itoa"}, false},
+		{"crates-io by default", "[registry]\ndefault = \"crates-io\"\n", "", []string{"install", "itoa"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("CARGO_HOME", home)
+			writeFile(t, filepath.Join(home, "config.toml"), tc.config)
+			t.Setenv("CARGO_REGISTRY_DEFAULT", tc.env)
+			if tc.env == "" {
+				unsetEnv(t, "CARGO_REGISTRY_DEFAULT")
+			}
+			ex := &stubExec{}
+			checked := false
+			swap(t, ex.fn, func(ctx context.Context, o check.Options) (*ossbom.SBOM, error) {
+				checked = true
+				return cleanSBOM(ctx, o)
+			})
+			latest := func(context.Context, string, string) (string, error) { return "1.0.19", nil }
+			if err := Run(context.Background(), Options{Bin: "cargo", Args: tc.args, ResolveLatest: latest}); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if checked != tc.checked || !ex.called {
+				t.Errorf("checked = %v, forwarded = %v; want checked %v and forwarded", checked, ex.called, tc.checked)
+			}
+		})
 	}
 }
 
@@ -588,6 +781,33 @@ func TestLockfileMoved(t *testing.T) {
 	if err := os.Remove(filepath.Join(home, "config.toml")); err != nil {
 		t.Fatal(err)
 	}
+	// cargo merges an included file, which may set lockfile-path, so any include counts.
+	include := "include = [\"lock.toml\"]\n"
+	writeFile(t, filepath.Join(project, ".cargo", "config.toml"), include)
+	if !lockfileMoved([]string{"add", "serde"}, sub) {
+		t.Error("missed an include in an ancestor's .cargo/config.toml")
+	}
+	if err := os.Remove(filepath.Join(project, ".cargo", "config.toml")); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(home, "config.toml"), include)
+	if !lockfileMoved([]string{"add", "serde"}, sub) {
+		t.Error("missed an include in CARGO_HOME's config.toml")
+	}
+	if err := os.Remove(filepath.Join(home, "config.toml")); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, file, include)
+	if !lockfileMoved([]string{"--config", file, "add", "serde"}, sub) {
+		t.Error("missed an include in a --config file")
+	}
+	if !lockfileMoved([]string{"--config", `include=["lock.toml"]`, "add", "serde"}, sub) {
+		t.Error("missed an include on the command line")
+	}
+	writeFile(t, filepath.Join(project, ".cargo", "config.toml"), "[build]\njobs = 4\n# include nothing\n")
+	if lockfileMoved([]string{"add", "serde"}, sub) {
+		t.Error("a config with no include or lockfile-path moves nothing")
+	}
 	t.Setenv("CARGO_RESOLVER_LOCKFILE_PATH", "x/Cargo.lock")
 	if !lockfileMoved([]string{"add", "serde"}, sub) {
 		t.Error("missed CARGO_RESOLVER_LOCKFILE_PATH")
@@ -639,5 +859,89 @@ func TestReadCargoWorkspaceWithCargo(t *testing.T) {
 	}
 	if _, err := os.Stat(ws.Lock); !errors.Is(err, os.ErrNotExist) {
 		t.Error("cargo metadata --no-deps must not write a lock")
+	}
+
+	// --manifest-path after the verb names another workspace than the one cargo runs in.
+	other := filepath.Join(dir, "other")
+	if err := os.MkdirAll(filepath.Join(other, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(other, "Cargo.toml"), "[package]\nname = \"other\"\nversion = \"0.1.0\"\nedition = \"2021\"\n")
+	writeFile(t, filepath.Join(other, "src", "lib.rs"), "")
+	if ws, err = readCargoWorkspace(context.Background(), []string{"add", "--manifest-path", filepath.Join(other, "Cargo.toml"), "itoa"}); err != nil {
+		t.Fatal(err)
+	}
+	if !same(filepath.Dir(ws.Lock), other) || len(ws.Manifests) != 1 || !same(ws.Manifests[0], filepath.Join(other, "Cargo.toml")) {
+		t.Errorf("--manifest-path: lock %s, manifests %v; want the other workspace's", ws.Lock, ws.Manifests)
+	}
+
+	// A lock cargo would write elsewhere is not checked.
+	if err := os.MkdirAll(filepath.Join(member, ".cargo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(member, ".cargo", "config.toml"), "include = [\"lock.toml\"]\n")
+	writeFile(t, filepath.Join(member, ".cargo", "lock.toml"), "[resolver]\nlockfile-path = \"locks/Cargo.lock\"\n")
+	if _, err := readCargoWorkspace(context.Background(), []string{"add", "itoa"}); !errors.Is(err, errLockfileMoved) {
+		t.Errorf("a config include: err = %v, want errLockfileMoved", err)
+	}
+	if err := os.Remove(filepath.Join(member, ".cargo", "config.toml")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CARGO_RESOLVER_LOCKFILE_PATH", filepath.Join(dir, "elsewhere", "Cargo.lock"))
+	if _, err := readCargoWorkspace(context.Background(), []string{"add", "itoa"}); !errors.Is(err, errLockfileMoved) {
+		t.Errorf("CARGO_RESOLVER_LOCKFILE_PATH: err = %v, want errLockfileMoved", err)
+	}
+}
+
+// Registry trust for the copied lock reads the configs where cargo runs, through scan and catalog, not those around the copy.
+func TestRunCargoAdd_TrustReadsTheConfigsWhereCargoRuns(t *testing.T) {
+	// itoa keeps the first scan from coming back empty, which would rescan through scanProject's fallback.
+	corpLock := "version = 4\n\n[[package]]\nname = \"acme-sparse\"\nversion = \"1.0.0\"\nsource = \"sparse+https://crates.corp.example/internal/\"\nchecksum = \"aaaa\"\n\n" +
+		"[[package]]\nname = \"itoa\"\nversion = \"1.0.15\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"bbbb\"\n"
+	replace := "[source.corp]\nregistry = \"sparse+https://crates.corp.example/internal/\"\nreplace-with = \"elsewhere\"\n"
+	policy, err := trust.Parse([]string{"https://crates.corp.example/internal/"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, replaced := range []bool{false, true} {
+		t.Run(map[bool]string{false: "no replacement", true: "a replacement"}[replaced], func(t *testing.T) {
+			t.Setenv("CARGO_HOME", t.TempDir())
+			root, ws := cargoProject(t)
+			if replaced {
+				if err := os.Mkdir(filepath.Join(root, ".cargo"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				writeFile(t, filepath.Join(root, ".cargo", "config.toml"), replace)
+			}
+			var sent []string
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body struct {
+					SBOM struct {
+						Components []struct {
+							Purl string `json:"purl"`
+						} `json:"components"`
+					} `json:"sbom"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&body)
+				for _, c := range body.SBOM.Components {
+					sent = append(sent, c.Purl)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"components": [], "vulnerabilities": []}`))
+			}))
+			t.Cleanup(api.Close)
+			swap(t, func(context.Context, string, []string) error {
+				writeFile(t, ws.Lock, corpLock)
+				return nil
+			}, cleanSBOM)
+			swapScan(t, scanProject)
+
+			if _, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"update"}, APIURL: api.URL, APIKey: "k", Trust: policy}); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if checked := slices.ContainsFunc(sent, func(p string) bool { return strings.Contains(p, "acme-sparse") }); checked != replaced {
+				t.Errorf("sent %v; want acme-sparse checked %v", sent, replaced)
+			}
+		})
 	}
 }

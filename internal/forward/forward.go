@@ -554,6 +554,8 @@ func Run(ctx context.Context, opts Options) error {
 				parsed.LocalCommand, m.Bin, strings.Join(opts.Args, " "))
 			return forwardTo()
 		}
+	} else if m.Ecosystem == "cargo" {
+		parsed = parseCargoInstall(opts.Args[start:], cargoDefaultRegistry(opts.Args))
 	} else {
 		parsed = parseInstallArgs(m, opts.Args[start:], m.reqFileArgs != nil && m.reqFileArgs(opts.Args))
 	}
@@ -1209,9 +1211,6 @@ func ParseSpecs(m *Manager, args []string) installArgs {
 // parseInstallArgs is ParseSpecs, except that with positionalReqFiles every
 // positional argument is a requirements file (`uv pip sync req.txt`).
 func parseInstallArgs(m *Manager, args []string, positionalReqFiles bool) installArgs {
-	if m.Ecosystem == "cargo" {
-		return parseCargoInstall(args)
-	}
 	valFlags := valueFlags[m.Bin]
 	if m.Ecosystem == "pypi" {
 		args = splitAttachedShorts(args, pythonOptionFlags(m), clapEquals(m))

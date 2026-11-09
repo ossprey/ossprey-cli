@@ -86,6 +86,15 @@ func isCratesIo(source string) (is, maybe bool) {
 	return strings.ToLower(host) == want[0], false
 }
 
+// IsCratesIoIndex reports whether cargo may read an `--index` URL as crates.io's.
+func IsCratesIoIndex(index string) bool {
+	if !strings.HasPrefix(index, "sparse+") {
+		index = "registry+" + index
+	}
+	is, maybe := isCratesIo(index)
+	return is || maybe
+}
+
 func nonASCII(r rune) bool { return r > unicode.MaxASCII }
 
 // gitCommit is the locked commit Cargo writes after '#' in a git source.

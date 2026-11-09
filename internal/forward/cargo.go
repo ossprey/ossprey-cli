@@ -13,6 +13,9 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/BurntSushi/toml"
+
+	"github.com/ossprey/ossprey-cli/internal/catalog"
 	"github.com/ossprey/ossprey-cli/internal/check"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
 	"github.com/ossprey/ossprey-cli/internal/progress"
@@ -59,10 +62,10 @@ func cargoHas(args []string, flags ...string) bool {
 // cargoSourceFlags install every crate named from somewhere other than crates.io.
 var cargoSourceFlags = flagSet("--git", "--path", "--index", "--registry")
 
-// parseCargoInstall classifies `cargo install`'s arguments: each positional is a crate, --version pins them all, and a source flag takes them off crates.io.
-func parseCargoInstall(args []string) installArgs {
+// parseCargoInstall classifies `cargo install`'s arguments: each positional is a crate, --version pins them all, and a source flag other than crates.io, or else a defaultRegistry, takes them off crates.io.
+func parseCargoInstall(args []string, defaultRegistry string) installArgs {
 	var crates []string
-	version, source := "", ""
+	version, source, cratesIo := "", "", false
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
@@ -84,9 +87,14 @@ func parseCargoInstall(args []string) installArgs {
 		switch {
 		case flag == "--version" || flag == "--vers":
 			version = value
+		case flag == "--registry" && value == "crates-io" || flag == "--index" && catalog.IsCratesIoIndex(value):
+			source, cratesIo = "", true
 		case cargoSourceFlags[flag]:
 			source = flag + " " + value
 		}
+	}
+	if source == "" && !cratesIo && defaultRegistry != "" {
+		source = "registry.default " + defaultRegistry
 	}
 	var out installArgs
 	for _, c := range crates {
@@ -120,11 +128,13 @@ func checkCargoAfter(ctx context.Context, m *Manager, opts Options) error {
 	command := m.Bin + " " + strings.Join(opts.Args, " ")
 	if opts.Passive {
 		flushWarnings(ctx)
-		if err := execFn(ctx, m.Bin, opts.Args); err != nil {
-			return err
+		runErr := execFn(ctx, m.Bin, opts.Args)
+		ws, err := cargoWorkspaceFn(ctx, opts.Args)
+		// A failed command may still have locked (cargo fetch locks, then downloads), so its lock is posted if there is one.
+		if runErr != nil && (err != nil || !exists(ws.Lock)) {
+			return runErr
 		}
 		stop := progress.Submit(progressTo(), 0)
-		ws, err := cargoWorkspaceFn(ctx, opts.Args)
 		var sbom *ossbom.SBOM
 		if err == nil {
 			sbom, err = scanCargoLock(ctx, opts, ws, true)
@@ -132,7 +142,7 @@ func checkCargoAfter(ctx context.Context, m *Manager, opts Options) error {
 		stop()
 		flushWarnings(ctx)
 		reportPassive(opts, sbom, err)
-		return nil
+		return runErr
 	}
 
 	ws, err := cargoWorkspaceFn(ctx, opts.Args)
@@ -141,8 +151,22 @@ func checkCargoAfter(ctx context.Context, m *Manager, opts Options) error {
 		saved = snapshot(ws.files())
 	}
 	flushWarnings(ctx)
-	if runErr := execFn(ctx, m.Bin, opts.Args); runErr != nil {
-		return runErr // cargo's own exit code, unscanned
+	runErr := execFn(ctx, m.Bin, opts.Args)
+	if runErr != nil {
+		if err != nil {
+			return runErr
+		}
+		// cargo writes before it can fail: fetch locks before it downloads, add edits Cargo.toml before it resolves.
+		changed := changedFiles(saved)
+		if !slices.Contains(changed, ws.Lock) {
+			for i, p := range changed {
+				changed[i] = displayPath(p)
+			}
+			if len(changed) > 0 {
+				fmt.Fprintf(errOut, "ossprey: warning: `%s` failed after changing %s, which was not checked\n", command, strings.Join(changed, ", "))
+			}
+			return runErr
+		}
 	}
 	var sbom *ossbom.SBOM
 	if err == nil {
@@ -153,7 +177,7 @@ func checkCargoAfter(ctx context.Context, m *Manager, opts Options) error {
 	flushWarnings(ctx)
 	if err != nil {
 		fmt.Fprintf(errOut, "ossprey: warning: Cargo.lock not checked after `%s` (%v); cargo's changes are kept\n", command, err)
-		return nil
+		return runErr
 	}
 
 	summary, hasMalware := scan.MalwareReports(sbom, severity.ParseFloor(sbom.FailingSeverityFloor))
@@ -175,7 +199,7 @@ func checkCargoAfter(ctx context.Context, m *Manager, opts Options) error {
 	default:
 		fmt.Fprintf(errOut, "ossprey: %s\n", verdict)
 	}
-	return nil
+	return runErr
 }
 
 // scanCargoLock scans a copy of the workspace's Cargo.lock alone, so nothing else in the tree is checked with it.
@@ -219,7 +243,7 @@ func (w cargoWorkspace) files() []string {
 }
 
 // errLockfileMoved is a resolver.lockfile-path, which puts the lock where this check does not look.
-var errLockfileMoved = errors.New("resolver.lockfile-path moves it")
+var errLockfileMoved = errors.New("a resolver.lockfile-path may move it")
 
 // readCargoWorkspace asks `cargo metadata --no-deps`, which reads manifests only, for the workspace root and its members.
 func readCargoWorkspace(ctx context.Context, args []string) (cargoWorkspace, error) {
@@ -344,20 +368,25 @@ func cargoConfigDir(globals []string) string {
 	return dir
 }
 
-// lockfileMoved reports a resolver.lockfile-path cargo may read: from the environment, the command line, or a config file.
+// lockfileMoved reports a resolver.lockfile-path cargo may read: from the environment, the command line, or a config file or one it includes.
 func lockfileMoved(args []string, configDir string) bool {
 	if os.Getenv("CARGO_RESOLVER_LOCKFILE_PATH") != "" {
 		return true
 	}
+	moves := func(data []byte) bool {
+		doc, ok := cargoConfigDoc(data)
+		return bytes.Contains(data, []byte("lockfile-path")) || ok && doc["include"] != nil
+	}
 	var files []string
-	for i, a := range args {
-		if strings.Contains(a, "lockfile-path") {
+	for _, c := range cargoConfigArgs(args) {
+		if moves([]byte(c)) {
 			return true
 		}
-		if a == "--config" && i+1 < len(args) {
-			files = append(files, args[i+1])
-		} else if v, ok := strings.CutPrefix(a, "--config="); ok {
-			files = append(files, v)
+		files = append(files, c)
+	}
+	for _, a := range args {
+		if strings.Contains(a, "lockfile-path") {
+			return true
 		}
 	}
 	for d := configDir; ; d = filepath.Dir(d) {
@@ -366,25 +395,123 @@ func lockfileMoved(args []string, configDir string) bool {
 			break
 		}
 	}
-	home := os.Getenv("CARGO_HOME")
-	if home == "" {
-		if h, err := os.UserHomeDir(); err == nil {
-			home = filepath.Join(h, ".cargo")
-		}
-	}
-	if home != "" {
+	if home := cargoHome(); home != "" {
 		files = append(files, filepath.Join(home, "config.toml"), filepath.Join(home, "config"))
 	}
 	for _, f := range files {
-		// Only a regular file is read: a FIFO may never end.
-		if fi, err := os.Stat(f); err != nil || !fi.Mode().IsRegular() {
-			continue
-		}
-		if data, err := os.ReadFile(f); err == nil && bytes.Contains(data, []byte("lockfile-path")) {
+		if data, ok := readRegular(f); ok && moves(data) {
 			return true
 		}
 	}
 	return false
+}
+
+// cargoDefaultRegistry is the registry other than crates.io that `cargo install` takes a crate from when the line names none, or "".
+func cargoDefaultRegistry(args []string) string {
+	// The value set nearest the line wins; an include may set it too.
+	pick := func(data []byte) (string, bool) {
+		doc, ok := cargoConfigDoc(data)
+		if !ok {
+			return "", false
+		}
+		if reg, _ := doc["registry"].(map[string]any); reg != nil {
+			if v, ok := reg["default"].(string); ok {
+				return v, true
+			}
+		}
+		if doc["include"] != nil {
+			return "an included config", true
+		}
+		return "", false
+	}
+	found := func(v string) string {
+		if v == "crates-io" {
+			return ""
+		}
+		return v
+	}
+	configs := cargoConfigArgs(args)
+	for _, c := range slices.Backward(configs) {
+		if v, ok := pick([]byte(c)); ok {
+			return found(v)
+		}
+		if data, ok := readRegular(c); ok {
+			if v, ok := pick(data); ok {
+				return found(v)
+			}
+		}
+	}
+	if v := os.Getenv("CARGO_REGISTRY_DEFAULT"); v != "" {
+		return found(v)
+	}
+	home := cargoHome()
+	if home == "" {
+		return ""
+	}
+	// cargo install reads no project config, only those from CARGO_HOME up.
+	var files []string
+	for d := home; ; d = filepath.Dir(d) {
+		files = append(files, filepath.Join(d, ".cargo", "config.toml"), filepath.Join(d, ".cargo", "config"))
+		if filepath.Dir(d) == d {
+			break
+		}
+	}
+	files = append(files, filepath.Join(home, "config.toml"), filepath.Join(home, "config"))
+	for _, f := range files {
+		if data, ok := readRegular(f); ok {
+			if v, ok := pick(data); ok {
+				return found(v)
+			}
+		}
+	}
+	return ""
+}
+
+// cargoConfigArgs are the --config values on the line, in order, before any `--`.
+func cargoConfigArgs(args []string) []string {
+	var out []string
+	for i := 0; i < len(args) && args[i] != "--"; i++ {
+		if args[i] == "--config" && i+1 < len(args) {
+			out = append(out, args[i+1])
+			i++
+		} else if v, ok := strings.CutPrefix(args[i], "--config="); ok {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// cargoConfigDoc parses a cargo config, or a --config KEY=VALUE, as TOML.
+func cargoConfigDoc(data []byte) (map[string]any, bool) {
+	var doc map[string]any
+	err := toml.Unmarshal(data, &doc)
+	return doc, err == nil
+}
+
+// cargoHome is CARGO_HOME, else ~/.cargo, else "".
+func cargoHome() string {
+	if home := os.Getenv("CARGO_HOME"); home != "" {
+		return home
+	}
+	if h, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(h, ".cargo")
+	}
+	return ""
+}
+
+// readRegular reads p only when it is a regular file, since a FIFO may never end.
+func readRegular(p string) ([]byte, bool) {
+	if fi, err := os.Stat(p); err != nil || !fi.Mode().IsRegular() {
+		return nil, false
+	}
+	data, err := os.ReadFile(p)
+	return data, err == nil
+}
+
+// exists reports whether p names anything.
+func exists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
 }
 
 // savedFile is a manifest or lock as it was before cargo ran.
@@ -412,6 +539,18 @@ func snapshot(paths []string) []savedFile {
 			continue
 		}
 		out = append(out, savedFile{path: p, existed: true, data: data, mode: fi.Mode().Perm()})
+	}
+	return out
+}
+
+// changedFiles are the saved files the command changed, created or removed.
+func changedFiles(saved []savedFile) []string {
+	var out []string
+	for _, f := range saved {
+		now, err := os.ReadFile(f.path)
+		if f.existed != (err == nil) || f.existed && !bytes.Equal(now, f.data) {
+			out = append(out, f.path)
+		}
 	}
 	return out
 }
