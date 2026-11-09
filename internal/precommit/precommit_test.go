@@ -8,6 +8,8 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
+	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -303,6 +305,76 @@ func TestStagedDeltaReadsAnUnstagedCargoWorkspaceRoot(t *testing.T) {
 	}
 	if out := warn.Drain(ctx); out != "" {
 		t.Errorf("a commit touching only a member warned:\n%s", out)
+	}
+}
+
+// git reads ":0:../x" as stage 0 of a path outside the repo, so a directory named "0:.." must still read as a path.
+func TestStagedDeltaReadsAPathThatLooksLikeAStage(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a colon cannot be in a Windows file name")
+	}
+	dir := initRepo(t)
+	writeRepoFile(t, dir, "README.md", "x")
+	commitAll(t, dir)
+	writeRepoFile(t, dir, "0:../a/Cargo.toml", "[package]\nname = \"a\"\nversion = \"0.1.0\"\n\n[dependencies]\nserde = \"=1.0.228\"\n")
+	gitT(t, dir, "add", "-A")
+	got, err := StagedDelta(context.Background(), dir, trust.Policy{})
+	if err != nil {
+		t.Fatalf("StagedDelta: %v", err)
+	}
+	want := []Package{{Type: "cargo", Name: "serde", Version: "1.0.228", Path: "0:../a/Cargo.toml"}}
+	if !reflect.DeepEqual(got.Packages, want) {
+		t.Errorf("delta mismatch:\n got: %+v\nwant: %+v", got.Packages, want)
+	}
+}
+
+// cat-file reads one name per line, so a workspace root whose path holds a newline is sized on its own rather than skipped for the root above it.
+func TestStagedDeltaReadsAWorkspaceRootWhosePathHoldsANewline(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a newline cannot be in a Windows file name")
+	}
+	dir := initRepo(t)
+	writeRepoFile(t, dir, "Cargo.toml", "[workspace]\n\n[workspace.dependencies]\nitoa = \"=1.0.10\"\n")
+	writeRepoFile(t, dir, "a\nb/Cargo.toml", "[workspace]\nmembers = [\"m\"]\n\n[workspace.dependencies]\nitoa = \"=1.0.11\"\n")
+	member := "[package]\nname = \"m\"\nversion = \"0.1.0\"\n\n[dependencies]\n"
+	writeRepoFile(t, dir, "a\nb/m/Cargo.toml", member)
+	commitAll(t, dir)
+	writeRepoFile(t, dir, "a\nb/m/Cargo.toml", member+"itoa = { workspace = true }\n")
+	gitT(t, dir, "add", "-A")
+	got, err := StagedDelta(context.Background(), dir, trust.Policy{})
+	if err != nil {
+		t.Fatalf("StagedDelta: %v", err)
+	}
+	want := []Package{{Type: "cargo", Name: "itoa", Version: "1.0.11", Path: "a\nb/m/Cargo.toml"}}
+	if !reflect.DeepEqual(got.Packages, want) {
+		t.Errorf("delta mismatch:\n got: %+v\nwant: %+v", got.Packages, want)
+	}
+}
+
+// A name holding a newline that has no object is unsized, but one git fails to look up fails the call, since its root's pins would drop unseen.
+func TestBlobSizesSkipsOnlyAMissingNameHoldingANewline(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a newline cannot be in a Windows file name")
+	}
+	ctx := context.Background()
+	dir := initRepo(t)
+	writeRepoFile(t, dir, "a\nb/Cargo.toml", "[workspace]\n")
+	commitAll(t, dir)
+	present := []string{":0:a\nb/Cargo.toml", "HEAD:a\nb/Cargo.toml"}
+	missing := []string{":0:x\ny/Cargo.toml", "HEAD:x\ny/Cargo.toml"}
+	got, err := blobSizes(ctx, dir, append(slices.Clone(present), missing...))
+	if err != nil {
+		t.Fatalf("blobSizes: %v", err)
+	}
+	if len(got) != len(present) || got[present[0]].oid == "" || got[present[1]].oid == "" {
+		t.Errorf("sized %+v, want %q alone", got, present)
+	}
+	// rev-parse exits 128 on a corrupt index, where a missing name exits 1.
+	if err := os.WriteFile(filepath.Join(dir, ".git", "index"), []byte("corrupt"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := blobSizes(ctx, dir, missing[:1]); err == nil {
+		t.Errorf("a failed lookup sized %+v with no error", got)
 	}
 }
 
@@ -623,8 +695,7 @@ func TestStagedDeltaNeverReadsAProofLockOverItsBound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	trace := filepath.Join(t.TempDir(), "trace")
-	t.Setenv("GIT_TRACE", trace)
+	asked := logBlobReads(t)
 	got, err := StagedDelta(ctx, dir, trust.Policy{})
 	if err != nil {
 		t.Fatalf("StagedDelta: %v", err)
@@ -633,12 +704,95 @@ func TestStagedDeltaNeverReadsAProofLockOverItsBound(t *testing.T) {
 	if !reflect.DeepEqual(got.Packages, want) {
 		t.Errorf("delta mismatch:\n got: %+v\nwant: %+v", got.Packages, want)
 	}
-	log, err := os.ReadFile(trace)
-	if err != nil || !strings.Contains(string(log), "cat-file blob") {
-		t.Fatalf("git trace holds no blob read (%v):\n%s", err, log)
+	if asked == nil {
+		return
 	}
-	if strings.Contains(string(log), strings.TrimSpace(string(oid))) {
+	log := asked()
+	if strings.TrimSpace(log) == "" {
+		t.Fatal("the hook read no blob through git cat-file --batch")
+	}
+	if strings.Contains(log, strings.TrimSpace(string(oid))) {
 		t.Errorf("the hook read the lock over the bound:\n%s", log)
+	}
+}
+
+// logBlobReads puts a git on PATH that logs every name the hook's cat-file --batch is asked for, and returns the log so far.
+func logBlobReads(t *testing.T) func() string {
+	t.Helper()
+	// The logging git is a shell script, so on Windows the caller checks the delta alone.
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	real, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin, log := t.TempDir(), filepath.Join(t.TempDir(), "asked")
+	script := "#!/bin/sh\nif [ \"$3 $4\" = \"cat-file --batch\" ]; then tee -a '" + log + "' | '" + real + "' \"$@\"; else exec '" + real + "' \"$@\"; fi\n"
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return func() string {
+		data, _ := os.ReadFile(log)
+		return string(data)
+	}
+}
+
+// A cargo vendor commit holds a few files per crate, and a git per file took seconds, so every blob goes through one git.
+func TestStagedDeltaReadsAVendoredCommitWithAFewGits(t *testing.T) {
+	dir := initRepo(t)
+	writeRepoFile(t, dir, ".cargo/config.toml", vendorConfig("vendor"))
+	writeRepoFile(t, dir, "Cargo.toml", appManifest)
+	var locked [][3]string
+	for i := range 40 {
+		name, sum := fmt.Sprintf("crate%d", i), fmt.Sprintf("%064x", i)
+		vendorCrate(t, dir, "vendor/"+name, name, "1.0.0", sum, lockedCrates([3]string{"dev-only", "1.0.0", strings.Repeat("d", 64)}))
+		locked = append(locked, [3]string{name, "1.0.0", sum})
+	}
+	writeRepoFile(t, dir, "Cargo.lock", lockedCrates(locked...))
+	gitT(t, dir, "add", "-A")
+	trace := filepath.Join(t.TempDir(), "trace")
+	t.Setenv("GIT_TRACE", trace)
+	got, err := StagedDelta(context.Background(), dir, trust.Policy{})
+	if err != nil {
+		t.Fatalf("StagedDelta: %v", err)
+	}
+	// Every crate from the project's lock, and no vendored copy's own dev-only lock.
+	if len(got.Packages) != 40 || slices.ContainsFunc(got.Packages, func(p Package) bool { return p.Name == "dev-only" }) {
+		t.Errorf("delta: %+v", got.Packages)
+	}
+	log, err := os.ReadFile(trace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(log), "trace: built-in: git"); n > 10 {
+		t.Errorf("read 40 vendored crates with %d gits, want a fixed few:\n%s", n, log)
+	}
+}
+
+// A blob over its limit is refused without stopping the next read.
+func TestBlobReaderRefusesABlobOverItsLimitAndReadsOn(t *testing.T) {
+	ctx := context.Background()
+	dir := initRepo(t)
+	// Larger than a pipe's buffer, so git is still writing when the read stops.
+	big, small := strings.Repeat("x", 1<<20), "small\n"
+	writeRepoFile(t, dir, "big", big)
+	writeRepoFile(t, dir, "small", small)
+	gitT(t, dir, "add", "-A")
+	blobs := &blobReader{ctx: ctx, repoDir: dir}
+	defer blobs.close()
+	if _, ok := blobs.read(":big", int64(len(big))-1); ok {
+		t.Error("read a blob one byte over its limit")
+	}
+	if blob, ok := blobs.read(":small", 64); !ok || string(blob) != small {
+		t.Errorf("after a refusal, read %q (ok %v), want %q", blob, ok, small)
+	}
+	if blob, ok := blobs.read(":big", int64(len(big))); !ok || string(blob) != big {
+		t.Errorf("refused a blob at its limit (ok %v, %d bytes)", ok, len(blob))
+	}
+	if _, err := blobs.show(":absent"); err == nil {
+		t.Error("showed a path the index does not hold")
 	}
 }
 
@@ -674,6 +828,7 @@ func TestStagedDeltaNeverReadsAWorkspaceRootOverItsBound(t *testing.T) {
 	}
 	trace := filepath.Join(t.TempDir(), "trace")
 	t.Setenv("GIT_TRACE", trace)
+	asked := logBlobReads(t)
 	got, err := StagedDelta(ctx, dir, trust.Policy{})
 	if err != nil {
 		t.Fatalf("StagedDelta: %v", err)
@@ -690,9 +845,15 @@ func TestStagedDeltaNeverReadsAWorkspaceRootOverItsBound(t *testing.T) {
 	if err != nil || !strings.Contains(string(log), "cat-file --batch-check") {
 		t.Fatalf("git trace holds no sizing call (%v):\n%s", err, log)
 	}
-	for _, read := range []string{strings.TrimSpace(string(oid)), "show :Cargo.toml", "show HEAD:Cargo.toml"} {
-		if strings.Contains(string(log), read) {
-			t.Errorf("the hook read the root over the bound (%s):\n%s", read, log)
+	reads := ""
+	if asked != nil {
+		if reads = asked(); strings.TrimSpace(reads) == "" {
+			t.Fatal("the hook read no blob through git cat-file --batch")
+		}
+	}
+	for _, read := range []string{strings.TrimSpace(string(oid)), ":0:Cargo.toml", "HEAD:Cargo.toml"} {
+		if strings.Contains(string(log), "show "+read) || slices.Contains(strings.Split(reads, "\n"), read) {
+			t.Errorf("the hook read the root over the bound (%s):\n%s\n%s", read, log, reads)
 		}
 	}
 }

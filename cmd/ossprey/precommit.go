@@ -159,12 +159,22 @@ func runPrecommit(ctx context.Context, apiURL, apiKey string, verbose bool, w io
 	}
 	byPurl := make(map[string]staged)
 	var purls []string
+	// A crate also sent bare, as one from a host cargo may map to crates.io is, counts as checked.
+	bare, marked := map[string]bool{}, map[string]bool{}
+	for _, p := range delta.Packages {
+		if len(p.Qualifiers) == 0 {
+			bare[p.Type+"/"+p.Name+"@"+p.Version] = true
+		}
+	}
 	for _, p := range delta.Packages {
 		if p.Version == "" || p.Name == "" {
 			continue
 		}
 		// A git or private-registry crate has no crates.io advisory, and its bare purl would be matched against one.
 		if len(p.Qualifiers) > 0 {
+			if id := p.Type + "/" + p.Name + "@" + p.Version; !bare[id] {
+				marked[id] = true
+			}
 			continue
 		}
 		// Same purl shape as ossbom.ToMiniBOM: pkg:<type>/<name>@<version>,
@@ -175,6 +185,9 @@ func runPrecommit(ctx context.Context, apiURL, apiKey string, verbose bool, w io
 		}
 		byPurl[purl] = staged{pkg: p}
 		purls = append(purls, purl)
+	}
+	if len(marked) > 0 && verbose {
+		fmt.Fprintf(w, "ossprey: %d staged crate(s) from git or a private registry; not checked\n", len(marked))
 	}
 	if len(purls) == 0 {
 		if verbose {

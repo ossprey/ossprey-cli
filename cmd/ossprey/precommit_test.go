@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -267,11 +266,36 @@ func TestPrecommitSendsCratesIoCratesButNotMarkedOnes(t *testing.T) {
 			return nil, nil
 		})
 
-	if blocked := runPrecommit(context.Background(), "https://api.test", "key", false, io.Discard); blocked {
+	var out bytes.Buffer
+	if blocked := runPrecommit(context.Background(), "https://api.test", "key", true, &out); blocked {
 		t.Fatal("clean commit must not be blocked")
 	}
 	if len(sent) != 1 || sent[0] != "pkg:cargo/serde@1.0.228" {
 		t.Errorf("purls sent: got %v, want only pkg:cargo/serde@1.0.228", sent)
+	}
+	// Left out, but said so under -v.
+	if !strings.Contains(out.String(), "1 staged crate(s) from git or a private registry; not checked") {
+		t.Errorf("verbose output: %q", out.String())
+	}
+}
+
+// A crate sent bare as well as marked, as one from a host cargo may map to crates.io is, is checked, so -v does not count it as left out.
+func TestPrecommitDoesNotCountACrateItAlsoSendsBare(t *testing.T) {
+	stubPrecommit(t,
+		func(context.Context, string) (precommit.Delta, error) {
+			return precommit.Delta{Packages: []precommit.Package{
+				{Type: "cargo", Name: "foo", Version: "1.0.0", Path: "Cargo.lock",
+					Qualifiers: map[string]string{"repository_url": "https://xn--thub-qp7a.com/"}},
+				{Type: "cargo", Name: "foo", Version: "1.0.0", Path: "Cargo.lock"},
+			}}, nil
+		},
+		func(context.Context, string, string, []string) ([]client.MalwareHit, error) { return nil, nil })
+	var out bytes.Buffer
+	if blocked := runPrecommit(context.Background(), "https://api.test", "key", true, &out); blocked {
+		t.Fatal("clean commit must not be blocked")
+	}
+	if strings.Contains(out.String(), "not checked") {
+		t.Errorf("verbose output counts a crate it checked: %q", out.String())
 	}
 }
 
