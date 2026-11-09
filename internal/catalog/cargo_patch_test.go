@@ -5,6 +5,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -425,6 +426,9 @@ func TestCatalogWarnsWhenCargoReplacesCratesIo(t *testing.T) {
 		{name: "config in a .cargo named in another case", files: map[string]string{"Cargo.toml": project, "tools/.Cargo/config.toml": mirrorConfig}, want: 1},
 		// Cargo reads a config through a linked .cargo directory, whose real path is not a .cargo.
 		{name: "config in a linked .cargo", tree: func(t *testing.T) string {
+			if runtime.GOOS == "windows" {
+				t.Skip("symlinks need privileges on Windows")
+			}
 			dir := t.TempDir()
 			writeTree(t, dir, map[string]string{"Cargo.toml": project, "cargo-config/config.toml": mirrorConfig})
 			if err := os.Symlink(filepath.Join(dir, "cargo-config"), filepath.Join(dir, ".cargo")); err != nil {
