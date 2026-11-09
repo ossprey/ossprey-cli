@@ -655,3 +655,20 @@ func TestCatalogReportsCargoReplacementWhereCargoRuns(t *testing.T) {
 		})
 	}
 }
+
+// Windows resolves a CARGO_HOME rooted without a drive, or relative to another drive, on that drive, as cargo's join leaves it (OSS-2553).
+func TestCargoHomeKeepsAWindowsRootedHomeOnItsDrive(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("only Windows has rooted and drive-relative paths")
+	}
+	for _, home := range []string{`\cargo`, `D:cargo`} {
+		t.Setenv("CARGO_HOME", home)
+		want, err := filepath.Abs(home)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := CargoHome(`C:\elsewhere`); got != want {
+			t.Errorf("CARGO_HOME=%s: %s, want %s", home, got, want)
+		}
+	}
+}

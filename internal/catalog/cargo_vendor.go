@@ -493,7 +493,14 @@ func cratesIoReplacement(levels map[string][]cargoFile, dir, home string) string
 // CargoHome is the directory cargo run in cwd reads its user-level config from: CARGO_HOME, a relative one joined to cwd, with `..` cleaned and links left alone as cargo 1.99.1 does, else ~/.cargo, else "".
 func CargoHome(cwd string) string {
 	if home := os.Getenv("CARGO_HOME"); home != "" {
-		if !filepath.IsAbs(home) {
+		switch {
+		case filepath.IsAbs(home):
+		case filepath.VolumeName(home) != "" || os.IsPathSeparator(home[0]):
+			// A Windows home rooted without a drive, or relative to another drive, resolves on that drive as cargo's join leaves it.
+			if abs, err := filepath.Abs(home); err == nil {
+				home = abs
+			}
+		default:
 			home = filepath.Join(cwd, home)
 		}
 		return filepath.Clean(home)

@@ -1422,3 +1422,20 @@ func TestRunCargoAdd_TrustReadsTheConfigsWhereCargoRuns(t *testing.T) {
 		})
 	}
 }
+
+// cargo reads a relative --config file from where it runs after -C, so a file of that name where ossprey started is not the one (OSS-2553).
+func TestCargoConfigFileIsReadWhereCargoRuns(t *testing.T) {
+	start, dir := t.TempDir(), t.TempDir()
+	writeFile(t, filepath.Join(start, "c.toml"), "ok = 1\n")
+	writeFile(t, filepath.Join(dir, "c.toml"), "[resolver]\nlockfile-path = \"alt/Cargo.lock\"\n\n[registry]\ndefault = \"corp\"\n")
+	t.Setenv("CARGO_HOME", t.TempDir())
+	unsetEnv(t, "CARGO_RESOLVER_LOCKFILE_PATH")
+	unsetEnv(t, "CARGO_REGISTRY_DEFAULT")
+	t.Chdir(start)
+	if !lockfileMoved([]string{"-Zunstable-options", "-C", dir, "--config", "c.toml", "generate-lockfile"}, dir) {
+		t.Error("lockfile-path in the -C directory's c.toml not seen")
+	}
+	if got := cargoDefaultRegistry([]string{"-Zunstable-options", "-C", dir, "--config", "c.toml", "install", "x"}); got != "corp" {
+		t.Errorf("registry.default from the -C directory's c.toml = %q, want corp", got)
+	}
+}

@@ -464,7 +464,7 @@ func lockfileMoved(args []string, configDir string) bool {
 		return !ok || resolver["lockfile-path"] != nil || doc["include"] != nil
 	}
 	for _, c := range cargoConfigArgs(args) {
-		if data, ok := cargoConfigArg(c); ok && moves(data) {
+		if data, ok := cargoConfigArg(c, configDir); ok && moves(data) {
 			return true
 		}
 	}
@@ -504,8 +504,9 @@ func cargoDefaultRegistry(args []string) string {
 		}
 		return v
 	}
+	dir := cargoConfigDir(args[:max(verbIndex("cargo", args), 0)])
 	for _, c := range slices.Backward(cargoConfigArgs(args)) {
-		if data, ok := cargoConfigArg(c); ok {
+		if data, ok := cargoConfigArg(c, dir); ok {
 			if v, ok := pick(data); ok {
 				return found(v)
 			}
@@ -514,7 +515,7 @@ func cargoDefaultRegistry(args []string) string {
 	if v := os.Getenv("CARGO_REGISTRY_DEFAULT"); v != "" {
 		return found(v)
 	}
-	home := catalog.CargoHome(cargoConfigDir(args[:max(verbIndex("cargo", args), 0)]))
+	home := catalog.CargoHome(dir)
 	if home == "" {
 		return ""
 	}
@@ -543,10 +544,15 @@ func cargoConfigArgs(args []string) []string {
 	return out
 }
 
-// cargoConfigArg is what cargo reads for a --config value: the file it names when that exists, else the value as TOML.
-func cargoConfigArg(c string) ([]byte, bool) {
-	if c != "" && exists(c) {
-		return readRegular(c)
+// cargoConfigArg is what cargo reads for a --config value: the file it names, from dir where cargo runs, when that exists, else the value as TOML.
+func cargoConfigArg(c, dir string) ([]byte, bool) {
+	p := c
+	if c != "" && dir != "" && filepath.VolumeName(c) == "" && !os.IsPathSeparator(c[0]) {
+		// cargo joins the value to its working directory uncleaned, so the kernel applies `..` after any link.
+		p = dir + string(filepath.Separator) + c
+	}
+	if c != "" && exists(p) {
+		return readRegular(p)
 	}
 	return []byte(c), true
 }
