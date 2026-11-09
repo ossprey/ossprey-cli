@@ -6,6 +6,10 @@ import (
 	"testing"
 )
 
+// treeLock is a root lock with a locked tree: a root-only lock covers no
+// workspace member.
+const treeLock = `{"lockfileVersion":3,"packages":{"":{},"node_modules/left-pad":{"version":"1.3.0","resolved":"https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"}}}`
+
 func TestMatchesWorkspaceGlobs(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -114,7 +118,7 @@ func TestIsWorkspaceMember(t *testing.T) {
 			name: "npm workspace member under root lock",
 			files: map[string]string{
 				"package.json":            `{"workspaces":["packages/*"]}`,
-				"package-lock.json":       `{}`,
+				"package-lock.json":       treeLock,
 				"packages/a/package.json": `{"name":"a"}`,
 			},
 			dir:  "packages/a",
@@ -124,7 +128,7 @@ func TestIsWorkspaceMember(t *testing.T) {
 			name: "non-member under the same root lock still resolves",
 			files: map[string]string{
 				"package.json":               `{"workspaces":["packages/*"]}`,
-				"package-lock.json":          `{}`,
+				"package-lock.json":          treeLock,
 				"examples/demo/package.json": `{"name":"demo"}`,
 			},
 			dir:  "examples/demo",
@@ -186,7 +190,7 @@ func TestIsWorkspaceMember(t *testing.T) {
 			name: "excluded member resolves",
 			files: map[string]string{
 				"package.json":                `{"workspaces":["packages/*","!packages/turbo"]}`,
-				"package-lock.json":           `{}`,
+				"package-lock.json":           treeLock,
 				"packages/turbo/package.json": `{"name":"turbo"}`,
 			},
 			dir:  "packages/turbo",
@@ -196,7 +200,7 @@ func TestIsWorkspaceMember(t *testing.T) {
 			name: "root manifest is not its own member",
 			files: map[string]string{
 				"package.json":      `{"workspaces":["."]}`,
-				"package-lock.json": `{}`,
+				"package-lock.json": treeLock,
 			},
 			dir:  ".",
 			want: false,
@@ -232,7 +236,7 @@ func TestIsWorkspaceMemberStopsAtScanRoot(t *testing.T) {
 	outer := t.TempDir()
 	writeTree(t, outer, map[string]string{
 		"package.json":                  `{"workspaces":["inner/packages/*"]}`,
-		"package-lock.json":             `{}`,
+		"package-lock.json":             treeLock,
 		"inner/packages/a/package.json": `{"name":"a"}`,
 	})
 	root := filepath.Join(outer, "inner")

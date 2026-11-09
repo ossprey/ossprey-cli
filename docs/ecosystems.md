@@ -56,8 +56,8 @@ never does that:
 - The resolvers do not see `OSSPREY_API_KEY`, `API_KEY`, `OSSPREY_MONITOR_ID` or
   any other `OSSPREY_*` variable.
 
-A Rust crate with dependencies and no `Cargo.lock` (beside it or at its
-workspace root) is unresolved too, as is a `package.json` whose
+A Rust crate with dependencies (git and path ones included) and no
+`Cargo.lock` (beside it or at its workspace root) is unresolved too, as is a `package.json` whose
 `package-lock.json` or `npm-shrinkwrap.json` cannot be parsed when no npm is
 available to resolve it instead. A manifest whose `uv.lock`, `poetry.lock`
 or `pdm.lock` parses is covered by that lock even when nothing could resolve it.

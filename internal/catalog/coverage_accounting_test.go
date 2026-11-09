@@ -48,6 +48,17 @@ func TestCargoCrateWithoutLockIsUnresolved(t *testing.T) {
 			"Cargo.toml": root, "crates/core/Cargo.toml": member,
 		}, []string{"crates/core/Cargo.toml"}},
 		{"no dependencies", map[string]string{"Cargo.toml": "[package]\nname = \"app\"\nversion = \"0.1.0\"\n"}, nil},
+		// Dependencies the direct-deps fallback does not emit still have
+		// trees only a lock names.
+		{"git dependency only", map[string]string{
+			"Cargo.toml": "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dependencies]\nfoo = { git = \"https://github.com/o/foo\" }\n",
+		}, []string{"Cargo.toml"}},
+		{"private-registry dev dependency only", map[string]string{
+			"Cargo.toml": "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[dev-dependencies]\nfoo = { version = \"1\", registry = \"corp\" }\n",
+		}, []string{"Cargo.toml"}},
+		{"path dependency only", map[string]string{
+			"Cargo.toml": "[package]\nname = \"app\"\nversion = \"0.1.0\"\n\n[target.'cfg(unix)'.dependencies]\nfoo = { path = \"../foo\" }\n",
+		}, []string{"Cargo.toml"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -279,5 +290,36 @@ func TestStubLockCoversNothing(t *testing.T) {
 	// A root-only npm lock still covers a package.json declaring nothing.
 	if got := unresolvedFor(t, map[string]string{"package.json": `{"name":"app","version":"1.0.0"}`, "package-lock.json": stubNpm}); len(got) != 0 {
 		t.Errorf("dependency-free project: unresolved = %v, want none", got)
+	}
+}
+
+// optionalDependencies are installed by default, so a manifest declaring only
+// those is not dependency-free: no npm leaves it unresolved, and a root-only
+// lock does not cover it.
+func TestNpmOptionalDependenciesNeedResolving(t *testing.T) {
+	pj := `{"name":"app","version":"1.0.0","optionalDependencies":{"fsevents":"^2.3.0"}}`
+	stub := `{"name":"app","lockfileVersion":3,"packages":{"":{"name":"app"}}}`
+	if got := unresolvedFor(t, map[string]string{"package.json": pj}); !slices.Equal(got, []string{"package.json"}) {
+		t.Errorf("no lock: unresolved = %v, want [package.json]", got)
+	}
+	if got := unresolvedFor(t, map[string]string{"package.json": pj, "package-lock.json": stub}); !slices.Equal(got, []string{"package.json"}) {
+		t.Errorf("root-only lock: unresolved = %v, want [package.json]", got)
+	}
+}
+
+// A dependency-free workspace root's root-only lock covers the root, not the
+// members whose dependencies it never locked.
+func TestRootOnlyLockDoesNotCoverWorkspaceMembers(t *testing.T) {
+	root := `{"name":"mono","version":"1.0.0","workspaces":["packages/*"]}`
+	member := `{"name":"web","version":"1.0.0","dependencies":{"left-pad":"^1.3.0"}}`
+	stub := `{"name":"mono","lockfileVersion":3,"packages":{"":{"name":"mono"}}}`
+	got := unresolvedFor(t, map[string]string{"package.json": root, "package-lock.json": stub, "packages/web/package.json": member})
+	if want := []string{filepath.Join("packages", "web", "package.json")}; !slices.Equal(got, want) {
+		t.Errorf("unresolved = %v, want %v", got, want)
+	}
+	// A lock with a real tree still covers its members.
+	full := `{"name":"mono","lockfileVersion":3,"packages":{"":{"name":"mono"},"node_modules/left-pad":{"version":"1.3.0","resolved":"https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"}}}`
+	if got := unresolvedFor(t, map[string]string{"package.json": root, "package-lock.json": full, "packages/web/package.json": member}); len(got) != 0 {
+		t.Errorf("full lock: unresolved = %v, want none", got)
 	}
 }

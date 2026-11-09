@@ -39,8 +39,10 @@ func (c *CargoTomlCataloger) Catalog(ctx context.Context, resolver file.Resolver
 	parse := func(path string, loc file.Location) ([]pkg.Package, error) {
 		pkgs, err := parseCargoTomlFile(ctx, path, loc, c.root)
 		// Without a Cargo.lock, here or at its workspace root, only the
-		// direct dependencies are known: Rust has no resolver tier.
-		if c.coverage && err == nil && len(pkgs) > 0 && !cargoLockCovers(path, c.root) {
+		// direct dependencies are known: Rust has no resolver tier. Git, path
+		// and private-registry dependencies are not emitted, but their trees
+		// are just as unknown, so the declared tables decide.
+		if c.coverage && err == nil && (len(pkgs) > 0 || cargoDeclaresDependencies(path)) && !cargoLockCovers(path, c.root) {
 			markUnresolved(ctx, c.root, path)
 			dir := filepath.Dir(path)
 			warn.Add(ctx, warn.Entry{
@@ -121,18 +123,44 @@ func parseCargoTomlFile(ctx context.Context, path string, loc file.Location, sca
 			Locations: file.NewLocationSet(loc),
 		})
 	}
-	tables := []map[string]any{m.Dependencies, m.DevDependencies, m.BuildDependencies, m.DevDependenciesUS, m.BuildDependenciesUS}
-	for _, t := range m.Target {
-		tables = append(tables, t.Dependencies, t.DevDependencies, t.BuildDependencies, t.DevDependenciesUS, t.BuildDependenciesUS)
-	}
 	// [workspace.dependencies] is an inheritance pool, not a dependency list: it
 	// is consulted for `dep = { workspace = true }` but never emitted wholesale.
-	for _, table := range tables {
+	for _, table := range m.dependencyTables() {
 		for n, spec := range table {
 			add(n, spec)
 		}
 	}
 	return out, nil
+}
+
+// dependencyTables is every table of the crate's own dependencies, platform
+// gated ones included; never [workspace.dependencies].
+func (m cargoManifest) dependencyTables() []map[string]any {
+	tables := []map[string]any{m.Dependencies, m.DevDependencies, m.BuildDependencies, m.DevDependenciesUS, m.BuildDependenciesUS}
+	for _, t := range m.Target {
+		tables = append(tables, t.Dependencies, t.DevDependencies, t.BuildDependencies, t.DevDependenciesUS, t.BuildDependenciesUS)
+	}
+	return tables
+}
+
+// cargoDeclaresDependencies reports a Cargo.toml declaring any dependency of
+// its own, whatever its source: a path dependency counts too, since the crate
+// it names may sit outside the scan and its tree is then read nowhere.
+func cargoDeclaresDependencies(path string) bool {
+	data, err := readManifest(path)
+	if err != nil {
+		return false
+	}
+	var m cargoManifest
+	if _, err := toml.Decode(string(data), &m); err != nil {
+		return false
+	}
+	for _, table := range m.dependencyTables() {
+		if len(table) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // maxManifestBytes is a sanity bound, not a fix for deeply nested TOML, which

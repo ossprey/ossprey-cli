@@ -371,7 +371,7 @@ func shlexSplit(s string) ([]string, error) {
 				i++
 				cur.WriteRune(rs[i])
 			}
-		case unicode.IsSpace(r):
+		case r == ' ' || r == '\t' || r == '\r' || r == '\n': // Python shlex's whitespace, not Unicode's
 			if inTok {
 				out = append(out, cur.String())
 				cur.Reset()

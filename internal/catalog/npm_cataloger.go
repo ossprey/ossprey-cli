@@ -43,7 +43,7 @@ func (c *NpmResolveCataloger) Catalog(ctx context.Context, resolver file.Resolve
 			if c.standsDown(absPath) {
 				return nil, nil
 			}
-			if direct, _ := parsePackageJSONFile(absPath, loc); len(direct) == 0 {
+			if !declaresNpmDependencies(absPath) {
 				return nil, nil
 			}
 			return nil, fmt.Errorf("%s: no npm on PATH to resolve it, so direct dependencies only", filepath.Dir(absPath))
@@ -62,7 +62,7 @@ func (c *NpmResolveCataloger) Catalog(ctx context.Context, resolver file.Resolve
 			return nil, nil
 		}
 		if cacheErr != nil {
-			if direct, _ := parsePackageJSONFile(absPath, loc); len(direct) == 0 {
+			if !declaresNpmDependencies(absPath) {
 				return nil, nil
 			}
 			return nil, fmt.Errorf("npm cache: %w", cacheErr)
@@ -93,43 +93,84 @@ func hasNpmLockfile(dir string) bool {
 	return false
 }
 
-// declaresNpmDependencies reports a package.json with any direct dependency;
-// one that cannot be read counts as declaring some.
-func declaresNpmDependencies(path string) bool {
-	direct, err := parsePackageJSONFile(path, file.Location{})
-	return err != nil || len(direct) > 0
+// hasNpmLockTree reports whether dir ships a lockfile with a locked tree, the
+// test for covering workspace members: a root-only lock beside a root
+// declaring nothing covers that root alone, never members it locked nothing for.
+func hasNpmLockTree(dir string) bool {
+	for _, name := range []string{"package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml"} {
+		if st := npmLockState(filepath.Join(dir, name)); st.parses && st.locks {
+			return true
+		}
+	}
+	return false
 }
 
-// npmLockReadCache memoises npmLockReadable by path, size and modification
+// declaresNpmDependencies reports a package.json with any direct dependency,
+// optionalDependencies included (npm installs them by default); one that
+// cannot be read counts as declaring some. The package.json fallback does not
+// emit optional ones, so they are read here rather than in its parser.
+func declaresNpmDependencies(path string) bool {
+	direct, err := parsePackageJSONFile(path, file.Location{})
+	if err != nil || len(direct) > 0 {
+		return true
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return !errors.Is(err, os.ErrNotExist)
+	}
+	var pj struct {
+		Optional map[string]string `json:"optionalDependencies"`
+	}
+	if json.Unmarshal(data, &pj) != nil {
+		return true
+	}
+	for _, spec := range pj.Optional {
+		if !isLocalNpmVersion(spec) {
+			return true
+		}
+	}
+	return false
+}
+
+// npmLockReadCache memoises npmLockState by path, size and modification
 // time: a monorepo root lock is consulted once per workspace member.
 var npmLockReadCache sync.Map
 
-// npmLockReadable reports whether the lockfile at path exists and, for npm's
-// JSON locks, parses. yarn.lock and pnpm-lock.yaml count when present: an
-// empty one is how a project with no dependencies ships, and syft has its own
-// parsers for their several formats.
-func npmLockReadable(path string) bool {
+type npmLock struct{ parses, locks bool }
+
+// npmLockState reads the lockfile at path: whether it exists and, for npm's
+// JSON locks, parses, and whether it locks any package. yarn.lock and
+// pnpm-lock.yaml count as both when present: an empty one is how a project
+// with no dependencies ships, and syft has its own parsers for their several
+// formats.
+func npmLockState(path string) npmLock {
 	info, err := os.Stat(path)
 	if err != nil || !info.Mode().IsRegular() {
-		return false
+		return npmLock{}
 	}
 	key := fmt.Sprintf("%s\x00%d\x00%d", path, info.Size(), info.ModTime().UnixNano())
 	if v, ok := npmLockReadCache.Load(key); ok {
-		return v.(bool)
+		return v.(npmLock)
 	}
-	ok := false
+	var st npmLock
 	if data, err := readRegularFile(path, maxLockfileBytes); err == nil {
 		switch filepath.Base(path) {
 		case "package-lock.json", "npm-shrinkwrap.json":
-			// A lock locking nothing covers only a manifest declaring nothing.
 			_, err := parseNpmLock(data, file.Location{})
-			ok = err == nil && (npmLockLocksSomething(data) || !declaresNpmDependencies(filepath.Join(filepath.Dir(path), "package.json")))
+			st = npmLock{parses: err == nil, locks: err == nil && npmLockLocksSomething(data)}
 		default:
-			ok = true
+			st = npmLock{parses: true, locks: true}
 		}
 	}
-	npmLockReadCache.Store(key, ok)
-	return ok
+	npmLockReadCache.Store(key, st)
+	return st
+}
+
+// npmLockReadable reports whether the lockfile at path covers the package.json
+// beside it: it parses, and locks something unless that manifest declares nothing.
+func npmLockReadable(path string) bool {
+	st := npmLockState(path)
+	return st.parses && (st.locks || !declaresNpmDependencies(filepath.Join(filepath.Dir(path), "package.json")))
 }
 
 // runNpmResolve copies package.json into a throwaway dir, generates a lockfile

@@ -426,3 +426,19 @@ func TestPyprojectExpandsEnvReadsRawEntries(t *testing.T) {
 		t.Error("a pyproject that does not parse passed")
 	}
 }
+
+// shlexSplit splits on Python shlex's whitespace (' \t\r\n') only, so a
+// non-breaking space, vertical tab or form feed stays inside a token as pip
+// reads it (verified against python3 shlex.split).
+func TestShlexSplitUsesPythonWhitespace(t *testing.T) {
+	for in, want := range map[string][]string{
+		"-r deps all.in": {"-r", "deps all.in"},
+		"a\vb\fc":        {"a\vb\fc"},
+		" a\tb\r\nc ":    {"a", "b", "c"},
+	} {
+		got, err := shlexSplit(in)
+		if err != nil || !slices.Equal(got, want) {
+			t.Errorf("shlexSplit(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+}
