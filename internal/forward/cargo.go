@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/ossprey/ossprey-cli/internal/catalog"
 	"github.com/ossprey/ossprey-cli/internal/check"
@@ -34,13 +35,53 @@ var cargoCredentialFn = func(ctx context.Context, apiURL, apiKey string) error {
 	return err
 }
 
+// cargoRunFirstShorts are the short options of add, update, fetch and generate-lockfile that take a value (TestCargoFlagTablesMatchCargo).
+var cargoRunFirstShorts = flagSet("-F", "-m", "-p", "-Z")
+
 // cargoRunFirstAt matches the cargo verbs that resolve and lock but build nothing, unless asked for --help.
 func cargoRunFirstAt(args []string) (int, bool) {
 	start, ok := verbAt("cargo", "add", "update", "generate-lockfile", "fetch")(args)
-	if !ok || cargoHas(args[start:], "-h", "--help") {
+	if !ok || cargoHas(cargoSplitShorts(args[start:], cargoRunFirstShorts), "-h", "--help") {
 		return 0, false
 	}
 	return start, true
+}
+
+// cargoShorts splits a group of short options as clap reads it: switches up to one in takes, which takes the rest less one leading `=`, else the next token (owes).
+func cargoShorts(a string, takes map[string]bool) (split []string, owes bool) {
+	if len(a) < 3 || a[0] != '-' || a[1] == '-' {
+		return []string{a}, len(a) == 2 && takes[a]
+	}
+	for i := 1; i < len(a); {
+		_, n := utf8.DecodeRuneInString(a[i:])
+		short := "-" + a[i:i+n]
+		if short == "--" {
+			// cargo refuses the group; splitting it would forge an end of options.
+			return []string{a}, false
+		}
+		i += n
+		split = append(split, short)
+		if takes[short] {
+			if i == len(a) {
+				return split, true
+			}
+			return append(split, strings.TrimPrefix(a[i:], "=")), false
+		}
+	}
+	return split, false
+}
+
+// cargoSplitShorts writes each group of short options before any `--` one option per token, as cargoShorts reads it: `-qFpcre2` is `-q -F pcre2`.
+func cargoSplitShorts(args []string, takes map[string]bool) []string {
+	var out []string
+	for i, a := range args {
+		if a == "--" {
+			return append(out, args[i:]...)
+		}
+		split, _ := cargoShorts(a, takes)
+		out = append(out, split...)
+	}
+	return out
 }
 
 // cargoInstallAt matches `cargo install`, but not `cargo install --list`.
@@ -65,11 +106,15 @@ func cargoHas(args []string, flags ...string) bool {
 	return false
 }
 
+// cargoOptionalValues are install's options whose value is optional (TestCargoFlagTablesMatchCargo).
+var cargoOptionalValues = flagSet("--bin", "--example", "--target")
+
 // cargoSourceFlags install every crate named from somewhere other than crates.io.
 var cargoSourceFlags = flagSet("--git", "--path", "--index", "--registry")
 
 // parseCargoInstall classifies `cargo install`'s arguments: each positional is a crate, --version pins them all, and a source flag other than crates.io, or else a defaultRegistry, takes them off crates.io.
 func parseCargoInstall(args []string, defaultRegistry string) installArgs {
+	args = cargoSplitShorts(args, valueFlags["cargo"])
 	var crates []string
 	version, source, cratesIo := "", "", false
 	for i := 0; i < len(args); i++ {
@@ -86,7 +131,8 @@ func parseCargoInstall(args []string, defaultRegistry string) installArgs {
 			continue
 		}
 		flag, value, inline := splitFlagValue(a)
-		if !inline && valueFlags["cargo"][flag] && i+1 < len(args) {
+		// clap fills an optional value only from a token that is not an option, so `--bin -F pcre2` gives pcre2 to -F.
+		if !inline && valueFlags["cargo"][flag] && i+1 < len(args) && !(cargoOptionalValues[flag] && len(args[i+1]) > 1 && args[i+1][0] == '-') {
 			value = args[i+1]
 			i++
 		}
@@ -334,6 +380,7 @@ func firstErrorLine(stderr string, err error) string {
 
 // cargoWorkspaceFlags are the options after the verb that move the workspace or its configuration, spelled for `cargo metadata`.
 func cargoWorkspaceFlags(rest []string) []string {
+	rest = cargoSplitShorts(rest, cargoRunFirstShorts)
 	var out []string
 	for i := 0; i < len(rest); i++ {
 		a := rest[i]
@@ -349,8 +396,6 @@ func cargoWorkspaceFlags(rest []string) []string {
 			i++
 		case strings.HasPrefix(a, "--manifest-path=") || strings.HasPrefix(a, "--config="):
 			name, value, _ = strings.Cut(a, "=")
-		case strings.HasPrefix(a, "-m") || strings.HasPrefix(a, "-Z"):
-			name, value = a[:2], strings.TrimPrefix(a[2:], "=")
 		default:
 			continue
 		}
@@ -365,6 +410,7 @@ func cargoWorkspaceFlags(rest []string) []string {
 // cargoConfigDir is where cargo starts reading configuration: -C's directory, else the working directory, symlinks resolved as the kernel does.
 func cargoConfigDir(globals []string) string {
 	dir, _ := os.Getwd()
+	globals = cargoSplitShorts(globals, globalValueFlags["cargo"])
 	for i := 0; i < len(globals); i++ {
 		a := globals[i]
 		var v string
@@ -372,8 +418,6 @@ func cargoConfigDir(globals []string) string {
 		case a == "-C" && i+1 < len(globals):
 			v = globals[i+1]
 			i++
-		case strings.HasPrefix(a, "-C") && len(a) > 2:
-			v = strings.TrimPrefix(a[2:], "=")
 		case globalValueFlags["cargo"][a]:
 			i++
 			continue

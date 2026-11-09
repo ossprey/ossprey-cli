@@ -143,8 +143,9 @@ as another registry.
 `cargo install --list` is not an install.
 
 A rustup toolchain (`cargo +nightly add serde`) and cargo's options before the
-subcommand (`--config`, `-Z`, `--color`, `-C`) are understood. In passive mode
-`cargo add` and the others run and the `Cargo.lock` they leave is then posted,
+subcommand (`--config`, `-Z`, `--color`, `-C`) are understood, and so are short
+options grouped as cargo groups them (`-qF pcre2` names no crate `pcre2`).
+In passive mode `cargo add` and the others run and the `Cargo.lock` they leave is then posted,
 even when cargo failed, and `cargo install` posts its crates alongside the
 build.
 

@@ -54,8 +54,15 @@ func TestCargoDetection(t *testing.T) {
 		{"install --vers 14.1.0 ripgrep", "before"},
 		{"install --path .", "before"},
 		{"+stable install ripgrep", "before"},
+		// clap reads a group of shorts as cargo 1.99.1 does: a value short takes the rest, else the next token.
+		{"-qZ unstable-options install ripgrep", "before"},
+		{"-Z unstable-options -qC sub add serde", "after"},
+		{"-qCsub add serde", "after"},
 		{"add --help", "through"},
 		{"update -h", "through"},
+		{"add -qh serde", "through"},
+		{"update -vh", "through"},
+		{"add -Fh serde", "after"},
 		{"install --list", "through"},
 		{"build", "through"},
 		{"+nightly build", "through"},
@@ -110,6 +117,21 @@ func TestParseCargoInstall(t *testing.T) {
 		{"--target x86_64-unknown-linux-gnu --root /opt -F a,b -j 4 --profile release ripgrep", "", ripgrep, nil},
 		{"--features=derive --locked --force -f ripgrep", "", ripgrep, nil},
 		{"--config k=v -Z unstable-options ripgrep", "", ripgrep, nil},
+		// Grouped, attached and separate shorts, read as cargo 1.99.1 reads them.
+		{"-qF pcre2 ripgrep@14.1.1", "", crate("ripgrep", "14.1.1"), nil},
+		{"-q -F pcre2 ripgrep@14.1.1", "", crate("ripgrep", "14.1.1"), nil},
+		{"-qFpcre2 ripgrep", "", ripgrep, nil},
+		{"-qF=pcre2 ripgrep", "", ripgrep, nil},
+		{"-fqF pcre2 ripgrep", "", ripgrep, nil},
+		{"-vvF pcre2 ripgrep", "", ripgrep, nil},
+		{"-Fq ripgrep", "", ripgrep, nil},
+		{"-qj 4 ripgrep", "", ripgrep, nil},
+		{"-qZ unstable-options ripgrep", "", ripgrep, nil},
+		{"-j -2 ripgrep", "", ripgrep, nil},
+		// An optional value is never an option, so pcre2 is -F's.
+		{"--bin -F pcre2 ripgrep", "", ripgrep, nil},
+		{"--bin -qF pcre2 ripgrep", "", ripgrep, nil},
+		{"-qF pcre2 --registry corp ripgrep", "", nil, []string{"ripgrep", "--registry corp"}},
 		{"./local", "", nil, []string{"./local"}},
 	} {
 		got := parseCargoInstall(strings.Fields(tc.args), tc.defaultRegistry)
@@ -182,9 +204,9 @@ func TestCargoDefaultRegistry(t *testing.T) {
 	}
 }
 
-// clapHelpFlags reads clap's help, short-only options and optional values included: the options taking a value, and those that do not.
-func clapHelpFlags(help string) (takes, switches map[string]bool) {
-	takes, switches = map[string]bool{}, map[string]bool{}
+// clapHelpFlags reads clap's help, short-only options included: the options taking a value, those whose value is optional, and those taking none.
+func clapHelpFlags(help string) (takes, optional, switches map[string]bool) {
+	takes, optional, switches = map[string]bool{}, map[string]bool{}, map[string]bool{}
 	flag := regexp.MustCompile(`^--?[A-Za-z][A-Za-z-]*$`)
 	for _, line := range strings.Split(help, "\n") {
 		fields := strings.Fields(line)
@@ -201,12 +223,13 @@ func clapHelpFlags(help string) (takes, switches map[string]bool) {
 		for _, n := range names {
 			if value {
 				takes[n] = true
+				optional[n] = strings.HasPrefix(fields[i], "[<")
 			} else {
 				switches[n] = true
 			}
 		}
 	}
-	return takes, switches
+	return takes, optional, switches
 }
 
 func TestCargoFlagTablesMatchCargo(t *testing.T) {
@@ -214,33 +237,51 @@ func TestCargoFlagTablesMatchCargo(t *testing.T) {
 	if err != nil {
 		t.Skip("cargo not installed")
 	}
+	install := [][]string{{"install", "--help"}}
+	runFirst := [][]string{{"add", "--help"}, {"update", "--help"}, {"fetch", "--help"}, {"generate-lockfile", "--help"}}
 	for _, tc := range []struct {
-		args   []string
+		helps  [][]string
 		table  map[string]bool
 		hidden []string
+		// only narrows the help's value options to the ones the table holds.
+		only func(name string, optional bool) bool
 	}{
-		{[]string{"--help"}, globalValueFlags["cargo"], nil},
-		{[]string{"install", "--help"}, valueFlags["cargo"], []string{"--vers"}},
+		{[][]string{{"--help"}}, globalValueFlags["cargo"], nil, nil},
+		{install, valueFlags["cargo"], []string{"--vers"}, nil},
+		{install, cargoOptionalValues, nil, func(_ string, optional bool) bool { return optional }},
+		// One table serves the four verbs, so no short may be a switch in one and take a value in another.
+		{runFirst, cargoRunFirstShorts, nil, func(name string, _ bool) bool { return !strings.HasPrefix(name, "--") }},
 	} {
-		out, err := exec.Command(cargo, tc.args...).Output()
-		if err != nil {
-			t.Skipf("cargo %v: %v", tc.args, err)
+		var help strings.Builder
+		for _, args := range tc.helps {
+			out, err := exec.Command(cargo, args...).Output()
+			if err != nil {
+				t.Skipf("cargo %v: %v", args, err)
+			}
+			help.Write(out)
 		}
-		takes, switches := clapHelpFlags(string(out))
+		takes, optional, switches := clapHelpFlags(help.String())
 		if len(takes) == 0 {
-			t.Fatalf("cargo %v: read no options from %q", tc.args, out)
+			t.Fatalf("cargo %v: read no options from %q", tc.helps, help.String())
+		}
+		if tc.only != nil {
+			for f := range takes {
+				if !tc.only(f, optional[f]) {
+					delete(takes, f)
+				}
+			}
 		}
 		for f := range takes {
 			if !tc.table[f] {
-				t.Errorf("cargo %v: %s takes a value but is missing from the table", tc.args, f)
+				t.Errorf("cargo %v: %s takes a value but is missing from the table", tc.helps, f)
 			}
 		}
 		for f := range tc.table {
 			switch {
 			case switches[f]:
-				t.Errorf("cargo %v: %s is a switch, and listing it swallows the token after it", tc.args, f)
+				t.Errorf("cargo %v: %s is a switch, and listing it swallows the token after it", tc.helps, f)
 			case !takes[f] && !slices.Contains(tc.hidden, f):
-				t.Errorf("cargo %v: %s is not one of its options", tc.args, f)
+				t.Errorf("cargo %v: %s is not one of the options this table holds", tc.helps, f)
 			}
 		}
 	}
@@ -882,10 +923,34 @@ func TestCargoWorkspaceFlags(t *testing.T) {
 		{"-m a/Cargo.toml serde", "--manifest-path a/Cargo.toml"},
 		{"-ma/Cargo.toml serde", "--manifest-path a/Cargo.toml"},
 		{"--config k=v -Zunstable-options serde", "--config k=v -Z unstable-options"},
+		{"-qm other/Cargo.toml serde", "--manifest-path other/Cargo.toml"},
+		{"-qmother/Cargo.toml serde", "--manifest-path other/Cargo.toml"},
+		{"-vm=other/Cargo.toml serde", "--manifest-path other/Cargo.toml"},
+		{"-qZ unstable-options serde", "-Z unstable-options"},
+		{"-pm serde", ""},
+		{"-Fm serde", ""},
 		{"serde -- -m x", ""},
 	} {
 		if got := strings.Join(cargoWorkspaceFlags(strings.Fields(tc.rest)), " "); got != tc.want {
 			t.Errorf("%q: %q, want %q", tc.rest, got, tc.want)
+		}
+	}
+}
+
+// -C may be grouped with switches or carry its value attached, as clap reads it.
+func TestCargoConfigDirReadsGroupedShorts(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	want, err := filepath.EvalSymlinks(filepath.Join(dir, "sub"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, globals := range []string{"-C sub", "-qC sub", "-qCsub", "-vC=sub", "-Z unstable-options -qC sub", "-qZ unstable-options -C sub"} {
+		if got := cargoConfigDir(strings.Fields(globals)); got != want {
+			t.Errorf("cargo %s: %s, want %s", globals, got, want)
 		}
 	}
 }

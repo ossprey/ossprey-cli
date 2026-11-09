@@ -130,3 +130,21 @@ func TestCargoInstallBlockedBeforeItBuilds(t *testing.T) {
 		t.Error("a blocked install must not reach cargo")
 	}
 }
+
+// cargo 1.99.1 reads `-qF pcre2` as -q and -F pcre2, so only ripgrep is a crate.
+func TestCargoInstallGroupedShortsAreNotCrates(t *testing.T) {
+	api := newFakeAPI(t, "pkg:cargo/ripgrep@14.1.1")
+	env := cargoEnv(t, api.URL)
+	root := t.TempDir()
+
+	res := runForwardEnv(t, t.TempDir(), env, binPath, "cargo", "install", "--root", root, "-qF", "pcre2", "ripgrep@14.1.1")
+	if res.exitCode != 1 {
+		t.Fatalf("exit %d, want 1\nstderr: %s", res.exitCode, res.stderr)
+	}
+	if _, purls := api.stats(); !slices.Equal(purls, []string{"pkg:cargo/ripgrep@14.1.1"}) {
+		t.Errorf("submitted %v, want ripgrep alone", purls)
+	}
+	if !dirEmpty(t, root) {
+		t.Error("a blocked install must not reach cargo")
+	}
+}

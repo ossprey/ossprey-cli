@@ -304,7 +304,11 @@ func verbIndex(bin string, args []string) int {
 			return -1
 		}
 		flag, _, hasInline := splitFlagValue(a)
-		if global[flag] && !hasInline {
+		owes := global[flag] && !hasInline
+		if bin == "cargo" && !strings.HasPrefix(a, "--") {
+			_, owes = cargoShorts(a, global) // clap's `-qC dir` owes C its value
+		}
+		if owes {
 			i++ // this flag's value is the next token, not the verb
 		}
 	}
