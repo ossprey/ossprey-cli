@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"unicode/utf8"
@@ -417,7 +418,7 @@ func cargoWorkspaceFlags(rest []string) []string {
 	return out
 }
 
-// cargoConfigDir is where cargo starts reading configuration: -C's directory, else the working directory, symlinks resolved as the kernel does.
+// cargoConfigDir is where cargo starts reading configuration: -C's directory, else the working directory, resolved as chdir(2) resolves it.
 func cargoConfigDir(globals []string) string {
 	dir, _ := os.Getwd()
 	globals = cargoSplitShorts(globals, globalValueFlags["cargo"])
@@ -435,14 +436,20 @@ func cargoConfigDir(globals []string) string {
 			continue
 		}
 		if !filepath.IsAbs(v) {
-			v = filepath.Join(dir, v)
+			// Not cleaned yet: the kernel follows a link before the `..` after it, so `lnk/..` is the link target's parent (verified).
+			v = dir + string(filepath.Separator) + v
 		}
 		dir = v
 	}
-	if real, err := filepath.EvalSymlinks(dir); err == nil {
-		dir = real
+	if runtime.GOOS == "windows" {
+		// Windows takes `..` off the path as written, before it opens anything.
+		dir = filepath.Clean(dir)
 	}
-	return dir
+	// EvalSymlinks takes each `..` off the resolved prefix, as the kernel does.
+	if real, err := filepath.EvalSymlinks(dir); err == nil {
+		return real
+	}
+	return filepath.Clean(dir)
 }
 
 // lockfileMoved reports a resolver.lockfile-path cargo may read: from the environment, the command line, or a config file or one it includes.

@@ -251,6 +251,46 @@ func TestCargoDefaultRegistryRelativeHome(t *testing.T) {
 	}
 }
 
+// cargo 1.99.1 resolves -C as chdir(2) does: from the physical working directory, each link followed before the `..` after it.
+func TestCargoDefaultRegistryUnderCThroughALink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows takes `..` off -C's path as written")
+	}
+	for _, tc := range []struct {
+		name, config, link, target, cwd, home, dirC, wantDir, want string
+	}{
+		{"-C .. from a linked working directory", "real/.cargo/config.toml", "link", "real/proj", "link", ".cargo", "..", "real", "corp"},
+		{"-C through a link and then ..", "cwd/.cargo/config.toml", "cwd/lnk", "other/deep", "cwd", "h", "lnk/../sub", "other/sub", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := t.TempDir()
+			if real, err := filepath.EvalSymlinks(base); err == nil {
+				base = real
+			}
+			for _, d := range []string{"cwd/sub", "real/proj", "other/deep", "other/sub", filepath.Dir(tc.config)} {
+				if err := os.MkdirAll(filepath.Join(base, d), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			writeFile(t, filepath.Join(base, tc.config), "[registry]\ndefault = \"corp\"\n")
+			if err := os.Symlink(filepath.Join(base, tc.target), filepath.Join(base, tc.link)); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+			t.Setenv("CARGO_HOME", tc.home)
+			unsetEnv(t, "CARGO_REGISTRY_DEFAULT")
+			// The logical path, so the working directory starts out spelled through the link.
+			t.Chdir(filepath.Join(base, tc.cwd))
+			globals := []string{"-Zunstable-options", "-C", tc.dirC}
+			if got, want := cargoConfigDir(globals), filepath.Join(base, tc.wantDir); got != want {
+				t.Errorf("cargo %v runs in %s, want %s", globals, got, want)
+			}
+			if got := cargoDefaultRegistry(append(globals, "install", "x")); got != tc.want {
+				t.Errorf("CARGO_HOME=%s cargo %v install: %q, want %q", tc.home, globals, got, tc.want)
+			}
+		})
+	}
+}
+
 // clapHelpFlags reads clap's help, short-only options included: the options taking a value, those whose value is optional, and those taking none.
 func clapHelpFlags(help string) (takes, optional, switches map[string]bool) {
 	takes, optional, switches = map[string]bool{}, map[string]bool{}, map[string]bool{}
