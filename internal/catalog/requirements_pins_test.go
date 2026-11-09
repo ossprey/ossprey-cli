@@ -242,3 +242,10 @@ func TestCatalog_UnparseableLineKeepsOtherPackages(t *testing.T) {
 		t.Errorf("click@8.1.7 dropped because a sibling line was unparseable; got %+v", got)
 	}
 }
+
+func TestRequirementLinesReadPastALongLine(t *testing.T) {
+	data := []byte("# " + strings.Repeat("x", 2<<20) + "\nrequests\n")
+	if got := unpinnedRequirements(data); len(got) != 1 || got[0] != "requests" {
+		t.Fatalf("unpinnedRequirements = %v, want [requests]", got)
+	}
+}
