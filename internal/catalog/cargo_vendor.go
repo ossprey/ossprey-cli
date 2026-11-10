@@ -327,20 +327,32 @@ func readCargoFileAt(p, base string) (cargoFile, bool) {
 
 // readRegularFile reads the file at p on disk, or false when it is not a regular file or holds more than limit bytes.
 func readRegularFile(p string, limit int64) ([]byte, bool) {
-	// A device or FIFO may never end, so only a regular file is opened, and read no further than the limit.
-	if info, err := os.Stat(p); err != nil || !info.Mode().IsRegular() {
-		return nil, false
-	}
-	fh, err := os.Open(p)
-	if err != nil {
-		return nil, false
-	}
-	defer fh.Close()
-	data, err := io.ReadAll(io.LimitReader(fh, limit+1))
+	data, _, err := ReadRegular(p, limit)
 	if err != nil || int64(len(data)) > limit {
 		return nil, false
 	}
 	return data, true
+}
+
+// ErrNotRegular refuses a FIFO, device or directory, which may never end.
+var ErrNotRegular = errors.New("not a regular file")
+
+// ReadRegular reads up to limit+1 bytes of p, opened without waiting on a FIFO and refused unless the file opened is regular.
+func ReadRegular(p string, limit int64) ([]byte, fs.FileInfo, error) {
+	f, err := os.OpenFile(p, os.O_RDONLY|ONonblock, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err == nil && !fi.Mode().IsRegular() {
+		err = &fs.PathError{Op: "read", Path: p, Err: ErrNotRegular}
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	return data, fi, err
 }
 
 // vendorDir is the folded directory cargo run in dir takes crates.io crates from, or "" when unreplaced or unclear.

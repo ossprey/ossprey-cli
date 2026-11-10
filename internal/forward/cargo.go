@@ -642,34 +642,13 @@ func readConfig(p string) (data []byte, there bool, err error) {
 	if !exists(p) {
 		return nil, false, nil
 	}
-	data, _, err = readRegularAt(p, catalog.CargoManifestLimit)
+	data, _, err = catalog.ReadRegular(p, catalog.CargoManifestLimit)
 	return data, true, err
-}
-
-// errNotRegular refuses a FIFO, device or directory, which may never end.
-var errNotRegular = errors.New("not a regular file")
-
-// readRegularAt reads up to limit+1 bytes of p, opened without waiting on a FIFO and refused unless the file opened is regular.
-func readRegularAt(p string, limit int64) ([]byte, fs.FileInfo, error) {
-	f, err := os.OpenFile(p, os.O_RDONLY|oNonblock, 0)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer f.Close()
-	fi, err := f.Stat()
-	if err == nil && !fi.Mode().IsRegular() {
-		err = &fs.PathError{Op: "read", Path: p, Err: errNotRegular}
-	}
-	if err != nil {
-		return nil, nil, err
-	}
-	data, err := io.ReadAll(io.LimitReader(f, limit+1))
-	return data, fi, err
 }
 
 // readCargoFile reads a manifest or lock whole, or fails when it is not a regular file or is over catalog.CargoProofLimit.
 func readCargoFile(p string) ([]byte, fs.FileInfo, error) {
-	data, fi, err := readRegularAt(p, catalog.CargoProofLimit)
+	data, fi, err := catalog.ReadRegular(p, catalog.CargoProofLimit)
 	if err == nil && len(data) > catalog.CargoProofLimit {
 		err = &fs.PathError{Op: "read", Path: p, Err: fmt.Errorf("over the %d byte limit", catalog.CargoProofLimit)}
 	}
@@ -884,7 +863,7 @@ var (
 
 // rewriteInPlace writes f's bytes into the file left at its path, as cargo writes a lock, once the handle shows it still as cargo left it.
 func rewriteInPlace(f, left savedFile) error {
-	fh, err := os.OpenFile(f.path, os.O_RDWR|oNonblock, 0)
+	fh, err := os.OpenFile(f.path, os.O_RDWR|catalog.ONonblock, 0)
 	if err != nil {
 		return err
 	}
@@ -927,7 +906,7 @@ func recreateLeft(f savedFile) error {
 			// A filesystem without hard links refuses the link, so the file is created below, which never replaces one either.
 		}
 	}
-	fh, err := os.OpenFile(f.path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|oNonblock, f.mode)
+	fh, err := os.OpenFile(f.path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|catalog.ONonblock, f.mode)
 	if errors.Is(err, fs.ErrExist) {
 		return errNotLeft
 	}
@@ -974,7 +953,7 @@ func writeStaged(tmp *os.File, f savedFile) error {
 
 // leftIn reports whether base in dir is still the file cargo left, with its mode and contents.
 func leftIn(dir *os.Root, base string, left savedFile) bool {
-	fh, err := dir.OpenFile(base, os.O_RDONLY|oNonblock, 0)
+	fh, err := dir.OpenFile(base, os.O_RDONLY|catalog.ONonblock, 0)
 	if err != nil {
 		return false
 	}
