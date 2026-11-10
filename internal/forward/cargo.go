@@ -10,7 +10,6 @@ import (
 	"io/fs"
 	"math/rand/v2"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -26,7 +25,6 @@ import (
 	"github.com/ossprey/ossprey-cli/internal/registry"
 	"github.com/ossprey/ossprey-cli/internal/scan"
 	"github.com/ossprey/ossprey-cli/internal/severity"
-	"github.com/ossprey/ossprey-cli/internal/shim"
 	"github.com/ossprey/ossprey-cli/internal/submit"
 )
 
@@ -376,12 +374,11 @@ func readCargoWorkspace(ctx context.Context, args []string) (cargoWorkspace, err
 	// The options before the verb, rustup's +toolchain included, pick the same workspace and configuration.
 	cmdArgs := append(slices.Clone(args[:verb]), "metadata", "--no-deps", "--format-version", "1")
 	cmdArgs = append(cmdArgs, cargoWorkspaceFlags(args[verb+1:])...)
-	path, err := shim.LookPathReal("cargo")
+	// The cargo the command runs, as Exec finds it, so both read the same manifests.
+	cmd, err := realCommand(ctx, "cargo", cmdArgs)
 	if err != nil {
 		return cargoWorkspace{}, err
 	}
-	cmd := exec.CommandContext(ctx, path, cmdArgs...)
-	cmd.Env = envWithoutMonitorID()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()

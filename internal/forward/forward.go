@@ -1647,16 +1647,25 @@ var requirementFileFlags = map[string]map[string]bool{
 // Exec runs the real package manager, inheriting stdio. The child's exit code
 // is propagated via the returned *exec.ExitError.
 func Exec(ctx context.Context, bin string, args []string) error {
-	path, err := shim.LookPathReal(bin)
+	cmd, err := realCommand(ctx, bin, args)
 	if err != nil {
 		return err
 	}
-	cmd := exec.CommandContext(ctx, path, args...)
-	cmd.Env = envWithoutMonitorID()
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+// realCommand runs the real bin with args, found past the shims as Exec finds it, without the monitor id.
+func realCommand(ctx context.Context, bin string, args []string) (*exec.Cmd, error) {
+	path, err := shim.LookPathReal(bin)
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.CommandContext(ctx, path, args...)
+	cmd.Env = envWithoutMonitorID()
+	return cmd, nil
 }
 
 // envWithoutMonitorID drops the monitor id before handing control to the real
