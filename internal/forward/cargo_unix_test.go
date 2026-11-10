@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -64,6 +65,68 @@ func TestRunCargo_PassiveReadsOnlyARegularLock(t *testing.T) {
 // cargo 1.99.1 reads a --config or level config that is a FIFO, which ossprey never opens, so one may move the lock, while cargo install reads its config twice and installs from crates.io once a pipe runs dry (OSS-2553).
 func TestCargoConfigThatIsAFIFOMayMoveTheLock(t *testing.T) {
 	assertIrregularConfig(t, func(p string) error { return syscall.Mkfifo(p, 0o644) })
+}
+
+// cargo metadata is handed no --config naming a pipe, FIFO or device, in any spelling, since it would empty a one-shot one before the command reads it (OSS-2553).
+func TestWithoutDrainedConfigs(t *testing.T) {
+	dir := t.TempDir()
+	if err := syscall.Mkfifo(filepath.Join(dir, "fifo"), 0o644); err != nil {
+		t.Skipf("cannot make a FIFO: %v", err)
+	}
+	writeFile(t, filepath.Join(dir, "c.toml"), "net.retry = 2\n")
+	if err := os.Mkdir(filepath.Join(dir, "d"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	in := []string{"+nightly", "--config", "fifo", "--config=fifo", "--config", "c.toml", "--config=d", "--config", "k=v", "--config", filepath.Join(dir, "fifo"), "--config=/dev/null", "-Z", "x", "--", "--config", "fifo"}
+	want := []string{"+nightly", "--config", "c.toml", "--config=d", "--config", "k=v", "-Z", "x", "--", "--config", "fifo"}
+	if got := withoutDrainedConfigs(in, dir); !slices.Equal(got, want) {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// A `--config <(...)` pipe the forwarder inherits is left whole for cargo, before or after the verb, so the lockfile-path in it moves cargo's lock and the warning saying so is true (OSS-2553).
+func TestReadCargoWorkspaceLeavesAPipedConfigToCargo(t *testing.T) {
+	if _, err := exec.LookPath("cargo"); err != nil {
+		t.Skip("cargo not installed")
+	}
+	unsetEnv(t, "CARGO_RESOLVER_LOCKFILE_PATH")
+	t.Setenv("CARGO_HOME", t.TempDir())
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "Cargo.toml"), "[package]\nname = \"p\"\nversion = \"0.1.0\"\nedition = \"2021\"\n")
+	if err := os.Mkdir(filepath.Join(dir, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, "src", "lib.rs"), "")
+	t.Chdir(dir)
+	const config = "resolver.lockfile-path = \"moved/Cargo.lock\"\n"
+	for _, spell := range []func(string) []string{
+		func(p string) []string { return []string{"--config", p, "generate-lockfile"} },
+		func(p string) []string { return []string{"--config=" + p, "generate-lockfile"} },
+		func(p string) []string { return []string{"generate-lockfile", "--config", p} },
+		func(p string) []string { return []string{"generate-lockfile", "--config=" + p} },
+	} {
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Children inherit it, as they inherit the fd a shell opens for <(...).
+		if _, _, errno := syscall.Syscall(syscall.SYS_FCNTL, r.Fd(), syscall.F_SETFD, 0); errno != 0 {
+			t.Fatal(errno)
+		}
+		if _, err := w.WriteString(config); err != nil {
+			t.Fatal(err)
+		}
+		w.Close()
+		args := spell("/dev/fd/" + strconv.Itoa(int(r.Fd())))
+		if _, err := readCargoWorkspace(context.Background(), args); !errors.Is(err, errLockfileMoved) {
+			t.Errorf("cargo %v: err = %v, want errLockfileMoved", args, err)
+		}
+		left, _ := io.ReadAll(r)
+		r.Close()
+		if string(left) != config {
+			t.Errorf("cargo %v: the pipe holds %q after cargo metadata, want %q left for cargo", args, left, config)
+		}
+	}
 }
 
 // cat cfg | cargo --config /dev/stdin install x goes to crates.io with cargo 1.99.1 whatever cfg sets, since cargo install reads the pipe again once it is empty, so the crate is checked and the pipe left unread (OSS-2553).

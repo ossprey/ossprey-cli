@@ -147,7 +147,11 @@ config, that may move the lock elsewhere, including one a
 config `include` could set or a config ossprey cannot read: one that is not a
 regular file (`--config /dev/stdin`, say) or is too large or too deeply nested,
 or a cargo script run with `-Zscript`, whose lock cargo keeps in its build
-directory), cargo's changes are kept and one warning line says so. When cargo itself
+directory), cargo's changes are kept and one warning line says so. A cargo
+config (`.cargo/config.toml`) that is a FIFO is also read by the `cargo
+metadata` ossprey runs to find the workspace, before cargo (after it in
+passive mode), so a FIFO written only once can leave cargo reading nothing, or
+cargo or ossprey waiting for a writer. When cargo itself
 failed in a workspace cargo cannot read, such as a directory with no
 `Cargo.toml`, nothing changed and cargo's own error is the only line; a
 `resolver.lockfile-path` or a cargo script still gets the warning after a

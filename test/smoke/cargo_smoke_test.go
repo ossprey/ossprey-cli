@@ -222,6 +222,49 @@ func TestCargoConfigFromStdinMayMoveTheLock(t *testing.T) {
 	}
 }
 
+// A `--config <(...)` pipe reaches cargo whole, since the cargo metadata run first is not handed it, so cargo writes the lock where its lockfile-path says and the warning is true (OSS-2553).
+func TestCargoConfigFromAProcessSubstitutionReachesCargo(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no /dev/fd")
+	}
+	api := newFakeAPI(t, "")
+	env := cargoEnv(t, api.URL)
+	dir, _ := cargoCrate(t)
+	lock := exec.Command("cargo", "generate-lockfile", "--offline")
+	lock.Dir, lock.Env = dir, env
+	if out, err := lock.CombinedOutput(); err != nil {
+		t.Fatalf("cargo generate-lockfile: %v\n%s", err, out)
+	}
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	moved := filepath.Join(dir, "moved", "Cargo.lock")
+	if _, err := fmt.Fprintf(w, "resolver.lockfile-path = %q\n", moved); err != nil {
+		t.Fatal(err)
+	}
+	w.Close()
+	// ExtraFiles opens the pipe at fd 3 without close-on-exec, as a shell opens <(...).
+	cmd := exec.Command(binPath, "cargo", "--config", "/dev/fd/3", "generate-lockfile", "--offline")
+	cmd.Dir, cmd.Env, cmd.ExtraFiles = dir, env, []*os.File{r}
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	err = cmd.Run()
+	r.Close()
+	if err != nil {
+		t.Fatalf("%v\nstderr: %s", err, stderr.String())
+	}
+	if _, err := os.Stat(moved); err != nil {
+		t.Errorf("cargo wrote no moved lock (%v)", err)
+	}
+	if want := "ossprey: warning: Cargo.lock not checked after `cargo --config /dev/fd/3 generate-lockfile --offline` (a resolver.lockfile-path may move it); cargo's changes are kept"; !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr lacks %q:\n%s", want, stderr.String())
+	}
+	if n, _ := api.stats(); n != 0 {
+		t.Errorf("%d API requests, want the stale project lock left unchecked", n)
+	}
+}
+
 // cargo 1.99.1 reads a piped --config again once the pipe is empty, so cargo install takes a crate from crates.io whatever the pipe set, and the crate is checked (OSS-2553).
 func TestCargoInstallFromAPipedConfigIsChecked(t *testing.T) {
 	if runtime.GOOS == "windows" {

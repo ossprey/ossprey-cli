@@ -162,7 +162,8 @@ Windows resolves it under `%LOCALAPPDATA%`.
      manifest, since `-p`, `--manifest-path` and a `package.workspace` member
      write a member's manifest and the root's lock. It runs through
      `realCommand`, the lookup `Exec` uses for the command, with the same
-     options, so both see one workspace.
+     options bar a `--config` it would drain (below), so both see one
+     workspace.
    - **Only what cargo left is undone.** Its state is read as cargo exits and
      again after the verdict; a file changed since (contents, mode, owner) or
      one the path reaches only since (`os.SameFile` against the handle read as
@@ -230,7 +231,12 @@ Windows resolves it under `%LOCALAPPDATA%`.
      1.97; there is no flag form. A config `catalog.ParseCargoConfig` refuses,
      or one there that is not a regular file, counts as moving the lock: cargo
      reads `--config /dev/stdin` and a FIFO, and the run-first verbs read their
-     config once, so what a pipe holds applies.
+     config once, so what a pipe holds applies. So `cargo metadata` is handed
+     no `--config` naming a pipe, FIFO or device (`withoutDrainedConfigs`): it
+     inherits a `<(...)` fd and emptied it before cargo read it, and it reports
+     the same workspace without one. A one-shot FIFO as a level config is still
+     read by `cargo metadata` too, first (after cargo when passive), so cargo
+     reads nothing, or cargo or metadata waits for a writer (not fixed).
    - **Which configs.** At each level, `CARGO_HOME` included, cargo reads only
      the legacy `config` when it opens, else `config.toml`, and
      `cargoConfigFile` picks the same: reading an ignored `config.toml` that set

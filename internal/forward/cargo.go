@@ -371,9 +371,10 @@ func readCargoWorkspace(ctx context.Context, args []string) (cargoWorkspace, err
 	if verb < 0 {
 		return cargoWorkspace{}, errors.New("no cargo command")
 	}
+	configDir := cargoConfigDir(args[:verb])
 	// The options before the verb, rustup's +toolchain included, pick the same workspace and configuration.
-	cmdArgs := append(slices.Clone(args[:verb]), "metadata", "--no-deps", "--format-version", "1")
-	cmdArgs = append(cmdArgs, cargoWorkspaceFlags(args[verb+1:])...)
+	cmdArgs := append(withoutDrainedConfigs(args[:verb], configDir), "metadata", "--no-deps", "--format-version", "1")
+	cmdArgs = append(cmdArgs, withoutDrainedConfigs(cargoWorkspaceFlags(args[verb+1:]), configDir)...)
 	// The cargo the command runs, as Exec finds it, so both read the same manifests.
 	cmd, err := realCommand(ctx, "cargo", cmdArgs)
 	if err != nil {
@@ -397,7 +398,7 @@ func readCargoWorkspace(ctx context.Context, args []string) (cargoWorkspace, err
 	ws := cargoWorkspace{
 		Lock:      filepath.Join(meta.WorkspaceRoot, "Cargo.lock"),
 		Manifests: []string{filepath.Join(meta.WorkspaceRoot, "Cargo.toml")},
-		ConfigDir: cargoConfigDir(args[:verb]),
+		ConfigDir: configDir,
 	}
 	for _, p := range meta.Packages {
 		if p.ManifestPath != "" && filepath.Base(p.ManifestPath) != "Cargo.toml" {
@@ -412,6 +413,31 @@ func readCargoWorkspace(ctx context.Context, args []string) (cargoWorkspace, err
 		return cargoWorkspace{}, errLockfileMoved
 	}
 	return ws, nil
+}
+
+// withoutDrainedConfigs drops each --config naming a pipe, FIFO or device, which cargo metadata would empty before the command reads it; lockfileMoved skips the check for one anyway.
+func withoutDrainedConfigs(opts []string, dir string) []string {
+	drained := func(c string) bool {
+		fi, err := os.Stat(cargoConfigPath(c, dir))
+		return err == nil && !fi.Mode().IsRegular() && !fi.IsDir()
+	}
+	out := make([]string, 0, len(opts))
+	for i := 0; i < len(opts); i++ {
+		a := opts[i]
+		v, attached := strings.CutPrefix(a, "--config=")
+		switch {
+		case a == "--":
+			return append(out, opts[i:]...)
+		case a == "--config" && i+1 < len(opts):
+			if !drained(opts[i+1]) {
+				out = append(out, a, opts[i+1])
+			}
+			i++
+		case !attached || !drained(v):
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // firstErrorLine is cargo's own error line, else its first line, else err.
@@ -594,17 +620,21 @@ func cargoConfigArgs(args []string) []string {
 
 // cargoConfigArg is what cargo reads for a --config value: the file it names, from dir where cargo runs, when that exists, else the value as TOML.
 func cargoConfigArg(c, dir string) ([]byte, error) {
-	p := c
-	if c != "" && dir != "" && filepath.VolumeName(c) == "" && !os.IsPathSeparator(c[0]) {
-		// cargo joins the value to its working directory uncleaned, so the kernel applies `..` after any link.
-		p = dir + string(filepath.Separator) + c
-	}
 	if c != "" {
-		if data, there, err := readConfig(p); there {
+		if data, there, err := readConfig(cargoConfigPath(c, dir)); there {
 			return data, err
 		}
 	}
 	return []byte(c), nil
+}
+
+// cargoConfigPath is the file a --config value names, read from dir where cargo runs.
+func cargoConfigPath(c, dir string) string {
+	if c != "" && dir != "" && filepath.VolumeName(c) == "" && !os.IsPathSeparator(c[0]) {
+		// cargo joins the value to its working directory uncleaned, so the kernel applies `..` after any link.
+		return dir + string(filepath.Separator) + c
+	}
+	return c
 }
 
 // cargoConfigFiles are the configs cargo reads from dir up, one per level.
