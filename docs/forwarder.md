@@ -124,7 +124,10 @@ from the directory's default ACL) or the rename is refused (a file mounted on
 its own, or one on another device): then the old bytes are written into the
 file in place, as cargo writes `Cargo.lock`, where a write that fails part way
 can leave a partial file, as cargo's own write would. Windows does not report
-a second hard link, so there the copy is always renamed over the file.
+a second hard link, so there the copy is always renamed over the file. ACLs are
+compared on Linux only, so on macOS and Windows a renamed copy has the ACL any
+new file in that directory gets, the directory's inheritable entries included,
+rather than the file's own.
 That includes `-p <member>`, `--manifest-path` and a member whose `Cargo.lock`
 sits at the workspace root. When cargo itself fails, its exit code is passed
 through (unless the lock it changed holds malware, which exits `1` as above), but a failure can still leave changes behind: `cargo fetch` writes
