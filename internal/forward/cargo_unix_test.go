@@ -67,8 +67,8 @@ func TestCargoConfigThatIsAFIFOMayMoveTheLock(t *testing.T) {
 	assertIrregularConfig(t, func(p string) error { return syscall.Mkfifo(p, 0o644) })
 }
 
-// cargo metadata is handed no --config naming a pipe, FIFO or device, in any spelling, since it would empty a one-shot one before the command reads it (OSS-2553).
-func TestWithoutDrainedConfigs(t *testing.T) {
+// cargo metadata is handed no --config naming a file, in any spelling: it would empty a one-shot pipe before the command reads it, and on macOS read a /dev/fd/N regular file to the end of the offset cargo shares (OSS-2553).
+func TestWithoutConfigFiles(t *testing.T) {
 	dir := t.TempDir()
 	if err := syscall.Mkfifo(filepath.Join(dir, "fifo"), 0o644); err != nil {
 		t.Skipf("cannot make a FIFO: %v", err)
@@ -77,9 +77,15 @@ func TestWithoutDrainedConfigs(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(dir, "d"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	in := []string{"+nightly", "--config", "fifo", "--config=fifo", "--config", "c.toml", "--config=d", "--config", "k=v", "--config", filepath.Join(dir, "fifo"), "--config=/dev/null", "-Z", "x", "--", "--config", "fifo"}
-	want := []string{"+nightly", "--config", "c.toml", "--config=d", "--config", "k=v", "-Z", "x", "--", "--config", "fifo"}
-	if got := withoutDrainedConfigs(in, dir); !slices.Equal(got, want) {
+	f, err := os.Open(filepath.Join(dir, "c.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	fd := "/dev/fd/" + strconv.Itoa(int(f.Fd()))
+	in := []string{"+nightly", "--config", "fifo", "--config=fifo", "--config", "c.toml", "--config=" + filepath.Join(dir, "c.toml"), "--config", fd, "--config=d", "--config", "k=v", "--config", filepath.Join(dir, "fifo"), "--config=/dev/null", "--config", "nosuch.toml", "-Z", "x", "--", "--config", "fifo"}
+	want := []string{"+nightly", "--config=d", "--config", "k=v", "--config", "nosuch.toml", "-Z", "x", "--", "--config", "fifo"}
+	if got := withoutConfigFiles(in, dir); !slices.Equal(got, want) {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }

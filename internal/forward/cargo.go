@@ -373,8 +373,8 @@ func readCargoWorkspace(ctx context.Context, args []string) (cargoWorkspace, err
 	}
 	configDir := cargoConfigDir(args[:verb])
 	// The options before the verb, rustup's +toolchain included, pick the same workspace and configuration.
-	cmdArgs := append(withoutDrainedConfigs(args[:verb], configDir), "metadata", "--no-deps", "--format-version", "1")
-	cmdArgs = append(cmdArgs, withoutDrainedConfigs(cargoWorkspaceFlags(args[verb+1:]), configDir)...)
+	cmdArgs := append(withoutConfigFiles(args[:verb], configDir), "metadata", "--no-deps", "--format-version", "1")
+	cmdArgs = append(cmdArgs, withoutConfigFiles(cargoWorkspaceFlags(args[verb+1:]), configDir)...)
 	// The cargo the command runs, as Exec finds it, so both read the same manifests.
 	cmd, err := realCommand(ctx, "cargo", cmdArgs)
 	if err != nil {
@@ -415,11 +415,11 @@ func readCargoWorkspace(ctx context.Context, args []string) (cargoWorkspace, err
 	return ws, nil
 }
 
-// withoutDrainedConfigs drops each --config naming a pipe, FIFO or device, which cargo metadata would empty before the command reads it; lockfileMoved skips the check for one anyway.
-func withoutDrainedConfigs(opts []string, dir string) []string {
-	drained := func(c string) bool {
+// withoutConfigFiles drops each --config naming a file, which cargo metadata needs not to find the workspace and could drain (a pipe, or on macOS a /dev/fd/N sharing cargo's offset); a directory stays, as cargo fails on it alike.
+func withoutConfigFiles(opts []string, dir string) []string {
+	file := func(c string) bool {
 		fi, err := os.Stat(cargoConfigPath(c, dir))
-		return err == nil && !fi.Mode().IsRegular() && !fi.IsDir()
+		return err == nil && !fi.IsDir()
 	}
 	out := make([]string, 0, len(opts))
 	for i := 0; i < len(opts); i++ {
@@ -429,11 +429,11 @@ func withoutDrainedConfigs(opts []string, dir string) []string {
 		case a == "--":
 			return append(out, opts[i:]...)
 		case a == "--config" && i+1 < len(opts):
-			if !drained(opts[i+1]) {
+			if !file(opts[i+1]) {
 				out = append(out, a, opts[i+1])
 			}
 			i++
-		case !attached || !drained(v):
+		case !attached || !file(v):
 			out = append(out, a)
 		}
 	}
