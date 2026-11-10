@@ -193,11 +193,14 @@ Windows resolves it under `%LOCALAPPDATA%`.
      appeared since, and where links fail (vfat, some FUSE and SMB mounts)
      creates it with `O_EXCL`, which never does either.
    - **Bounded, regular reads.** Every manifest, lock and config read goes
-     through `catalog.ReadRegular` (opened `O_NONBLOCK`, refused unless the
-     opened handle is regular, read no further than the bound), shared with the
-     catalogue so the guard cannot drift: a passive run whose cargo failed at
-     once hung on a FIFO `Cargo.lock` and read a link to `/dev/zero` until out
-     of memory.
+     through `catalog.ReadRegular` (refused unless regular both by `os.Stat`
+     before the open and on the handle opened `O_NONBLOCK`, read no further
+     than the bound), shared with the catalogue's `readRegularFile` so the
+     guard cannot drift: a passive run whose cargo failed at once hung on a
+     FIFO `Cargo.lock` and read a link to `/dev/zero` until out of memory. The
+     type is checked before the open because opening a FIFO releases a writer
+     blocked on it into a SIGPIPE and opening a device can reset it; the check
+     on the handle closes the race.
    - **A failed command** still gets its lock checked, since cargo writes before
      it can fail (`fetch --offline` locks before it downloads, `add` edits
      `Cargo.toml` before it resolves), and so does a lock unread before it ran,
