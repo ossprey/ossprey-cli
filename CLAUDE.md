@@ -201,9 +201,11 @@ Windows resolves it under `%LOCALAPPDATA%`.
    - **Bounded, regular reads.** Every manifest, lock and config read goes
      through `catalog.ReadRegular` (refused unless regular both by `os.Stat`
      before the open and on the handle opened `O_NONBLOCK`, read no further
-     than the bound), shared with the catalogue's `readRegularFile` so the
-     guard cannot drift: a passive run whose cargo failed at once hung on a
-     FIFO `Cargo.lock` and read a link to `/dev/zero` until out of memory. The
+     than the bound, at offsets from 0 since on macOS opening `/dev/stdin` or
+     `/dev/fd/N` dups the descriptor and moved cargo's offset), shared with
+     the catalogue's `readRegularFile` so the guard cannot drift: a passive
+     run whose cargo failed at once hung on a FIFO `Cargo.lock` and read a
+     link to `/dev/zero` until out of memory. The
      type is checked before the open because opening a FIFO releases a writer
      blocked on it into a SIGPIPE and opening a device can reset it; the check
      on the handle closes the race.

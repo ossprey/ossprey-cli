@@ -5,9 +5,11 @@ package catalog
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"syscall"
 	"testing"
 	"time"
@@ -79,5 +81,38 @@ func TestReadRegularNeverOpensAFIFO(t *testing.T) {
 	case <-opened:
 		t.Error("the FIFO was opened, releasing its writer")
 	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// ReadRegular reads from offset 0 without moving the descriptor's offset, so on macOS, where opening /dev/fd/N dups N, cargo still reads the whole config after it (OSS-2553).
+func TestReadRegularLeavesASharedOffsetAlone(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(p, []byte("net.retry = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	alias := "/dev/fd/" + strconv.Itoa(int(f.Fd()))
+	probe, err := os.Open(alias)
+	if err != nil {
+		t.Skipf("no /dev/fd: %v", err)
+	}
+	_, err = probe.Seek(4, io.SeekStart)
+	probe.Close()
+	if off, _ := f.Seek(0, io.SeekCurrent); err != nil || off != 4 {
+		t.Skip("opening /dev/fd/N reopens the file here (Linux), so it shares no offset to move")
+	}
+	if _, err := f.Seek(2, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	data, _, err := ReadRegular(alias, maxCargoProofBytes)
+	if err != nil || string(data) != "net.retry = 2\n" {
+		t.Errorf("ReadRegular = %q, %v; want the whole file", data, err)
+	}
+	if off, _ := f.Seek(0, io.SeekCurrent); off != 2 {
+		t.Errorf("offset %d after ReadRegular, want 2 as it was", off)
 	}
 }

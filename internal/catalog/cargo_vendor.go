@@ -337,7 +337,7 @@ func readRegularFile(p string, limit int64) ([]byte, bool) {
 // ErrNotRegular refuses a FIFO, device or directory, which may never end.
 var ErrNotRegular = errors.New("not a regular file")
 
-// ReadRegular reads up to limit+1 bytes of p, refused unless it is a regular file both before it is opened and once opened without waiting on a FIFO.
+// ReadRegular reads up to limit+1 bytes of p from its start, refused unless it is a regular file both before it is opened and once opened without waiting on a FIFO.
 func ReadRegular(p string, limit int64) ([]byte, fs.FileInfo, error) {
 	// Opening a FIFO releases a writer blocked on it, and opening a device can reset it, so neither is opened.
 	if fi, err := os.Stat(p); err != nil {
@@ -357,7 +357,8 @@ func ReadRegular(p string, limit int64) ([]byte, fs.FileInfo, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	// Read at offsets from 0, since on macOS /dev/stdin or /dev/fd/N dups a descriptor and shares its offset with cargo.
+	data, err := io.ReadAll(io.NewSectionReader(f, 0, limit+1))
 	return data, fi, err
 }
 
