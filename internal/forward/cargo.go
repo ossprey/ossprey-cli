@@ -734,7 +734,7 @@ func reportRestore(command string, changes []fileChange, unread []string) {
 		switch {
 		case f.is(now):
 			continue
-		case !c.after.is(now) || c.after.mode != now.mode || now.existed && !os.SameFile(now.info, c.after.info):
+		case !c.after.is(now) || c.after.mode != now.mode || now.existed && (!os.SameFile(now.info, c.after.info) || !sameOwner(now.info, c.after.info)):
 			// A permission change since cargo exited is the user's too, and a file the path reaches only since was never cargo's.
 			err = errNotLeft
 		case !f.existed:

@@ -495,3 +495,43 @@ func TestRunCargoUpdate_RestoreFallsBackInPlaceOnlyWhereItHelps(t *testing.T) {
 		})
 	}
 }
+
+// A lock the command created whose owner or group changed while the verdict was pending is left as it stands and named, not removed (OSS-2553).
+func TestRunCargoUpdate_BlockLeavesACreatedLockWhoseGroupChanged(t *testing.T) {
+	var other int
+	if groups, err := os.Getgroups(); err == nil {
+		for _, g := range groups {
+			if g != os.Getegid() {
+				other = g
+			}
+		}
+	}
+	if other == 0 {
+		t.Skip("the user is in no other group")
+	}
+	_, ws := cargoProject(t)
+	if err := os.Remove(ws.Lock); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	swap(t, func(context.Context, string, []string) error {
+		writeFile(t, ws.Lock, evilLock)
+		return nil
+	}, cleanSBOM)
+	swapScan(t, func(context.Context, scanRequest) (*ossbom.SBOM, error) {
+		if err := os.Chown(ws.Lock, -1, other); err != nil {
+			t.Fatal(err)
+		}
+		return evilSBOM(), nil
+	})
+
+	out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"update"}})
+	if !errors.Is(err, ErrBlocked) {
+		t.Fatalf("Run = %v, want ErrBlocked", err)
+	}
+	if got := readFile(t, ws.Lock); got != evilLock {
+		t.Errorf("lock = %q, want the lock whose group changed left in place", got)
+	}
+	if want := "ossprey: warning: did not undo `cargo update` in Cargo.lock, changed again after cargo exited\n"; !strings.Contains(out, want) || strings.Contains(out, "removed Cargo.lock") {
+		t.Errorf("output:\n%s\nwant %q and no removal", out, want)
+	}
+}
