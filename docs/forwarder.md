@@ -119,7 +119,8 @@ put back by renaming a copy over it, so one that cannot be written back or
 removed (on a full disk, say) is left exactly as cargo left it with a warning
 line, unless the copy cannot keep what cargo's own write keeps (a directory you
 cannot write to, a second hard link, an owner or group the copy cannot be
-given, or on Linux an access ACL) or the rename is refused (a file mounted on
+given, or on Linux an access ACL, on the file or one the copy would inherit
+from the directory's default ACL) or the rename is refused (a file mounted on
 its own, or one on another device): then the old bytes are written into the
 file in place, as cargo writes `Cargo.lock`, where a write that fails part way
 can leave a partial file, as cargo's own write would. Windows does not report

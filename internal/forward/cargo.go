@@ -805,7 +805,7 @@ func rewriteLeft(f, left savedFile) error {
 	return rewriteInPlace(f, left)
 }
 
-// replaceLeft renames a synced copy of f over target while the path still reaches it as cargo left it; errInPlace when the copy cannot be made beside it or would not keep its one name, owner and group.
+// replaceLeft renames a synced copy of f over target while the path still reaches it as cargo left it; errInPlace when the copy cannot be made beside it or would not keep its one name, owner, group and ACL.
 func replaceLeft(f, left savedFile, target string) error {
 	dir, err := os.OpenRoot(filepath.Dir(target))
 	if err != nil {
@@ -832,7 +832,7 @@ func replaceLeft(f, left savedFile, target string) error {
 			dir.Remove(name)
 		}
 	}()
-	if !ownAs(tmp, left.info) {
+	if !ownAs(tmp, left.info) || !sameACL(tmp, target) {
 		tmp.Close()
 		return errInPlace
 	}
