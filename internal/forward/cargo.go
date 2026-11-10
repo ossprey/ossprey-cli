@@ -873,10 +873,11 @@ func replaceLeft(f, left savedFile, target string) error {
 	return nil
 }
 
-// stageFile and renameStaged stage a copy and rename it over the target; test seams.
+// stageFile, renameStaged and linkStaged stage a copy and rename it over the target or link it in; test seams.
 var (
 	stageFile    = stageIn
 	renameStaged = func(dir *os.Root, from, to string) error { return dir.Rename(from, to) }
+	linkStaged   = func(dir *os.Root, from, to string) error { return dir.Link(from, to) }
 )
 
 // rewriteInPlace writes f's bytes into the file left at its path, as cargo writes a lock, once the handle shows it still as cargo left it.
@@ -905,7 +906,7 @@ func rewriteInPlace(f, left savedFile) error {
 	return err
 }
 
-// recreateLeft writes back a file cargo removed by linking in a staged copy, which fails if anything has appeared at the path since, or in place when no copy can be staged.
+// recreateLeft writes back a file cargo removed by linking in a staged copy, or by creating it in place when no copy can be staged or linked; either way one that has appeared at the path since is left alone.
 func recreateLeft(f savedFile) error {
 	if dir, err := os.OpenRoot(filepath.Dir(f.path)); err == nil {
 		defer dir.Close()
@@ -915,10 +916,19 @@ func recreateLeft(f savedFile) error {
 			if err := writeStaged(tmp, f); err != nil {
 				return err
 			}
-			return dir.Link(name, base)
+			switch err := linkStaged(dir, name, base); {
+			case err == nil:
+				return nil
+			case errors.Is(err, fs.ErrExist):
+				return errNotLeft
+			}
+			// A filesystem without hard links refuses the link, so the file is created below, which never replaces one either.
 		}
 	}
 	fh, err := os.OpenFile(f.path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|oNonblock, f.mode)
+	if errors.Is(err, fs.ErrExist) {
+		return errNotLeft
+	}
 	if err != nil {
 		return err
 	}

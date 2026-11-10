@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -781,6 +782,64 @@ func TestRunCargoAdd_BlockWritesBackAFileCargoRemoved(t *testing.T) {
 			}
 		})
 	}
+}
+
+// recreateBlock is a blocked `cargo add -p a evil` that removed the member's manifest, with prepare run first to swap seams; it returns the output and the manifest's path.
+func recreateBlock(t *testing.T, prepare func(member string)) (string, string) {
+	t.Helper()
+	root, ws := cargoProject(t)
+	member := filepath.Join(root, "a", "Cargo.toml")
+	swap(t, func(context.Context, string, []string) error {
+		writeFile(t, ws.Lock, evilLock)
+		return os.Remove(member)
+	}, cleanSBOM)
+	swapScan(t, func(context.Context, scanRequest) (*ossbom.SBOM, error) { return evilSBOM(), nil })
+	prepare(member)
+	out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"add", "-p", "a", "evil"}})
+	if !errors.Is(err, ErrBlocked) {
+		t.Fatalf("Run = %v, want ErrBlocked", err)
+	}
+	return out, member
+}
+
+// A file cargo removed is created in place where the filesystem makes no hard links, and one that appears at its path meanwhile is left alone and named (OSS-2553).
+func TestRunCargoAdd_BlockRecreatesAFileWhereNoLinkCanBeMade(t *testing.T) {
+	for name, refusal := range map[string]error{"permission": fs.ErrPermission, "unsupported": errors.ErrUnsupported} {
+		t.Run("link refused for "+name, func(t *testing.T) {
+			out, member := recreateBlock(t, func(string) {
+				old := linkStaged
+				linkStaged = func(_ *os.Root, from, to string) error {
+					return &os.LinkError{Op: "link", Old: from, New: to, Err: refusal}
+				}
+				t.Cleanup(func() { linkStaged = old })
+			})
+			if got := readFile(t, member); got != memberManifest {
+				t.Errorf("%s = %q, want its old bytes", member, got)
+			}
+			if got := dirNames(t, filepath.Dir(member)); !slices.Equal(got, []string{"Cargo.toml"}) {
+				t.Errorf("member holds %v, want no staged copy left", got)
+			}
+			if want := "ossprey: undid `cargo add -p a evil`: restored " + filepath.Join("a", "Cargo.toml") + ", removed Cargo.lock\n"; !strings.Contains(out, want) {
+				t.Errorf("output lacks %q:\n%s", want, out)
+			}
+		})
+	}
+	t.Run("a file appears while the copy is staged", func(t *testing.T) {
+		const appeared = "[package]\nname = \"a\"\nversion = \"0.2.0\"\n"
+		out, member := recreateBlock(t, func(member string) {
+			swapWriteRestore(t, func(w io.Writer, data []byte) error {
+				writeFile(t, member, appeared)
+				_, err := w.Write(data)
+				return err
+			})
+		})
+		if got := readFile(t, member); got != appeared {
+			t.Errorf("%s = %q, want the file that appeared left as it is", member, got)
+		}
+		if want := "ossprey: warning: did not undo `cargo add -p a evil` in " + filepath.Join("a", "Cargo.toml") + ", changed again after cargo exited\n"; !strings.Contains(out, want) || strings.Contains(out, "could not restore") {
+			t.Errorf("output:\n%s\nwant %q and no failed restore", out, want)
+		}
+	})
 }
 
 // A manifest or lock over the bound is never read whole: the lock goes unchecked with the warning, and a manifest is left as cargo left it (OSS-2553).
