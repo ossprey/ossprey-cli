@@ -705,8 +705,8 @@ func TestRunCargoAdd_FailedRestoreLeavesCargosFiles(t *testing.T) {
 			t.Errorf("output lacks %q:\n%s", line, out)
 		}
 	}
-	if strings.Contains(out, "undid") {
-		t.Errorf("output claims an undo:\n%s", out)
+	if strings.Contains(out, "undid") || strings.Contains(out, "nothing to restore") {
+		t.Errorf("output claims an undo or nothing to undo:\n%s", out)
 	}
 }
 

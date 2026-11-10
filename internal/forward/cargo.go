@@ -716,6 +716,7 @@ func changedFiles(saved []savedFile) []fileChange {
 // reportRestore undoes each change in the file cargo left, while it is still as cargo left it, leaves alone one changed again since, and says so.
 func reportRestore(command string, changes []fileChange, unread []string) {
 	var done, kept []string
+	failed := false
 	for _, c := range changes {
 		f, now := c.before, stateOf(c.before.path)
 		verb := "restore"
@@ -735,6 +736,7 @@ func reportRestore(command string, changes []fileChange, unread []string) {
 		case errors.Is(err, errNotLeft):
 			kept = append(kept, displayPath(f.path))
 		case err != nil:
+			failed = true
 			fmt.Fprintf(errOut, "ossprey: warning: could not %s %s (%v)\n", verb, displayPath(f.path), err)
 		default:
 			done = append(done, verb+"d "+displayPath(f.path))
@@ -753,7 +755,7 @@ func reportRestore(command string, changes []fileChange, unread []string) {
 		}
 		fmt.Fprintf(errOut, "ossprey: warning: did not undo `%s` in %s, which could not be read before cargo ran\n", command, strings.Join(names, ", "))
 	}
-	if len(done) == 0 && len(kept) == 0 && len(unread) == 0 {
+	if len(done) == 0 && len(kept) == 0 && len(unread) == 0 && !failed {
 		fmt.Fprintf(errOut, "ossprey: `%s` changed no Cargo.toml or Cargo.lock; nothing to restore\n", command)
 	}
 }
