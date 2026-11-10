@@ -208,10 +208,16 @@ func checkCargoAfter(ctx context.Context, m *Manager, opts Options) error {
 	command := m.Bin + " " + strings.Join(opts.Args, " ")
 	if opts.Passive {
 		flushWarnings(ctx)
+		before := cargoLockBefore(ctx, opts.Args)
 		runErr := execFn(ctx, m.Bin, opts.Args)
+		written := changedFiles(before)
 		ws, err := cargoWorkspaceFn(ctx, opts.Args)
 		if cargoFailedOnItsWorkspace(command, runErr, err) {
 			return runErr
+		}
+		if err == nil && ws.LockMayMove && !lockChanged(written, ws.Lock) {
+			// Only a lock cargo changed is known to be there, which shows only when cargoLockBefore saved it.
+			err = errLockfileMoved
 		}
 		if err == nil && !exists(ws.Lock) {
 			// cargo add --dry-run with no lock writes nothing, so there is nothing to post.
@@ -248,10 +254,14 @@ func checkCargoAfter(ctx context.Context, m *Manager, opts Options) error {
 	if cargoFailedOnItsWorkspace(command, runErr, err) {
 		return runErr
 	}
+	if err == nil && ws.LockMayMove && !lockChanged(changes, ws.Lock) {
+		// Only cargo read the config that could move the lock, and it left the project lock alone, so it may have written one elsewhere.
+		err = errLockfileMoved
+	}
 	// A moved or script lock has no snapshot, so a failed command still gets the warning below.
 	if runErr != nil && err == nil {
 		// cargo writes before it can fail: fetch locks before it downloads, add edits Cargo.toml before it resolves; a lock unread before may have changed.
-		if !slices.ContainsFunc(changes, func(c fileChange) bool { return c.before.path == ws.Lock }) && !slices.Contains(unread, ws.Lock) {
+		if !lockChanged(changes, ws.Lock) && !slices.Contains(unread, ws.Lock) {
 			var changed []string
 			for _, c := range changes {
 				changed = append(changed, displayPath(c.before.path))
@@ -310,6 +320,25 @@ func checkCargoAfter(ctx context.Context, m *Manager, opts Options) error {
 	return runErr
 }
 
+// lockChanged reports whether cargo changed the lock, which shows it wrote the lock there.
+func lockChanged(changes []fileChange, lock string) bool {
+	return slices.ContainsFunc(changes, func(c fileChange) bool { return c.before.path == lock })
+}
+
+// cargoLockBefore saves the lock before a passive cargo runs when only a --config naming no regular file may move it, which cargo metadata is never handed, so reading the workspace first drains nothing.
+func cargoLockBefore(ctx context.Context, args []string) []savedFile {
+	verb := verbIndex("cargo", args)
+	if verb < 0 || len(cargoConfigArgs(args)) == 0 || lockfileMoved(args, cargoConfigDir(args[:verb])) != lockUnreadArg {
+		return nil
+	}
+	ws, err := cargoWorkspaceFn(ctx, args)
+	if err != nil || !ws.LockMayMove {
+		return nil
+	}
+	saved, _ := snapshot([]string{ws.Lock})
+	return saved
+}
+
 // cargoFailedOnItsWorkspace is a failed command whose workspace cargo metadata cannot read either: cargo's error says why, and only a moved or script lock may have been written.
 func cargoFailedOnItsWorkspace(command string, runErr, wsErr error) bool {
 	if runErr == nil || wsErr == nil || errors.Is(wsErr, errLockfileMoved) || errors.Is(wsErr, errScriptLock) {
@@ -353,6 +382,8 @@ type cargoWorkspace struct {
 	Lock      string
 	Manifests []string
 	ConfigDir string
+	// LockMayMove is a config only cargo can read, so the lock counts only where cargo changed it.
+	LockMayMove bool
 }
 
 func (w cargoWorkspace) files() []string {
@@ -361,6 +392,18 @@ func (w cargoWorkspace) files() []string {
 
 // errLockfileMoved is a resolver.lockfile-path, which puts the lock where this check does not look.
 var errLockfileMoved = errors.New("a resolver.lockfile-path may move it")
+
+// lockPlace is what the configs cargo reads say of where it writes the lock, in rising order of doubt.
+type lockPlace int
+
+const (
+	lockStays lockPlace = iota
+	// lockUnreadArg is a --config naming no regular file, which only cargo reads, since reading it would drain it.
+	lockUnreadArg
+	// lockUnreadLevel is a config cargo finds that is not a regular file, which cargo metadata reads too.
+	lockUnreadLevel
+	lockMoves
+)
 
 // errScriptLock is a cargo script (-Zscript), whose lock cargo keeps under its build directory, where this check does not look.
 var errScriptLock = errors.New("a cargo script keeps it in the build directory")
@@ -409,8 +452,11 @@ func readCargoWorkspace(ctx context.Context, args []string) (cargoWorkspace, err
 			ws.Manifests = append(ws.Manifests, p.ManifestPath)
 		}
 	}
-	if lockfileMoved(args, ws.ConfigDir) {
+	switch lockfileMoved(args, ws.ConfigDir) {
+	case lockMoves:
 		return cargoWorkspace{}, errLockfileMoved
+	case lockUnreadArg, lockUnreadLevel:
+		ws.LockMayMove = true
 	}
 	return ws, nil
 }
@@ -521,35 +567,41 @@ func cargoConfigDir(globals []string) string {
 	return filepath.Clean(dir)
 }
 
-// lockfileMoved reports a resolver.lockfile-path cargo may read: from the environment, a --config on the line, or a config file or one it includes.
-func lockfileMoved(args []string, configDir string) bool {
+// lockfileMoved reports whether a resolver.lockfile-path cargo may read moves the lock, or only cargo can tell: from the environment, a --config on the line, or a config file or one it includes.
+func lockfileMoved(args []string, configDir string) lockPlace {
 	if os.Getenv("CARGO_RESOLVER_LOCKFILE_PATH") != "" {
-		return true
+		return lockMoves
 	}
-	// Only the decoded key counts, escapes included, though a config that cannot be read, or that the bounded parser refuses, may set it too.
-	moves := func(data []byte, err error) bool {
+	// Only the decoded key counts, escapes included, though a config that cannot be read, or that the bounded parser refuses, may set it too; one that is not a regular file is left to cargo.
+	place := func(data []byte, err error, unread lockPlace) lockPlace {
+		if errors.Is(err, catalog.ErrNotRegular) {
+			return unread
+		}
 		if err != nil {
-			return true
+			return lockMoves
 		}
 		doc, ok := cargoConfigDoc(data)
 		resolver, _ := doc["resolver"].(map[string]any)
-		return !ok || resolver["lockfile-path"] != nil || doc["include"] != nil
-	}
-	for _, c := range cargoConfigArgs(args) {
-		if moves(cargoConfigArg(c, configDir)) {
-			return true
+		if !ok || resolver["lockfile-path"] != nil || doc["include"] != nil {
+			return lockMoves
 		}
+		return lockStays
+	}
+	got := lockStays
+	for _, c := range cargoConfigArgs(args) {
+		data, err := cargoConfigArg(c, configDir)
+		got = max(got, place(data, err, lockUnreadArg))
 	}
 	files := cargoConfigFiles(configDir)
 	if home := catalog.CargoHome(configDir); home != "" {
 		files = append(files, cargoConfigFile(home))
 	}
 	for _, f := range files {
-		if data, there, err := readConfig(f); there && moves(data, err) {
-			return true
+		if data, there, err := readConfig(f); there {
+			got = max(got, place(data, err, lockUnreadLevel))
 		}
 	}
-	return false
+	return got
 }
 
 // cargoDefaultRegistry is the registry other than crates.io that `cargo install` takes a crate from when the line names none, or "".

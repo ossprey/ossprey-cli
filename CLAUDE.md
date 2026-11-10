@@ -232,17 +232,23 @@ Windows resolves it under `%LOCALAPPDATA%`.
      `"lockfile\u002dpath"` read): matching the bytes let a crate, a
      `--manifest-path` or a comment naming `lockfile-path` skip the check, and
      none of those moves the lock, nor does `-Z lockfile-path`, a no-op since
-     1.97; there is no flag form. A config `catalog.ParseCargoConfig` refuses,
-     or one there that is not a regular file, counts as moving the lock: cargo
-     reads `--config /dev/stdin` and a FIFO, and the run-first verbs read their
-     config once, so what a pipe holds applies. So `cargo metadata` is handed
-     no `--config` naming a file (`withoutConfigFiles`; a directory stays, as
-     cargo fails on it alike): it emptied an inherited `<(...)` fd before cargo
-     read it, on macOS opening `/dev/fd/N` shares cargo's offset, and it
-     reports the same workspace without one. A one-shot FIFO as a level
-     config is still read by `cargo metadata` too, first (after cargo when
-     passive), so cargo reads nothing, or cargo or metadata waits for a
-     writer (not fixed).
+     1.97; there is no flag form. A config `catalog.ParseCargoConfig` refuses
+     counts as moving the lock. One there that is not a regular file cannot be
+     read without draining it (cargo reads `--config /dev/stdin` and a FIFO,
+     once on the run-first verbs), so `lockfileMoved` leaves it to what cargo
+     writes (`LockMayMove`): a workspace lock cargo changed was written there
+     and is checked (posted when passive), one it left alone gets the warning.
+     Counting such a config as moving turned a blocked `cargo add` under a
+     piped config that set nothing into an unchecked one. Passive saves the
+     lock before cargo only for such a `--config` (`cargoLockBefore`), since
+     metadata, run first, would read a level config. `cargo metadata` is
+     handed no `--config` naming a file (`withoutConfigFiles`; a directory
+     stays, as cargo fails on it alike): it emptied an inherited `<(...)` fd
+     before cargo read it, on macOS opening `/dev/fd/N` shares cargo's
+     offset, and it reports the same workspace without one. A one-shot FIFO
+     as a level config is still read by `cargo metadata` too, first (after
+     cargo when passive), so cargo reads nothing, or cargo or metadata waits
+     for a writer (not fixed).
    - **Which configs.** At each level, `CARGO_HOME` included, cargo reads only
      the legacy `config` when it opens, else `config.toml`, and
      `cargoConfigFile` picks the same: reading an ignored `config.toml` that set

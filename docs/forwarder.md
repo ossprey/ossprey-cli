@@ -144,10 +144,14 @@ cannot be made (the API unreachable, a workspace cargo cannot read, a
 `Cargo.lock` that is not a regular file or is over 32 MiB, or a
 `resolver.lockfile-path` setting, in the environment, a `--config` or a cargo
 config, that may move the lock elsewhere, including one a
-config `include` could set or a config ossprey cannot read: one that is not a
-regular file (`--config /dev/stdin`, say) or is too large or too deeply nested,
+config `include` could set or a config too large or too deeply nested to read,
 or a cargo script run with `-Zscript`, whose lock cargo keeps in its build
-directory), cargo's changes are kept and one warning line says so. A cargo
+directory), cargo's changes are kept and one warning line says so. A config
+that is not a regular file (a piped `--config /dev/stdin`, say, or
+`--config <(...)`) cannot be read without emptying it before cargo does, so
+what cargo did decides: a `Cargo.lock` cargo changed at the workspace root is
+checked as usual, and one it left alone gets that warning, since cargo may
+have written the lock elsewhere. A cargo
 config (`.cargo/config.toml`) that is a FIFO is also read by the `cargo
 metadata` ossprey runs to find the workspace, before cargo (after it in
 passive mode), so a FIFO written only once can leave cargo reading nothing, or
@@ -191,7 +195,9 @@ subcommand (`--config`, `-Z`, `--color`, `-C`) are understood, and so are short
 options grouped as cargo groups them (`-qF pcre2` names no crate `pcre2`).
 In passive mode `cargo add` and the others run and the `Cargo.lock` they leave is then posted,
 even when cargo failed, and `cargo install` posts its crates alongside the
-build.
+build. Under a `--config` that is not a regular file the lock is posted only
+when cargo changed it, and under a cargo config that is not one it is not
+posted; a warning line says so.
 
 ## What is not checked
 
@@ -403,8 +409,8 @@ than being quietly forwarded. That includes the cargo commands checked after
 they run (`cargo add`, `update`, `generate-lockfile` and `fetch`): the
 credential is looked up first, so they stop on the same error before cargo
 changes anything, unless the check cannot be made at all (a lock that
-`resolver.lockfile-path` may move, a cargo script, or a workspace cargo cannot
-read), where
+`resolver.lockfile-path` may move, other than through a config that is not a
+regular file, a cargo script, or a workspace cargo cannot read), where
 cargo runs and the warning described under cargo above is printed instead. If
 the check then fails once cargo has run (the API
 unreachable, timing out or refusing the credential), cargo's changes are kept

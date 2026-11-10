@@ -222,46 +222,116 @@ func TestCargoConfigFromStdinMayMoveTheLock(t *testing.T) {
 	}
 }
 
-// A `--config <(...)` pipe reaches cargo whole, since the cargo metadata run first is not handed it, so cargo writes the lock where its lockfile-path says and the warning is true (OSS-2553).
+// A `--config <(...)` pipe reaches cargo whole, since the cargo metadata run first is not handed it, so cargo writes the lock where its lockfile-path says and the warning is true, gating or passive (OSS-2553).
 func TestCargoConfigFromAProcessSubstitutionReachesCargo(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("no /dev/fd")
 	}
-	api := newFakeAPI(t, "")
-	env := cargoEnv(t, api.URL)
-	dir, _ := cargoCrate(t)
-	lock := exec.Command("cargo", "generate-lockfile", "--offline")
-	lock.Dir, lock.Env = dir, env
-	if out, err := lock.CombinedOutput(); err != nil {
-		t.Fatalf("cargo generate-lockfile: %v\n%s", err, out)
+	for passive, want := range map[string]string{
+		"":  "ossprey: warning: Cargo.lock not checked after `cargo --config /dev/fd/3 generate-lockfile --offline` (a resolver.lockfile-path may move it); cargo's changes are kept",
+		"1": "ossprey: warning: could not post scan (a resolver.lockfile-path may move it); the install was not blocked (passive)",
+	} {
+		api := newFakeAPI(t, "")
+		env := append(cargoEnv(t, api.URL), "OSSPREY_PASSIVE="+passive)
+		dir, _ := cargoCrate(t)
+		lock := exec.Command("cargo", "generate-lockfile", "--offline")
+		lock.Dir, lock.Env = dir, env
+		if out, err := lock.CombinedOutput(); err != nil {
+			t.Fatalf("cargo generate-lockfile: %v\n%s", err, out)
+		}
+		before, _ := os.ReadFile(filepath.Join(dir, "Cargo.lock"))
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		moved := filepath.Join(dir, "moved", "Cargo.lock")
+		if _, err := fmt.Fprintf(w, "resolver.lockfile-path = %q\n", moved); err != nil {
+			t.Fatal(err)
+		}
+		w.Close()
+		// ExtraFiles opens the pipe at fd 3 without close-on-exec, as a shell opens <(...).
+		cmd := exec.Command(binPath, "cargo", "--config", "/dev/fd/3", "generate-lockfile", "--offline")
+		cmd.Dir, cmd.Env, cmd.ExtraFiles = dir, env, []*os.File{r}
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+		err = cmd.Run()
+		r.Close()
+		if err != nil {
+			t.Fatalf("passive %q: %v\nstderr: %s", passive, err, stderr.String())
+		}
+		if _, err := os.Stat(moved); err != nil {
+			t.Errorf("passive %q: cargo wrote no moved lock (%v)", passive, err)
+		}
+		if after, _ := os.ReadFile(filepath.Join(dir, "Cargo.lock")); string(after) != string(before) {
+			t.Errorf("passive %q: the project lock changed, want cargo to leave it alone", passive)
+		}
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("passive %q: stderr lacks %q:\n%s", passive, want, stderr.String())
+		}
+		if n, _ := api.stats(); n != 0 {
+			t.Errorf("passive %q: %d API requests, want the stale project lock left unchecked", passive, n)
+		}
 	}
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
+}
+
+// A piped --config that moves no lock leaves the project lock to cargo, which writes it there, so it is checked: a block undoes the add, and passive posts it, from stdin or <(...) alike (OSS-2553).
+func TestCargoAddWithAPipedConfigIsChecked(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no /dev/fd")
 	}
-	moved := filepath.Join(dir, "moved", "Cargo.lock")
-	if _, err := fmt.Fprintf(w, "resolver.lockfile-path = %q\n", moved); err != nil {
-		t.Fatal(err)
-	}
-	w.Close()
-	// ExtraFiles opens the pipe at fd 3 without close-on-exec, as a shell opens <(...).
-	cmd := exec.Command(binPath, "cargo", "--config", "/dev/fd/3", "generate-lockfile", "--offline")
-	cmd.Dir, cmd.Env, cmd.ExtraFiles = dir, env, []*os.File{r}
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	err = cmd.Run()
-	r.Close()
-	if err != nil {
-		t.Fatalf("%v\nstderr: %s", err, stderr.String())
-	}
-	if _, err := os.Stat(moved); err != nil {
-		t.Errorf("cargo wrote no moved lock (%v)", err)
-	}
-	if want := "ossprey: warning: Cargo.lock not checked after `cargo --config /dev/fd/3 generate-lockfile --offline` (a resolver.lockfile-path may move it); cargo's changes are kept"; !strings.Contains(stderr.String(), want) {
-		t.Errorf("stderr lacks %q:\n%s", want, stderr.String())
-	}
-	if n, _ := api.stats(); n != 0 {
-		t.Errorf("%d API requests, want the stale project lock left unchecked", n)
+	for _, passive := range []bool{false, true} {
+		for _, path := range []string{"/dev/stdin", "/dev/fd/3"} {
+			t.Run(fmt.Sprintf("passive %v %s", passive, path), func(t *testing.T) {
+				api := newFakeAPI(t, "pkg:cargo/itoa@1.0.15")
+				env := cargoEnv(t, api.URL)
+				if passive {
+					env = append(env, "OSSPREY_PASSIVE=1")
+				}
+				dir, manifest := cargoCrate(t)
+				r, w, err := os.Pipe()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := w.WriteString("net.retry = 2\n"); err != nil {
+					t.Fatal(err)
+				}
+				w.Close()
+				cmd := exec.Command(binPath, "cargo", "--config", path, "add", "itoa@=1.0.15")
+				cmd.Dir, cmd.Env = dir, env
+				// As `cat cfg | ossprey cargo --config /dev/stdin ...` and a shell's <(...) at fd 3.
+				if path == "/dev/stdin" {
+					cmd.Stdin = r
+				} else {
+					cmd.ExtraFiles = []*os.File{r}
+				}
+				var stderr strings.Builder
+				cmd.Stderr = &stderr
+				err = cmd.Run()
+				r.Close()
+				code := 0
+				if ee, ok := err.(*exec.ExitError); ok {
+					code = ee.ExitCode()
+				} else if err != nil {
+					t.Fatalf("%v\nstderr: %s", err, stderr.String())
+				}
+				if _, purls := api.stats(); !slices.Contains(purls, "pkg:cargo/itoa@1.0.15") {
+					t.Errorf("submitted %v, want the crate cargo locked\nstderr: %s", purls, stderr.String())
+				}
+				got, _ := os.ReadFile(filepath.Join(dir, "Cargo.toml"))
+				if passive {
+					if code != 0 || string(got) == manifest {
+						t.Errorf("exit %d, Cargo.toml changed %v; want 0 and cargo's change kept\nstderr: %s", code, string(got) != manifest, stderr.String())
+					}
+					return
+				}
+				if code != 1 || string(got) != manifest {
+					t.Errorf("exit %d, Cargo.toml %q; want 1 and it restored\nstderr: %s", code, got, stderr.String())
+				}
+				if _, err := os.Stat(filepath.Join(dir, "Cargo.lock")); !os.IsNotExist(err) {
+					t.Errorf("the Cargo.lock cargo created is still there (%v)", err)
+				}
+			})
+		}
 	}
 }
 

@@ -62,9 +62,80 @@ func TestRunCargo_PassiveReadsOnlyARegularLock(t *testing.T) {
 	}
 }
 
-// cargo 1.99.1 reads a --config or level config that is a FIFO, which ossprey never opens, so one may move the lock, while cargo install reads its config twice and installs from crates.io once a pipe runs dry (OSS-2553).
+// cargo 1.99.1 reads a --config or level config that is a FIFO, which ossprey never opens, so whether one moves the lock is left to what cargo writes, while cargo install reads its config twice and installs from crates.io once a pipe runs dry (OSS-2553).
 func TestCargoConfigThatIsAFIFOMayMoveTheLock(t *testing.T) {
 	assertIrregularConfig(t, func(p string) error { return syscall.Mkfifo(p, 0o644) })
+}
+
+// Passive reads the workspace before cargo only for a --config naming no regular file, which cargo metadata is not handed, and posts the lock only where cargo changed it (OSS-2553).
+func TestRunCargoAdd_PassiveDecidesAConfigOnlyCargoReadsByTheLock(t *testing.T) {
+	const warning = "ossprey: warning: could not post scan (a resolver.lockfile-path may move it); the install was not blocked (passive)\n"
+	for _, tc := range []struct {
+		name         string
+		config, link bool
+		moved        bool
+		order        []string
+		want         string
+	}{
+		{"cargo wrote the project lock", true, false, false, []string{"workspace", "cargo", "workspace", "scan"}, ""},
+		{"cargo wrote a lock elsewhere", true, false, true, []string{"workspace", "cargo", "workspace"}, warning},
+		{"a level config cargo metadata reads first", true, true, false, []string{"cargo", "workspace"}, warning},
+		{"only a level config", false, true, false, []string{"cargo", "workspace"}, warning},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, ws := cargoProject(t)
+			ws.LockMayMove = true
+			t.Setenv("CARGO_HOME", t.TempDir())
+			unsetEnv(t, "CARGO_RESOLVER_LOCKFILE_PATH")
+			if tc.link {
+				if err := os.Mkdir(filepath.Join(root, ".cargo"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink("/dev/null", filepath.Join(root, ".cargo", "config.toml")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var order []string
+			cargoWorkspaceFn = func(context.Context, []string) (cargoWorkspace, error) {
+				order = append(order, "workspace")
+				return ws, nil
+			}
+			lock := ws.Lock
+			if tc.moved {
+				lock = filepath.Join(root, "moved", "Cargo.lock")
+			}
+			swap(t, func(context.Context, string, []string) error {
+				order = append(order, "cargo")
+				writeFile(t, filepath.Join(root, "a", "Cargo.toml"), memberManifest+"\n[dependencies]\nevil = \"1\"\n")
+				if err := os.MkdirAll(filepath.Dir(lock), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				writeFile(t, lock, evilLock)
+				return nil
+			}, cleanSBOM)
+			var req scanRequest
+			var scanned string
+			scan := lockScan(t, &req, &scanned, evilSBOM)
+			swapScan(t, func(ctx context.Context, r scanRequest) (*ossbom.SBOM, error) {
+				order = append(order, "scan")
+				return scan(ctx, r)
+			})
+			args := []string{"add", "-p", "a", "evil"}
+			if tc.config {
+				args = append([]string{"--config", "/dev/null"}, args...)
+			}
+			out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: args, Passive: true})
+			if err != nil || out != tc.want {
+				t.Errorf("Run = %v, output %q; want nil and %q", err, out, tc.want)
+			}
+			if !slices.Equal(order, tc.order) {
+				t.Errorf("order = %v, want %v", order, tc.order)
+			}
+			if posted := scanned == evilLock && req.SubmitOnly; posted != (tc.want == "") {
+				t.Errorf("posted %v (%+v of %q), want %v", posted, req, scanned, tc.want == "")
+			}
+		})
+	}
 }
 
 // cargo metadata is handed no --config naming a file, in any spelling: it would empty a one-shot pipe before the command reads it, and on macOS read a /dev/fd/N regular file to the end of the offset cargo shares (OSS-2553).
@@ -90,7 +161,7 @@ func TestWithoutConfigFiles(t *testing.T) {
 	}
 }
 
-// A `--config <(...)` pipe the forwarder inherits is left whole for cargo, before or after the verb, so the lockfile-path in it moves cargo's lock and the warning saying so is true (OSS-2553).
+// A `--config <(...)` pipe the forwarder inherits is left whole for cargo, before or after the verb, so the lockfile-path in it moves cargo's lock, and whether it did is left to what cargo writes (OSS-2553).
 func TestReadCargoWorkspaceLeavesAPipedConfigToCargo(t *testing.T) {
 	if _, err := exec.LookPath("cargo"); err != nil {
 		t.Skip("cargo not installed")
@@ -124,8 +195,8 @@ func TestReadCargoWorkspaceLeavesAPipedConfigToCargo(t *testing.T) {
 		}
 		w.Close()
 		args := spell("/dev/fd/" + strconv.Itoa(int(r.Fd())))
-		if _, err := readCargoWorkspace(context.Background(), args); !errors.Is(err, errLockfileMoved) {
-			t.Errorf("cargo %v: err = %v, want errLockfileMoved", args, err)
+		if ws, err := readCargoWorkspace(context.Background(), args); err != nil || !ws.LockMayMove {
+			t.Errorf("cargo %v: LockMayMove %v, err = %v; want the lock left to what cargo writes", args, ws.LockMayMove, err)
 		}
 		left, _ := io.ReadAll(r)
 		r.Close()

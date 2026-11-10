@@ -1345,6 +1345,78 @@ func TestRunCargoAdd_UnreadableWorkspaceRunsCargoAndWarns(t *testing.T) {
 	}
 }
 
+// A config only cargo can read leaves the lock to what cargo writes: a project lock it changed is checked, blocked and undone, failed or not, and one it left alone gets the moved-lock warning unchecked (OSS-2553).
+func TestRunCargoAdd_ConfigOnlyCargoReadsIsDecidedByTheLock(t *testing.T) {
+	exit101 := errors.New("exit status 101")
+	for _, tc := range []struct {
+		name   string
+		moved  bool
+		runErr error
+	}{
+		{"cargo wrote the project lock", false, nil},
+		{"cargo wrote the project lock and failed", false, exit101},
+		{"cargo wrote a lock elsewhere", true, nil},
+		{"cargo wrote a lock elsewhere and failed", true, exit101},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, ws := cargoProject(t)
+			ws.LockMayMove = true
+			cargoWorkspaceFn = func(context.Context, []string) (cargoWorkspace, error) { return ws, nil }
+			lock := ws.Lock
+			if tc.moved {
+				lock = filepath.Join(root, "moved", "Cargo.lock")
+			}
+			member := filepath.Join(root, "a", "Cargo.toml")
+			swap(t, func(context.Context, string, []string) error {
+				writeFile(t, member, memberManifest+"\n[dependencies]\nevil = \"1\"\n")
+				if err := os.MkdirAll(filepath.Dir(lock), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				writeFile(t, lock, evilLock)
+				return tc.runErr
+			}, cleanSBOM)
+			var req scanRequest
+			var scanned string
+			swapScan(t, lockScan(t, &req, &scanned, evilSBOM))
+
+			out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"add", "-p", "a", "evil"}})
+			if tc.moved {
+				want := "ossprey: warning: Cargo.lock not checked after `cargo add -p a evil` (a resolver.lockfile-path may move it); cargo's changes are kept\n"
+				if !errors.Is(err, tc.runErr) || out != want || scanned != "" {
+					t.Errorf("Run = %v, output %q, scanned %q; want cargo's result, %q and nothing scanned", err, out, scanned, want)
+				}
+				if readFile(t, member) == memberManifest {
+					t.Error("an unchecked change must be kept")
+				}
+				return
+			}
+			if !errors.Is(err, ErrBlocked) || scanned != evilLock {
+				t.Fatalf("Run = %v, scanned %q; want the lock cargo wrote checked and blocked", err, scanned)
+			}
+			if got := readFile(t, member); got != memberManifest {
+				t.Errorf("member manifest = %q, want it restored", got)
+			}
+			if _, err := os.Stat(ws.Lock); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("the lock cargo created is still there (%v)", err)
+			}
+			if want := "ossprey: undid `cargo add -p a evil`: restored " + filepath.Join("a", "Cargo.toml") + ", removed Cargo.lock\n"; !strings.Contains(out, want) {
+				t.Errorf("output lacks %q:\n%s", want, out)
+			}
+		})
+	}
+	t.Run("no credential", func(t *testing.T) {
+		root, ws := cargoProject(t)
+		ws.LockMayMove = true
+		cargoWorkspaceFn = func(context.Context, []string) (cargoWorkspace, error) { return ws, nil }
+		unsetEnv(t, "OSSPREY_API_KEY")
+		ran := false
+		swap(t, addEvil(t, root, &ran), cleanSBOM)
+		if _, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"add", "-p", "a", "evil"}}); err == nil || ran {
+			t.Errorf("Run = %v, cargo ran = %v; want the credentials error before cargo", err, ran)
+		}
+	})
+}
+
 // Passive puts nothing in front of cargo: it runs, then the lock is posted without polling.
 func TestRunCargoAdd_Passive(t *testing.T) {
 	root, _ := cargoProject(t)
@@ -1593,26 +1665,26 @@ func TestLockfileMoved(t *testing.T) {
 	if err := os.MkdirAll(sub, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if lockfileMoved([]string{"add", "serde"}, sub) {
+	if lockfileMoved([]string{"add", "serde"}, sub) != lockStays {
 		t.Fatal("nothing sets resolver.lockfile-path yet")
 	}
-	if !lockfileMoved([]string{"--config", `resolver.lockfile-path="x/Cargo.lock"`, "add", "serde"}, sub) {
+	if lockfileMoved([]string{"--config", `resolver.lockfile-path="x/Cargo.lock"`, "add", "serde"}, sub) != lockMoves {
 		t.Error("missed --config on the command line")
 	}
 	file := filepath.Join(project, "extra.toml")
 	writeFile(t, file, "[resolver]\nlockfile-path = \"x/Cargo.lock\"\n")
-	if !lockfileMoved([]string{"add", "--config=" + file, "serde"}, sub) {
+	if lockfileMoved([]string{"add", "--config=" + file, "serde"}, sub) != lockMoves {
 		t.Error("missed a --config file")
 	}
 	writeFile(t, filepath.Join(project, ".cargo", "config.toml"), "[resolver]\nlockfile-path = \"x/Cargo.lock\"\n")
-	if !lockfileMoved([]string{"add", "serde"}, sub) {
+	if lockfileMoved([]string{"add", "serde"}, sub) != lockMoves {
 		t.Error("missed an ancestor's .cargo/config.toml")
 	}
 	if err := os.Remove(filepath.Join(project, ".cargo", "config.toml")); err != nil {
 		t.Fatal(err)
 	}
 	writeFile(t, filepath.Join(home, "config.toml"), "resolver.lockfile-path = \"x/Cargo.lock\"\n")
-	if !lockfileMoved([]string{"add", "serde"}, sub) {
+	if lockfileMoved([]string{"add", "serde"}, sub) != lockMoves {
 		t.Error("missed CARGO_HOME's config.toml")
 	}
 	if err := os.Remove(filepath.Join(home, "config.toml")); err != nil {
@@ -1621,28 +1693,28 @@ func TestLockfileMoved(t *testing.T) {
 	// cargo merges an included file, which may set lockfile-path, so any include counts.
 	include := "include = [\"lock.toml\"]\n"
 	writeFile(t, filepath.Join(project, ".cargo", "config.toml"), include)
-	if !lockfileMoved([]string{"add", "serde"}, sub) {
+	if lockfileMoved([]string{"add", "serde"}, sub) != lockMoves {
 		t.Error("missed an include in an ancestor's .cargo/config.toml")
 	}
 	if err := os.Remove(filepath.Join(project, ".cargo", "config.toml")); err != nil {
 		t.Fatal(err)
 	}
 	writeFile(t, filepath.Join(home, "config.toml"), include)
-	if !lockfileMoved([]string{"add", "serde"}, sub) {
+	if lockfileMoved([]string{"add", "serde"}, sub) != lockMoves {
 		t.Error("missed an include in CARGO_HOME's config.toml")
 	}
 	if err := os.Remove(filepath.Join(home, "config.toml")); err != nil {
 		t.Fatal(err)
 	}
 	writeFile(t, file, include)
-	if !lockfileMoved([]string{"--config", file, "add", "serde"}, sub) {
+	if lockfileMoved([]string{"--config", file, "add", "serde"}, sub) != lockMoves {
 		t.Error("missed an include in a --config file")
 	}
-	if !lockfileMoved([]string{"--config", `include=["lock.toml"]`, "add", "serde"}, sub) {
+	if lockfileMoved([]string{"--config", `include=["lock.toml"]`, "add", "serde"}, sub) != lockMoves {
 		t.Error("missed an include on the command line")
 	}
 	writeFile(t, filepath.Join(project, ".cargo", "config.toml"), "[build]\njobs = 4\n# include nothing\n")
-	if lockfileMoved([]string{"add", "serde"}, sub) {
+	if lockfileMoved([]string{"add", "serde"}, sub) != lockStays {
 		t.Error("a config with no include or lockfile-path moves nothing")
 	}
 	// TOML decodes escapes in a quoted key, and cargo 1.99.1 moved the lock for each of these.
@@ -1652,22 +1724,22 @@ func TestLockfileMoved(t *testing.T) {
 		"resolver.\"lockfile\\u002dpath\" = \"x/Cargo.lock\"\n",
 	} {
 		writeFile(t, filepath.Join(project, ".cargo", "config.toml"), escaped)
-		if !lockfileMoved([]string{"add", "serde"}, sub) {
+		if lockfileMoved([]string{"add", "serde"}, sub) != lockMoves {
 			t.Errorf("missed an escaped key: %q", escaped)
 		}
 	}
-	if !lockfileMoved([]string{"--config", `resolver."lockfile\u002dpath"="x/Cargo.lock"`, "add", "serde"}, sub) {
+	if lockfileMoved([]string{"--config", `resolver."lockfile\u002dpath"="x/Cargo.lock"`, "add", "serde"}, sub) != lockMoves {
 		t.Error("missed an escaped key on the command line")
 	}
 	// cargo 1.99.1 reads only the legacy config when both are at one level.
 	writeFile(t, filepath.Join(project, ".cargo", "config.toml"), "[resolver]\nlockfile-path = \"x/Cargo.lock\"\n")
 	writeFile(t, filepath.Join(project, ".cargo", "config"), "[build]\njobs = 4\n")
-	if lockfileMoved([]string{"add", "serde"}, sub) {
+	if lockfileMoved([]string{"add", "serde"}, sub) != lockStays {
 		t.Error("a config.toml beside config is not read, so it moves nothing")
 	}
 	writeFile(t, filepath.Join(project, ".cargo", "config"), "[resolver]\nlockfile-path = \"x/Cargo.lock\"\n")
 	writeFile(t, filepath.Join(project, ".cargo", "config.toml"), "[build]\njobs = 4\n")
-	if !lockfileMoved([]string{"add", "serde"}, sub) {
+	if lockfileMoved([]string{"add", "serde"}, sub) != lockMoves {
 		t.Error("missed the legacy config beside config.toml")
 	}
 	if err := os.Remove(filepath.Join(project, ".cargo", "config")); err != nil {
@@ -1680,30 +1752,30 @@ func TestLockfileMoved(t *testing.T) {
 		"too large": "# " + strings.Repeat("x", catalog.CargoManifestLimit) + "\n",
 	} {
 		writeFile(t, filepath.Join(project, ".cargo", "config.toml"), refused)
-		if !lockfileMoved([]string{"add", "serde"}, sub) {
+		if lockfileMoved([]string{"add", "serde"}, sub) != lockMoves {
 			t.Errorf("a config %s to read may move it", name)
 		}
 		writeFile(t, file, refused)
-		if !lockfileMoved([]string{"add", "--config", file, "serde"}, sub) {
+		if lockfileMoved([]string{"add", "--config", file, "serde"}, sub) != lockMoves {
 			t.Errorf("a --config file %s to read may move it", name)
 		}
 	}
 	writeFile(t, filepath.Join(project, ".cargo", "config.toml"), "[build]\njobs = 4\n")
-	if lockfileMoved([]string{"add", "serde"}, sub) {
+	if lockfileMoved([]string{"add", "serde"}, sub) != lockStays {
 		t.Error("a readable config with no lockfile-path moves nothing")
 	}
 	t.Setenv("CARGO_RESOLVER_LOCKFILE_PATH", "x/Cargo.lock")
-	if !lockfileMoved([]string{"add", "serde"}, sub) {
+	if lockfileMoved([]string{"add", "serde"}, sub) != lockMoves {
 		t.Error("missed CARGO_RESOLVER_LOCKFILE_PATH")
 	}
 }
 
-// cargo 1.99.1 reads a --config or level config that is a directory as an error, so one may move the lock, while cargo install fails on it with the crate still checked (OSS-2553).
+// cargo 1.99.1 reads a --config or level config that is a directory as an error, so whether one moves the lock is left to what cargo writes, while cargo install fails on it with the crate still checked (OSS-2553).
 func TestCargoConfigThatIsADirectoryMayMoveTheLock(t *testing.T) {
 	assertIrregularConfig(t, func(p string) error { return os.Mkdir(p, 0o755) })
 }
 
-// assertIrregularConfig makes each config cargo reads with mk, which is not a regular file, and wants it to count as one that may move the lock but not as one that sets registry.default.
+// assertIrregularConfig makes each config cargo reads with mk, which is not a regular file, and wants it to leave the lock's place to what cargo writes, below any config that moves it, and not to set registry.default.
 func assertIrregularConfig(t *testing.T, mk func(string) error) {
 	t.Helper()
 	base := t.TempDir()
@@ -1717,15 +1789,18 @@ func assertIrregularConfig(t *testing.T, mk func(string) error) {
 	unsetEnv(t, "CARGO_RESOLVER_LOCKFILE_PATH")
 	unsetEnv(t, "CARGO_REGISTRY_DEFAULT")
 	t.Chdir(project)
-	if lockfileMoved([]string{"generate-lockfile"}, project) || cargoDefaultRegistry([]string{"install", "x"}) != "" {
+	if lockfileMoved([]string{"generate-lockfile"}, project) != lockStays || cargoDefaultRegistry([]string{"install", "x"}) != "" {
 		t.Fatal("nothing sets either key yet")
 	}
 	arg := filepath.Join(base, "arg.toml")
 	if err := mk(arg); err != nil {
 		t.Fatal(err)
 	}
-	if !lockfileMoved([]string{"--config", arg, "generate-lockfile"}, project) {
-		t.Error("a --config file that is not a regular file may move the lock")
+	if got := lockfileMoved([]string{"--config", arg, "generate-lockfile"}, project); got != lockUnreadArg {
+		t.Errorf("a --config file that is not a regular file: %v, want lockUnreadArg", got)
+	}
+	if got := lockfileMoved([]string{"--config", arg, "--config", `resolver.lockfile-path="x/Cargo.lock"`, "generate-lockfile"}, project); got != lockMoves {
+		t.Errorf("a --config file that is not a regular file beside one that moves the lock: %v, want lockMoves", got)
 	}
 	if got := cargoDefaultRegistry([]string{"install", "--config", arg, "x"}); got != "" {
 		t.Errorf("a --config file that is not a regular file: %q, want the crates.io crate checked", got)
@@ -1736,8 +1811,17 @@ func assertIrregularConfig(t *testing.T, mk func(string) error) {
 	if err := mk(filepath.Join(project, ".cargo", "config.toml")); err != nil {
 		t.Fatal(err)
 	}
-	if !lockfileMoved([]string{"generate-lockfile"}, project) {
-		t.Error("a level config that is not a regular file may move the lock")
+	for _, args := range [][]string{{"generate-lockfile"}, {"--config", arg, "generate-lockfile"}} {
+		if got := lockfileMoved(args, project); got != lockUnreadLevel {
+			t.Errorf("a level config that is not a regular file, cargo %v: %v, want lockUnreadLevel", args, got)
+		}
+	}
+	writeFile(t, filepath.Join(home, "config.toml"), "include = [\"lock.toml\"]\n")
+	if got := lockfileMoved([]string{"generate-lockfile"}, project); got != lockMoves {
+		t.Errorf("a level config that is not a regular file under one with an include: %v, want lockMoves", got)
+	}
+	if err := os.Remove(filepath.Join(home, "config.toml")); err != nil {
+		t.Fatal(err)
 	}
 	if err := mk(filepath.Join(home, "config.toml")); err != nil {
 		t.Fatal(err)
@@ -1770,7 +1854,7 @@ func TestLockfileMovedReadsOnlyTheSetting(t *testing.T) {
 		{"update", "--", "--config", set},
 		{"add", "--", "--config=" + set},
 	} {
-		if lockfileMoved(args, project) {
+		if lockfileMoved(args, project) != lockStays {
 			t.Errorf("cargo %v moves no lock", args)
 		}
 	}
@@ -1779,11 +1863,11 @@ func TestLockfileMovedReadsOnlyTheSetting(t *testing.T) {
 		"[alias]\nlp = \"lockfile-path\"\n\n[env]\nX = \"resolver.lockfile-path = alt\"\n",
 	} {
 		writeFile(t, filepath.Join(project, ".cargo", "config.toml"), config)
-		if lockfileMoved([]string{"generate-lockfile"}, project) {
+		if lockfileMoved([]string{"generate-lockfile"}, project) != lockStays {
 			t.Errorf("config %q moves no lock", config)
 		}
 		writeFile(t, filepath.Join(home, "config.toml"), config)
-		if lockfileMoved([]string{"generate-lockfile", "--config", filepath.Join(home, "config.toml")}, project) {
+		if lockfileMoved([]string{"generate-lockfile", "--config", filepath.Join(home, "config.toml")}, project) != lockStays {
 			t.Errorf("--config file %q moves no lock", config)
 		}
 	}
@@ -1795,7 +1879,7 @@ func TestLockfileMovedReadsOnlyTheSetting(t *testing.T) {
 		{"add", "itoa", "--config", `resolver."lockfile-path"="alt/Cargo.lock"`},
 		{"-q", "--config", set, "update", "-p", "itoa"},
 	} {
-		if !lockfileMoved(args, project) {
+		if lockfileMoved(args, project) != lockMoves {
 			t.Errorf("missed cargo %v", args)
 		}
 	}
@@ -1805,7 +1889,7 @@ func TestLockfileMovedReadsOnlyTheSetting(t *testing.T) {
 		"resolver.lockfile-path = \"alt/Cargo.lock\"\n",
 	} {
 		writeFile(t, filepath.Join(project, ".cargo", "config.toml"), config)
-		if !lockfileMoved([]string{"generate-lockfile"}, project) {
+		if lockfileMoved([]string{"generate-lockfile"}, project) != lockMoves {
 			t.Errorf("missed config %q", config)
 		}
 	}
@@ -1822,10 +1906,10 @@ func TestLockfileMovedReadsARelativeHomeWhereCargoRuns(t *testing.T) {
 	t.Setenv("CARGO_HOME", "h")
 	unsetEnv(t, "CARGO_RESOLVER_LOCKFILE_PATH")
 	t.Chdir(project)
-	if !lockfileMoved([]string{"-Z", "unstable-options", "-C", "sub", "fetch"}, sub) {
+	if lockfileMoved([]string{"-Z", "unstable-options", "-C", "sub", "fetch"}, sub) != lockMoves {
 		t.Error("missed the lockfile-path in the relative CARGO_HOME under -C's directory")
 	}
-	if lockfileMoved([]string{"fetch"}, project) {
+	if lockfileMoved([]string{"fetch"}, project) != lockStays {
 		t.Error("read a relative CARGO_HOME from a directory cargo does not run in")
 	}
 }
@@ -2001,7 +2085,7 @@ func TestCargoConfigFileIsReadWhereCargoRuns(t *testing.T) {
 	unsetEnv(t, "CARGO_RESOLVER_LOCKFILE_PATH")
 	unsetEnv(t, "CARGO_REGISTRY_DEFAULT")
 	t.Chdir(start)
-	if !lockfileMoved([]string{"-Zunstable-options", "-C", dir, "--config", "c.toml", "generate-lockfile"}, dir) {
+	if lockfileMoved([]string{"-Zunstable-options", "-C", dir, "--config", "c.toml", "generate-lockfile"}, dir) != lockMoves {
 		t.Error("lockfile-path in the -C directory's c.toml not seen")
 	}
 	if got := cargoDefaultRegistry([]string{"-Zunstable-options", "-C", dir, "--config", "c.toml", "install", "x"}); got != "corp" {
