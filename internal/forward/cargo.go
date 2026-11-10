@@ -663,6 +663,8 @@ type savedFile struct {
 	data    []byte
 	mode    fs.FileMode
 	unread  bool
+	// info is the file read, which tells it apart from another the path reaches later.
+	info fs.FileInfo
 }
 
 // stateOf saves p as it stands now; one that is not a regular file or is over the bound is unread.
@@ -674,7 +676,7 @@ func stateOf(p string) savedFile {
 	if err != nil {
 		return savedFile{path: p, existed: true, unread: true}
 	}
-	return savedFile{path: p, existed: true, data: data, mode: fi.Mode().Perm()}
+	return savedFile{path: p, existed: true, data: data, mode: fi.Mode().Perm(), info: fi}
 }
 
 // is reports whether f and g hold the same state; an unread one matches nothing.
@@ -707,30 +709,31 @@ func changedFiles(saved []savedFile) []fileChange {
 	return out
 }
 
-// reportRestore undoes each change still as the command left it, leaves alone one changed again since, and says so.
+// reportRestore undoes each change in the file cargo left, while it is still as cargo left it, leaves alone one changed again since, and says so.
 func reportRestore(command string, changes []fileChange) {
 	var done, kept []string
 	for _, c := range changes {
 		f, now := c.before, stateOf(c.before.path)
+		verb := "restore"
+		var err error
 		switch {
 		case f.is(now):
 			continue
-		case !c.after.is(now) || c.after.mode != now.mode:
-			// A permission change since cargo exited is the user's too, so the file is left as it stands.
-			kept = append(kept, displayPath(f.path))
+		case !c.after.is(now) || c.after.mode != now.mode || now.existed && !os.SameFile(now.info, c.after.info):
+			// A permission change since cargo exited is the user's too, and a file the path reaches only since was never cargo's.
+			err = errNotLeft
 		case !f.existed:
-			if err := os.Remove(f.path); err != nil {
-				fmt.Fprintf(errOut, "ossprey: warning: could not remove %s (%v)\n", displayPath(f.path), err)
-				continue
-			}
-			done = append(done, "removed "+displayPath(f.path))
+			verb, err = "remove", removeLeft(f.path, c.after.info)
 		default:
-			if err := os.WriteFile(f.path, f.data, f.mode); err != nil {
-				fmt.Fprintf(errOut, "ossprey: warning: could not restore %s (%v)\n", displayPath(f.path), err)
-				continue
-			}
-			_ = os.Chmod(f.path, f.mode)
-			done = append(done, "restored "+displayPath(f.path))
+			err = rewriteLeft(f, c.after)
+		}
+		switch {
+		case errors.Is(err, errNotLeft):
+			kept = append(kept, displayPath(f.path))
+		case err != nil:
+			fmt.Fprintf(errOut, "ossprey: warning: could not %s %s (%v)\n", verb, displayPath(f.path), err)
+		default:
+			done = append(done, verb+"d "+displayPath(f.path))
 		}
 	}
 	if len(done) > 0 {
@@ -742,6 +745,50 @@ func reportRestore(command string, changes []fileChange) {
 	if len(done) == 0 && len(kept) == 0 {
 		fmt.Fprintf(errOut, "ossprey: `%s` changed no Cargo.toml or Cargo.lock; nothing to restore\n", command)
 	}
+}
+
+// errNotLeft is a path that no longer reaches the file cargo left there.
+var errNotLeft = errors.New("not the file cargo left")
+
+// removeLeft removes the file cargo created at p, at the end of any link it wrote through, and only while it is the file left.
+func removeLeft(p string, left fs.FileInfo) error {
+	real, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		return err
+	}
+	if fi, err := os.Lstat(real); err != nil || !os.SameFile(fi, left) {
+		return errNotLeft
+	}
+	return os.Remove(real)
+}
+
+// rewriteLeft puts f's bytes back in the file left at its path, through a link as cargo wrote, and never in another file found there.
+func rewriteLeft(f, left savedFile) error {
+	flag := os.O_WRONLY | oNonblock
+	if !left.existed {
+		flag |= os.O_CREATE | os.O_EXCL
+	}
+	fh, err := os.OpenFile(f.path, flag, f.mode)
+	if err != nil {
+		return err
+	}
+	if left.existed {
+		if fi, serr := fh.Stat(); serr != nil || !os.SameFile(fi, left.info) {
+			fh.Close()
+			return errNotLeft
+		}
+		err = fh.Truncate(0)
+	}
+	if err == nil {
+		_, err = fh.Write(f.data)
+	}
+	if err == nil {
+		_ = fh.Chmod(f.mode)
+	}
+	if cerr := fh.Close(); err == nil {
+		err = cerr
+	}
+	return err
 }
 
 // displayPath is p relative to the working directory, preferring whichever spelling of it, physical or as typed, holds p.

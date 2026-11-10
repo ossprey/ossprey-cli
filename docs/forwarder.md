@@ -109,10 +109,13 @@ If the lock holds malware you get the full malware report, every `Cargo.toml`
 and `Cargo.lock` the command changed is put back as it was (a `Cargo.lock` it
 created is removed), one line names those files, and the exit code is `1`.
 A file changed again after cargo exited, while the check ran, in its contents or
-its permissions, is left as it is, and a warning line names it. A file that
-could not be read before cargo ran (not a regular file, or over 32 MiB) is never
-touched, and one that cannot be written back or removed is left as it is with a
-warning line.
+its permissions, or one the path no longer reaches (a symlink retargeted or a
+directory swapped), is left as it is, and a warning line names it. A symlinked
+`Cargo.toml` or `Cargo.lock` is put back through the link, as cargo writes
+through it, and a lock cargo created through a dangling link is removed from the
+link's target. A file that could not be read before cargo ran (not a regular
+file, or over 32 MiB) is never touched, and one that cannot be written back or
+removed is left as it is with a warning line.
 That includes `-p <member>`, `--manifest-path` and a member whose `Cargo.lock`
 sits at the workspace root. When cargo itself fails, its exit code is passed
 through (unless the lock it changed holds malware, which exits `1` as above), but a failure can still leave changes behind: `cargo fetch` writes
