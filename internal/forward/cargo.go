@@ -310,7 +310,7 @@ func cargoFailedOnItsWorkspace(command string, runErr, wsErr error) bool {
 
 // scanCargoLock scans a copy of the workspace's Cargo.lock alone, so nothing else in the tree is checked with it.
 func scanCargoLock(ctx context.Context, opts Options, ws cargoWorkspace, submitOnly bool) (*ossbom.SBOM, error) {
-	data, err := os.ReadFile(ws.Lock)
+	data, _, err := readCargoFile(ws.Lock)
 	if err != nil {
 		return nil, err
 	}
@@ -616,16 +616,38 @@ func cargoConfigDoc(data []byte) (map[string]any, bool) {
 
 // readRegular reads p only when it is a regular file, since a FIFO may never end, and stops one byte past the bounded parser's limit.
 func readRegular(p string) ([]byte, bool) {
-	if fi, err := os.Stat(p); err != nil || !fi.Mode().IsRegular() {
-		return nil, false
-	}
-	f, err := os.Open(p)
+	data, _, err := readRegularAt(p, catalog.CargoManifestLimit)
+	return data, err == nil
+}
+
+// errNotRegular refuses a FIFO, device or directory, which may never end.
+var errNotRegular = errors.New("not a regular file")
+
+// readRegularAt reads up to limit+1 bytes of p, opened without waiting on a FIFO and refused unless the file opened is regular.
+func readRegularAt(p string, limit int64) ([]byte, fs.FileInfo, error) {
+	f, err := os.OpenFile(p, os.O_RDONLY|oNonblock, 0)
 	if err != nil {
-		return nil, false
+		return nil, nil, err
 	}
 	defer f.Close()
-	data, err := io.ReadAll(io.LimitReader(f, catalog.CargoManifestLimit+1))
-	return data, err == nil
+	fi, err := f.Stat()
+	if err == nil && !fi.Mode().IsRegular() {
+		err = &fs.PathError{Op: "read", Path: p, Err: errNotRegular}
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	return data, fi, err
+}
+
+// readCargoFile reads a manifest or lock whole, or fails when it is not a regular file or is over catalog.CargoProofLimit.
+func readCargoFile(p string) ([]byte, fs.FileInfo, error) {
+	data, fi, err := readRegularAt(p, catalog.CargoProofLimit)
+	if err == nil && len(data) > catalog.CargoProofLimit {
+		err = &fs.PathError{Op: "read", Path: p, Err: fmt.Errorf("over the %d byte limit", catalog.CargoProofLimit)}
+	}
+	return data, fi, err
 }
 
 // exists reports whether p names anything.
@@ -643,16 +665,12 @@ type savedFile struct {
 	unread  bool
 }
 
-// stateOf saves p as it stands now.
+// stateOf saves p as it stands now; one that is not a regular file or is over the bound is unread.
 func stateOf(p string) savedFile {
-	fi, err := os.Stat(p)
+	data, fi, err := readCargoFile(p)
 	if errors.Is(err, fs.ErrNotExist) {
 		return savedFile{path: p}
 	}
-	if err != nil || !fi.Mode().IsRegular() {
-		return savedFile{path: p, existed: true, unread: true}
-	}
-	data, err := os.ReadFile(p)
 	if err != nil {
 		return savedFile{path: p, existed: true, unread: true}
 	}

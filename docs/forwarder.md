@@ -109,9 +109,10 @@ If the lock holds malware you get the full malware report, every `Cargo.toml`
 and `Cargo.lock` the command changed is put back as it was (a `Cargo.lock` it
 created is removed), one line names those files, and the exit code is `1`.
 A file changed again after cargo exited, while the check ran, in its contents or
-its permissions, is left as it is, and a warning line names it. A file that could not be read before cargo ran is
-never touched, and one that cannot be written back or removed is left as it is
-with a warning line.
+its permissions, is left as it is, and a warning line names it. A file that
+could not be read before cargo ran (not a regular file, or over 32 MiB) is never
+touched, and one that cannot be written back or removed is left as it is with a
+warning line.
 That includes `-p <member>`, `--manifest-path` and a member whose `Cargo.lock`
 sits at the workspace root. When cargo itself fails, its exit code is passed
 through (unless the lock it changed holds malware, which exits `1` as above), but a failure can still leave changes behind: `cargo fetch` writes
@@ -119,7 +120,8 @@ through (unless the lock it changed holds malware, which exits `1` as above), bu
 the same way, and `cargo add` edits `Cargo.toml` before it resolves, so a
 failure that changed only manifests gets one warning line naming them. Run
 `ossprey cargo fetch` once it resolves to check what they add. When the check
-cannot be made (the API unreachable, a workspace cargo cannot read, or a
+cannot be made (the API unreachable, a workspace cargo cannot read, a
+`Cargo.lock` that is not a regular file or is over 32 MiB, or a
 `resolver.lockfile-path` setting, in the environment, a `--config` or a cargo
 config, that may move the lock elsewhere, including one a
 config `include` could set or a config too large or too deeply nested to read),

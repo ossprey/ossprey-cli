@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -625,6 +626,61 @@ func TestRunCargoAdd_BlockLeavesAFileWhoseModeChangedAgain(t *testing.T) {
 	if line := "ossprey: warning: did not undo `cargo add -p a evil` in " + member + ", changed again after cargo exited\n"; !strings.Contains(out, line) {
 		t.Errorf("output lacks %q:\n%s", line, out)
 	}
+}
+
+// A manifest or lock over the bound is never read whole: the lock goes unchecked with the warning, and a manifest is left as cargo left it (OSS-2553).
+func TestRunCargoAdd_FileOverTheBoundIsNeverReadWhole(t *testing.T) {
+	big := func(t *testing.T, p string) {
+		t.Helper()
+		writeFile(t, p, "")
+		if err := os.Truncate(p, catalog.CargoProofLimit+1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	added := "\n[dependencies]\nevil = \"1\"\n"
+	t.Run("the lock", func(t *testing.T) {
+		root, ws := cargoProject(t)
+		big(t, ws.Lock)
+		swap(t, func(context.Context, string, []string) error {
+			writeFile(t, filepath.Join(root, "a", "Cargo.toml"), memberManifest+added)
+			return nil
+		}, cleanSBOM)
+
+		out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"add", "-p", "a", "evil"}})
+		if err != nil {
+			t.Fatalf("Run = %v", err)
+		}
+		want := fmt.Sprintf("ossprey: warning: Cargo.lock not checked after `cargo add -p a evil` (read %s: over the %d byte limit); cargo's changes are kept\n", ws.Lock, catalog.CargoProofLimit)
+		if out != want {
+			t.Errorf("output = %q, want %q", out, want)
+		}
+	})
+	t.Run("a manifest", func(t *testing.T) {
+		root, ws := cargoProject(t)
+		manifest := filepath.Join(root, "a", "Cargo.toml")
+		big(t, manifest)
+		swap(t, func(context.Context, string, []string) error {
+			f, err := os.OpenFile(manifest, os.O_WRONLY|os.O_APPEND, 0)
+			if err == nil {
+				_, err = f.WriteString(added)
+				f.Close()
+			}
+			writeFile(t, ws.Lock, evilLock)
+			return err
+		}, cleanSBOM)
+		swapScan(t, func(context.Context, scanRequest) (*ossbom.SBOM, error) { return evilSBOM(), nil })
+
+		out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"add", "-p", "a", "evil"}})
+		if !errors.Is(err, ErrBlocked) {
+			t.Fatalf("Run = %v, want ErrBlocked", err)
+		}
+		if fi, err := os.Stat(manifest); err != nil || fi.Size() != catalog.CargoProofLimit+1+int64(len(added)) {
+			t.Errorf("%s changed after cargo exited (%v), want it left as cargo left it", manifest, err)
+		}
+		if line := "ossprey: undid `cargo add -p a evil`: removed Cargo.lock\n"; !strings.Contains(out, line) {
+			t.Errorf("output lacks %q:\n%s", line, out)
+		}
+	})
 }
 
 // cargo add --dry-run with no lock writes nothing, so nothing is checked or posted and nothing is said unless verbose.
