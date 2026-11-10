@@ -65,6 +65,24 @@ func TestCargoConfigThatIsAFIFOCounts(t *testing.T) {
 	assertUnreadableConfigCounts(t, func(p string) error { return syscall.Mkfifo(p, 0o644) })
 }
 
+// A name starting with `..` is inside the working directory, so it is shown relative to whichever spelling of it holds the path.
+func TestDisplayPathReadsADotDotNameAsInside(t *testing.T) {
+	real, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("cannot link: %v", err)
+	}
+	t.Chdir(link)
+	for _, base := range []string{link, real} {
+		if got, want := displayPath(filepath.Join(base, "..crate", "Cargo.toml")), filepath.Join("..crate", "Cargo.toml"); got != want {
+			t.Errorf("under %s: %q, want %q", base, got, want)
+		}
+	}
+}
+
 // A block undoes only the file cargo left at each path: through a link as cargo 1.99.1 writes, and never a file the path reaches only since (OSS-2553).
 func TestRunCargoAdd_BlockTouchesOnlyTheFileCargoLeft(t *testing.T) {
 	const oldLock = "version = 4\n# before\n"

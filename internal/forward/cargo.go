@@ -1016,7 +1016,7 @@ func displayPath(p string) string {
 		rel, err := filepath.Rel(base, p)
 		switch {
 		case err != nil:
-		case !strings.HasPrefix(rel, ".."):
+		case rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)):
 			return rel
 		case best == p:
 			best = rel
