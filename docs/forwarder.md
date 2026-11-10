@@ -110,7 +110,8 @@ and `Cargo.lock` the command changed is put back as it was (a `Cargo.lock` it
 created is removed), one line names those files, and the exit code is `1`.
 A file changed again after cargo exited, while the check ran, in its contents,
 its permissions or its owner, or one the path no longer reaches (a symlink retargeted or a
-directory swapped), is left as it is, and a warning line names it. A symlinked
+directory swapped), is left as it is, and a warning line names it; one already
+back as it was before cargo ran is named on a line of its own. A symlinked
 `Cargo.toml` or `Cargo.lock` is put back through the link, as cargo writes
 through it, and a lock cargo created through a dangling link is removed from the
 link's target. A file that could not be read before cargo ran (not a regular

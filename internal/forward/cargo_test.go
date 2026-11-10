@@ -711,6 +711,41 @@ func TestRunCargoAdd_FailedRestoreLeavesCargosFiles(t *testing.T) {
 	}
 }
 
+// A block names the files cargo changed that are already back as before, and says there was nothing to restore only when cargo changed nothing (OSS-2553).
+func TestRunCargoAdd_BlockNamesFilesAlreadyBack(t *testing.T) {
+	const oldLock = "version = 4\n# before\n"
+	for name, changes := range map[string]bool{"put back during the check": true, "unchanged": false} {
+		t.Run(name, func(t *testing.T) {
+			root, ws := cargoProject(t)
+			member := filepath.Join(root, "a", "Cargo.toml")
+			writeFile(t, ws.Lock, oldLock)
+			ran := false
+			run := addEvil(t, root, &ran)
+			if !changes {
+				run = func(context.Context, string, []string) error { return nil }
+			}
+			swap(t, run, cleanSBOM)
+			swapScan(t, func(context.Context, scanRequest) (*ossbom.SBOM, error) {
+				writeFile(t, member, memberManifest)
+				writeFile(t, ws.Lock, oldLock)
+				return evilSBOM(), nil
+			})
+
+			out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"add", "-p", "a", "evil"}})
+			if !errors.Is(err, ErrBlocked) {
+				t.Fatalf("Run = %v, want ErrBlocked", err)
+			}
+			want, not := "ossprey: `cargo add -p a evil` changed "+filepath.Join("a", "Cargo.toml")+", Cargo.lock, already back as before\n", "nothing to restore"
+			if !changes {
+				want, not = "ossprey: `cargo add -p a evil` changed no Cargo.toml or Cargo.lock; nothing to restore\n", "already back"
+			}
+			if !strings.Contains(out, want) || strings.Contains(out, not) || strings.Contains(out, "undid") {
+				t.Errorf("output:\n%s\nwant %q, no %q and no undo", out, want, not)
+			}
+		})
+	}
+}
+
 // A file edited in place while its copy is staged is left alone and named, not overwritten (OSS-2553).
 func TestRunCargoUpdate_RestoreLeavesAFileEditedWhileStaged(t *testing.T) {
 	_, ws := cargoProject(t)

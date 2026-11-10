@@ -736,16 +736,16 @@ func changedFiles(saved []savedFile) []fileChange {
 	return out
 }
 
-// reportRestore undoes each change in the file cargo left, while it is still as cargo left it, leaves alone one changed again since, and says so.
+// reportRestore undoes each change in the file cargo left, while it is still as cargo left it, leaves alone one changed again or already back since, and says so.
 func reportRestore(command string, changes []fileChange, unread []string) {
-	var done, kept []string
-	failed := false
+	var done, kept, back []string
 	for _, c := range changes {
 		f, now := c.before, stateOf(c.before.path)
 		verb := "restore"
 		var err error
 		switch {
 		case f.is(now):
+			back = append(back, displayPath(f.path))
 			continue
 		case !c.after.is(now) || c.after.mode != now.mode || now.existed && (!os.SameFile(now.info, c.after.info) || !sameOwner(now.info, c.after.info)):
 			// A permission change since cargo exited is the user's too, and a file the path reaches only since was never cargo's.
@@ -759,7 +759,6 @@ func reportRestore(command string, changes []fileChange, unread []string) {
 		case errors.Is(err, errNotLeft):
 			kept = append(kept, displayPath(f.path))
 		case err != nil:
-			failed = true
 			fmt.Fprintf(errOut, "ossprey: warning: could not %s %s (%v)\n", verb, displayPath(f.path), err)
 		default:
 			done = append(done, verb+"d "+displayPath(f.path))
@@ -768,13 +767,16 @@ func reportRestore(command string, changes []fileChange, unread []string) {
 	if len(done) > 0 {
 		fmt.Fprintf(errOut, "ossprey: undid `%s`: %s\n", command, strings.Join(done, ", "))
 	}
+	if len(back) > 0 {
+		fmt.Fprintf(errOut, "ossprey: `%s` changed %s, already back as before\n", command, strings.Join(back, ", "))
+	}
 	if len(kept) > 0 {
 		fmt.Fprintf(errOut, "ossprey: warning: did not undo `%s` in %s, changed again after cargo exited\n", command, strings.Join(kept, ", "))
 	}
 	if len(unread) > 0 {
 		fmt.Fprintf(errOut, "ossprey: warning: did not undo `%s` in %s, which could not be read before cargo ran\n", command, strings.Join(displayPaths(unread), ", "))
 	}
-	if len(done) == 0 && len(kept) == 0 && len(unread) == 0 && !failed {
+	if len(changes) == 0 && len(unread) == 0 {
 		fmt.Fprintf(errOut, "ossprey: `%s` changed no Cargo.toml or Cargo.lock; nothing to restore\n", command)
 	}
 }
