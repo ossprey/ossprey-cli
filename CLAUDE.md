@@ -150,8 +150,9 @@ Windows resolves it under `%LOCALAPPDATA%`.
 
    - **Run first, then check the lock.** `add`, `update`, `generate-lockfile`
      and `fetch` compile nothing (a path dependency's `build.rs` ran on `cargo
-     build` and on none of them), so `Manager.runFirstAt` runs them as a child
-     and checks the lock they leave: what the next build compiles, at the
+     build` and on none of them), so `Manager.runFirstAt` runs them as a child,
+     not through `Handoff`, since the check follows, and checks the lock they
+     leave: what the next build compiles, at the
      versions cargo picked rather than ones guessed in front. Only that lock is
      scanned, from a copy, so an unrelated `package.json` cannot block a `cargo
      add`; `CargoConfigDir` makes registry trust read the configs cargo reads
@@ -263,7 +264,8 @@ Windows resolves it under `%LOCALAPPDATA%`.
      goes where chdir(2) goes, each link followed before the `..` after it
      (`cargoConfigDir`).
    - **Reading the line.** `cargoPrintsOnly` passes through a line that only
-     prints help or the version. `--bin`, `--example` and `--target` take an
+     prints help or the version, grouped shorts included (`cargo -qV`), for
+     `install` and the run-first verbs alike. `--bin`, `--example` and `--target` take an
      optional value clap fills from the next token unless it is an option, so
      they are value flags and `cargoOptionalValues`. clap reads a group of
      shorts as switches up to one taking a value, which takes the rest less one
