@@ -138,7 +138,8 @@ cannot be made (the API unreachable, a workspace cargo cannot read, a
 `Cargo.lock` that is not a regular file or is over 32 MiB, or a
 `resolver.lockfile-path` setting, in the environment, a `--config` or a cargo
 config, that may move the lock elsewhere, including one a
-config `include` could set or a config too large or too deeply nested to read,
+config `include` could set or a config ossprey cannot read: one that is not a
+regular file (`--config /dev/stdin`, say) or is too large or too deeply nested,
 or a cargo script run with `-Zscript`, whose lock cargo keeps in its build
 directory), cargo's changes are kept and one warning line says so. When cargo itself
 failed in a workspace cargo cannot read, such as a directory with no
@@ -159,8 +160,8 @@ crates.io is not from crates.io and is forwarded unchecked, and so is one that
 names no source while cargo's default registry is elsewhere (`registry.default`
 in a `--config`, in `CARGO_REGISTRY_DEFAULT` or in the cargo configs from
 `CARGO_HOME` up, a relative `CARGO_HOME` counting from where cargo runs, or
-possibly set there by an `include` or by a config too large
-or too deeply nested to read). `--registry crates-io` and crates.io's own index
+possibly set there by an `include` or by a config that is not a regular file
+or is too large or too deeply nested to read). `--registry crates-io` and crates.io's own index
 URL are checked like a plain install; an index URL with a non-ASCII host counts
 as another registry.
 `cargo install --list` is not an install, and nothing is checked for a line

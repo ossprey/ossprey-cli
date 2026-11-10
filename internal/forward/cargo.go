@@ -503,14 +503,17 @@ func lockfileMoved(args []string, configDir string) bool {
 	if os.Getenv("CARGO_RESOLVER_LOCKFILE_PATH") != "" {
 		return true
 	}
-	// Only the decoded key counts, escapes included, though a config the bounded parser refuses may set it too.
-	moves := func(data []byte) bool {
+	// Only the decoded key counts, escapes included, though a config that cannot be read, or that the bounded parser refuses, may set it too.
+	moves := func(data []byte, err error) bool {
+		if err != nil {
+			return true
+		}
 		doc, ok := cargoConfigDoc(data)
 		resolver, _ := doc["resolver"].(map[string]any)
 		return !ok || resolver["lockfile-path"] != nil || doc["include"] != nil
 	}
 	for _, c := range cargoConfigArgs(args) {
-		if data, ok := cargoConfigArg(c, configDir); ok && moves(data) {
+		if moves(cargoConfigArg(c, configDir)) {
 			return true
 		}
 	}
@@ -519,7 +522,7 @@ func lockfileMoved(args []string, configDir string) bool {
 		files = append(files, cargoConfigFile(home))
 	}
 	for _, f := range files {
-		if data, ok := readRegular(f); ok && moves(data) {
+		if data, there, err := readConfig(f); there && moves(data, err) {
 			return true
 		}
 	}
@@ -528,10 +531,10 @@ func lockfileMoved(args []string, configDir string) bool {
 
 // cargoDefaultRegistry is the registry other than crates.io that `cargo install` takes a crate from when the line names none, or "".
 func cargoDefaultRegistry(args []string) string {
-	// The value set nearest the line wins; an include, or a config the bounded parser refuses, may set it too.
-	pick := func(data []byte) (string, bool) {
+	// The value set nearest the line wins; an include, or a config that cannot be read or that the bounded parser refuses, may set it too.
+	pick := func(data []byte, err error) (string, bool) {
 		doc, ok := cargoConfigDoc(data)
-		if !ok {
+		if err != nil || !ok {
 			return "a config it cannot read", true
 		}
 		if reg, _ := doc["registry"].(map[string]any); reg != nil {
@@ -552,10 +555,8 @@ func cargoDefaultRegistry(args []string) string {
 	}
 	dir := cargoConfigDir(args[:max(verbIndex("cargo", args), 0)])
 	for _, c := range slices.Backward(cargoConfigArgs(args)) {
-		if data, ok := cargoConfigArg(c, dir); ok {
-			if v, ok := pick(data); ok {
-				return found(v)
-			}
+		if v, ok := pick(cargoConfigArg(c, dir)); ok {
+			return found(v)
 		}
 	}
 	if v := os.Getenv("CARGO_REGISTRY_DEFAULT"); v != "" {
@@ -567,8 +568,8 @@ func cargoDefaultRegistry(args []string) string {
 	}
 	// cargo install reads no project config, only those from CARGO_HOME up.
 	for _, f := range append(cargoConfigFiles(home), cargoConfigFile(home)) {
-		if data, ok := readRegular(f); ok {
-			if v, ok := pick(data); ok {
+		if data, there, err := readConfig(f); there {
+			if v, ok := pick(data, err); ok {
 				return found(v)
 			}
 		}
@@ -591,16 +592,18 @@ func cargoConfigArgs(args []string) []string {
 }
 
 // cargoConfigArg is what cargo reads for a --config value: the file it names, from dir where cargo runs, when that exists, else the value as TOML.
-func cargoConfigArg(c, dir string) ([]byte, bool) {
+func cargoConfigArg(c, dir string) ([]byte, error) {
 	p := c
 	if c != "" && dir != "" && filepath.VolumeName(c) == "" && !os.IsPathSeparator(c[0]) {
 		// cargo joins the value to its working directory uncleaned, so the kernel applies `..` after any link.
 		p = dir + string(filepath.Separator) + c
 	}
-	if c != "" && exists(p) {
-		return readRegular(p)
+	if c != "" {
+		if data, there, err := readConfig(p); there {
+			return data, err
+		}
 	}
-	return []byte(c), true
+	return []byte(c), nil
 }
 
 // cargoConfigFiles are the configs cargo reads from dir up, one per level.
@@ -634,10 +637,13 @@ func cargoConfigDoc(data []byte) (map[string]any, bool) {
 	return doc, err == nil
 }
 
-// readRegular reads p only when it is a regular file, since a FIFO may never end, and stops one byte past the bounded parser's limit.
-func readRegular(p string) ([]byte, bool) {
-	data, _, err := readRegularAt(p, catalog.CargoManifestLimit)
-	return data, err == nil
+// readConfig reads the config at p when cargo would find one there, failing on one that is not a regular file, since a FIFO may never end.
+func readConfig(p string) (data []byte, there bool, err error) {
+	if !exists(p) {
+		return nil, false, nil
+	}
+	data, _, err = readRegularAt(p, catalog.CargoManifestLimit)
+	return data, true, err
 }
 
 // errNotRegular refuses a FIFO, device or directory, which may never end.

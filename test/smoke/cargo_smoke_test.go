@@ -5,10 +5,12 @@
 package smoke
 
 import (
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -184,6 +186,39 @@ func TestCargoFetchFailingAfterAMovedLockWarns(t *testing.T) {
 	}
 	if want := "ossprey: warning: Cargo.lock not checked after `cargo fetch --offline` (a resolver.lockfile-path may move it); cargo's changes are kept"; !strings.Contains(res.stderr, want) {
 		t.Errorf("stderr lacks %q:\n%s", want, res.stderr)
+	}
+}
+
+// cargo 1.99.1 reads a --config naming /dev/stdin, which ossprey cannot read, so a lockfile-path there is warned about and the stale project lock is not checked (OSS-2553).
+func TestCargoConfigFromStdinMayMoveTheLock(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no /dev/stdin")
+	}
+	api := newFakeAPI(t, "")
+	env := cargoEnv(t, api.URL)
+	dir, _ := cargoCrate(t)
+	lock := exec.Command("cargo", "generate-lockfile", "--offline")
+	lock.Dir, lock.Env = dir, env
+	if out, err := lock.CombinedOutput(); err != nil {
+		t.Fatalf("cargo generate-lockfile: %v\n%s", err, out)
+	}
+	moved := filepath.Join(dir, "moved", "Cargo.lock")
+	cmd := exec.Command(binPath, "cargo", "--config", "/dev/stdin", "generate-lockfile", "--offline")
+	cmd.Dir, cmd.Env = dir, env
+	cmd.Stdin = strings.NewReader(fmt.Sprintf("resolver.lockfile-path = %q\n", moved))
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("%v\nstderr: %s", err, stderr.String())
+	}
+	if _, err := os.Stat(moved); err != nil {
+		t.Errorf("cargo wrote no moved lock (%v)", err)
+	}
+	if want := "ossprey: warning: Cargo.lock not checked after `cargo --config /dev/stdin generate-lockfile --offline` (a resolver.lockfile-path may move it); cargo's changes are kept"; !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr lacks %q:\n%s", want, stderr.String())
+	}
+	if n, _ := api.stats(); n != 0 {
+		t.Errorf("%d API requests, want the stale project lock left unchecked", n)
 	}
 }
 

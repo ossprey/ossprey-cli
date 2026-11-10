@@ -1574,6 +1574,52 @@ func TestLockfileMoved(t *testing.T) {
 	}
 }
 
+// cargo 1.99.1 reads a --config or level config that is a directory as an error, so one it cannot read may set either key (OSS-2553).
+func TestCargoConfigThatIsADirectoryCounts(t *testing.T) {
+	assertUnreadableConfigCounts(t, func(p string) error { return os.Mkdir(p, 0o755) })
+}
+
+// assertUnreadableConfigCounts makes each config cargo reads with mk and wants it to count as one that may move the lock or set registry.default.
+func assertUnreadableConfigCounts(t *testing.T, mk func(string) error) {
+	t.Helper()
+	base := t.TempDir()
+	home, project := filepath.Join(base, "home"), filepath.Join(base, "project")
+	for _, d := range []string{home, filepath.Join(project, ".cargo")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("CARGO_HOME", home)
+	unsetEnv(t, "CARGO_RESOLVER_LOCKFILE_PATH")
+	unsetEnv(t, "CARGO_REGISTRY_DEFAULT")
+	t.Chdir(project)
+	if lockfileMoved([]string{"generate-lockfile"}, project) || cargoDefaultRegistry([]string{"install", "x"}) != "" {
+		t.Fatal("nothing sets either key yet")
+	}
+	arg := filepath.Join(base, "arg.toml")
+	if err := mk(arg); err != nil {
+		t.Fatal(err)
+	}
+	if !lockfileMoved([]string{"--config", arg, "generate-lockfile"}, project) {
+		t.Error("a --config file that cannot be read may move the lock")
+	}
+	if got := cargoDefaultRegistry([]string{"install", "--config", arg, "x"}); got != "a config it cannot read" {
+		t.Errorf("a --config file that cannot be read: %q, want it to count as setting registry.default", got)
+	}
+	if err := mk(filepath.Join(project, ".cargo", "config.toml")); err != nil {
+		t.Fatal(err)
+	}
+	if !lockfileMoved([]string{"generate-lockfile"}, project) {
+		t.Error("a level config that cannot be read may move the lock")
+	}
+	if err := mk(filepath.Join(home, "config.toml")); err != nil {
+		t.Fatal(err)
+	}
+	if got := cargoDefaultRegistry([]string{"install", "x"}); got != "a config it cannot read" {
+		t.Errorf("CARGO_HOME's config that cannot be read: %q, want it to count as setting registry.default", got)
+	}
+}
+
 // Only the setting moves the lock: cargo 1.99.1 reads none of these as one, so naming the words must not skip the check (OSS-2553).
 func TestLockfileMovedReadsOnlyTheSetting(t *testing.T) {
 	home, project := t.TempDir(), t.TempDir()

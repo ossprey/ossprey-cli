@@ -60,6 +60,11 @@ func TestRunCargo_PassiveReadsOnlyARegularLock(t *testing.T) {
 	}
 }
 
+// cargo 1.99.1 reads a --config or level config that is a FIFO, which ossprey never opens to read, so one may set either key (OSS-2553).
+func TestCargoConfigThatIsAFIFOCounts(t *testing.T) {
+	assertUnreadableConfigCounts(t, func(p string) error { return syscall.Mkfifo(p, 0o644) })
+}
+
 // A block undoes only the file cargo left at each path: through a link as cargo 1.99.1 writes, and never a file the path reaches only since (OSS-2553).
 func TestRunCargoAdd_BlockTouchesOnlyTheFileCargoLeft(t *testing.T) {
 	const oldLock = "version = 4\n# before\n"
