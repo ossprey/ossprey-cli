@@ -83,6 +83,11 @@ func TestCargoDetection(t *testing.T) {
 		{"install -F-h ripgrep", "before"},
 		{"-Zunstable-options -C-h add serde", "after"},
 		{"add -p-h serde", "after"},
+		// An optional value never takes an option token, so the help after it is help (cargo 1.99.1).
+		{"install --bin --help ripgrep", "through"},
+		{"install --example -h ripgrep", "through"},
+		{"install --target -qh ripgrep", "through"},
+		{"install --bin rg ripgrep", "before"},
 		{"build", "through"},
 		{"+nightly build", "through"},
 		{"check", "through"},

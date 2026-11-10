@@ -63,7 +63,7 @@ func cargoOptionsHave(split []string, takes map[string]bool, flags ...string) bo
 			return false
 		case slices.Contains(flags, a):
 			return true
-		case takes[a]:
+		case takes[a] && i+1 < len(split) && !cargoOptionalSkips(a, split[i+1]):
 			i++
 		}
 	}
@@ -132,6 +132,11 @@ func cargoHas(args []string, flags ...string) bool {
 // cargoOptionalValues are install's options whose value is optional (TestCargoFlagTablesMatchCargo).
 var cargoOptionalValues = flagSet("--bin", "--example", "--target")
 
+// cargoOptionalSkips reports whether clap leaves next alone for flag: an optional value is never an option token, so `--bin -F pcre2` gives pcre2 to -F.
+func cargoOptionalSkips(flag, next string) bool {
+	return cargoOptionalValues[flag] && len(next) > 1 && next[0] == '-'
+}
+
 // cargoSourceFlags install every crate named from somewhere other than crates.io.
 var cargoSourceFlags = flagSet("--git", "--path", "--index", "--registry")
 
@@ -154,8 +159,7 @@ func parseCargoInstall(args []string, defaultRegistry string) installArgs {
 			continue
 		}
 		flag, value, inline := splitFlagValue(a)
-		// clap fills an optional value only from a token that is not an option, so `--bin -F pcre2` gives pcre2 to -F.
-		if !inline && valueFlags["cargo"][flag] && i+1 < len(args) && !(cargoOptionalValues[flag] && len(args[i+1]) > 1 && args[i+1][0] == '-') {
+		if !inline && valueFlags["cargo"][flag] && i+1 < len(args) && !cargoOptionalSkips(flag, args[i+1]) {
 			value = args[i+1]
 			i++
 		}
