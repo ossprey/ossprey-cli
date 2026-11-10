@@ -260,6 +260,10 @@ func checkCargoAfter(ctx context.Context, m *Manager, opts Options) error {
 			if len(changed) > 0 {
 				fmt.Fprintf(errOut, "ossprey: warning: `%s` failed after changing %s, which was not checked\n", command, strings.Join(changed, ", "))
 			}
+			// A manifest unread before cargo ran may have changed too.
+			if len(unread) > 0 {
+				fmt.Fprintf(errOut, "ossprey: warning: `%s` failed after possibly changing %s, which was not checked\n", command, strings.Join(displayPaths(unread), ", "))
+			}
 			return runErr
 		}
 	}
@@ -276,7 +280,12 @@ func checkCargoAfter(ctx context.Context, m *Manager, opts Options) error {
 	}
 	flushWarnings(ctx)
 	if err != nil {
-		fmt.Fprintf(errOut, "ossprey: warning: Cargo.lock not checked after `%s` (%v); cargo's changes are kept\n", command, err)
+		kept := "cargo's changes are kept"
+		if runErr != nil && len(changes) == 0 && slices.Contains(unread, ws.Lock) {
+			// A failed command may have changed nothing, and a lock unread before cannot say.
+			kept = "any changes cargo made are kept"
+		}
+		fmt.Fprintf(errOut, "ossprey: warning: Cargo.lock not checked after `%s` (%v); %s\n", command, err, kept)
 		return runErr
 	}
 
@@ -749,11 +758,7 @@ func reportRestore(command string, changes []fileChange, unread []string) {
 		fmt.Fprintf(errOut, "ossprey: warning: did not undo `%s` in %s, changed again after cargo exited\n", command, strings.Join(kept, ", "))
 	}
 	if len(unread) > 0 {
-		names := make([]string, len(unread))
-		for i, p := range unread {
-			names[i] = displayPath(p)
-		}
-		fmt.Fprintf(errOut, "ossprey: warning: did not undo `%s` in %s, which could not be read before cargo ran\n", command, strings.Join(names, ", "))
+		fmt.Fprintf(errOut, "ossprey: warning: did not undo `%s` in %s, which could not be read before cargo ran\n", command, strings.Join(displayPaths(unread), ", "))
 	}
 	if len(done) == 0 && len(kept) == 0 && len(unread) == 0 && !failed {
 		fmt.Fprintf(errOut, "ossprey: `%s` changed no Cargo.toml or Cargo.lock; nothing to restore\n", command)
@@ -945,6 +950,15 @@ func holdsLeft(fh *os.File, left savedFile) bool {
 	}
 	data, err := io.ReadAll(io.LimitReader(fh, catalog.CargoProofLimit+1))
 	return err == nil && bytes.Equal(data, left.data)
+}
+
+// displayPaths is each of paths as displayPath gives it.
+func displayPaths(paths []string) []string {
+	out := make([]string, len(paths))
+	for i, p := range paths {
+		out[i] = displayPath(p)
+	}
+	return out
 }
 
 // displayPath is p relative to the working directory, preferring whichever spelling of it, physical or as typed, holds p.

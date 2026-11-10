@@ -953,7 +953,7 @@ func TestRunCargoFetch_FailureWithALockUnreadBeforeIsChecked(t *testing.T) {
 		}},
 		{"clean", true, cleanCrates, exit101, func(string) string { return "ossprey: no malware found in 2 packages in Cargo.lock\n" }},
 		{"left over the bound", false, cleanCrates, exit101, func(lock string) string {
-			return fmt.Sprintf("ossprey: warning: Cargo.lock not checked after `cargo fetch --offline` (read %s: over the %d byte limit); cargo's changes are kept\n", lock, catalog.CargoProofLimit)
+			return fmt.Sprintf("ossprey: warning: Cargo.lock not checked after `cargo fetch --offline` (read %s: over the %d byte limit); any changes cargo made are kept\n", lock, catalog.CargoProofLimit)
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1004,6 +1004,46 @@ func TestRunCargoAdd_FailureAfterEditingTheManifestWarns(t *testing.T) {
 	want := "ossprey: warning: `cargo add -p a evil` failed after changing " + filepath.Join("a", "Cargo.toml") + ", which was not checked\n"
 	if out != want {
 		t.Errorf("output = %q, want %q", out, want)
+	}
+}
+
+// A failed command may have changed a manifest unread before it ran, so the warning names it as possibly changed (OSS-2553).
+func TestRunCargoAdd_FailureWithAManifestUnreadBeforeWarns(t *testing.T) {
+	exit101 := errors.New("exit status 101")
+	member := filepath.Join("a", "Cargo.toml")
+	unchecked := "ossprey: warning: `cargo add -p a evil` failed after possibly changing " + member + ", which was not checked\n"
+	for _, tc := range []struct {
+		name, root, want string
+	}{
+		{"alone", "", unchecked},
+		{"beside a changed manifest", "[workspace]\nmembers = [\"a\"]\nresolver = \"3\"\n", "ossprey: warning: `cargo add -p a evil` failed after changing Cargo.toml, which was not checked\n" + unchecked},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, _ := cargoProject(t)
+			manifest := filepath.Join(root, member)
+			writeFile(t, manifest, "")
+			if err := os.Truncate(manifest, catalog.CargoProofLimit+1); err != nil {
+				t.Fatal(err)
+			}
+			swap(t, func(context.Context, string, []string) error {
+				// cargo add keeps its manifest edit when resolution fails (verified with cargo 1.99.1 on a 34 MB Cargo.toml).
+				f, err := os.OpenFile(manifest, os.O_WRONLY|os.O_APPEND, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				f.WriteString("\n[dependencies]\nevil = \"1\"\n")
+				f.Close()
+				if tc.root != "" {
+					writeFile(t, filepath.Join(root, "Cargo.toml"), tc.root)
+				}
+				return exit101
+			}, cleanSBOM)
+
+			out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"add", "-p", "a", "evil"}})
+			if !errors.Is(err, exit101) || out != tc.want {
+				t.Errorf("Run = %v, output %q; want cargo's error and %q", err, out, tc.want)
+			}
+		})
 	}
 }
 

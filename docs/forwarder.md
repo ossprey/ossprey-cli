@@ -127,7 +127,8 @@ through (unless the lock it changed holds malware, which exits `1` as above), bu
 `Cargo.lock` before it downloads, so a lock a failed command changed, or one
 that could not be read before it ran, is checked the same way, and `cargo add`
 edits `Cargo.toml` before it resolves, so a failure that changed only
-manifests gets one warning line naming them. Run
+manifests gets one warning line naming them, and another naming any
+`Cargo.toml` that could not be read before cargo ran as possibly changed. Run
 `ossprey cargo fetch` once it resolves to check what they add. When the check
 cannot be made (the API unreachable, a workspace cargo cannot read, a
 `Cargo.lock` that is not a regular file or is over 32 MiB, or a
