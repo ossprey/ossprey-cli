@@ -710,6 +710,41 @@ func TestRunCargoAdd_FailedRestoreLeavesCargosFiles(t *testing.T) {
 	}
 }
 
+// A file edited in place while its copy is staged is left alone and named, not overwritten (OSS-2553).
+func TestRunCargoUpdate_RestoreLeavesAFileEditedWhileStaged(t *testing.T) {
+	_, ws := cargoProject(t)
+	writeFile(t, ws.Lock, "version = 4\n# before\n")
+	swap(t, func(context.Context, string, []string) error {
+		writeFile(t, ws.Lock, evilLock)
+		return nil
+	}, cleanSBOM)
+	swapScan(t, func(context.Context, scanRequest) (*ossbom.SBOM, error) { return evilSBOM(), nil })
+	const edit = "# edited while the copy was staged\n"
+	swapWriteRestore(t, func(w io.Writer, data []byte) error {
+		f, err := os.OpenFile(ws.Lock, os.O_WRONLY|os.O_APPEND, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.WriteString(edit); err != nil {
+			t.Fatal(err)
+		}
+		f.Close()
+		_, err = w.Write(data)
+		return err
+	})
+
+	out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"update"}})
+	if !errors.Is(err, ErrBlocked) {
+		t.Fatalf("Run = %v, want ErrBlocked", err)
+	}
+	if got := readFile(t, ws.Lock); got != evilLock+edit {
+		t.Errorf("lock = %q, want the edit kept", got)
+	}
+	if want := "ossprey: warning: did not undo `cargo update` in Cargo.lock, changed again after cargo exited\n"; !strings.Contains(out, want) || strings.Contains(out, "undid") {
+		t.Errorf("output:\n%s\nwant %q and no undo", out, want)
+	}
+}
+
 // A file cargo removed is written back whole with its mode, and a write that fails part way leaves nothing at its path (OSS-2553).
 func TestRunCargoAdd_BlockWritesBackAFileCargoRemoved(t *testing.T) {
 	for _, fail := range []bool{false, true} {

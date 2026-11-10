@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"math/rand/v2"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -771,33 +773,146 @@ func removeLeft(p string, left fs.FileInfo) error {
 	return os.Remove(real)
 }
 
-// writeRestore writes a restore's staged copy; a test seam.
+// writeRestore writes a restore's bytes, to a staged copy or in place; a test seam.
 var writeRestore = func(w io.Writer, data []byte) error {
 	_, err := w.Write(data)
 	return err
 }
 
-// rewriteLeft stages f's bytes and mode beside the file left at its path, through a link as cargo wrote, and renames the copy over it only while the path still reaches that file.
+// errInPlace is a restore a staged copy would make differently from a write in place, so it is written in place.
+var errInPlace = errors.New("restore in place")
+
+// rewriteLeft puts f's bytes and mode back in the file left at its path, through a link as cargo wrote: a staged copy replaces it when that keeps what a write in place keeps, else it is written in place.
 func rewriteLeft(f, left savedFile) error {
-	target := f.path
-	if left.existed {
-		real, err := filepath.EvalSymlinks(f.path)
-		if err != nil {
-			return err
-		}
-		target = real
+	if !left.existed {
+		return recreateLeft(f)
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(target), "."+filepath.Base(target)+".ossprey-*")
+	target, err := filepath.EvalSymlinks(f.path)
 	if err != nil {
 		return err
 	}
-	renamed := false
+	if err := replaceLeft(f, left, target); !errors.Is(err, errInPlace) {
+		return err
+	}
+	return rewriteInPlace(f, left)
+}
+
+// replaceLeft renames a synced copy of f over target while the path still reaches it as cargo left it; errInPlace when the copy cannot be made beside it or would not keep its one name, owner and group.
+func replaceLeft(f, left savedFile, target string) error {
+	dir, err := os.OpenRoot(filepath.Dir(target))
+	if err != nil {
+		return errInPlace
+	}
+	defer dir.Close()
+	base := filepath.Base(target)
+	if fi, err := dir.Lstat(base); err != nil || !os.SameFile(fi, left.info) {
+		return errNotLeft
+	} else if !oneLink(fi) {
+		return errInPlace
+	}
+	tmp, name, err := stageIn(dir, base)
+	if err != nil {
+		return errInPlace
+	}
+	// Removed through the directory held open, so no copy is left in a directory moved since.
 	defer func() {
-		if !renamed {
-			os.Remove(tmp.Name())
+		if name != "" {
+			dir.Remove(name)
 		}
 	}()
-	err = writeRestore(tmp, f.data)
+	if !ownAs(tmp, left.info) {
+		tmp.Close()
+		return errInPlace
+	}
+	if err := writeStaged(tmp, f); err != nil {
+		return err
+	}
+	if real, err := filepath.EvalSymlinks(f.path); err != nil || real != target {
+		return errNotLeft
+	}
+	fi, err := os.Lstat(target)
+	if err != nil || !os.SameFile(fi, left.info) || !leftIn(dir, base, left) {
+		return errNotLeft
+	}
+	if !oneLink(fi) {
+		return errInPlace
+	}
+	if err := dir.Rename(name, base); err != nil {
+		return err
+	}
+	name = ""
+	return nil
+}
+
+// rewriteInPlace writes f's bytes into the file left at its path, as cargo writes a lock, once the handle shows it still as cargo left it.
+func rewriteInPlace(f, left savedFile) error {
+	fh, err := os.OpenFile(f.path, os.O_RDWR|oNonblock, 0)
+	if err != nil {
+		return err
+	}
+	if !holdsLeft(fh, left) {
+		fh.Close()
+		return errNotLeft
+	}
+	err = fh.Truncate(0)
+	if err == nil {
+		_, err = fh.Seek(0, io.SeekStart)
+	}
+	if err == nil {
+		err = writeRestore(fh, f.data)
+	}
+	if err == nil {
+		_ = fh.Chmod(f.mode)
+	}
+	if cerr := fh.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
+
+// recreateLeft writes back a file cargo removed by linking in a staged copy, which fails if anything has appeared at the path since, or in place when no copy can be staged.
+func recreateLeft(f savedFile) error {
+	if dir, err := os.OpenRoot(filepath.Dir(f.path)); err == nil {
+		defer dir.Close()
+		base := filepath.Base(f.path)
+		if tmp, name, err := stageIn(dir, base); err == nil {
+			defer dir.Remove(name)
+			if err := writeStaged(tmp, f); err != nil {
+				return err
+			}
+			return dir.Link(name, base)
+		}
+	}
+	fh, err := os.OpenFile(f.path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|oNonblock, f.mode)
+	if err != nil {
+		return err
+	}
+	err = writeRestore(fh, f.data)
+	if err == nil {
+		_ = fh.Chmod(f.mode)
+	}
+	if cerr := fh.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
+
+// stageIn creates a new file in dir to stage a copy of base in, and returns its name there.
+func stageIn(dir *os.Root, base string) (*os.File, string, error) {
+	var err error
+	for range 100 {
+		name := "." + base + ".ossprey-" + strconv.FormatUint(uint64(rand.Uint32()), 10)
+		var fh *os.File
+		if fh, err = dir.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600); !errors.Is(err, fs.ErrExist) {
+			return fh, name, err
+		}
+	}
+	return nil, "", err
+}
+
+// writeStaged writes f's bytes and mode to a staged copy, synced and closed.
+func writeStaged(tmp *os.File, f savedFile) error {
+	err := writeRestore(tmp, f.data)
 	if err == nil {
 		err = tmp.Chmod(f.mode)
 	}
@@ -807,24 +922,27 @@ func rewriteLeft(f, left savedFile) error {
 	if cerr := tmp.Close(); err == nil {
 		err = cerr
 	}
+	return err
+}
+
+// leftIn reports whether base in dir is still the file cargo left, with its mode and contents.
+func leftIn(dir *os.Root, base string, left savedFile) bool {
+	fh, err := dir.OpenFile(base, os.O_RDONLY|oNonblock, 0)
 	if err != nil {
-		return err
+		return false
 	}
-	if !left.existed {
-		// A link, unlike a rename, fails when anything has appeared at the path since.
-		return os.Link(tmp.Name(), target)
+	defer fh.Close()
+	return holdsLeft(fh, left)
+}
+
+// holdsLeft reports whether fh is the file cargo left, with the owner, mode and contents it had as cargo exited.
+func holdsLeft(fh *os.File, left savedFile) bool {
+	fi, err := fh.Stat()
+	if err != nil || !fi.Mode().IsRegular() || !os.SameFile(fi, left.info) || fi.Mode().Perm() != left.mode || !sameOwner(fi, left.info) {
+		return false
 	}
-	if real, err := filepath.EvalSymlinks(f.path); err != nil || real != target {
-		return errNotLeft
-	}
-	if fi, err := os.Lstat(target); err != nil || !os.SameFile(fi, left.info) || fi.Mode().Perm() != left.mode {
-		return errNotLeft
-	}
-	if err := os.Rename(tmp.Name(), target); err != nil {
-		return err
-	}
-	renamed = true
-	return nil
+	data, err := io.ReadAll(io.LimitReader(fh, catalog.CargoProofLimit+1))
+	return err == nil && bytes.Equal(data, left.data)
 }
 
 // displayPath is p relative to the working directory, preferring whichever spelling of it, physical or as typed, holds p.

@@ -246,3 +246,177 @@ func TestRunCargoAdd_RestoreChecksThePathAgainBeforeReplacing(t *testing.T) {
 		t.Errorf("output:\n%s\nwant %q and no undo", out, want)
 	}
 }
+
+// A restore keeps what writing in place keeps, as cargo 1.99.1 writes Cargo.lock: in place where no copy can be staged beside it or the lock has a second name, and with its owner and group (OSS-2553).
+func TestRunCargoUpdate_RestoreKeepsWhatAWriteInPlaceKeeps(t *testing.T) {
+	const oldLock = "version = 4\n# before\n"
+	readOnly := func(t *testing.T, dir string) {
+		t.Helper()
+		if err := os.Chmod(dir, 0o555); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.Chmod(dir, 0o755) })
+	}
+	stat := func(t *testing.T, p string) *syscall.Stat_t {
+		t.Helper()
+		fi, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fi.Sys().(*syscall.Stat_t)
+	}
+	var other uint32
+	if groups, err := os.Getgroups(); err == nil {
+		for _, g := range groups {
+			if g != os.Getegid() {
+				other = uint32(g)
+			}
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		skip string
+		// setup returns the files that must end up holding the old lock, each still the same file.
+		setup func(t *testing.T, root string) []string
+		owner *[2]uint32
+	}{
+		{
+			name: "a read-only project directory",
+			skip: map[bool]string{true: "root writes into a read-only directory"}[os.Geteuid() == 0],
+			setup: func(t *testing.T, root string) []string {
+				readOnly(t, root)
+				return []string{filepath.Join(root, "Cargo.lock")}
+			},
+		},
+		{
+			name: "a lock linked into a read-only directory",
+			skip: map[bool]string{true: "root writes into a read-only directory"}[os.Geteuid() == 0],
+			setup: func(t *testing.T, root string) []string {
+				shared := filepath.Join(root, "shared")
+				if err := os.Mkdir(shared, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(filepath.Join(root, "Cargo.lock"), filepath.Join(shared, "real.lock")); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(filepath.Join("shared", "real.lock"), filepath.Join(root, "Cargo.lock")); err != nil {
+					t.Fatal(err)
+				}
+				readOnly(t, shared)
+				return []string{filepath.Join(shared, "real.lock")}
+			},
+		},
+		{
+			name: "a lock with a second name",
+			setup: func(t *testing.T, root string) []string {
+				if err := os.Link(filepath.Join(root, "Cargo.lock"), filepath.Join(root, "Cargo.lock.orig")); err != nil {
+					t.Fatal(err)
+				}
+				return []string{filepath.Join(root, "Cargo.lock"), filepath.Join(root, "Cargo.lock.orig")}
+			},
+		},
+		{
+			name: "a lock in a group of the user's other than their own",
+			skip: map[bool]string{true: "the user is in no other group"}[other == 0],
+			setup: func(t *testing.T, root string) []string {
+				if err := os.Chown(filepath.Join(root, "Cargo.lock"), -1, int(other)); err != nil {
+					t.Fatal(err)
+				}
+				return nil
+			},
+			owner: &[2]uint32{uint32(os.Getuid()), other},
+		},
+		{
+			name: "a lock root restores in a user's tree",
+			skip: map[bool]string{false: "needs root"}[os.Geteuid() == 0],
+			setup: func(t *testing.T, root string) []string {
+				if err := os.Chown(filepath.Join(root, "Cargo.lock"), 65534, 65534); err != nil {
+					t.Fatal(err)
+				}
+				return nil
+			},
+			owner: &[2]uint32{65534, 65534},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.skip != "" {
+				t.Skip(tc.skip)
+			}
+			root, ws := cargoProject(t)
+			writeFile(t, ws.Lock, oldLock)
+			same := tc.setup(t, root)
+			before := map[string]uint64{}
+			for _, p := range same {
+				before[p] = stat(t, p).Ino
+			}
+			swap(t, func(context.Context, string, []string) error {
+				writeFile(t, ws.Lock, evilLock)
+				return nil
+			}, cleanSBOM)
+			swapScan(t, func(context.Context, scanRequest) (*ossbom.SBOM, error) { return evilSBOM(), nil })
+
+			out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"update"}})
+			if !errors.Is(err, ErrBlocked) {
+				t.Fatalf("Run = %v, want ErrBlocked", err)
+			}
+			if want := "ossprey: undid `cargo update`: restored Cargo.lock\n"; !strings.Contains(out, want) {
+				t.Errorf("output lacks %q:\n%s", want, out)
+			}
+			if got := readFile(t, ws.Lock); got != oldLock {
+				t.Errorf("lock = %q, want its old bytes", got)
+			}
+			for _, p := range same {
+				if got := readFile(t, p); got != oldLock || stat(t, p).Ino != before[p] {
+					t.Errorf("%s = %q, want the old bytes written into the same file", p, got)
+				}
+			}
+			if st := stat(t, ws.Lock); tc.owner != nil && (st.Uid != tc.owner[0] || st.Gid != tc.owner[1]) {
+				t.Errorf("lock owned by %d:%d, want %d:%d", st.Uid, st.Gid, tc.owner[0], tc.owner[1])
+			}
+			if got := dirNames(t, root); slices.ContainsFunc(got, func(n string) bool { return strings.Contains(n, ".ossprey-") }) {
+				t.Errorf("root holds %v, want no staged copy left", got)
+			}
+		})
+	}
+}
+
+// A staged copy is removed from the directory it was made in, even one moved while the copy was written (OSS-2553).
+func TestRunCargoUpdate_RestoreRemovesItsCopyFromAMovedDirectory(t *testing.T) {
+	root, ws := cargoProject(t)
+	writeFile(t, ws.Lock, "version = 4\n# before\n")
+	swap(t, func(context.Context, string, []string) error {
+		writeFile(t, ws.Lock, evilLock)
+		return nil
+	}, cleanSBOM)
+	swapScan(t, func(context.Context, scanRequest) (*ossbom.SBOM, error) { return evilSBOM(), nil })
+	moved := root + ".moved"
+	t.Cleanup(func() { os.RemoveAll(moved) })
+	swapWriteRestore(t, func(w io.Writer, data []byte) error {
+		if err := os.Rename(root, moved); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(root, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, ws.Lock, "# another project\n")
+		_, err := w.Write(data)
+		return err
+	})
+
+	out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"update"}})
+	if !errors.Is(err, ErrBlocked) {
+		t.Fatalf("Run = %v, want ErrBlocked", err)
+	}
+	if got := readFile(t, filepath.Join(moved, "Cargo.lock")); got != evilLock {
+		t.Errorf("moved lock = %q, want it left alone", got)
+	}
+	if got := readFile(t, ws.Lock); got != "# another project\n" {
+		t.Errorf("new lock = %q, want it left alone", got)
+	}
+	if got := dirNames(t, moved); !slices.Equal(got, []string{"Cargo.lock", "Cargo.toml", "a"}) {
+		t.Errorf("moved directory holds %v, want no staged copy left", got)
+	}
+	if want := ", changed again after cargo exited\n"; !strings.Contains(out, want) || strings.Contains(out, "undid") {
+		t.Errorf("output:\n%s\nwant %q and no undo", out, want)
+	}
+}

@@ -108,15 +108,19 @@ found in N packages in Cargo.lock` after cargo's own output.
 If the lock holds malware you get the full malware report, every `Cargo.toml`
 and `Cargo.lock` the command changed is put back as it was (a `Cargo.lock` it
 created is removed), one line names those files, and the exit code is `1`.
-A file changed again after cargo exited, while the check ran, in its contents or
-its permissions, or one the path no longer reaches (a symlink retargeted or a
+A file changed again after cargo exited, while the check ran, in its contents,
+its permissions or its owner, or one the path no longer reaches (a symlink retargeted or a
 directory swapped), is left as it is, and a warning line names it. A symlinked
 `Cargo.toml` or `Cargo.lock` is put back through the link, as cargo writes
 through it, and a lock cargo created through a dangling link is removed from the
 link's target. A file that could not be read before cargo ran (not a regular
-file, or over 32 MiB) is never touched and a warning line names it, and one
-that cannot be written back or removed (on a full disk, say) is left exactly
-as cargo left it with a warning line.
+file, or over 32 MiB) is never touched and a warning line names it. A file is
+put back by renaming a copy over it, so one that cannot be written back or
+removed (on a full disk, say) is left exactly as cargo left it with a warning
+line, unless the copy cannot keep what cargo's own write keeps (a directory you
+cannot write to, a second hard link, or an owner or group the copy cannot be
+given): then the old bytes are written into the file in place, as cargo writes
+`Cargo.lock`.
 That includes `-p <member>`, `--manifest-path` and a member whose `Cargo.lock`
 sits at the workspace root. When cargo itself fails, its exit code is passed
 through (unless the lock it changed holds malware, which exits `1` as above), but a failure can still leave changes behind: `cargo fetch` writes
