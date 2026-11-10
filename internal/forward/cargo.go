@@ -973,13 +973,28 @@ func linkEnd(p string) (string, string, error) {
 		if err != nil {
 			return "", "", err
 		}
-		if !filepath.IsAbs(to) {
-			// Left uncleaned, so a `..` after a link in the text goes where the kernel takes it.
-			to = dir + string(filepath.Separator) + to
-		}
-		p = to
+		p = linkTarget(dir, to)
 	}
 	return "", "", &fs.PathError{Op: "readlink", Path: p, Err: syscall.ELOOP}
+}
+
+// linkTarget is the path a link in dir whose text is to leads to, as the kernel reads it.
+func linkTarget(dir, to string) string {
+	switch {
+	case filepath.IsAbs(to):
+		return to
+	case filepath.VolumeName(to) != "":
+		// A drive-relative text (C:x) starts from that drive's working directory.
+		if abs, err := filepath.Abs(to); err == nil {
+			return abs
+		}
+		return to
+	case to != "" && os.IsPathSeparator(to[0]):
+		// A text rooted without a drive (\x) starts at the root of the link's own drive.
+		return filepath.VolumeName(dir) + to
+	}
+	// Left uncleaned, so a `..` after a link in the text goes where the kernel takes it.
+	return dir + string(filepath.Separator) + to
 }
 
 // stageIn creates a new file in dir to stage a copy of base in, and returns its name there.

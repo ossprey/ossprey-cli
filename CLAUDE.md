@@ -195,7 +195,9 @@ Windows resolves it under `%LOCALAPPDATA%`.
      appeared since, and where links fail (vfat, some FUSE and SMB mounts)
      creates it with `O_EXCL`, which never does either. Both happen at the end
      of any link the path was reached through (`linkEnd`, each link's text read
-     against its own directory, with a `..` after a link left to the kernel):
+     against its own directory, with a `..` after a link left to the kernel,
+     and a Windows text rooted without a drive from the link's drive,
+     `linkTarget`):
      linking at a dangling link's own name hit EEXIST and named a file that had
      not changed since cargo exited.
    - **Bounded, regular reads.** Every manifest, lock and config read goes
