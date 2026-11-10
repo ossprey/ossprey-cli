@@ -249,8 +249,8 @@ func checkCargoAfter(ctx context.Context, m *Manager, opts Options) error {
 	}
 	// A moved lock has no snapshot, so a failed command still gets the warning below.
 	if runErr != nil && err == nil {
-		// cargo writes before it can fail: fetch locks before it downloads, add edits Cargo.toml before it resolves.
-		if !slices.ContainsFunc(changes, func(c fileChange) bool { return c.before.path == ws.Lock }) {
+		// cargo writes before it can fail: fetch locks before it downloads, add edits Cargo.toml before it resolves; a lock unread before may have changed.
+		if !slices.ContainsFunc(changes, func(c fileChange) bool { return c.before.path == ws.Lock }) && !slices.Contains(unread, ws.Lock) {
 			var changed []string
 			for _, c := range changes {
 				changed = append(changed, displayPath(c.before.path))

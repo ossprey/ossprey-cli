@@ -783,6 +783,57 @@ func TestRunCargoFetch_FailureAfterLockingIsChecked(t *testing.T) {
 	}
 }
 
+// A failed command may have rewritten a lock unread before it ran (verified: a failed fetch --offline rewrote a 34 MB lock with cargo 1.99.1), so that lock is checked, and a block names it as not undone (OSS-2553).
+func TestRunCargoFetch_FailureWithALockUnreadBeforeIsChecked(t *testing.T) {
+	exit101 := errors.New("exit status 101")
+	for _, tc := range []struct {
+		name    string
+		rewrite bool
+		sbom    func() *ossbom.SBOM
+		want    error
+		wantOut func(lock string) string
+	}{
+		{"blocked", true, evilSBOM, ErrBlocked, func(string) string {
+			return "ossprey: warning: did not undo `cargo fetch --offline` in Cargo.lock, which could not be read before cargo ran\n"
+		}},
+		{"clean", true, cleanCrates, exit101, func(string) string { return "ossprey: no malware found in 2 packages in Cargo.lock\n" }},
+		{"left over the bound", false, cleanCrates, exit101, func(lock string) string {
+			return fmt.Sprintf("ossprey: warning: Cargo.lock not checked after `cargo fetch --offline` (read %s: over the %d byte limit); cargo's changes are kept\n", lock, catalog.CargoProofLimit)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, ws := cargoProject(t)
+			writeFile(t, ws.Lock, "")
+			if err := os.Truncate(ws.Lock, catalog.CargoProofLimit+1); err != nil {
+				t.Fatal(err)
+			}
+			swap(t, func(context.Context, string, []string) error {
+				if tc.rewrite {
+					writeFile(t, ws.Lock, evilLock)
+				}
+				return exit101
+			}, cleanSBOM)
+			var req scanRequest
+			var scanned string
+			swapScan(t, lockScan(t, &req, &scanned, tc.sbom))
+
+			out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"fetch", "--offline"}})
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("Run = %v, want %v", err, tc.want)
+			}
+			if tc.rewrite && scanned != evilLock {
+				t.Errorf("scanned %q, want the lock cargo wrote", scanned)
+			}
+			if want := tc.wantOut(ws.Lock); !strings.HasSuffix(out, want) || strings.Contains(out, "undid") {
+				t.Errorf("output:\n%s\nwant it to end %q and undo nothing", out, want)
+			}
+			if fi, err := os.Stat(ws.Lock); tc.rewrite && readFile(t, ws.Lock) != evilLock || !tc.rewrite && (err != nil || fi.Size() != catalog.CargoProofLimit+1) {
+				t.Errorf("lock changed after cargo exited (%v), want it left as cargo left it", err)
+			}
+		})
+	}
+}
+
 // cargo add edits Cargo.toml before it resolves, so a failure that changed only manifests says they were not checked.
 func TestRunCargoAdd_FailureAfterEditingTheManifestWarns(t *testing.T) {
 	root, _ := cargoProject(t)
