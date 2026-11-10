@@ -1698,13 +1698,13 @@ func TestLockfileMoved(t *testing.T) {
 	}
 }
 
-// cargo 1.99.1 reads a --config or level config that is a directory as an error, so one it cannot read may set either key (OSS-2553).
-func TestCargoConfigThatIsADirectoryCounts(t *testing.T) {
-	assertUnreadableConfigCounts(t, func(p string) error { return os.Mkdir(p, 0o755) })
+// cargo 1.99.1 reads a --config or level config that is a directory as an error, so one may move the lock, while cargo install fails on it with the crate still checked (OSS-2553).
+func TestCargoConfigThatIsADirectoryMayMoveTheLock(t *testing.T) {
+	assertIrregularConfig(t, func(p string) error { return os.Mkdir(p, 0o755) })
 }
 
-// assertUnreadableConfigCounts makes each config cargo reads with mk and wants it to count as one that may move the lock or set registry.default.
-func assertUnreadableConfigCounts(t *testing.T, mk func(string) error) {
+// assertIrregularConfig makes each config cargo reads with mk, which is not a regular file, and wants it to count as one that may move the lock but not as one that sets registry.default.
+func assertIrregularConfig(t *testing.T, mk func(string) error) {
 	t.Helper()
 	base := t.TempDir()
 	home, project := filepath.Join(base, "home"), filepath.Join(base, "project")
@@ -1725,22 +1725,25 @@ func assertUnreadableConfigCounts(t *testing.T, mk func(string) error) {
 		t.Fatal(err)
 	}
 	if !lockfileMoved([]string{"--config", arg, "generate-lockfile"}, project) {
-		t.Error("a --config file that cannot be read may move the lock")
+		t.Error("a --config file that is not a regular file may move the lock")
 	}
-	if got := cargoDefaultRegistry([]string{"install", "--config", arg, "x"}); got != "a config it cannot read" {
-		t.Errorf("a --config file that cannot be read: %q, want it to count as setting registry.default", got)
+	if got := cargoDefaultRegistry([]string{"install", "--config", arg, "x"}); got != "" {
+		t.Errorf("a --config file that is not a regular file: %q, want the crates.io crate checked", got)
+	}
+	if got := cargoDefaultRegistry([]string{"--config", `registry.default="corp"`, "install", "--config", arg, "x"}); got != "corp" {
+		t.Errorf("a --config file that is not a regular file after one that sets corp: %q, want corp", got)
 	}
 	if err := mk(filepath.Join(project, ".cargo", "config.toml")); err != nil {
 		t.Fatal(err)
 	}
 	if !lockfileMoved([]string{"generate-lockfile"}, project) {
-		t.Error("a level config that cannot be read may move the lock")
+		t.Error("a level config that is not a regular file may move the lock")
 	}
 	if err := mk(filepath.Join(home, "config.toml")); err != nil {
 		t.Fatal(err)
 	}
-	if got := cargoDefaultRegistry([]string{"install", "x"}); got != "a config it cannot read" {
-		t.Errorf("CARGO_HOME's config that cannot be read: %q, want it to count as setting registry.default", got)
+	if got := cargoDefaultRegistry([]string{"install", "x"}); got != "" {
+		t.Errorf("CARGO_HOME's config that is not a regular file: %q, want the crates.io crate checked", got)
 	}
 }
 

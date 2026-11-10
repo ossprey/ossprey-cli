@@ -166,11 +166,15 @@ not find `serde_json`). Only the
 named crates are checked, not their dependencies, and one warning line says so.
 An install with `--git`, `--path`, or a `--registry` or `--index` other than
 crates.io is not from crates.io and is forwarded unchecked, and so is one that
-names no source while cargo's default registry is elsewhere (`registry.default`
-in a `--config`, in `CARGO_REGISTRY_DEFAULT` or in the cargo configs from
-`CARGO_HOME` up, a relative `CARGO_HOME` counting from where cargo runs, or
-possibly set there by an `include` or by a config that is not a regular file
-or is too large or too deeply nested to read). `--registry crates-io` and crates.io's own index
+names no source while cargo's default registry is elsewhere. That is
+`registry.default` as cargo reads it for an install: from the last `--config`
+that sets it, else `CARGO_REGISTRY_DEFAULT`, else the cargo configs from
+`CARGO_HOME` up, nearest first (a relative `CARGO_HOME` counting from where
+cargo runs), or possibly set there by an `include` or by a config file too
+large or too deeply nested to read. A config that is not a regular file, such
+as a piped `--config /dev/stdin`, sets nothing here: `cargo install` reads its
+configuration a second time, when the pipe is already empty, and then installs
+from crates.io, so the crate is checked. `--registry crates-io` and crates.io's own index
 URL are checked like a plain install; an index URL with a non-ASCII host counts
 as another registry.
 `cargo install --list` is not an install, and nothing is checked for a line

@@ -528,8 +528,12 @@ func lockfileMoved(args []string, configDir string) bool {
 
 // cargoDefaultRegistry is the registry other than crates.io that `cargo install` takes a crate from when the line names none, or "".
 func cargoDefaultRegistry(args []string) string {
-	// The value set nearest the line wins; an include, or a config that cannot be read or that the bounded parser refuses, may set it too.
+	// The value set nearest the line wins; an include, or a regular file that cannot be read or that the bounded parser refuses, may set it too.
 	pick := func(data []byte, err error) (string, bool) {
+		if errors.Is(err, catalog.ErrNotRegular) {
+			// cargo install reads its config again from CARGO_HOME, when a pipe read once is empty, so one that is not a regular file sets nothing.
+			return "", false
+		}
 		doc, ok := cargoConfigDoc(data)
 		if err != nil || !ok {
 			return "a config it cannot read", true

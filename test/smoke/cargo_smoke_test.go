@@ -222,6 +222,31 @@ func TestCargoConfigFromStdinMayMoveTheLock(t *testing.T) {
 	}
 }
 
+// cargo 1.99.1 reads a piped --config again once the pipe is empty, so cargo install takes a crate from crates.io whatever the pipe set, and the crate is checked (OSS-2553).
+func TestCargoInstallFromAPipedConfigIsChecked(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no /dev/stdin")
+	}
+	api := newFakeAPI(t, "pkg:cargo/ripgrep@14.1.1")
+	env := cargoEnv(t, api.URL)
+	root := t.TempDir()
+	cmd := exec.Command(binPath, "cargo", "--config", "/dev/stdin", "install", "--offline", "--root", root, "ripgrep@14.1.1")
+	cmd.Dir, cmd.Env = t.TempDir(), env
+	cmd.Stdin = strings.NewReader("[registry]\ndefault = \"corp\"\n[registries.corp]\nindex = \"sparse+https://corp.invalid/\"\n")
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if ee, ok := err.(*exec.ExitError); !ok || ee.ExitCode() != 1 {
+		t.Fatalf("Run = %v, want exit 1 on the block\nstderr: %s", err, stderr.String())
+	}
+	if _, purls := api.stats(); !slices.Equal(purls, []string{"pkg:cargo/ripgrep@14.1.1"}) {
+		t.Errorf("submitted %v, want ripgrep checked", purls)
+	}
+	if !dirEmpty(t, root) {
+		t.Error("a blocked install must not reach cargo")
+	}
+}
+
 // cargo add in a directory with no Cargo.toml fails before it writes anything, so cargo's error is the only line, gating or passive.
 func TestCargoAddWithNoWorkspaceSaysNothing(t *testing.T) {
 	api := newFakeAPI(t, "")

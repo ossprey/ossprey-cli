@@ -223,9 +223,9 @@ Windows resolves it under `%LOCALAPPDATA%`.
      `--manifest-path` or a comment naming `lockfile-path` skip the check, and
      none of those moves the lock, nor does `-Z lockfile-path`, a no-op since
      1.97; there is no flag form. A config `catalog.ParseCargoConfig` refuses,
-     or one there that is not a regular file (cargo reads `--config /dev/stdin`
-     and a FIFO), counts as moving the lock, and for `cargoDefaultRegistry` as
-     setting a default.
+     or one there that is not a regular file, counts as moving the lock: cargo
+     reads `--config /dev/stdin` and a FIFO, and the run-first verbs read their
+     config once, so what a pipe holds applies.
    - **Which configs.** At each level, `CARGO_HOME` included, cargo reads only
      the legacy `config` when it opens, else `config.toml`, and
      `cargoConfigFile` picks the same: reading an ignored `config.toml` that set
@@ -236,12 +236,22 @@ Windows resolves it under `%LOCALAPPDATA%`.
    - **`install`** builds at once, so it is a named check in front, of the named
      crates only (`errCargoNotResolved`). A crate from anywhere but crates.io
      forwards unchecked (`cargoSourceFlags`, `catalog.IsCratesIoIndex`, and
-     `cargoDefaultRegistry`, which reads no project config), since checking
-     crates.io's crate of that name would block an internal tool on a squat, or
-     clear one never installed; only a definite crates.io index counts, so a
-     non-ASCII host that only IDNA could map to github.com is another registry.
-     `cargo install` folds no spelling, so the name is sent as typed, without
-     `CanonicalCrate`.
+     `cargoDefaultRegistry`), since checking crates.io's crate of that name
+     would block an internal tool on a squat, or clear one never installed;
+     only a definite crates.io index counts, so a non-ASCII host that only IDNA
+     could map to github.com is another registry. `cargo install` folds no
+     spelling, so the name is sent as typed, without `CanonicalCrate`.
+   - **`registry.default` for `install`.** `cargo install` reloads its config
+     rooted at `CARGO_HOME`, so it reads no project config, and the value set
+     nearest the line wins: the last `--config`, then `CARGO_REGISTRY_DEFAULT`,
+     then the configs from `CARGO_HOME` up, nearest first. `cargoDefaultRegistry`
+     takes the first source that sets it, so a value further out never hides a
+     nearer one. An `include`, or a regular file it cannot read or the bounded
+     parser refuses, counts as setting it, but one that is not a regular file
+     does not: the reload reads each `--config` again, and a one-shot pipe is
+     empty by then (`cat cfg | cargo --config /dev/stdin install` goes to
+     crates.io whatever `cfg` sets), so counting it forwarded a crates.io
+     install unchecked.
    - **Where cargo runs.** A relative `CARGO_HOME` is joined to cargo's physical
      working directory, after `-C`, with `..` cleaned and links left alone
      (`catalog.CargoHome`, shared with the catalogue; a Windows home rooted
