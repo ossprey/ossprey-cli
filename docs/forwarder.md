@@ -107,7 +107,8 @@ found in N packages in Cargo.lock` after cargo's own output.
 
 If the lock holds malware you get the full malware report, every `Cargo.toml`
 and `Cargo.lock` the command changed is put back as it was (a `Cargo.lock` it
-created is removed), one line names those files, and the exit code is `1`.
+created is removed, and a file it removed is written back), one line names
+those files, and the exit code is `1`.
 A file changed again after cargo exited, while the check ran, in its contents,
 its permissions or its owner, or one the path no longer reaches (a symlink retargeted or a
 directory swapped), is left as it is, and a warning line names it; one already
@@ -151,13 +152,17 @@ failed in a workspace cargo cannot read, such as a directory with no
 `resolver.lockfile-path` or a cargo script still gets the warning after a
 failure, since a failed `cargo fetch` can still write that lock.
 A command that changes nothing and leaves no `Cargo.lock`, such as
-`cargo add --dry-run` in a project without one, has nothing to check.
+`cargo add --dry-run` in a project without one, has nothing to check. A dry
+run is not skipped, since `cargo update --dry-run` still writes a missing
+`Cargo.lock`.
 
 `cargo install` compiles the crate and runs its build scripts straight away, so
 the crates it names are checked first, and a block means cargo never starts.
 An exact version given to `--version` (or `--vers`), or `name@1.2.3`, pins a
 release; anything else, a range given to `--version` or `name@^1` included, is
-checked at the latest release on crates.io. Only the
+checked at the latest release on crates.io. A crate is checked under the name
+typed, since `cargo install` takes no other spelling of it (`serde-json` does
+not find `serde_json`). Only the
 named crates are checked, not their dependencies, and one warning line says so.
 An install with `--git`, `--path`, or a `--registry` or `--index` other than
 crates.io is not from crates.io and is forwarded unchecked, and so is one that

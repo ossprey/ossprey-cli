@@ -140,7 +140,120 @@ Windows resolves it under `%LOCALAPPDATA%`.
 
    **bun** finds its command by skipping options *without reading values* (in `bun --cwd web add x` its `command::which` takes `web` as the command, not `add`), so it has no `globalValueFlags` entry. Its `valueFlags` leave out `-c/--config` and `--catalog` because their value is optional — listing them would swallow a package name. It has no `Lockfile` because syft cannot read `bun.lock`/`bun.lockb`, so passive bun goes through `passiveAlongside` and a bare `bun install` scan resolves `package.json` via npm; teaching the catalogue `bun.lock` is what would change both.
 
-   **cargo** (`internal/forward/cargo.go`). `add`, `update`, `generate-lockfile` and `fetch` compile nothing (verified with cargo 1.99.1: a path dependency's `build.rs` ran on `cargo build` and on none of them), so `Manager.runFirstAt` runs them first, as a child since work follows, and checks the lock they leave: what the next build compiles, at the versions cargo picked rather than ones guessed in front. Only that lock is scanned, from a copy, so an unrelated `package.json` cannot block a `cargo add`; `CargoConfigDir` makes registry trust read the configs cargo reads where it runs, not those around the copy. What a block restores comes from `cargo metadata --no-deps` (manifests only; writes nothing, verified): the root's manifest and lock and every member's manifest, since `add -p <member>`, `--manifest-path` and a member outside the root's directory (`package.workspace`) each write that member's manifest and the root's lock (verified). Changed files get their old bytes back and a lock the command created is removed, but only a file still as cargo left it: that state is read as cargo exits, and one changed again while the verdict is pending, contents, permissions or owner, is left alone and named, so a block never overwrites an edit or deletes a newer lock. It must be the same file too (`os.SameFile` against the handle read as cargo exits): cargo 1.99.1 writes `Cargo.lock` in place and `Cargo.toml` by a rename onto the link's target, both through a symlink, and creates a lock through a dangling one (verified), so a restore renames a synced copy of the old bytes and mode, staged beside the link's target, over that file only while the path still reaches it with cargo's contents (truncating in place left a partial file when the write failed on a full disk; `writeRestore` is the seam), but only where the copy keeps what a write in place keeps (`replaceLeft`: the directory takes a new file, the file has one link and on Linux no access ACL, nor one the copy inherits from the directory's default ACL (verified: a renamed copy granted a user the lock never did), and on unix the copy has its owner and group, by chown if need be), else, and when the rename itself is refused with EBUSY, EXDEV or a permission error (a single-file bind mount), it writes in place as cargo does, where a partial write remains possible; only a permission error making the copy falls back, so a full volume leaves cargo's file whole, after the same check on the handle (verified: the rename alone failed in a read-only directory, left a second hard link with cargo's lock, and dropped a group or a user's ownership under a root run); the copy is made and removed through the directory held open (`os.Root`), so a directory moved meanwhile keeps no copy; a removal removes the link's target, and a retargeted link or a swapped directory is left alone and named. Each manifest and lock read, the snapshot and the lock copy alike, goes through `catalog.ReadRegular`, opened `O_NONBLOCK` and refused unless the opened file is regular (the catalogue's own cargo reads share it, so the guard cannot drift), and one over `CargoProofLimit` is unread: left out of the snapshot and named on a block, or not checked with the warning, since a passive run whose cargo failed at once (`add nosuchcrate`, verified) hung on a FIFO `Cargo.lock` and read a link to `/dev/zero` until out of memory. A failed command passes its exit code through, but cargo writes before it can fail (verified: `fetch --offline` locks and then fails to download, and `add --offline` keeps its `Cargo.toml` edit when resolution fails), so a lock it changed, or one unread before it ran (verified: a failed `fetch --offline` rewrote a lock padded past `CargoProofLimit`), is still checked and a change to manifests alone, or a manifest unread before, warns; passive posts whatever lock a failed command leaves, having no snapshot to compare. A workspace it cannot read warns after cargo succeeds, and after a failure only for a moved lock, which a failed `fetch --offline` still writes (verified), or a cargo script's: cargo 1.99.1 under `-Zscript` locks a script (any manifest not named `Cargo.toml`) under `$CARGO_HOME/build`, while `cargo metadata` names its directory as the workspace root, so a project lock there was checked in its place and a `generate-lockfile` with none said only verbosely that it left no lock (verified), and `errScriptLock` warns instead; any other reason (no `Cargo.toml`, a broken manifest) failed cargo too, which changed nothing and said why. A gating run resolves the credential first (`cargoCredentialFn`, `submit.NewClient` with the check's own inputs), so with no login or key it stops on the same error as any gating install before cargo writes anything; only a workspace it can check needs one. A platform error after cargo has run warns and keeps the changes. `resolver.lockfile-path` (stable in 1.99, or `CARGO_RESOLVER_LOCKFILE_PATH`) moves the lock, so `lockfileMoved` reads the environment, each `--config` before `--` (`cargoConfigArgs`) and the configs and warns rather than check a stale file; any config `include` counts too, since cargo merges the included file (verified). Only the decoded key counts, a `[resolver]` table, dotted key or inline table alike, and a quoted key's escapes (`"lockfile\u002dpath"`, in a file or on the line) included (verified): matching the bytes let a crate, a `--manifest-path` or a comment naming `lockfile-path` skip the check, and cargo 1.99.1 moved no lock for any of them, nor for `-Z lockfile-path`, a no-op since 1.97, and it has no flag form (verified). Configs go through `catalog.ParseCargoConfig`, read up to `CargoManifestLimit`, and one it refuses, or one there that is not a regular file (cargo reads `--config /dev/stdin` and a FIFO, verified), counts as moving the lock (and, for `cargoDefaultRegistry`, as setting a default, like an include). At each level cargo reads only the legacy `config` when it opens, else `config.toml` (verified, `CARGO_HOME` included), and `cargoConfigFile` picks the same; a `--config` value is a file when that path exists, a relative one read from where cargo runs after `-C`, and TOML otherwise, as cargo decides (verified). Dry runs are not skipped: `cargo update -n` writes a missing lock (verified). `cargo add --dry-run` writes nothing (verified), so a command that changes nothing and leaves no lock has nothing to check, and says so only when verbose. `install` compiles and runs build scripts at once, so it is a named check in front, of the named crates only (`errCargoNotResolved` makes `reportUnexpanded` say so); `--git`, `--path`, and a `--registry` or `--index` naming another registry take every crate off crates.io, while `--registry crates-io` and crates.io's index (`catalog.IsCratesIoIndex`) install from it (verified). Only a definite index counts: a non-ASCII host that only IDNA could map to github.com forwards unchecked, as a `registry.default` does. So does an effective `registry.default` (`cargoDefaultRegistry`): `cargo install` reads no project config, only the last `--config`, then `CARGO_REGISTRY_DEFAULT`, then the configs from `CARGO_HOME` up (verified), and an `include` there counts as setting it; a relative `CARGO_HOME` is joined to cargo's physical working directory, after `-C`, with `..` cleaned and links left alone (`catalog.CargoHome`, shared with the catalogue so the two cannot drift, verified; a Windows home rooted without a drive, or drive-relative, resolves on its own drive), while `-C` itself goes where chdir(2) goes, each link followed before the `..` after it (`cargoConfigDir`, verified); checking crates.io's crate of that name would block an internal tool on a squat, or clear one never installed. `cargo install` folds no spelling (verified: `serde-json` is not found), so the typed name is sent without `CanonicalCrate`. A line that only prints help or the version (`-h`/`--help` after the verb, or those and `-V`/`--version` before it, grouped or not; verified) runs nothing, so `cargoPrintsOnly` passes it through for `install` and the run-first verbs alike. `--bin`, `--example` and `--target` take an optional value that clap fills from the next token unless it is an option (verified: `--bin -F x` gives `x` to `-F`), so they are value flags and `cargoOptionalValues`. clap reads a group of shorts as switches up to one taking a value, which takes the rest less one `=`, else the next token (verified: `-qF pcre2`, `-qFpcre2`, and `-qjF 2` is `-j F`), so `cargoSplitShorts` splits groups before the verb, after `install` and after the verbs run first (`cargoRunFirstShorts`); `TestCargoFlagTablesMatchCargo` holds every table to `--help`. A `+toolchain` is rustup's and only as the first argument (cargo alone rejects it), so `verbIndex` skips it there alone. Opt-in like git (`shim.optInManagers`, `--cargo`): crates are checked only on Teams and Enterprise plans, so a default shim would cost most accounts a round trip for an Unsupported answer. Known gaps, all fail-open: a config `[alias]` or an external subcommand is invisible to verb detection, a `cargo build` with no lock resolves and builds unchecked, and a range resolves to the latest release, as a PyPI one does.
+   **cargo** (`internal/forward/cargo.go`). Each cargo behaviour below was
+   checked against cargo 1.99.1; `test/smoke/cargo_smoke_test.go` and
+   `TestCargoFlagTablesMatchCargo` pin what a real cargo can show, and
+   `docs/forwarder.md` says what users see, its known gaps included. Opt-in like
+   git (`shim.optInManagers`, `--cargo`): crates are checked only on Teams and
+   Enterprise plans, so a default shim would cost most accounts a round trip for
+   an Unsupported answer.
+
+   - **Run first, then check the lock.** `add`, `update`, `generate-lockfile`
+     and `fetch` compile nothing (a path dependency's `build.rs` ran on `cargo
+     build` and on none of them), so `Manager.runFirstAt` runs them as a child
+     and checks the lock they leave: what the next build compiles, at the
+     versions cargo picked rather than ones guessed in front. Only that lock is
+     scanned, from a copy, so an unrelated `package.json` cannot block a `cargo
+     add`; `CargoConfigDir` makes registry trust read the configs cargo reads
+     where it runs, not those around the copy.
+   - **What a block restores** comes from `cargo metadata --no-deps` (reads
+     manifests, writes nothing): the root's manifest and lock and every member's
+     manifest, since `-p`, `--manifest-path` and a `package.workspace` member
+     write a member's manifest and the root's lock. It runs through
+     `realCommand`, the lookup `Exec` uses for the command, with the same
+     options, so both see one workspace.
+   - **Only what cargo left is undone.** Its state is read as cargo exits and
+     again after the verdict; a file changed since (contents, mode, owner) or
+     one the path reaches only since (`os.SameFile` against the handle read as
+     cargo exits) is left alone and named, so a block never overwrites an edit
+     or deletes a newer lock. Each read guards its own window: the verdict wait
+     (the only content check before a removal or a recreate, and what finds a
+     file already back as before), staging the copy (`leftIn`), and the handle
+     an in-place write truncates (`holdsLeft`, a fresh open).
+   - **A staged copy where it keeps what a write in place keeps.** cargo writes
+     `Cargo.lock` in place and `Cargo.toml` by a rename onto the link's target,
+     both through a symlink. Truncating in place left a partial file on a full
+     disk (`writeRestore` is the seam), so `replaceLeft` renames a synced copy,
+     staged beside the link's target, over that file while the path still
+     reaches it with cargo's contents. Only where the copy keeps what cargo's
+     write keeps, though: a renamed copy failed in a read-only directory, left a
+     second hard link holding cargo's lock, dropped a group or a user's
+     ownership under a root run (so on unix the copy is chowned to match), lost
+     the file's access ACL, and took the directory's default ACL, granting a
+     user the lock never did (`hasACL`, `sameACL`, Linux only). Otherwise, or
+     when the rename is refused (EBUSY, EXDEV or a permission error: a
+     single-file bind mount), `rewriteInPlace` writes in place as cargo does,
+     after the same check on the handle. Only a permission error making the copy
+     falls back, so a full volume leaves cargo's file whole. The copy is made
+     and removed through the directory held open (`os.Root`), so a moved
+     directory keeps no copy.
+   - **Removal and recreate.** `removeLeft` removes the link's target; a
+     retargeted link or a swapped directory is left alone. `recreateLeft` links
+     a removed file back from a staged copy, which never replaces what has
+     appeared since, and where links fail (vfat, some FUSE and SMB mounts)
+     creates it with `O_EXCL`, which never does either.
+   - **Bounded, regular reads.** Every manifest, lock and config read goes
+     through `catalog.ReadRegular` (opened `O_NONBLOCK`, refused unless the
+     opened handle is regular, read no further than the bound), shared with the
+     catalogue so the guard cannot drift: a passive run whose cargo failed at
+     once hung on a FIFO `Cargo.lock` and read a link to `/dev/zero` until out
+     of memory.
+   - **A failed command** still gets its lock checked, since cargo writes before
+     it can fail (`fetch --offline` locks before it downloads, `add` edits
+     `Cargo.toml` before it resolves), and so does a lock unread before it ran,
+     since a failed `fetch --offline` rewrote one padded past `CargoProofLimit`.
+     A workspace `cargo metadata` cannot read warns only for a moved lock or a
+     cargo script after a failure: any other reason failed cargo too, before it
+     changed anything. Under `-Zscript` cargo locks a script (any manifest not
+     named `Cargo.toml`) under `$CARGO_HOME/build` while `cargo metadata` names
+     the script's directory as the root, so a project lock there was checked in
+     its place (`errScriptLock`).
+   - **The credential first** (`cargoCredentialFn`, `submit.NewClient` with the
+     check's own inputs), so a missing one stops a gating run before cargo
+     writes anything, as it stops any gating install.
+   - **A moved lock.** `resolver.lockfile-path` moves the lock, so
+     `lockfileMoved` reads the environment (`CARGO_RESOLVER_LOCKFILE_PATH`),
+     each `--config` before `--` (`cargoConfigArgs`) and the configs, and any
+     `include` counts, since cargo merges it. Only the decoded key counts (a
+     table, dotted key or inline table, quoted escapes such as
+     `"lockfile\u002dpath"` read): matching the bytes let a crate, a
+     `--manifest-path` or a comment naming `lockfile-path` skip the check, and
+     none of those moves the lock, nor does `-Z lockfile-path`, a no-op since
+     1.97; there is no flag form. A config `catalog.ParseCargoConfig` refuses,
+     or one there that is not a regular file (cargo reads `--config /dev/stdin`
+     and a FIFO), counts as moving the lock, and for `cargoDefaultRegistry` as
+     setting a default.
+   - **Which configs.** At each level, `CARGO_HOME` included, cargo reads only
+     the legacy `config` when it opens, else `config.toml`, and
+     `cargoConfigFile` picks the same: reading an ignored `config.toml` that set
+     `registry.default` made `cargo install` forward unchecked. The catalogue's
+     trust check reads both on purpose (`cargoConfigsIn`), since one more config
+     can only keep a crate checked. A `--config` value is a file when that path
+     exists, read from where cargo runs after `-C`, and TOML otherwise.
+   - **`install`** builds at once, so it is a named check in front, of the named
+     crates only (`errCargoNotResolved`). A crate from anywhere but crates.io
+     forwards unchecked (`cargoSourceFlags`, `catalog.IsCratesIoIndex`, and
+     `cargoDefaultRegistry`, which reads no project config), since checking
+     crates.io's crate of that name would block an internal tool on a squat, or
+     clear one never installed; only a definite crates.io index counts, so a
+     non-ASCII host that only IDNA could map to github.com is another registry.
+     `cargo install` folds no spelling, so the name is sent as typed, without
+     `CanonicalCrate`.
+   - **Where cargo runs.** A relative `CARGO_HOME` is joined to cargo's physical
+     working directory, after `-C`, with `..` cleaned and links left alone
+     (`catalog.CargoHome`, shared with the catalogue; a Windows home rooted
+     without a drive, or drive-relative, resolves on its own drive), while `-C`
+     goes where chdir(2) goes, each link followed before the `..` after it
+     (`cargoConfigDir`).
+   - **Reading the line.** `cargoPrintsOnly` passes through a line that only
+     prints help or the version. `--bin`, `--example` and `--target` take an
+     optional value clap fills from the next token unless it is an option, so
+     they are value flags and `cargoOptionalValues`. clap reads a group of
+     shorts as switches up to one taking a value, which takes the rest less one
+     `=`, else the next token (`-qjF 2` is `-j F`), so `cargoSplitShorts` splits
+     groups before the verb, after `install` and after the run-first verbs
+     (`cargoRunFirstShorts`). A `+toolchain` is rustup's and valid only first
+     (cargo alone rejects it), so `verbIndex` skips it there alone.
 
    **Not covered, deliberately (for now):** `pnpm dlx`, `yarn dlx`, and initializers (`npm init <x>`, `npm create`, `bun create`, `yarn create`, which fetch `create-<x>`). Do **not** close `dlx` by adding it to a `verbAt` list (same argv problem: `pnpm dlx cowsay moo` would check `moo`); give it a `toolRunAt`/`parseRun` like npm's. `docs/forwarder.md`'s "What is not checked" section is the user-facing statement of this.
 
