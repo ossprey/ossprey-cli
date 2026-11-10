@@ -36,6 +36,9 @@ func readACL(get func([]byte) (int, error)) ([]byte, bool) {
 		return nil, false
 	}
 	buf := make([]byte, n)
-	n, err = get(buf)
-	return buf[:n], err == nil
+	// The ACL can change between the two calls, and a failed read returns -1, so the error is checked before slicing.
+	if n, err = get(buf); err != nil {
+		return nil, false
+	}
+	return buf[:n], true
 }

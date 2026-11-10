@@ -105,3 +105,19 @@ func TestRunCargoUpdate_RestoreAddsNoInheritedACL(t *testing.T) {
 		t.Errorf("a staged copy was left in %v", entries)
 	}
 }
+
+// An ACL that grows or goes between the size probe and the read counts as unreadable, never a panic (OSS-2553).
+func TestReadACLChangingBetweenCallsIsUnreadable(t *testing.T) {
+	for _, errno := range []syscall.Errno{syscall.ERANGE, syscall.ENODATA} {
+		calls := 0
+		got, ok := readACL(func(b []byte) (int, error) {
+			if calls++; calls == 1 {
+				return 8, nil
+			}
+			return -1, errno
+		})
+		if ok || got != nil {
+			t.Errorf("%v on the read: readACL = %v, %v; want nil, false", errno, got, ok)
+		}
+	}
+}
