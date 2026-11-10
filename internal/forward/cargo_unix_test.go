@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -418,5 +419,79 @@ func TestRunCargoUpdate_RestoreRemovesItsCopyFromAMovedDirectory(t *testing.T) {
 	}
 	if want := ", changed again after cargo exited\n"; !strings.Contains(out, want) || strings.Contains(out, "undid") {
 		t.Errorf("output:\n%s\nwant %q and no undo", out, want)
+	}
+}
+
+// Only a directory that will not take the copy, or a rename a mount or device refuses, falls back to the in-place write; any other failure leaves cargo's lock whole (OSS-2553).
+func TestRunCargoUpdate_RestoreFallsBackInPlaceOnlyWhereItHelps(t *testing.T) {
+	const oldLock = "version = 4\n# before\n"
+	failStage := func(errno syscall.Errno) func(*os.Root, string) (*os.File, string, error) {
+		return func(*os.Root, string) (*os.File, string, error) {
+			return nil, "", &fs.PathError{Op: "open", Path: ".Cargo.lock.ossprey-1", Err: errno}
+		}
+	}
+	failRename := func(errno syscall.Errno) func(*os.Root, string, string) error {
+		return func(_ *os.Root, from, to string) error {
+			return &os.LinkError{Op: "rename", Old: from, New: to, Err: errno}
+		}
+	}
+	for _, tc := range []struct {
+		name     string
+		stage    func(*os.Root, string) (*os.File, string, error)
+		rename   func(*os.Root, string, string) error
+		restored bool
+	}{
+		{"staging refused for permission", failStage(syscall.EACCES), nil, true},
+		{"staging on a full volume", failStage(syscall.ENOSPC), nil, false},
+		{"rename onto a mount point", nil, failRename(syscall.EBUSY), true},
+		{"rename across devices", nil, failRename(syscall.EXDEV), true},
+		{"rename on a full volume", nil, failRename(syscall.ENOSPC), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, ws := cargoProject(t)
+			writeFile(t, ws.Lock, oldLock)
+			fi, err := os.Stat(ws.Lock)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.stage != nil {
+				old := stageFile
+				stageFile = tc.stage
+				t.Cleanup(func() { stageFile = old })
+			}
+			if tc.rename != nil {
+				old := renameStaged
+				renameStaged = tc.rename
+				t.Cleanup(func() { renameStaged = old })
+			}
+			swap(t, func(context.Context, string, []string) error {
+				f, err := os.OpenFile(ws.Lock, os.O_WRONLY|os.O_TRUNC, 0)
+				if err == nil {
+					_, err = f.WriteString(evilLock)
+					f.Close()
+				}
+				return err
+			}, cleanSBOM)
+			swapScan(t, func(context.Context, scanRequest) (*ossbom.SBOM, error) { return evilSBOM(), nil })
+
+			out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"update"}})
+			if !errors.Is(err, ErrBlocked) {
+				t.Fatalf("Run = %v, want ErrBlocked", err)
+			}
+			now, err := os.Stat(ws.Lock)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := readFile(t, ws.Lock)
+			switch {
+			case tc.restored && (got != oldLock || !os.SameFile(fi, now)):
+				t.Errorf("lock = %q (same file %v), want the old bytes written in place", got, os.SameFile(fi, now))
+			case !tc.restored && (got != evilLock || !strings.Contains(out, "could not restore Cargo.lock")):
+				t.Errorf("lock = %q, output:\n%s\nwant cargo's lock left whole and the failure named", got, out)
+			}
+			if names := dirNames(t, root); slices.ContainsFunc(names, func(n string) bool { return strings.Contains(n, ".ossprey-") }) {
+				t.Errorf("root holds %v, want no staged copy left", names)
+			}
+		})
 	}
 }

@@ -118,9 +118,12 @@ file, or over 32 MiB) is never touched and a warning line names it. A file is
 put back by renaming a copy over it, so one that cannot be written back or
 removed (on a full disk, say) is left exactly as cargo left it with a warning
 line, unless the copy cannot keep what cargo's own write keeps (a directory you
-cannot write to, a second hard link, or an owner or group the copy cannot be
-given): then the old bytes are written into the file in place, as cargo writes
-`Cargo.lock`.
+cannot write to, a second hard link, an owner or group the copy cannot be
+given, or on Linux an access ACL) or the rename is refused (a file mounted on
+its own, or one on another device): then the old bytes are written into the
+file in place, as cargo writes `Cargo.lock`, where a write that fails part way
+can leave a partial file, as cargo's own write would. Windows does not report
+a second hard link, so there the copy is always renamed over the file.
 That includes `-p <member>`, `--manifest-path` and a member whose `Cargo.lock`
 sits at the workspace root. When cargo itself fails, its exit code is passed
 through (unless the lock it changed holds malware, which exits `1` as above), but a failure can still leave changes behind: `cargo fetch` writes

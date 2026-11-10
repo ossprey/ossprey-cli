@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"unicode/utf8"
 
 	"github.com/ossprey/ossprey-cli/internal/catalog"
@@ -814,12 +815,16 @@ func replaceLeft(f, left savedFile, target string) error {
 	base := filepath.Base(target)
 	if fi, err := dir.Lstat(base); err != nil || !os.SameFile(fi, left.info) {
 		return errNotLeft
-	} else if !oneLink(fi) {
+	} else if !oneLink(fi) || hasACL(target) {
 		return errInPlace
 	}
-	tmp, name, err := stageIn(dir, base)
+	tmp, name, err := stageFile(dir, base)
 	if err != nil {
-		return errInPlace
+		// Only a directory that will not take the copy falls back; a full volume leaves cargo's file whole.
+		if errors.Is(err, fs.ErrPermission) {
+			return errInPlace
+		}
+		return err
 	}
 	// Removed through the directory held open, so no copy is left in a directory moved since.
 	defer func() {
@@ -844,12 +849,22 @@ func replaceLeft(f, left savedFile, target string) error {
 	if !oneLink(fi) {
 		return errInPlace
 	}
-	if err := dir.Rename(name, base); err != nil {
+	if err := renameStaged(dir, name, base); err != nil {
+		// A mount point (EBUSY), another device or a file not ours to replace still takes cargo's own in-place write.
+		if errors.Is(err, syscall.EBUSY) || errors.Is(err, syscall.EXDEV) || errors.Is(err, fs.ErrPermission) {
+			return errInPlace
+		}
 		return err
 	}
 	name = ""
 	return nil
 }
+
+// stageFile and renameStaged stage a copy and rename it over the target; test seams.
+var (
+	stageFile    = stageIn
+	renameStaged = func(dir *os.Root, from, to string) error { return dir.Rename(from, to) }
+)
 
 // rewriteInPlace writes f's bytes into the file left at its path, as cargo writes a lock, once the handle shows it still as cargo left it.
 func rewriteInPlace(f, left savedFile) error {
