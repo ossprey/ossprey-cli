@@ -118,8 +118,8 @@ type Manager struct {
 	// parseRun classifies a tool run's arguments from start on. Unset means
 	// uv's syntax, parseToolRun.
 	parseRun func(args []string) installArgs
-	// runFirstAt matches a command that only rewrites the lockfile (`cargo add`), checked after it runs.
-	runFirstAt func(args []string) (start int, ok bool)
+	// resolveAt matches a command that only resolves and locks (`cargo add`), checked before its lock reaches the project.
+	resolveAt func(args []string) (start int, ok bool)
 }
 
 // noLocalLockfileFlags name the options that stop an install from updating a
@@ -238,8 +238,8 @@ var managers = map[string]*Manager{
 	// uvx is `uv tool run` under its own name: every invocation fetches and runs.
 	"uvx": {Bin: "uvx", Ecosystem: "pypi", installAt: noInstall,
 		toolRunAt: func([]string) (int, bool) { return 0, true }},
-	// cargo: `install` is checked before it builds, the verbs that only lock after they run (cargo.go).
-	"cargo": {Bin: "cargo", Ecosystem: "cargo", installAt: cargoInstallAt, runFirstAt: cargoRunFirstAt},
+	// cargo: `install` is checked before it builds, the verbs that only lock before their lock lands (cargo.go).
+	"cargo": {Bin: "cargo", Ecosystem: "cargo", installAt: cargoInstallAt, resolveAt: cargoResolveAt},
 }
 
 func noInstall([]string) (int, bool) { return 0, false }
@@ -500,14 +500,17 @@ func Run(ctx context.Context, opts Options) error {
 		}
 	}
 
-	if m.runFirstAt != nil {
-		if _, ok := m.runFirstAt(opts.Args); ok {
+	if m.resolveAt != nil {
+		if _, ok := m.resolveAt(opts.Args); ok {
 			if opts.SkipCI {
 				note("ossprey: skip-ci set; forwarding `%s %s` without checking\n",
 					m.Bin, strings.Join(opts.Args, " "))
 				return forwardTo()
 			}
-			return checkCargoAfter(ctx, m, opts)
+			if opts.Passive {
+				return postCargoLock(ctx, m, opts)
+			}
+			return checkCargoFirst(ctx, m, opts)
 		}
 	}
 

@@ -1,26 +1,18 @@
+//go:build windows
+
 package forward
 
-import (
-	"path/filepath"
-	"testing"
-)
+import "testing"
 
-// A link text rooted without a drive starts at the root of the link's own drive, and a drive-relative one on that drive, as Windows reads them, not under the link's directory (OSS-2553).
-func TestLinkTargetReadsWindowsTextsAsWindowsDoes(t *testing.T) {
-	driveRelative, err := filepath.Abs(`C:x\Cargo.toml`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, tc := range []struct{ dir, to, want string }{
-		{`D:\proj`, `\store\Cargo.toml`, `D:\store\Cargo.toml`},
-		{`\\srv\share\proj`, `\store\Cargo.toml`, `\\srv\share\store\Cargo.toml`},
-		{`D:\proj`, `C:x\Cargo.toml`, driveRelative},
-		{`D:\proj`, `C:\store\Cargo.toml`, `C:\store\Cargo.toml`},
-		{`D:\proj`, `\\srv\share\Cargo.toml`, `\\srv\share\Cargo.toml`},
-		{`D:\proj`, `..\store\Cargo.toml`, `D:\proj\..\store\Cargo.toml`},
+// A Windows volume is one directory in the mirror, so a path keeps its drive or share and two never meet.
+func TestMirrorPathKeepsTheVolume(t *testing.T) {
+	for p, want := range map[string]string{
+		`C:\Users\x\proj`:  `D:\m\C\Users\x\proj`,
+		`C:\`:              `D:\m\C`,
+		`\\srv\share\proj`: `D:\m\__srv_share\proj`,
 	} {
-		if got := linkTarget(tc.dir, tc.to); got != tc.want {
-			t.Errorf("linkTarget(%q, %q) = %q, want %q", tc.dir, tc.to, got, tc.want)
+		if got := mirrorPath(`D:\m`, p); got != want {
+			t.Errorf("%s: %s, want %s", p, got, want)
 		}
 	}
 }

@@ -51,17 +51,24 @@ flowchart TD
     S["ossprey npm install ..."] --> CA{"cargo add, update,<br/>generate-lockfile or fetch,<br/>not only printing help?"}
     CA -- "yes" --> CV{"OSSPREY_SKIP_CI?"}
     CV -- "set" --> U
-    CV -- "unset" --> CW{"gating, with a workspace cargo<br/>cannot read, a cargo script, or<br/>a lock that lockfile-path may move,<br/>bar a config only cargo can read?"}
-    CW -- "yes: run cargo" --> CN["keep cargo's changes,<br/>one warning: not checked<br/>(after a failure, a moved<br/>or script lock only)"]
-    CW -- "no" --> CK{"gating, with no<br/>credential to check with?"}
-    CK -- "yes" --> CX["stop on the credentials<br/>error, exit 2: cargo never runs"]
-    CK -- "no" --> CB["run cargo first:<br/>it builds nothing"]
-    CB -- "gating" --> CM{"a config only cargo can read,<br/>and cargo left the workspace<br/>Cargo.lock alone?"}
-    CM -- "yes" --> CN
-    CM -- "no" --> CC{"malware in the Cargo.lock it<br/>left, even if cargo failed?"}
-    CC -- "yes, gating" --> CD["put back the Cargo.toml and<br/>Cargo.lock files it changed,<br/>unless changed again since, exit 1"]
-    CC -- "no" --> CE["keep cargo's changes"]
-    CB -- "passive" --> AE
+    CV -- "unset" --> CP{"passive mode?"}
+    CP -- "yes" --> CB["exec cargo first"]
+    CB --> AE
+    CP -- "no: gating" --> CVG{"cargo 1.97 or later?"}
+    CVG -- "no" --> CX["refuse, exit 2:<br/>cargo never runs"]
+    CVG -- "yes: add --dry-run" --> U
+    CVG -- "yes" --> CG{"a line cargo takes (no update<br/>--breaking), a workspace cargo<br/>metadata can read, no lock<br/>lockfile-path may move, no script,<br/>a credential (bar update --dry-run)?"}
+    CG -- "no" --> CX
+    CG -- "yes" --> CR["cargo resolves into a scratch<br/>Cargo.lock (add: in a mirror of<br/>the workspace); the project<br/>is not touched"]
+    CR -- "a project file changed<br/>while cargo ran" --> CT["put it back, keep what<br/>was found beside it, exit 2"]
+    CR -- "cargo fails" --> CF["cargo's exit code,<br/>nothing written"]
+    CR -- "update --dry-run" --> CF
+    CR -- "cargo succeeds" --> CC{"malware in the<br/>resolved lock?"}
+    CC -- "yes" --> CD["block, exit 1:<br/>the project is unchanged"]
+    CC -- "no verdict" --> CN["exit 2:<br/>the project is unchanged"]
+    CC -- "no" --> CL{"project files as<br/>cargo started from?"}
+    CL -- "no: changed during<br/>the check" --> CN
+    CL -- "yes" --> CE["write Cargo.lock, then any<br/>Cargo.toml add changed;<br/>fetch then runs with --locked"]
     CA -- "no" --> T{"an install verb, or a<br/>tool run (npx, bunx, uvx)?"}
     T -- "no, e.g. npm run" --> U["exec the real manager"]
     T -- "yes" --> V{"OSSPREY_SKIP_CI?"}
@@ -102,10 +109,15 @@ checked at once (`internal/catalog/install_resolve.go`, driven from
 packages are checked alone and one warning line says so; the install is never
 blocked for want of a prediction.
 
-`cargo add`, `update`, `generate-lockfile` and `fetch` are the one place the
-manager runs before the check: they compile nothing, so the `Cargo.lock` they
-leave is checked afterwards, and a block puts their files back
-(`internal/forward/cargo.go`). In passive mode the lock is posted instead.
+`cargo add`, `update`, `generate-lockfile` and `fetch` are checked by running
+cargo against a scratch copy of the lock: `resolver.lockfile-path` sends the
+lock there, `cargo add` runs in a mirror of the workspace since it edits
+`Cargo.toml` too, and only a clean result is written to the project
+(`internal/forward/cargo.go`, `cargo_mirror.go`). `cargo fetch` is resolved
+with `cargo update --workspace`, which downloads no crate (cargo still checks
+out git dependencies to resolve them), and runs with `--locked` once the lock
+is written. In passive mode cargo runs first and the
+lock is posted.
 
 The passive branch is the one worth reading twice. It never gates, so it never
 sits in front of the install: where a lockfile will land, the install runs

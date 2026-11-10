@@ -466,7 +466,6 @@ func TestCatalogHidesNothingWhenAPathCannotBePlaced(t *testing.T) {
 	}
 }
 
-// TestCatalogReadsAVendoredCrateScannedDirectly: scanning a vendored crate asks for that crate.
 // The vendor filter reads a relative CARGO_HOME where cargo 1.99.1 does, so a crate its config builds by path stays visible (OSS-2553).
 func TestCatalogReadsARelativeCargoHomeForVendoring(t *testing.T) {
 	for name, c := range map[string]struct {
@@ -517,6 +516,7 @@ func TestCatalogReadsARelativeCargoHomeForVendoring(t *testing.T) {
 	}
 }
 
+// TestCatalogReadsAVendoredCrateScannedDirectly: scanning a vendored crate asks for that crate.
 func TestCatalogReadsAVendoredCrateScannedDirectly(t *testing.T) {
 	proj := cargoVendorFixture(t)
 

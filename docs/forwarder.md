@@ -9,8 +9,8 @@ install express` checks express and the 64 packages it depends on, not just the
 one you typed — because that is where a planted package usually lives. If any
 are flagged, the install is blocked (exit `1`) and the real package manager
 is never invoked; otherwise the command is forwarded unchanged. The cargo
-commands that only lock are the exception: cargo runs first and a block undoes
-its changes ([below](#cargo)).
+commands that only lock work differently: cargo resolves into a scratch copy,
+and only a clean result is written to your project ([below](#cargo)).
 
 > Everything on this page describes the default, **gating** mode. In
 > [passive mode](passive-monitoring.md) nothing is checked in front of the
@@ -47,7 +47,7 @@ check and no API call.
 | `poetry` | `add`, `install`, `sync`, `update`, `lock` |
 | `uv` | `add`, `sync`, `lock`, `pip install`, `pip sync`, `tool install`, `tool run` |
 | `uvx` | every invocation (`uvx` is `uv tool run`) |
-| `cargo` | `install`, before it runs; `add`, `update`, `generate-lockfile` and `fetch`, after they run ([below](#cargo)) |
+| `cargo` | `install`, before it runs; `add`, `update`, `generate-lockfile` and `fetch`, before their `Cargo.lock` reaches your project ([below](#cargo)) |
 
 Each manager's global options are understood before the subcommand, so
 `pnpm --filter web add x` and `npm --prefix ./app install x` are checked like any
@@ -94,76 +94,82 @@ it does for a project with no lockfile.
 ## cargo
 
 ```sh
-ossprey cargo add serde          # cargo runs, then Cargo.lock is checked
+ossprey cargo add serde          # resolved and checked, then written to your project
 ossprey cargo install ripgrep    # ripgrep is checked, then cargo builds it
 ```
 
-`cargo add`, `cargo update`, `cargo generate-lockfile` and `cargo fetch` run
-no crate code: they pick versions, write `Cargo.toml` and `Cargo.lock` and
-download sources, and nothing is compiled until the next build. So cargo runs
-first, and then the workspace's `Cargo.lock`, which is what the next build
-compiles, is checked on its own. A clean check prints `ossprey: no malware
-found in N packages in Cargo.lock` after cargo's own output.
+`cargo add`, `cargo update`, `cargo generate-lockfile` and `cargo fetch` need
+cargo 1.97 or later. Older versions, and 1.97.0 pre-releases, are refused
+before cargo runs, with the version found and a pointer to `rustup update`.
 
-If the lock holds malware you get the full malware report, every `Cargo.toml`
-and `Cargo.lock` the command changed is put back as it was (a `Cargo.lock` it
-created is removed, and a file it removed is written back), one line names
-those files, and the exit code is `1`.
-A file changed again after cargo exited, while the check ran, in its contents,
-its permissions or its owner, or one the path no longer reaches (a symlink retargeted or a
-directory swapped), is left as it is, and a warning line names it; one already
-back as it was before cargo ran is named on a line of its own. A symlinked
-`Cargo.toml` or `Cargo.lock` is put back through the link, as cargo writes
-through it: one removed from behind the link is written back at the link's
-target, and a lock cargo created through a dangling link is removed from the
-link's target. A file that could not be read before cargo ran (not a regular
-file, or over 32 MiB) is never touched and a warning line names it. A file is
-put back by renaming a copy over it, so one that cannot be written back or
-removed (on a full disk, say) is left exactly as cargo left it with a warning
-line, unless the copy cannot keep what cargo's own write keeps (a directory you
-cannot write to, a second hard link, an owner or group the copy cannot be
-given, or on Linux an access ACL, on the file or one the copy would inherit
-from the directory's default ACL) or the rename is refused (a file mounted on
-its own, or one on another device): then the old bytes are written into the
-file in place, as cargo writes `Cargo.lock`, where a write that fails part way
-can leave a partial file, as cargo's own write would. Windows does not report
-a second hard link, so there the copy is always renamed over the file. ACLs are
-compared on Linux only, so on macOS and Windows a renamed copy has the ACL any
-new file in that directory gets, the directory's inheritable entries included,
-rather than the file's own.
-That includes `-p <member>`, `--manifest-path` and a member whose `Cargo.lock`
-sits at the workspace root. When cargo itself fails, its exit code is passed
-through (unless the lock it changed holds malware, which exits `1` as above), but a failure can still leave changes behind: `cargo fetch` writes
-`Cargo.lock` before it downloads, so a lock a failed command changed, or one
-that could not be read before it ran, is checked the same way, and `cargo add`
-edits `Cargo.toml` before it resolves, so a failure that changed only
-manifests gets one warning line naming them, and another naming any
-`Cargo.toml` that could not be read before cargo ran as possibly changed. Run
-`ossprey cargo fetch` once it resolves to check what they add. When the check
-cannot be made (the API unreachable, a workspace cargo cannot read, a
-`Cargo.lock` that is not a regular file or is over 32 MiB, or a
-`resolver.lockfile-path` setting, in the environment, a `--config` or a cargo
-config, that may move the lock elsewhere, including one a
-config `include` could set or a config too large or too deeply nested to read,
-or a cargo script run with `-Zscript`, whose lock cargo keeps in its build
-directory), cargo's changes are kept and one warning line says so. A config
-that is not a regular file (a piped `--config /dev/stdin`, say, or
-`--config <(...)`) cannot be read without emptying it before cargo does, so
-what cargo did decides: a `Cargo.lock` cargo changed at the workspace root is
-checked as usual, and one it left alone gets that warning, since cargo may
-have written the lock elsewhere. A cargo
-config (`.cargo/config.toml`) that is a FIFO is also read by the `cargo
-metadata` ossprey runs to find the workspace, before cargo (after it in
-passive mode), so a FIFO written only once can leave cargo reading nothing, or
-cargo or ossprey waiting for a writer. When cargo itself
-failed in a workspace cargo cannot read, such as a directory with no
-`Cargo.toml`, nothing changed and cargo's own error is the only line; a
-`resolver.lockfile-path` or a cargo script still gets the warning after a
-failure, since a failed `cargo fetch` can still write that lock.
-A command that changes nothing and leaves no `Cargo.lock`, such as
-`cargo add --dry-run` in a project without one, has nothing to check. A dry
-run is not skipped, since `cargo update --dry-run` still writes a missing
-`Cargo.lock`.
+These four commands are checked before anything in your project changes.
+Cargo resolves into a scratch copy of your workspace's `Cargo.lock`, ossprey
+checks the lock it resolved, and only a clean result is written to your
+project. Nothing unchecked is on disk in the project at any point, so an
+editor such as rust-analyzer or a file watcher such as cargo-watch never sees
+a crate that has not been checked. A clean check prints `ossprey: no malware
+found in N packages in Cargo.lock` after cargo's output for `cargo add`,
+`update` and `generate-lockfile`, and before cargo's download lines for
+`cargo fetch`.
+
+- `Cargo.lock` is written first and then any `Cargo.toml` that `cargo add`
+  changed, so your manifests never name a crate the lock does not hold. Each
+  file is written the way cargo writes `Cargo.toml`: a new file beside the
+  real one (through a symlink, if it is one), given the old file's
+  permissions, and renamed over it. Ossprey also syncs the new file to disk
+  before the rename, which cargo does not. A new `Cargo.lock` gets the
+  permissions cargo would give it. A file whose bytes did not change is not
+  touched.
+- `cargo add` edits `Cargo.toml` before it resolves, so it runs in a private
+  mirror of your workspace under your user cache directory: copies of the
+  manifests and the lock, and links to everything else. Its edits are copied
+  back as above, and the mirror is deleted.
+- `cargo fetch` downloads crates, so the lock is first resolved with `cargo
+  update --workspace`, which writes the same lock `cargo fetch` would and
+  downloads no crate. Every option you gave `cargo fetch` except `--target` is
+  passed along. Once that lock is checked and written, your `cargo fetch` runs
+  with `--locked` added, so cargo downloads exactly the checked lock.
+
+If the lock holds malware you get the full malware report, a line saying the
+project was not changed, and exit code `1`. Nothing was written to the project
+and no crate from a registry was downloaded. Git dependencies are the
+exception: to resolve them, cargo fetches each repository and checks out its
+source under `CARGO_HOME/git` before the check, as plain cargo does. Nothing is
+built. If `Cargo.lock` changes while the check runs, or for `cargo add` any
+`Cargo.toml` in the workspace, nothing is written and the command exits `2`;
+run it again. This covers `-p <member>`, `--manifest-path`, a member reached
+through a symlinked directory, and a member whose `Cargo.lock` sits at the
+workspace root.
+
+When cargo itself fails, its exit code is passed through and nothing is
+written. Its messages name your `Cargo.lock` and `Cargo.toml`, not the scratch
+copies. `cargo update --dry-run` runs against the scratch lock, so it writes
+nothing and nothing is checked; `cargo add --dry-run` writes nothing anywhere
+and goes to cargo as typed.
+
+Everything else fails closed: the project is left as it was, cargo's changes
+are dropped, and the command exits `2` with one line saying why. That happens
+when the API cannot be reached, when the platform checked none of the crates
+(Rust is checked on Teams and Enterprise plans), when there is no credential
+(before cargo runs), and, before cargo runs, for a workspace `cargo metadata`
+cannot read (cargo's own error is shown), a cargo script run with `-Zscript`,
+a `Cargo.lock` or `Cargo.toml` that is not a regular file or is over 32 MiB,
+and a `resolver.lockfile-path` that would put the lock elsewhere. That last
+one may come from the environment, a `--config` or a cargo config, and is
+assumed for a config ossprey cannot read (a piped `--config /dev/stdin`, say),
+one too large or too deeply nested to read, and one with an `include`.
+`cargo update --breaking` is refused too, since it edits `Cargo.toml`; raise
+the requirement with `cargo add <crate>@<version>`, which is checked first. So
+is a `cargo fetch` with an option or argument cargo fetch would reject.
+`cargo add` is also refused when a cargo config sits in a directory above the
+mirror that cargo would not read for your project, when the mirror runs
+another cargo than your project does (a `rustup override` is set for your
+project's directory, so name the toolchain with `cargo +<toolchain>` or
+`RUSTUP_TOOLCHAIN`), and on Windows when the mirror's links cannot be made
+(Windows allows them in Developer Mode). If `Cargo.lock` or a `Cargo.toml`
+changes while cargo runs, whether cargo wrote it or another program did,
+ossprey puts back what was there before, keeps what it found beside it as
+`Cargo.lock.ossprey-found-<n>` (or the `Cargo.toml` equivalent), and exits `2`.
 
 `cargo install` compiles the crate and runs its build scripts straight away, so
 the crates it names are checked first, and a block means cargo never starts.
@@ -193,11 +199,11 @@ or either or `-V`/`--version` before it.
 A rustup toolchain (`cargo +nightly add serde`) and cargo's options before the
 subcommand (`--config`, `-Z`, `--color`, `-C`) are understood, and so are short
 options grouped as cargo groups them (`-qF pcre2` names no crate `pcre2`).
-In passive mode `cargo add` and the others run and the `Cargo.lock` they leave is then posted,
-even when cargo failed, and `cargo install` posts its crates alongside the
-build. Under a `--config` that is not a regular file the lock is posted only
-when cargo changed it, and under a cargo config that is not one it is not
-posted; a warning line says so.
+In passive mode nothing is checked in front of cargo, at any version: `cargo
+add` and the others run and the `Cargo.lock` they leave is then posted, even
+when cargo failed, and `cargo install` posts its crates alongside the build. A
+lock that a `resolver.lockfile-path` may have moved, or a cargo script's, is
+not posted, and a warning line says so.
 
 ## What is not checked
 
@@ -220,9 +226,12 @@ still put code on your machine:
   and every other cargo command not listed above are forwarded unchecked,
   though they compile crates and run build scripts. They build what
   `Cargo.lock` names, which `cargo add` and `cargo update` have checked, but a
-  build with no `Cargo.lock` resolves one on the spot: run `ossprey cargo
-  generate-lockfile` first. A cargo `[alias]` and an external subcommand (such
-  as `cargo upgrade`) are not recognised, so a lock they change is not
+  build with a missing or out-of-date `Cargo.lock` resolves one on the spot,
+  unchecked, and so does an editor such as rust-analyzer after you edit
+  `Cargo.toml` by hand: run `ossprey cargo generate-lockfile` (or `ossprey
+  cargo fetch`) after editing it. `cargo install` checks only the crates it
+  names, not their dependencies. A cargo `[alias]` and an external subcommand
+  (such as `cargo upgrade`) are not recognised, so a lock they change is not
   checked.
 - **A named install whose dependencies could not be resolved.** The
   dependencies of a named install are worked out with a dry run of the
@@ -405,17 +414,12 @@ listed above, since `ossprey <anything else>` isn't a command.
 An intercepted install needs credentials exactly like `ossprey scan` does, so
 run `ossprey login` once (or export `OSSPREY_API_KEY`) before relying on the
 aliases. With neither, a gating install stops on a credentials error rather
-than being quietly forwarded. That includes the cargo commands checked after
-they run (`cargo add`, `update`, `generate-lockfile` and `fetch`): the
-credential is looked up first, so they stop on the same error before cargo
-changes anything, unless the check cannot be made at all (a lock that
-`resolver.lockfile-path` may move, other than through a config that is not a
-regular file, a cargo script, or a workspace cargo cannot read), where
-cargo runs and the warning described under cargo above is printed instead. If
-the check then fails once cargo has run (the API
-unreachable, timing out or refusing the credential), cargo's changes are kept
-and one warning line says so. (A passive install never stops for anything, so
-there the same failure is a warning and the install proceeds.)
+than being quietly forwarded. That includes `cargo add`, `update`,
+`generate-lockfile` and `fetch`, which stop on the same error before cargo
+runs (the two dry runs need no credential). If the check then fails (the API
+unreachable, timing out or refusing the credential), nothing is written to the
+project and the command exits `2`. (A passive install never stops for
+anything, so there the same failure is a warning and the install proceeds.)
 
 To check they took, run `type npm`. Non-install commands (`npm run build`, `pip
 list`, `poetry run pytest`) go straight through untouched, so an
@@ -439,8 +443,9 @@ platform scanned none of the packages, there is no verdict line.
 
 The verdict is ossprey's last line, not the terminal's: the forwarder replaces
 itself with the manager once the check passes, so it cannot print after the
-manager finishes. The cargo commands checked after they run are the
-exception, and print theirs after cargo's output. An install that was not checked (no dependencies found,
+manager finishes. `cargo add`, `update` and `generate-lockfile` are the
+exception: cargo resolves before the check, so the verdict follows cargo's
+output. An install that was not checked (no dependencies found,
 `skip-ci`, a passive scan) prints no verdict, since there is none to give.
 
 Otherwise a forwarder speaks only for a malware block (below) or a platform
@@ -452,8 +457,9 @@ verdict is in; a CI log or a pipe gets nothing.
 If a check comes back dirty you get the full malware report on stderr — the
 alert box, an `Error: WARNING:` line per finding, and a blocked line naming
 the command (see [Output](output.md)) — and an exit code of `1`. The real
-manager never starts, except for the cargo commands checked after they run,
-whose changes are undone instead.
+manager never starts, except for `cargo add`, `update`, `generate-lockfile`
+and `fetch`, which resolve into a scratch copy first and leave the project as
+it was.
 
 Set `OSSPREY_VERBOSE=1` for everything else: why an install
 was not checked (`skip-ci set`, `found no dependencies to check`, a passive

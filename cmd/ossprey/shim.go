@@ -79,7 +79,8 @@ repositories the formula and its dependencies build from.
 
 --cargo also shims cargo (opt-in): cargo install checks the crate before it
 builds, and cargo add, update, generate-lockfile and fetch check the Cargo.lock
-they leave. Rust (crates.io) is available on Teams and Enterprise plans.
+they resolve before it reaches the project (cargo 1.97 or later). Rust
+(crates.io) is available on Teams and Enterprise plans.
 
 Shell profiles only reach login and interactive shells. A coding agent's
 commands run in neither, so --agent claude also puts the shim directory on PATH

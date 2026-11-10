@@ -122,7 +122,7 @@ Windows resolves it under `%LOCALAPPDATA%`.
    parse — i.e. silently no scanning at all.
 1. **`scan [path]`** — catalog a directory, submit, report.
 2. **`check -e <pypi|npm|cargo> <name[@version]>...`** checks named packages with no project on disk. A crate takes one exact release or none (`splitCargo`: the version after an optional `=` is held to `registry.IsCargoRelease`, the release grammar the cataloguer applies after its required `=`, and the name to `registry.IsCargoName`; a bare `1.2.3` is that exact release, as `cargo install` reads it): Cargo reads `1.0` as a caret range and nothing here resolves a cargo range, so a range is an error rather than a check of a guessed release; a bare name resolves the latest stable release from crates.io. Both forms go through `registry.CanonicalCrate` and are sent under crates.io's own spelling, because crates.io folds case and `-`/`_` into one crate while the malware lookup matches the name exactly; an outage is an error, but a pinned crate crates.io answers 404 for is sent as typed, since crates.io deletes malicious crates and those are the ones most worth checking. The service folds crate names only for package-wide verdicts, so a deleted crate typed in another spelling still meets one, while a per-version record matches the name exactly. Cargo itself never folds a spelling (verified with cargo 1.99.1: `serde-json = "=1.0.100"` fails with no matching package), so a `Cargo.toml` that builds names each crate as crates.io spells it, and the pre-commit hook sends that spelling unchanged.
-3. **Forwarders** (`npm`/`npx`/`pnpm`/`yarn`/`bun`/`bunx`/`pip`/`pip3`/`poetry`/`uv`/`uvx`/`cargo`) — registered dynamically from `forward.Managers()`. Each wraps an install, blocks on malware, otherwise execs the real manager. `DisableFlagParsing: true` so every arg reaches the real tool untouched; config comes only from `OSSPREY_API_URL` / `OSSPREY_API_KEY` env vars. `forward.Run` has two modes (`internal/forward/forward.go`): when packages are **named** it checks exactly those (`ParseSpecs` classifies args into `Specs` / `NonPackages` / `ReqFiles`, skipping flag-values, local paths, archives, URLs, VCS refs); when **no** packages are named — a bare `install`/`ci`/`yarn install`/`poetry install`/`poetry sync`/`uv sync`/`uv lock`/`pip install -r`/`uv pip sync` — the manager installs from the project manifest, so it runs a directory scan (`scanProjectFn` → `scan.Run` + `submit.Validate`) and checks every declared dependency rather than falling through unchecked (OSS-1284). Only installs whose sole targets are local/URL refs forward without a check. `uv pip sync`'s positionals are requirements files (`Manager.reqFileArgs`), so it is a manifest install. `uv tool install` is a named install: `--with` values are checked as packages too (`packageValueFlags`), and a `--from` value *replaces* the positional (`sourceFlags`) — checking the bare positional as well would resolve it to latest and check a release that is not being installed. `uv run` is a script runner like `pnpm run`, with the same side-effect gap: it syncs the project env (and installs `--with` packages) unchecked.
+3. **Forwarders** (`npm`/`npx`/`pnpm`/`yarn`/`bun`/`bunx`/`pip`/`pip3`/`poetry`/`uv`/`uvx`/`cargo`): registered dynamically from `forward.Managers()`. Each wraps an install, blocks on malware, otherwise execs the real manager. `DisableFlagParsing: true` so every arg reaches the real tool untouched; config comes only from `OSSPREY_API_URL` / `OSSPREY_API_KEY` env vars. `forward.Run` has two modes (`internal/forward/forward.go`): when packages are **named** it checks exactly those (`ParseSpecs` classifies args into `Specs` / `NonPackages` / `ReqFiles`, skipping flag-values, local paths, archives, URLs, VCS refs); when **no** packages are named — a bare `install`/`ci`/`yarn install`/`poetry install`/`poetry sync`/`uv sync`/`uv lock`/`pip install -r`/`uv pip sync` — the manager installs from the project manifest, so it runs a directory scan (`scanProjectFn` → `scan.Run` + `submit.Validate`) and checks every declared dependency rather than falling through unchecked (OSS-1284). Only installs whose sole targets are local/URL refs forward without a check. `uv pip sync`'s positionals are requirements files (`Manager.reqFileArgs`), so it is a manifest install. `uv tool install` is a named install: `--with` values are checked as packages too (`packageValueFlags`), and a `--from` value *replaces* the positional (`sourceFlags`) — checking the bare positional as well would resolve it to latest and check a release that is not being installed. `uv run` is a script runner like `pnpm run`, with the same side-effect gap: it syncs the project env (and installs `--with` packages) unchecked.
 
    **A named install is checked with its dependencies (OSS-2481).** `npm install express` installs 65 packages; the forwarder used to check one, and the planted package in a real attack is rarely the one asked for. `resolveNamed` (`internal/forward/expand.go`) asks the manager's own kind of resolver what the install would add — `catalog.ResolveNpmInstall` runs `npm install --package-lock-only --ignore-scripts` in a throwaway copy of the project; `catalog.ResolvePythonInstall` runs `uv pip compile --no-build`, or `pip install --dry-run --only-binary=:all:` without uv — and checks the whole tree at the releases the resolver picked. Four rules: it **never runs package code** (no scripts, no sdist builds; a package that needs building fails the dry run and falls back); it **fails open, out loud** — on any error the names are checked alone and `reportUnexpanded` prints one line even when quiet, since a clean verdict on the names must not read as a verdict on the install (a tool run's cached or installed trees, below, are read whether or not the dry run succeeds — a failed resolution is exactly when npm reuses its npx cache — and come back beside the error, so `resolveNamed` still counts them and the line claims them: `checking the named packages and N dependencies from an earlier run`; and since such a tree says nothing about what resolves today, the names are then resolved as well — `npx tool@latest` with `tool@1.0.0` cached may fetch `2.0.0` — each counted once and a release already in the set not repeated, and a cached copy's trusted provenance covering that copy only, never the lookup); the npm copy is **diffed against the project's lockfile** (`Resolved.Locked`), so only what the install adds is checked, not a monorepo's thousand locked packages; and the copy drops local/workspace deps so npm resolves from registries alone. The scratch dry run is **isolated from whatever is above it**: with no project it gets a minimal `package.json` of its own, since npm otherwise takes the nearest ancestor with one as the project and rewrites that project's `package.json` and lockfile (verified: a `TMPDIR` inside a project did exactly that), and every dry run passes `--workspaces=false` so npm cannot walk on to an ancestor workspace root whose globs name scratch (a copied root still locks its own members, verified); the uv probes (`uv cache dir`, `uv tool dir`) name their configuration through `uvToolRunConfig` for the same reason, since a bare scratch directory does not stop uv discovering a project's `uv.toml` above it. The project is the context only when the install will update a lockfile npm can read (`npmProjectDir`); otherwise the names resolve on their own. Trust applies to the tree with the registries the resolver reported. Resolvers get the tokens as typed (`installArgs.Tokens`), and only resolution-affecting flags (`pickFlags`). Tool runs (`npx`, `npm exec`, `bunx`, `uvx`) are expanded too (`installArgs.ToolRun`): with no project context, since the package goes into the tool's own cache, and with none of the program's argv read as a resolver flag — only a uvx flag before the command (`toolRunLeadingFlags`, translated for the pip fallback by `toolRunPipFlags`) reaches the Python resolver, and only the `--registry` and `--userconfig` npm's own parse attributes to npm (`npmArgv.Registry`/`Userconfig`, the path made absolute since the dry run runs elsewhere) reach the npm one. A uv command with a flag pip cannot honour (`uvOnlyResolution`: `--index`, `--extra-index-url`, `--overrides`, `--resolution`, `--exclude-newer`, `--torch-backend`, `--no-binary` — pip's dry run is `--only-binary=:all:`, so it would pick the newest release with a wheel where uv builds the newest of all — …) never reaches the pip fallback: uv takes the first index that has the package, pip the best version across indexes, so pip would check a release uv does not install, and a private-only name would resolve from PyPI, where a squat may wait. `needsUV` routes it to `catalog.ResolvePythonInstallWithUV`, which fails with `ErrNeedsUV` on a host without uv so the names are checked with the warning (`TestExpandInstall_UVOnlyFlagsAreResolvedByUVOnly`). The same holds for configuration outside the line (`catalog.UVConfigShapesResolution`): a `UV_INDEX_URL` or any other `UV_*` variable for an index, strategy, cut-off, build policy, interpreter or override, or such a key (or a `[pip]` table with one) in the file uv reads — `--config-file`/`UV_CONFIG_FILE`, else the project's `uv.toml`/`pyproject.toml [tool.uv]` for a named install (never for a tool run), and the user- and system-level `uv.toml`, which uv merges underneath a project file, so a project file that shapes nothing stops discovery above it and not their check — makes the command uv-only, since pip reads none of it and would resolve from the public index instead; an unreadable file counts as shaping, and `--no-config` stops the files but not the variables. `--default-index` still maps to pip's `--index-url` and `--constraints` to `--constraint`, which mean the same. **Configuration follows the real command, not the cwd.** uvx reads no project configuration (verified: a `uv.toml` with a bad index breaks `uv pip compile` in that directory and not `uvx`), so a tool run resolves with `dir ""`, a scratch directory, and `pythonPathFlags` are made absolute first. The `[pip]` table is the other way round: `uv pip compile` applies it and uvx ignores it (verified: one file with a top-level `index-url` and a `[pip] index-url` sends uvx to the former and the compile to the latter), so for a tool run `uvToolRunConfig` writes the configuration the run reads — the file named by `--config-file` or `UV_CONFIG_FILE`, else the user-level `uv.toml` merged over the system-level one as uv merges them (`mergeTOML`: table by table, the user's value winning, and arrays joined with the user's entries first — verified with `--show-settings`, where the user's `[[index]]` and `extra-index-url` entries precede the system's — since replacing the array dropped an index the run uses) — into scratch without that table and names the copy with `--config-file`, with every relative local path among a file's index and find-links settings made absolute against that file's directory first (`anchorUVConfigPaths`), since uv resolves them there and not against the cwd (verified: `find-links = ["./wheels"]` in the user-level file reads `<config dir>/wheels` from any directory and under `--directory`), so the copy in scratch would otherwise send the dry run to directories under scratch and resolve from the registry what the run takes from local wheels; always, when the files are discovered rather than named, even with no table or no file at all (an empty one then), since a named file stops uv discovering a project's `uv.toml`/`pyproject.toml` above scratch (verified), and scratch sits under a project when `TMPDIR` points inside one; `UV_CONFIG_FILE` names configuration pip does not read, so `uvEnvConfigFlag` hands the resolver and the probes `--config-file <abs>` whenever it is set (absolute or not), which makes the run uv-only rather than letting the pip fallback resolve from indexes the run does not use, and a relative value is made absolute first since it is read where the run runs (`uvToolRunConfig` does the same for a direct caller, even without the table, since the resolver runs in scratch where uv would not find it); uv's path-valued variables (`UV_CONSTRAINT`, `UV_OVERRIDE`, `UV_BUILD_CONSTRAINT`, `UV_FIND_LINKS` — every non-URL entry a path, `constraints.lock` and `wheels` included — and a path-shaped `UV_PYTHON`, which also takes a version or a name) are read against the directory uv runs in too — verified: uvx and `uv pip compile` both honour `UV_CONSTRAINT`, and `--directory sub` reads `sub/c.txt` — so in scratch `UV_CONSTRAINT=requirements.txt` would name the resolver's own input; `uvEnvPathFlags` hands a tool run's resolver each relative entry as the equivalent flag made absolute (one flag per entry, since a flag replaces the whole variable; a flag on the line already does; the entries are split as uv splits them, on whitespace for the requirements-file variables and on commas for `UV_FIND_LINKS`, verified with `--show-settings`: `./w1,./w2` is two find-links entries and `./w1 ./w2` one path with a space in it), and `UV_NO_CACHE` is `--no-cache` from the environment (`uvReadsCache`, `envTrue`: anything but an explicit false), governing the cache and not the installed tool; a relative `UV_CACHE_DIR`, or a relative `cache-dir` in uv's configuration, is read the same way (verified: `uv cache dir` answers `c` from any directory), so `uvCacheDir` reports the path as `moved` and the tool run hands the resolver `--cache-dir <abs>` — uv's own flag, not a uv-only routing — or an offline run would resolve against an empty scratch cache; the cache is found once per run and handed to `withUVCached`, so the probe is one subprocess, and none at all under `--no-cache`/`--refresh` (`uvReadsCache`); `--no-config` reads none, and a named `uv pip install` keeps the table, since it is a pip-interface command that reads it (a named `uv add` does not, and is not corrected: it would need the verb in the resolver's signature). `--reinstall` "implies `--refresh`" (uv's words), so `uvRenames` hands the resolver `--refresh` for it and `--refresh-package` for `--reinstall-package`, both uv-only. A `--with` requirement carrying a marker is installed only where the marker holds, so the cached-environment match does not require it — unless every spelling of that package is conditional; one requested unconditionally too is required (`addTarget` keeps both spellings under one Spec). A cached environment whose metadata cannot be read hides only itself (`UVCachedTree` skips it, and `venvPackages` skips one unreadable dist-info), since the environment uv reuses may be the next one. A tool run's `--with-requirements` files resolve **together** with its packages (`reqFileTokens`: one `-r <abs path>` spec each, a line uv's input reads as it is and pip takes as two arguments), since a release that satisfies each alone may not satisfy both; the files are still scanned on their own as before. uv's `name[extras]@version` shorthand is rewritten for the resolver by `pep508FromAt`, keeping extras and marker (`httpx[cli]@0.28.1` is `httpx[cli]==0.28.1`), since rebuilding it from the Spec dropped the extras and their dependencies. npm's negated cache flags (`--no-offline`, `--no-prefer-offline`) travel with the positive ones, so npm's last-wins reading holds in the dry run. npm reads the `.npmrc` at its local prefix — the nearest ancestor with a `package.json` or `node_modules`, so a run from a project subdirectory gets the project's file, and the **workspace root's** when that ancestor is a member its `package.json` workspaces declare (`stageNpmScratch` stages that directory's file whether or not a project is staged beside it: an earlier revision staged the member's own `.npmrc` with its manifest, so a scoped private registry in the root's file never reached the dry run and the scope resolved against public npm) (`catalog.NpmWorkspaceRoot`, as npm's config loader walks on to the root and ignores the member's `.npmrc` with a warning; verified: `npm prefix` from a member answers the root, `--workspaces=false` stops it, and `mapWorkspaces` reads `package.json` only, so a `pnpm-workspace.yaml` does not count there; the walk reads the filesystem root too, `walkUp`, since npm's does and a loop stopping one short missed a root at `/`) — at `--prefix` when given, and none at all in global mode (verified against npm 11.19.1); `npmConfigDir`/`npmLocalPrefix` decide what `ResolveNpmInstall` stages (`TestNpmConfigDir`); `npmConfigDir` asks `parseNpmArgv` for the mode so npm's last-wins and negation rules hold (`--global --no-global` and `--global=false` are local). `uvGlobalArgs` returns a **copy** of the pre-verb tokens: callers append to it, and an append into `args`'s own backing array overwrote the verb the real uv was about to receive (`uv --no-config tool run --with x ruff` became `uv --no-config --with x --with x ruff`); the uv test asserts `args` is untouched. For a tool run the same comes from npm's own parse: `npmArgv.Config` records every option in `npmRunConfig` that nopt attributes to npm (`--before`, `--tag`, `--omit`, the peer rules, `--global`/`--prefix`/`--location`, and the cache policy — `--offline`/`--prefer-offline` resolve against the cache's metadata, which may be older than the registry's, `--prefer-online` revalidates it, `--cache` names which cache, and `--min-release-age`/`--min-release-age-exclude` pick an older eligible release like `--before`, so all of them reach the dry run; a named install renders the same from npm's own parse (`npmResolveFlags` is `parseNpmArgv(args).resolveFlags()` plus the registry and `--userconfig`), so `--no-no-optional` reaches the dry run as `--optional` and the last of two `--userconfig` values is the one passed, where a filter by flag name dropped the one and kept both of the other; a negated path or url option (`--no-cache`, `--no-prefix`, `--no-globalconfig`, `--no-userconfig`, `--no-registry`) is not recorded at all and clears an earlier value, since nopt's last value wins and it then drops the boolean as invalid for the type, so npm keeps its default (verified: `--cache custom --no-cache` is no cache setting at all), where recording the word rendered `--cache=<cwd>/false` and the dry run built a cache there, and keeping `custom` sent it to a cache the run never reads; a literal `--cache=false` is the path `false`, which npm does use, and is kept, and an array option drops only the invalid entry, so `--omit dev --no-omit` is still `omit=dev`; a relative `npm_config_userconfig`/`_globalconfig` is resolved where npm runs, so `npmEnvConfigFlags` hands the dry run and the probes the file absolutely; the probes (`npm config get omit`, `npm config list -l` for the cache) run in the command's own directory, since a relative `cache=./cache` in an `.npmrc` is resolved against the cwd and not the file's directory (verified: from a subdirectory npm answers `sub/cache`), with `-g`, `--workspaces=false` and `--prefix` as the command had them, `--prefix` naming the configuration directory the command would discover when the line names none (`npmLocationFlags`): named explicitly, npm neither walks for it nor, from a workspace member, fails with ENOWORKSPACES, which every probe from a member did (verified); `workspaces` is recorded for configuration discovery only and never passed, `npmRecordOnly`, since `npm install --workspaces` in a scratch directory fails with "No workspaces found!"), the oracle test holds it to the real npm, and `installArgs.NpmFlags`/`NpmGlobal`/`NpmPrefix` carry it to the dry run — never a flag from the program's argv. uv's global options before the verb (`uvGlobalFlags`: `--config-file`, `--no-config`, `--offline`, `--allow-insecure-host`, `--project`) reach the resolver and count for `needsUV`, as do its cache options wherever they sit (`--cache-dir`, made absolute against the run's directory, `-n`/`--no-cache`, `--refresh`, `--refresh-package`): offline or prefer-cached resolution reads that cache's metadata, which may be older than the registry's, so the dry run must read the same one, and pip has no such cache, so they are uv-only. npm's are read from the whole line (`npmResolveFlags(m, args)`), since `npm --userconfig corp.npmrc install x` puts them before the verb. `--directory` is a directory change and `--project` is not: `uvDir` reads only `--directory`, which is where a named uv install resolves and the base every relative file path is made absolute against (a tool run's `uvx --directory sub -c c.txt` reads `sub/c.txt`) — but not an index location: `--index`, `--default-index`, `--index-url`, `--extra-index-url` and `--find-links`, and the `UV_INDEX`/`UV_DEFAULT_INDEX`/`UV_INDEX_URL`/`UV_EXTRA_INDEX_URL`/`UV_FIND_LINKS` variables, are parsed into absolute paths where the command starts, before `--directory` moves it (verified: `uvx --directory sub --find-links ./wheels` and `--index local=./idx` read beside `sub`), so `pythonIndexFlags` and the `index` entries of `uvEnvPathVars` are anchored there by `absIndexLocation`, a URL left alone and uv's `name=location` keeping its name, for tool runs and named installs alike, since the dry run runs in scratch or `--directory` and would otherwise read `./idx` under a directory the run never looks in and resolve from the registry what the run takes from a local index; `--project` names where a project is discovered, so it is passed on as a flag for a named install and dropped for a tool run (`toolRunNoPass`), which reads no project configuration. A path-shaped `-p/--python` is made absolute, a version or name is not. npm's `--globalconfig` travels like `--userconfig`, made absolute. A short option's value may be attached (`-ihttps://…`, `-cc.txt`, `-p3.12`; clap and argparse both read it), so `splitAttachedShorts` rewrites it into two tokens, from a copy, wherever a Python command is read (`parseInstallArgs`, `parseToolRun`, the resolver flag paths): without it `-cc.txt` read as a boolean and the constraint never reached the dry run. It leaves the value of the option before it as typed and copies everything after `--`: pip's optparse takes the next token as `--config-settings`' value whatever it looks like (verified: `pip install --config-settings -Cfoo=bar requests` installs requests), so splitting that token read `foo=bar` as a package to check; the set it reads is every value-taking option the parser knows (`pythonOptionFlags`: requirements-file, package and source flags too), since `-r -constraints.txt` names a file and `-r` was not in the resolution table. The `=` of `-c=file` goes only where the parser drops it (`clapEquals`): uv reads `file`, pip's optparse the file named `=file` (verified: pip installed the pin from `=c.txt`, uv from `c.txt`), so a dry run stripping it for pip would check another file's pins. npm's lock records every dependency whatever the omit policy, marked `dev`, `optional`, `peer` or `devOptional` (reached both ways); `parseNpmLock` carries the marks into `Resolved`, merging a release found at several paths so a kind survives only if every copy has it (and `Copies` keeps each copy's own kinds, since the AND alone cannot say that a dev-only copy beside an optional-only one is left out entirely under `--omit=dev --omit=optional`; `npmOmitted` judges copy by copy) and the registry only if every copy agrees — copies fetched from different registries record none, so a trusted copy cannot cover a public one (map order must not pick the copy) — and `npmOmit` drops what npm's effective policy leaves out. That policy is npm's own answer: `npmEffectiveOmits` asks `npm config get omit` (`catalog.NpmConfigOmits`) with the dry run's flags and the same `-g`/`--prefix`/`--userconfig` selectors, and npm applies everything itself — the line's `--omit`/`--include` with include winning, nopt's negation and parity (`--no-no-optional` is on), the `optional` boolean (`.npmrc optional=false` answers `optional`), omits set in the environment or any `.npmrc`, and the older spellings `--production`, `--only`, `--dev` and `--also`, which are recorded and rendered so that `--production=false` under `NODE_ENV=production` keeps dev dependencies in the check as npm keeps them in the install (verified against npm 11.19.1: `--production` answers `dev`, and `--production=false` overrides both the variable and an `--omit=dev` on the line). The port's own `omits()` reading was deleted for that reason: the dry run's lockfile cannot say which applied since it records omitted packages too, and npm is the one parser that knows. One subprocess, asked only for a fresh tree with something to prune, and when npm cannot answer nothing is dropped. So a run is not blocked on a package it never installs, and every approximation errs toward checking. A tool-run token is kept as typed (`tool@latest` is not stripped): the tag is what npm fetches whatever `--tag` says, libnpmexec never takes a tag spec from the local tree, and the dry run must see it. **An npx run may execute a tree resolved earlier**: npm keeps each tool run's installation under `<cache>/_npx/<key>` (`key` = the first 16 hex chars of sha512 of the sorted `--package` values, else the command, joined by newline — `catalog.NpxCacheKey`, `TestNpxCachedTreeMatchesARealRun` holds it to a real npx) and reuses it when the package there still satisfies the request, with the dependencies resolved back then. So `withNpxCached` unions the fresh dry run with that cached lock (`catalog.NpxCachedTree`), and an unreadable cache adds nothing. The cache is `--cache`, else `npm_config_cache`, else what npm says with the command's own config-file and location flags (`catalog.NpmConfigGet` with key `cache`, which reads `npm config list -l` rather than `npm config get cache`: the latter refuses a relative path as protected, verified, while the listing prints it resolved against the cwd; a `cache=` in a project, user or global `.npmrc` is where npm reuses from, and the default lookup would miss it), else the platform default when npm cannot be asked. That is one more subprocess per tool run with no `--cache`, next to a dry run costing seconds. It is found once per tool run and handed to `withNpxCached`; and since nopt resolves a relative `npm_config_cache` or `.npmrc` `cache=` against the directory npm runs in, the dry run in scratch is told it absolutely (`npmCacheDir` reports such a path as `moved`; a named install's dry run gets `npmEnvCacheFlag` for the variable), or an offline dry run would face an empty cache. A release both trees report is **one sighting merged conservatively** (`unionSightings`, keyed as the registry compares names — PEP 503 for PyPI, the spelling for npm, where `lodash.get` and `lodash-get` are two packages a PyPI key would fold into one and drop from the check — and `resolveNamed`'s own dedup keys the same way, `canonicalSpec`, so a cached environment's `Django 5.0` and the registry's `django 5.0` are submitted once; `mergeSighting`): a kind survives only when both carry it, the registry only when both agree — a fresh fetch from a trusted registry must not cover a cached copy fetched publicly, and no registry means checked — and the lock covers it only if both say so. Both `npm exec` and the `npx` binary take this path (`m.Bin` is `npx` for the latter, which the first revision missed); bunx has its own cache. The omit policy prunes the **fresh** tree only, before the union: npm reuses a cached installation as it is, so an optional dependency it holds runs under `--omit=optional` too. It prunes npm's and npx's trees only: bun reads none of npm's configuration, so a bunx run installs what an `.npmrc` `omit` would have npm leave out, and pruning it dropped packages that run. The key sorts the specs as libnpmexec does, with node's `localeCompare('en')`, which is not byte order: ICU puts punctuation before digits before letters (`_` before `-`, so `is_js` sorts before `is-odd`) and lowercase before uppercase, and a byte-order key for `--package a_b --package a-b` looked up an entry npm never wrote. `npmCollate` ports that for printable ASCII (primary weights from `npmCollateOrder`, case as a tiebreak) and `TestNpmCollateMatchesNode` holds it to the installed node; `TestNpxCachedTreeMatchesARealRun` finds a real two-package run under it. **uv does the same with tool environments**: `uvx`/`uv tool run` reuse an environment cached under `<cache>/environments-v2/<key>/<key>` (a venv) when it satisfies the request, with the dependencies resolved back then, and `uvx tool@latest` exists because an unpinned request would otherwise never see a newer release. The key is uv's own hash of the request, so `catalog.UVCachedTree` reads every cached environment holding the named packages at the pinned versions (from each dist-info `METADATA` in its site-packages; `lib/pythonX.Y` or `Lib` on Windows; `holdsNames` lists the dist-info directory names first and reads metadata only in an environment that has every wanted name, since a cache holds hundreds of environments and most hold none of them) and `withUVCached` unions them with the fresh resolution, erring toward checking. The cache is `--cache-dir`, else `UV_CACHE_DIR`, else `uv cache dir` (`catalog.UVCacheDir`, one fast subprocess) asked with the run's own `--config-file`/`--no-config` (`uvCacheSelectors`: a `cache-dir` in an explicitly named file is where uvx reuses from, verified) and **from a scratch directory**: uvx reads no project configuration, but `uv cache dir` in a project whose `uv.toml` names a `cache-dir` answers for the project (verified: uvx ignored that file and `uv cache dir` reported it), so asking from the cwd would name a cache the run never touches. Else the platform default, uv's documented one (`uv help cache dir` / `uv help tool dir`): `$XDG_CACHE_HOME/uv` or `~/.cache/uv` on macOS and Linux alike — not `os.UserCacheDir`, which is `~/Library/Caches` on macOS — and `%LOCALAPPDATA%\uv\cache` on Windows; tools under `$XDG_DATA_HOME/uv/tools`, `~/.local/share/uv/tools`, or `%APPDATA%\uv\data\tools`. Every relative path — `--cache-dir c`, a relative `cache-dir` in a config file, which uv resolves against the directory it runs in and not the file's, and so uv's own relative answer — is resolved against `uvDir`'s base, since `uvx --directory sub --cache-dir c` uses `sub/c` (verified). `--no-cache`/`-n`, `--refresh` and `--reinstall` read or rebuild nothing, so they add nothing. A venv records no provenance, so nothing read there is trusted by registry; `TestUVCachedTreeMatchesARealRun` finds a real `uv tool run`'s environment. **An installed tool is run as installed**: for a bare request — the command or `--from` with no version, no `@latest`, no `--with`, no `--isolated` (each verified against uv 0.11 to make uvx resolve instead) — uvx runs the environment `uv tool install` keeps under `uv tool dir` (`<dir>/<name>`, a venv) and resolves nothing, so `parseToolRun` records `installArgs.InstalledTool` and `withUVCached` unions that environment too (`catalog.UVInstalledTree`, the directory from `UV_TOOL_DIR`, else `uv tool dir`, else the platform default), whatever the cache flags say, since those govern the cache and not installed tools. The npx cache is read the same way: its lock records what the earlier run resolved, omitted dependencies included, so `parseNpmLockAt` keeps only entries whose directory exists under the cached install (a run is not blocked on a package it never put on disk), and reads the whole lock only when there is no `node_modules` to check against. A pin is matched as PEP 440 reads `==` (`pep440Equal`: `6.1.0` is `6.1`, `1.0-alpha1` is `1.0a1`, `+build.01` is `+build.1`, a local segment on the candidate is ignored unless the pin names one), and a spelling the specification does not describe is retained rather than skipped; the site-packages glob is relative to the environment (`fs.Glob` over `os.DirFS`), since a bracket in the cache path would otherwise read as a character class and an existing environment would match nothing. An npm lock entry without `resolved` (npm's `omit-lockfile-registry-resolved`) is kept with no registry — `parseNpmLock` drops only the root, `link` entries and local packages outside `node_modules/` — because a package npm installed from a registry it did not name is one to check, not to drop. An npm lock's alias entry (`node_modules/renamed` with `"name": "left-pad"`) is read by its `name`, the registry package; `--prefix`, `--globalconfig` and `--cache` take nopt's path type, so `~/` is expanded (`expandHome`) before they are made absolute. `TestNamedNpmInstall*`/`TestNamedPipInstall*` in `test/smoke` prove it against real tools; unit tests stub `expandFn`.
 
@@ -140,66 +140,154 @@ Windows resolves it under `%LOCALAPPDATA%`.
 
    **bun** finds its command by skipping options *without reading values* (in `bun --cwd web add x` its `command::which` takes `web` as the command, not `add`), so it has no `globalValueFlags` entry. Its `valueFlags` leave out `-c/--config` and `--catalog` because their value is optional — listing them would swallow a package name. It has no `Lockfile` because syft cannot read `bun.lock`/`bun.lockb`, so passive bun goes through `passiveAlongside` and a bare `bun install` scan resolves `package.json` via npm; teaching the catalogue `bun.lock` is what would change both.
 
-   **cargo** (`internal/forward/cargo.go`). Each cargo behaviour below was
-   checked against cargo 1.99.1; `test/smoke/cargo_smoke_test.go` and
+   **cargo** (`internal/forward/cargo.go`, `cargo_mirror.go`). Each cargo
+   behaviour below was checked against a real cargo (1.99.1 unless named); `test/smoke/cargo_smoke_test.go` and
    `TestCargoFlagTablesMatchCargo` pin what a real cargo can show, and
    `docs/forwarder.md` says what users see, its known gaps included. Opt-in like
    git (`shim.optInManagers`, `--cargo`): crates are checked only on Teams and
    Enterprise plans, so a default shim would cost most accounts a round trip for
    an Unsupported answer.
 
-   - **Run first, then check the lock.** `add`, `update`, `generate-lockfile`
-     and `fetch` compile nothing (a path dependency's `build.rs` ran on `cargo
-     build` and on none of them), so `Manager.runFirstAt` runs them as a child,
-     not through `Handoff`, since the check follows, and checks the lock they
-     leave: what the next build compiles, at the
-     versions cargo picked rather than ones guessed in front. Only that lock is
-     scanned, from a copy, so an unrelated `package.json` cannot block a `cargo
-     add`; `CargoConfigDir` makes registry trust read the configs cargo reads
-     where it runs, not those around the copy.
-   - **What a block restores** comes from `cargo metadata --no-deps` (reads
-     manifests, writes nothing): the root's manifest and lock and every member's
-     manifest, since `-p`, `--manifest-path` and a `package.workspace` member
-     write a member's manifest and the root's lock. It runs through
-     `realCommand`, the lookup `Exec` uses for the command, with the same
-     options bar a `--config` naming a file (below), so both see one
-     workspace.
-   - **Only what cargo left is undone.** Its state is read as cargo exits and
-     again after the verdict; a file changed since (contents, mode, owner) or
-     one the path reaches only since (`os.SameFile` against the handle read as
-     cargo exits) is left alone and named, so a block never overwrites an edit
-     or deletes a newer lock. Each read guards its own window: the verdict wait
-     (the only content check before a removal or a recreate, and what finds a
-     file already back as before), staging the copy (`leftIn`), and the handle
-     an in-place write truncates (`holdsLeft`, a fresh open).
-   - **A staged copy where it keeps what a write in place keeps.** cargo writes
-     `Cargo.lock` in place and `Cargo.toml` by a rename onto the link's target,
-     both through a symlink. Truncating in place left a partial file on a full
-     disk (`writeRestore` is the seam), so `replaceLeft` renames a synced copy,
-     staged beside the link's target, over that file while the path still
-     reaches it with cargo's contents. Only where the copy keeps what cargo's
-     write keeps, though: a renamed copy failed in a read-only directory, left a
-     second hard link holding cargo's lock, dropped a group or a user's
-     ownership under a root run (so on unix the copy is chowned to match), lost
-     the file's access ACL, and took the directory's default ACL, granting a
-     user the lock never did (`hasACL`, `sameACL`, Linux only). Otherwise, or
-     when the rename is refused (EBUSY, EXDEV or a permission error: a
-     single-file bind mount), `rewriteInPlace` writes in place as cargo does,
-     after the same check on the handle. Only a permission error making the copy
-     falls back, so a full volume leaves cargo's file whole. The copy is made
-     and removed through the directory held open (`os.Root`), so a moved
-     directory keeps no copy.
-   - **Removal and recreate.** `removeLeft` removes the link's target; a
-     retargeted link or a swapped directory is left alone. `recreateLeft` links
-     a removed file back from a staged copy, which never replaces what has
-     appeared since, and where links fail (vfat, some FUSE and SMB mounts)
-     creates it with `O_EXCL`, which never does either. Both happen at the end
-     of any link the path was reached through (`linkEnd`, each link's text read
-     against its own directory, with a `..` after a link left to the kernel,
-     and a Windows text rooted without a drive from the link's drive,
-     `linkTarget`):
-     linking at a dangling link's own name hit EEXIST and named a file that had
-     not changed since cargo exited.
+   - **Check first (OSS-2553).** In gating mode `add`, `update`,
+     `generate-lockfile` and `fetch` never change the project before the
+     check (`checkCargoFirst`): the user's requirement is that no unchecked
+     crate is ever where an IDE (rust-analyzer), a watcher (cargo-watch,
+     bacon) or CI could build it, and that cargo below 1.97 is refused. The
+     first revision ran cargo first and undid its changes on a block; that
+     left exactly such a window and its undo grew without end (symlinks,
+     hard links, ACLs, bind mounts, owners, races), so it was deleted. The
+     redirect and the version gate were verified with cargo 1.80.0, 1.96.0,
+     1.97.0, 1.97.0-nightly and 1.99.1 on Linux, the mirror, fetch and dry-run
+     facts with 1.97.0 and 1.99.1, and the rest with 1.99.1 unless named.
+   - **The version gate.** `resolver.lockfile-path` (and
+     `CARGO_RESOLVER_LOCKFILE_PATH`) is honoured from cargo 1.97.0. 1.96.0
+     ignores it with a warning, 1.80.0 silently, and so does
+     `1.97.0-nightly (eb94155a9 2026-04-09)`, each writing the project lock
+     and exiting 0, so nothing after the run can catch it. `cargoRedirects`
+     compares `cargo -V` in semver order, a pre-release below its release.
+     The probe runs bare (plus a leading `+toolchain`) in ossprey's cwd,
+     since `-C` makes a stable cargo exit 101, and again in the add mirror,
+     which must print the same line: rustup keys `rustup override set` by
+     the project's real path, so the mirror ran the default toolchain, 1.96
+     in the repro, with the redirect ignored. Passive mode and `install`
+     are not gated.
+   - **The redirect, twice.** The variable beats every config file, but a
+     user `--config` (inline or a file, before or after the verb) beats the
+     variable, and the last `--config` wins. So ossprey sets the variable and
+     appends its own `--config resolver.lockfile-path="<abs>"` last, before
+     any `--` (`cargoRedirectArgs`). The project lock is copied to the
+     scratch path first: with no lock there cargo resolves from nothing
+     (`update -p x` re-resolved everything). `CARGO_CACHE_RUSTC_INFO=0`
+     stops cargo writing `target/.rustc_info.json` into the project.
+   - **Refusals, before cargo runs.** `update --breaking` (`-b`) is refused:
+     it rewrites `Cargo.toml` too, and only the lock is redirected, so a
+     blocked run left the bumped requirement for the next build to resolve
+     unchecked; `cargo add <crate>@<version>` raises a requirement checked
+     first. A `fetch` with a token `cargo fetch` would reject
+     (`cargoFetchUnknown`, against `cargoFetchSwitches` and
+     `cargoFetchValues`) is refused, since its resolve step passes on only
+     what `update` takes and the lock would land before cargo rejected the
+     line; refused rather than handed to cargo, so an option the table lacks
+     can never fetch unchecked. The workspace comes from `cargo
+     metadata --no-deps` (`readCargoWorkspace`, root and manifests spelled as
+     cargo spells them), run through `realCommand` with the command's options bar a
+     `--config` naming a file (`withoutConfigFiles`: it emptied an inherited
+     `<(...)` pipe, and on macOS `/dev/fd/N` shares cargo's offset). Any
+     `resolver.lockfile-path` the run may read (`lockfileMoved`: the
+     variable, a `--config`, a config file or an `include`, or a config
+     ossprey cannot read, which covers a FIFO or a pipe) refuses, decided
+     before metadata runs so metadata never drains a pipe: the user's lock
+     would be elsewhere and ossprey would land the wrong one. Only the
+     decoded key counts (a table, dotted key or inline table, quoted escapes
+     such as `"lockfile\u002dpath"` read), so a crate, a `--manifest-path`
+     or a comment naming `lockfile-path` does not refuse; `-Z
+     lockfile-path` is a no-op since 1.97. A cargo script is refused too:
+     under `-Zscript` cargo locks it under `$CARGO_HOME/build`
+     (`errScriptLock`). Then the credential (`cargoCredentialFn`), then the
+     snapshot: the lock, and for `add` every manifest, read through
+     `catalog.ReadRegular`; one that is not a regular file, is over the
+     bound or is a link to nothing refuses.
+   - **fetch.** `cargo fetch` with the redirect downloads before it returns,
+     so it cannot be the resolve step. `cargo update --workspace` with the
+     redirect locks byte for byte what `cargo fetch` would (current, stale,
+     missing and v3 locks) and downloads no `.crate`, so it resolves, carrying
+     every fetch option but `--target`, which update lacks (`cargoFetchResolve`;
+     dropping `-q`, `-v` and `--color` printed what plain fetch keeps quiet),
+     and after the landing the user's fetch is handed off with `--locked`
+     added (`cargoFetchLocked`), which downloads exactly the landed lock or
+     exits 101 before downloading. Resolving still fetches and checks out each
+     git dependency under `CARGO_HOME/git`, `build.rs` included, before the
+     check (verified with cargo 1.99.1 for update, fetch and `add --git`), as
+     plain cargo does; nothing is built, and whether the gate should cover
+     git sources too is an open question.
+   - **Dry runs.** `update --dry-run` (`-n`) still writes a whole lock to the
+     redirect when there is none, so it runs redirected and nothing lands or
+     is checked, and no credential is asked. `add --dry-run` writes nothing
+     anywhere and is handed off as typed after the version gate.
+   - **The add mirror** (`cargo_mirror.go`). The redirect moves only the
+     lock, and `cargo add` writes `Cargo.toml` before it resolves (temp file
+     plus rename in the manifest's dir), so `add` runs in a link farm under
+     `os.UserCacheDir()/ossprey` (0700, refused when another user could
+     write it). Every dir on the way to the cwd, the `-C` dir, the root and
+     each member is real, the lock and manifests are copies, and every other
+     entry links to the project's. cargo starts from getcwd(), physical (as
+     set on Windows, `cargoCwd`), and only joins and normalizes paths from
+     there, a `members` glob, a `package.workspace`, a `--manifest-path` and
+     a path dependency alike, never resolving a link (verified with cargo
+     1.99.1: `crates/app/../lib` is `crates/lib` even when `crates/app` is a
+     link). So the mirror uses cargo metadata's spellings, not canonical
+     paths: a member reached through a linked dir was a link in a mirror of
+     canonical dirs, and `add -p` wrote the real manifest through it before
+     the check, while a `--manifest-path` through it resolved the member
+     alone and landed a one-crate lock over the workspace's. The lock's
+     name and each manifest's stay a copy or nothing, never a link: a lock
+     created after the snapshot was linked, and cargo wrote it through the
+     link. Its results were byte for byte those of a plain copy for single
+     crates, glob workspaces, `-p`, a cwd in a member, path deps outside the
+     root, workspace inheritance, features and an ancestor config with a
+     relative `[patch]`. Every `--manifest-path` (relative too, since a
+     relative path through a linked dir reaches the project), `-C` and
+     absolute `--path` is rewritten into the mirror, the last so cargo
+     records the same relative path as in the project (it climbed out
+     through the mirror's prefix), and a `--manifest-path` naming no
+     workspace manifest refuses. A `.cargo/config` above
+     the mirror that cargo does not read for the project (an ancestor of the
+     mirror that is not one of the cwd's) would apply to the run, so it
+     refuses, bar CARGO_HOME's, which cargo reads once by its canonical
+     path. Each mirror dir keeps its `.cargo` link: dropping the ones shared
+     with the mirror's own ancestors avoided a double read but broke a
+     `[patch]` into the workspace. Windows refuses `add` when links cannot be
+     made.
+   - **Tripwire, then check, then land.** After cargo exits, the project
+     lock and manifests must be byte-identical to the snapshot; if not, cargo
+     ignored the redirect or another program wrote them, so they are put
+     back, what was found is kept beside each as `<name>.ossprey-found-<n>`
+     (putting back alone erased an editor's save), and the run fails
+     (`cargoTripwire`). A non-zero exit returns cargo's code with nothing
+     landed. The resolved bytes are scanned (`scanCargoLock`), and a block, a
+     check error, or crates the platform checked none of leave the project
+     as it was: gating fails closed now, where the first revision kept
+     cargo's changes with a warning. Those errors exit 2, not 1, since exit
+     1 means malware and nothing else. `landCargo` re-reads every file and
+     lands nothing if one changed during the check, skips unchanged bytes
+     (cargo never rewrites an unchanged lock), and writes the lock first so
+     the project never names a crate its lock does not hold. `landFile`
+     copies cargo's own `Cargo.toml` writer (follow the link, `O_EXCL` file
+     beside the target, the old mode, rename) and syncs before the rename,
+     which cargo does not; a new lock gets 0666 less the umask, cargo's mode
+     for one.
+   - **cargo's stderr** goes through `cargoStderr`, which spells the scratch
+     lock and the mirror as the project's paths, line by line, and never
+     fails a write: cargo exits 101 without locking when its stderr closes.
+     `CARGO_TERM_COLOR=always` keeps a terminal's colours through the pipe,
+     set only where cargo's own auto mode would colour (`cargoColours`: not
+     under `NO_COLOR` or `CLICOLOR=0`, and with a `TERM` other than `dumb`,
+     `CLICOLOR` or `CI`), since setting it on any terminal overrode those.
+   - **Passive** still runs cargo first and posts the lock it leaves
+     (`postCargoLock`), even after a failure, since it observes and never
+     blocks; a lock that may have moved, or a script's, is not posted, with
+     a warning, and a failure for want of a workspace leaves cargo's error
+     alone (`cargoFailedOnItsWorkspace`).
    - **Bounded, regular reads.** Every manifest, lock and config read goes
      through `catalog.ReadRegular` (refused unless regular both by `os.Stat`
      before the open and on the handle opened `O_NONBLOCK`, read no further
@@ -207,48 +295,14 @@ Windows resolves it under `%LOCALAPPDATA%`.
      `/dev/fd/N` dups the descriptor and moved cargo's offset), shared with
      the catalogue's `readRegularFile` so the guard cannot drift: a passive
      run whose cargo failed at once hung on a FIFO `Cargo.lock` and read a
-     link to `/dev/zero` until out of memory. The
-     type is checked before the open because opening a FIFO releases a writer
-     blocked on it into a SIGPIPE and opening a device can reset it; the check
-     on the handle closes the race.
-   - **A failed command** still gets its lock checked, since cargo writes before
-     it can fail (`fetch --offline` locks before it downloads, `add` edits
-     `Cargo.toml` before it resolves), and so does a lock unread before it ran,
-     since a failed `fetch --offline` rewrote one padded past `CargoProofLimit`.
-     A workspace `cargo metadata` cannot read warns only for a moved lock or a
-     cargo script after a failure: any other reason failed cargo too, before it
-     changed anything. Under `-Zscript` cargo locks a script (any manifest not
-     named `Cargo.toml`) under `$CARGO_HOME/build` while `cargo metadata` names
-     the script's directory as the root, so a project lock there was checked in
-     its place (`errScriptLock`).
-   - **The credential first** (`cargoCredentialFn`, `submit.NewClient` with the
-     check's own inputs), so a missing one stops a gating run before cargo
-     writes anything, as it stops any gating install.
-   - **A moved lock.** `resolver.lockfile-path` moves the lock, so
-     `lockfileMoved` reads the environment (`CARGO_RESOLVER_LOCKFILE_PATH`),
-     each `--config` before `--` (`cargoConfigArgs`) and the configs, and any
-     `include` counts, since cargo merges it. Only the decoded key counts (a
-     table, dotted key or inline table, quoted escapes such as
-     `"lockfile\u002dpath"` read): matching the bytes let a crate, a
-     `--manifest-path` or a comment naming `lockfile-path` skip the check, and
-     none of those moves the lock, nor does `-Z lockfile-path`, a no-op since
-     1.97; there is no flag form. A config `catalog.ParseCargoConfig` refuses
-     counts as moving the lock. One there that is not a regular file cannot be
-     read without draining it (cargo reads `--config /dev/stdin` and a FIFO,
-     once on the run-first verbs), so `lockfileMoved` leaves it to what cargo
-     writes (`LockMayMove`): a workspace lock cargo changed was written there
-     and is checked (posted when passive), one it left alone gets the warning.
-     Counting such a config as moving turned a blocked `cargo add` under a
-     piped config that set nothing into an unchecked one. Passive saves the
-     lock before cargo only for such a `--config` (`cargoLockBefore`), since
-     metadata, run first, would read a level config. `cargo metadata` is
-     handed no `--config` naming a file (`withoutConfigFiles`; a directory
-     stays, as cargo fails on it alike): it emptied an inherited `<(...)` fd
-     before cargo read it, on macOS opening `/dev/fd/N` shares cargo's
-     offset, and it reports the same workspace without one. A one-shot FIFO
-     as a level config is still read by `cargo metadata` too, first (after
-     cargo when passive), so cargo reads nothing, or cargo or metadata waits
-     for a writer (not fixed).
+     link to `/dev/zero` until out of memory. The type is checked before the
+     open because opening a FIFO releases a writer blocked on it into a
+     SIGPIPE and opening a device can reset it; the check on the handle
+     closes the race.
+   - **Not checked yet.** `cargo install` checks the named crates only (next
+     PR). A `cargo build` with a stale or missing lock still resolves on the
+     spot, and an IDE resolves a hand-edited `Cargo.toml` the same way,
+     outside ossprey.
    - **Which configs.** At each level, `CARGO_HOME` included, cargo reads only
      the legacy `config` when it opens, else `config.toml`, and
      `cargoConfigFile` picks the same: reading an ignored `config.toml` that set
@@ -283,13 +337,13 @@ Windows resolves it under `%LOCALAPPDATA%`.
      (`cargoConfigDir`).
    - **Reading the line.** `cargoPrintsOnly` passes through a line that only
      prints help or the version, grouped shorts included (`cargo -qV`), for
-     `install` and the run-first verbs alike. `--bin`, `--example` and `--target` take an
+     `install` and the resolving verbs alike. `--bin`, `--example` and `--target` take an
      optional value clap fills from the next token unless it is an option, so
      they are value flags and `cargoOptionalValues`. clap reads a group of
      shorts as switches up to one taking a value, which takes the rest less one
      `=`, else the next token (`-qjF 2` is `-j F`), so `cargoSplitShorts` splits
-     groups before the verb, after `install` and after the run-first verbs
-     (`cargoRunFirstShorts`). A `+toolchain` is rustup's and valid only first
+     groups before the verb, after `install` and after the resolving verbs
+     (`cargoResolveShorts`). A `+toolchain` is rustup's and valid only first
      (cargo alone rejects it), so `verbIndex` skips it there alone.
 
    **Not covered, deliberately (for now):** `pnpm dlx`, `yarn dlx`, and initializers (`npm init <x>`, `npm create`, `bun create`, `yarn create`, which fetch `create-<x>`). Do **not** close `dlx` by adding it to a `verbAt` list (same argv problem: `pnpm dlx cowsay moo` would check `moo`); give it a `toolRunAt`/`parseRun` like npm's. `docs/forwarder.md`'s "What is not checked" section is the user-facing statement of this.

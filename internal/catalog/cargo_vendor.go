@@ -345,7 +345,7 @@ func ReadRegular(p string, limit int64) ([]byte, fs.FileInfo, error) {
 	} else if !fi.Mode().IsRegular() {
 		return nil, nil, &fs.PathError{Op: "read", Path: p, Err: ErrNotRegular}
 	}
-	f, err := os.OpenFile(p, os.O_RDONLY|ONonblock, 0)
+	f, err := os.OpenFile(p, os.O_RDONLY|oNonblock, 0)
 	if err != nil {
 		return nil, nil, err
 	}
