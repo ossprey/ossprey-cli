@@ -888,11 +888,14 @@ func rewriteInPlace(f, left savedFile) error {
 	return err
 }
 
-// recreateLeft writes back a file cargo removed by linking in a staged copy, or by creating it in place when no copy can be staged or linked; either way one that has appeared at the path since is left alone.
+// recreateLeft writes back a file cargo removed, at the end of any link it was reached through, by linking in a staged copy, or by creating it in place when no copy can be staged or linked; either way one that has appeared there since is left alone.
 func recreateLeft(f savedFile) error {
-	if dir, err := os.OpenRoot(filepath.Dir(f.path)); err == nil {
+	at, base, err := linkEnd(f.path)
+	if err != nil {
+		return err
+	}
+	if dir, err := os.OpenRoot(at); err == nil {
 		defer dir.Close()
-		base := filepath.Base(f.path)
 		if tmp, name, err := stageFile(dir, base); err == nil {
 			defer dir.Remove(name)
 			if err := writeStaged(tmp, f); err != nil {
@@ -907,7 +910,7 @@ func recreateLeft(f savedFile) error {
 			// A filesystem without hard links refuses the link, so the file is created below, which never replaces one either.
 		}
 	}
-	fh, err := os.OpenFile(f.path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|catalog.ONonblock, f.mode)
+	fh, err := os.OpenFile(filepath.Join(at, base), os.O_WRONLY|os.O_CREATE|os.O_EXCL|catalog.ONonblock, f.mode)
 	if errors.Is(err, fs.ErrExist) {
 		return errNotLeft
 	}
@@ -922,6 +925,31 @@ func recreateLeft(f savedFile) error {
 		err = cerr
 	}
 	return err
+}
+
+// linkEnd is the real directory and name p leads to through the links at its end, each link's text read against its own directory as the kernel reads it.
+func linkEnd(p string) (string, string, error) {
+	for range 40 {
+		dir, base := filepath.Split(p)
+		dir, err := filepath.EvalSymlinks(dir)
+		if err != nil {
+			return "", "", err
+		}
+		p = filepath.Join(dir, base)
+		if fi, err := os.Lstat(p); err != nil || fi.Mode()&fs.ModeSymlink == 0 {
+			return dir, base, nil
+		}
+		to, err := os.Readlink(p)
+		if err != nil {
+			return "", "", err
+		}
+		if !filepath.IsAbs(to) {
+			// Left uncleaned, so a `..` after a link in the text goes where the kernel takes it.
+			to = dir + string(filepath.Separator) + to
+		}
+		p = to
+	}
+	return "", "", &fs.PathError{Op: "readlink", Path: p, Err: syscall.ELOOP}
 }
 
 // stageIn creates a new file in dir to stage a copy of base in, and returns its name there.

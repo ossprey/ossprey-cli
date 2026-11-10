@@ -267,6 +267,130 @@ func TestRunCargoAdd_BlockTouchesOnlyTheFileCargoLeft(t *testing.T) {
 	}
 }
 
+// A file removed from behind a link is written back at the link's target, as cargo writes through it, and one that appears there meanwhile is left alone and named (OSS-2553).
+func TestRunCargoAdd_BlockWritesBackAFileRemovedBehindALink(t *testing.T) {
+	const appeared = "[package]\nname = \"a\"\nversion = \"0.2.0\"\n"
+	restored := "ossprey: undid `cargo add -p a evil`: restored " + filepath.Join("a", "Cargo.toml") + ", removed Cargo.lock\n"
+	for _, tc := range []struct {
+		name string
+		// link makes a/Cargo.toml a link and returns the file it reaches.
+		link    func(t *testing.T, root string) string
+		prepare func(t *testing.T, target string)
+		want    string
+		kept    string
+	}{
+		{
+			name: "linked back",
+			link: func(t *testing.T, root string) string {
+				return linkMember(t, root, filepath.Join("..", "shared", "Cargo.toml"), filepath.Join(root, "shared", "Cargo.toml"))
+			},
+			want: restored,
+			kept: memberManifest,
+		},
+		{
+			name: "created in place where links fail",
+			link: func(t *testing.T, root string) string {
+				return linkMember(t, root, filepath.Join("..", "shared", "Cargo.toml"), filepath.Join(root, "shared", "Cargo.toml"))
+			},
+			prepare: func(t *testing.T, _ string) {
+				old := linkStaged
+				linkStaged = func(_ *os.Root, from, to string) error {
+					return &os.LinkError{Op: "link", Old: from, New: to, Err: fs.ErrPermission}
+				}
+				t.Cleanup(func() { linkStaged = old })
+			},
+			want: restored,
+			kept: memberManifest,
+		},
+		{
+			name: "through a chain of links, with `..` after a link taken as the kernel takes it",
+			link: func(t *testing.T, root string) string {
+				for _, d := range []string{filepath.Join("deep", "inner"), filepath.Join("deep", "shared"), "shared"} {
+					if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := os.Symlink(filepath.Join("deep", "inner"), filepath.Join(root, "sub")); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink("sub/../shared/Cargo.toml", filepath.Join(root, "mid.toml")); err != nil {
+					t.Fatal(err)
+				}
+				return linkMember(t, root, filepath.Join("..", "mid.toml"), filepath.Join(root, "deep", "shared", "Cargo.toml"))
+			},
+			want: restored,
+			kept: memberManifest,
+		},
+		{
+			name: "a file appears at the link's target while the copy is staged",
+			link: func(t *testing.T, root string) string {
+				return linkMember(t, root, filepath.Join("..", "shared", "Cargo.toml"), filepath.Join(root, "shared", "Cargo.toml"))
+			},
+			prepare: func(t *testing.T, target string) {
+				swapWriteRestore(t, func(w io.Writer, data []byte) error {
+					writeFile(t, target, appeared)
+					_, err := w.Write(data)
+					return err
+				})
+			},
+			want: "ossprey: warning: did not undo `cargo add -p a evil` in " + filepath.Join("a", "Cargo.toml") + ", changed again after cargo exited\n",
+			kept: appeared,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, ws := cargoProject(t)
+			target := tc.link(t, root)
+			member := filepath.Join(root, "a", "Cargo.toml")
+			swap(t, func(context.Context, string, []string) error {
+				writeFile(t, ws.Lock, evilLock)
+				return os.Remove(target)
+			}, cleanSBOM)
+			swapScan(t, func(context.Context, scanRequest) (*ossbom.SBOM, error) { return evilSBOM(), nil })
+			if tc.prepare != nil {
+				tc.prepare(t, target)
+			}
+
+			out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"add", "-p", "a", "evil"}})
+			if !errors.Is(err, ErrBlocked) {
+				t.Fatalf("Run = %v, want ErrBlocked", err)
+			}
+			if got := readFile(t, target); got != tc.kept {
+				t.Errorf("link target = %q, want %q", got, tc.kept)
+			}
+			if got := dirNames(t, filepath.Dir(target)); !slices.Equal(got, []string{"Cargo.toml"}) {
+				t.Errorf("the target's directory holds %v, want no staged copy left", got)
+			}
+			if fi, err := os.Lstat(member); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+				t.Errorf("%s is no longer a link (%v)", member, err)
+			}
+			if !strings.Contains(out, tc.want) || strings.Contains(out, "could not restore") {
+				t.Errorf("output:\n%s\nwant %q and no failed restore", out, tc.want)
+			}
+			if shared := filepath.Join(root, "shared"); filepath.Dir(target) != shared {
+				if got := dirNames(t, shared); len(got) != 0 {
+					t.Errorf("%s holds %v, want nothing written where `..` reads lexically", shared, got)
+				}
+			}
+		})
+	}
+}
+
+// linkMember moves the member's manifest to target and links a/Cargo.toml to it with the text to, returning target.
+func linkMember(t *testing.T, root, to, target string) string {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	member := filepath.Join(root, "a", "Cargo.toml")
+	if err := os.Rename(member, target); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(to, member); err != nil {
+		t.Fatal(err)
+	}
+	return target
+}
+
 // The path is checked again just before the staged copy replaces cargo's file, so a link retargeted while the copy was written is left alone (OSS-2553).
 func TestRunCargoAdd_RestoreChecksThePathAgainBeforeReplacing(t *testing.T) {
 	const oldLock = "version = 4\n# before\n"

@@ -114,7 +114,8 @@ its permissions or its owner, or one the path no longer reaches (a symlink retar
 directory swapped), is left as it is, and a warning line names it; one already
 back as it was before cargo ran is named on a line of its own. A symlinked
 `Cargo.toml` or `Cargo.lock` is put back through the link, as cargo writes
-through it, and a lock cargo created through a dangling link is removed from the
+through it: one removed from behind the link is written back at the link's
+target, and a lock cargo created through a dangling link is removed from the
 link's target. A file that could not be read before cargo ran (not a regular
 file, or over 32 MiB) is never touched and a warning line names it. A file is
 put back by renaming a copy over it, so one that cannot be written back or

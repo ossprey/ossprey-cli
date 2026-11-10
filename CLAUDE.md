@@ -191,7 +191,11 @@ Windows resolves it under `%LOCALAPPDATA%`.
      retargeted link or a swapped directory is left alone. `recreateLeft` links
      a removed file back from a staged copy, which never replaces what has
      appeared since, and where links fail (vfat, some FUSE and SMB mounts)
-     creates it with `O_EXCL`, which never does either.
+     creates it with `O_EXCL`, which never does either. Both happen at the end
+     of any link the path was reached through (`linkEnd`, each link's text read
+     against its own directory, with a `..` after a link left to the kernel):
+     linking at a dangling link's own name hit EEXIST and named a file that had
+     not changed since cargo exited.
    - **Bounded, regular reads.** Every manifest, lock and config read goes
      through `catalog.ReadRegular` (refused unless regular both by `os.Stat`
      before the open and on the handle opened `O_NONBLOCK`, read no further
