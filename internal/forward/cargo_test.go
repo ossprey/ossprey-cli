@@ -677,8 +677,13 @@ func TestRunCargoAdd_FileOverTheBoundIsNeverReadWhole(t *testing.T) {
 		if fi, err := os.Stat(manifest); err != nil || fi.Size() != catalog.CargoProofLimit+1+int64(len(added)) {
 			t.Errorf("%s changed after cargo exited (%v), want it left as cargo left it", manifest, err)
 		}
-		if line := "ossprey: undid `cargo add -p a evil`: removed Cargo.lock\n"; !strings.Contains(out, line) {
-			t.Errorf("output lacks %q:\n%s", line, out)
+		for _, line := range []string{
+			"ossprey: undid `cargo add -p a evil`: removed Cargo.lock\n",
+			"ossprey: warning: did not undo `cargo add -p a evil` in " + filepath.Join("a", "Cargo.toml") + ", which could not be read before cargo ran\n",
+		} {
+			if !strings.Contains(out, line) {
+				t.Errorf("output lacks %q:\n%s", line, out)
+			}
 		}
 	})
 }

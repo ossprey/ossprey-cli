@@ -231,13 +231,14 @@ func checkCargoAfter(ctx context.Context, m *Manager, opts Options) error {
 
 	ws, err := cargoWorkspaceFn(ctx, opts.Args)
 	var saved []savedFile
+	var unread []string
 	if err == nil {
 		// A missing credential stops here, before cargo changes anything, as it stops any gating install.
 		if credErr := cargoCredentialFn(ctx, opts.APIURL, opts.APIKey); credErr != nil {
 			flushWarnings(ctx)
 			return credErr
 		}
-		saved = snapshot(ws.files())
+		saved, unread = snapshot(ws.files())
 	}
 	flushWarnings(ctx)
 	runErr := execFn(ctx, m.Bin, opts.Args)
@@ -284,7 +285,7 @@ func checkCargoAfter(ctx context.Context, m *Manager, opts Options) error {
 	lock := displayPath(ws.Lock)
 	if hasMalware {
 		printBlock(m, opts, summary)
-		reportRestore(command, changes)
+		reportRestore(command, changes, unread)
 		return ErrBlocked
 	}
 	verdict, checked := CleanVerdict(sbom, len(summary.Informational), " in "+lock)
@@ -684,15 +685,16 @@ func (f savedFile) is(g savedFile) bool {
 	return !f.unread && !g.unread && f.existed == g.existed && bytes.Equal(f.data, g.data)
 }
 
-// snapshot saves each file, or that it did not exist; one it cannot read is left out, and so never touched.
-func snapshot(paths []string) []savedFile {
-	var out []savedFile
+// snapshot saves each file, or that it did not exist; one it cannot read is left out, and so never touched, and returned to be named on a block.
+func snapshot(paths []string) (saved []savedFile, unread []string) {
 	for _, p := range paths {
 		if f := stateOf(p); !f.unread {
-			out = append(out, f)
+			saved = append(saved, f)
+		} else {
+			unread = append(unread, p)
 		}
 	}
-	return out
+	return saved, unread
 }
 
 // fileChange is a saved file the command changed, created or removed, and what the command left there.
@@ -710,7 +712,7 @@ func changedFiles(saved []savedFile) []fileChange {
 }
 
 // reportRestore undoes each change in the file cargo left, while it is still as cargo left it, leaves alone one changed again since, and says so.
-func reportRestore(command string, changes []fileChange) {
+func reportRestore(command string, changes []fileChange, unread []string) {
 	var done, kept []string
 	for _, c := range changes {
 		f, now := c.before, stateOf(c.before.path)
@@ -742,7 +744,14 @@ func reportRestore(command string, changes []fileChange) {
 	if len(kept) > 0 {
 		fmt.Fprintf(errOut, "ossprey: warning: did not undo `%s` in %s, changed again after cargo exited\n", command, strings.Join(kept, ", "))
 	}
-	if len(done) == 0 && len(kept) == 0 {
+	if len(unread) > 0 {
+		names := make([]string, len(unread))
+		for i, p := range unread {
+			names[i] = displayPath(p)
+		}
+		fmt.Fprintf(errOut, "ossprey: warning: did not undo `%s` in %s, which could not be read before cargo ran\n", command, strings.Join(names, ", "))
+	}
+	if len(done) == 0 && len(kept) == 0 && len(unread) == 0 {
 		fmt.Fprintf(errOut, "ossprey: `%s` changed no Cargo.toml or Cargo.lock; nothing to restore\n", command)
 	}
 }
