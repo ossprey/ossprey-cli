@@ -138,12 +138,13 @@ cannot be made (the API unreachable, a workspace cargo cannot read, a
 `Cargo.lock` that is not a regular file or is over 32 MiB, or a
 `resolver.lockfile-path` setting, in the environment, a `--config` or a cargo
 config, that may move the lock elsewhere, including one a
-config `include` could set or a config too large or too deeply nested to read),
-cargo's changes are kept and one warning line says so. When cargo itself
+config `include` could set or a config too large or too deeply nested to read,
+or a cargo script run with `-Zscript`, whose lock cargo keeps in its build
+directory), cargo's changes are kept and one warning line says so. When cargo itself
 failed in a workspace cargo cannot read, such as a directory with no
 `Cargo.toml`, nothing changed and cargo's own error is the only line; a
-`resolver.lockfile-path` still gets the warning after a failure, since a failed
-`cargo fetch` can still write the moved lock.
+`resolver.lockfile-path` or a cargo script still gets the warning after a
+failure, since a failed `cargo fetch` can still write that lock.
 A command that changes nothing and leaves no `Cargo.lock`, such as
 `cargo add --dry-run` in a project without one, has nothing to check.
 
@@ -383,7 +384,8 @@ than being quietly forwarded. That includes the cargo commands checked after
 they run (`cargo add`, `update`, `generate-lockfile` and `fetch`): the
 credential is looked up first, so they stop on the same error before cargo
 changes anything, unless the check cannot be made at all (a lock that
-`resolver.lockfile-path` may move, or a workspace cargo cannot read), where
+`resolver.lockfile-path` may move, a cargo script, or a workspace cargo cannot
+read), where
 cargo runs and the warning described under cargo above is printed instead. If
 the check then fails once cargo has run (the API
 unreachable, timing out or refusing the credential), cargo's changes are kept

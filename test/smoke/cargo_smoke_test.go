@@ -5,6 +5,7 @@
 package smoke
 
 import (
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -258,5 +259,42 @@ func TestCargoAddInALockfilePathDirectoryIsChecked(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "Cargo.lock")); !os.IsNotExist(err) {
 		t.Errorf("the Cargo.lock cargo created is still there (%v)", err)
+	}
+}
+
+// cargo 1.99.1 locks a -Zscript manifest under its build directory, so the project lock beside the script is not checked in its place (OSS-2553).
+func TestCargoScriptLockIsNotCheckedWarns(t *testing.T) {
+	api := newFakeAPI(t, "pkg:cargo/itoa@1.0.15")
+	env := append(cargoEnv(t, api.URL), "RUSTC_BOOTSTRAP=1")
+	dir, _ := cargoCrate(t)
+	if err := os.WriteFile(filepath.Join(dir, "Cargo.lock"), []byte("version = 4\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	script := "---\n[package]\nedition = \"2024\"\n[dependencies]\nitoa = \"=1.0.15\"\n---\nfn main() {}\n"
+	if err := os.WriteFile(filepath.Join(dir, "s.rs"), []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res := runForwardEnv(t, dir, env, binPath, "cargo", "-Zscript", "generate-lockfile", "--manifest-path", "s.rs")
+	if res.exitCode != 0 {
+		t.Fatalf("exit %d, want 0\nstderr: %s", res.exitCode, res.stderr)
+	}
+	if want := "ossprey: warning: Cargo.lock not checked after `cargo -Zscript generate-lockfile --manifest-path s.rs` (a cargo script keeps it in the build directory); cargo's changes are kept"; !strings.Contains(res.stderr, want) {
+		t.Errorf("stderr lacks %q:\n%s", want, res.stderr)
+	}
+	var locked bool
+	for _, kv := range env {
+		if home, ok := strings.CutPrefix(kv, "CARGO_HOME="); ok {
+			_ = filepath.WalkDir(filepath.Join(home, "build"), func(p string, d fs.DirEntry, err error) error {
+				if err == nil && d.Name() == "Cargo.lock" {
+					data, _ := os.ReadFile(p)
+					locked = locked || strings.Contains(string(data), "name = \"itoa\"")
+				}
+				return nil
+			})
+		}
+	}
+	if !locked {
+		t.Error("cargo wrote no lock for the script under its build directory")
 	}
 }

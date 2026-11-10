@@ -250,7 +250,7 @@ func checkCargoAfter(ctx context.Context, m *Manager, opts Options) error {
 	if cargoFailedOnItsWorkspace(command, runErr, err) {
 		return runErr
 	}
-	// A moved lock has no snapshot, so a failed command still gets the warning below.
+	// A moved or script lock has no snapshot, so a failed command still gets the warning below.
 	if runErr != nil && err == nil {
 		// cargo writes before it can fail: fetch locks before it downloads, add edits Cargo.toml before it resolves; a lock unread before may have changed.
 		if !slices.ContainsFunc(changes, func(c fileChange) bool { return c.before.path == ws.Lock }) && !slices.Contains(unread, ws.Lock) {
@@ -312,9 +312,9 @@ func checkCargoAfter(ctx context.Context, m *Manager, opts Options) error {
 	return runErr
 }
 
-// cargoFailedOnItsWorkspace is a failed command whose workspace cargo metadata cannot read either: cargo's error says why, and only a moved lock may have been written.
+// cargoFailedOnItsWorkspace is a failed command whose workspace cargo metadata cannot read either: cargo's error says why, and only a moved or script lock may have been written.
 func cargoFailedOnItsWorkspace(command string, runErr, wsErr error) bool {
-	if runErr == nil || wsErr == nil || errors.Is(wsErr, errLockfileMoved) {
+	if runErr == nil || wsErr == nil || errors.Is(wsErr, errLockfileMoved) || errors.Is(wsErr, errScriptLock) {
 		return false
 	}
 	note("ossprey: `%s` failed and its workspace could not be read (%v); nothing to check\n", command, wsErr)
@@ -364,6 +364,9 @@ func (w cargoWorkspace) files() []string {
 // errLockfileMoved is a resolver.lockfile-path, which puts the lock where this check does not look.
 var errLockfileMoved = errors.New("a resolver.lockfile-path may move it")
 
+// errScriptLock is a cargo script (-Zscript), whose lock cargo keeps under its build directory, where this check does not look.
+var errScriptLock = errors.New("a cargo script keeps it in the build directory")
+
 // readCargoWorkspace asks `cargo metadata --no-deps`, which reads manifests only, for the workspace root and its members.
 func readCargoWorkspace(ctx context.Context, args []string) (cargoWorkspace, error) {
 	verb := verbIndex("cargo", args)
@@ -400,6 +403,10 @@ func readCargoWorkspace(ctx context.Context, args []string) (cargoWorkspace, err
 		ConfigDir: cargoConfigDir(args[:verb]),
 	}
 	for _, p := range meta.Packages {
+		if p.ManifestPath != "" && filepath.Base(p.ManifestPath) != "Cargo.toml" {
+			// Only a script's manifest has another name, and cargo does not lock it at workspace_root (verified with cargo 1.99.1).
+			return cargoWorkspace{}, errScriptLock
+		}
 		if p.ManifestPath != "" && !slices.Contains(ws.Manifests, p.ManifestPath) {
 			ws.Manifests = append(ws.Manifests, p.ManifestPath)
 		}

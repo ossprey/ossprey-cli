@@ -1047,18 +1047,21 @@ func TestRunCargoAdd_FailureWithAManifestUnreadBeforeWarns(t *testing.T) {
 	}
 }
 
-// A failed command with no workspace to check (here a moved lock, which a failed fetch --offline still writes) warns and keeps cargo's error.
+// A failed command with no workspace to check (a moved or script lock, which a failed fetch --offline still writes) warns and keeps cargo's error.
 func TestRunCargoFetch_FailureWithNoWorkspaceStillWarns(t *testing.T) {
 	exit101 := errors.New("exit status 101")
 	for _, tc := range []struct {
 		passive bool
+		wsErr   error
 		want    string
 	}{
-		{false, "ossprey: warning: Cargo.lock not checked after `cargo fetch --offline` (a resolver.lockfile-path may move it); cargo's changes are kept\n"},
-		{true, "ossprey: warning: could not post scan (a resolver.lockfile-path may move it); the install was not blocked (passive)\n"},
+		{false, errLockfileMoved, "ossprey: warning: Cargo.lock not checked after `cargo fetch --offline` (a resolver.lockfile-path may move it); cargo's changes are kept\n"},
+		{true, errLockfileMoved, "ossprey: warning: could not post scan (a resolver.lockfile-path may move it); the install was not blocked (passive)\n"},
+		{false, errScriptLock, "ossprey: warning: Cargo.lock not checked after `cargo fetch --offline` (a cargo script keeps it in the build directory); cargo's changes are kept\n"},
+		{true, errScriptLock, "ossprey: warning: could not post scan (a cargo script keeps it in the build directory); the install was not blocked (passive)\n"},
 	} {
 		root, _ := cargoProject(t)
-		cargoWorkspaceFn = func(context.Context, []string) (cargoWorkspace, error) { return cargoWorkspace{}, errLockfileMoved }
+		cargoWorkspaceFn = func(context.Context, []string) (cargoWorkspace, error) { return cargoWorkspace{}, tc.wsErr }
 		swap(t, func(context.Context, string, []string) error {
 			if err := os.MkdirAll(filepath.Join(root, "alt"), 0o755); err != nil {
 				t.Fatal(err)
@@ -1068,7 +1071,7 @@ func TestRunCargoFetch_FailureWithNoWorkspaceStillWarns(t *testing.T) {
 		}, cleanSBOM)
 		out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"fetch", "--offline"}, Passive: tc.passive})
 		if !errors.Is(err, exit101) || out != tc.want {
-			t.Errorf("passive %v: Run = %v, output %q; want cargo's error and %q", tc.passive, err, out, tc.want)
+			t.Errorf("passive %v, %v: Run = %v, output %q; want cargo's error and %q", tc.passive, tc.wsErr, err, out, tc.want)
 		}
 	}
 }
@@ -1730,6 +1733,36 @@ func TestReadCargoWorkspaceWithCargo(t *testing.T) {
 	t.Setenv("CARGO_RESOLVER_LOCKFILE_PATH", filepath.Join(dir, "elsewhere", "Cargo.lock"))
 	if _, err := readCargoWorkspace(context.Background(), []string{"add", "itoa"}); !errors.Is(err, errLockfileMoved) {
 		t.Errorf("CARGO_RESOLVER_LOCKFILE_PATH: err = %v, want errLockfileMoved", err)
+	}
+}
+
+// cargo 1.99.1 locks a -Zscript manifest under its build directory, not beside the script, so a project lock there is not the one to check (OSS-2553).
+func TestReadCargoWorkspaceRefusesACargoScript(t *testing.T) {
+	if _, err := exec.LookPath("cargo"); err != nil {
+		t.Skip("cargo not installed")
+	}
+	unsetEnv(t, "CARGO_RESOLVER_LOCKFILE_PATH")
+	t.Setenv("CARGO_HOME", t.TempDir())
+	t.Setenv("RUSTC_BOOTSTRAP", "1")
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, "Cargo.toml"), "[package]\nname = \"p\"\nversion = \"0.1.0\"\nedition = \"2021\"\n")
+	writeFile(t, filepath.Join(dir, "src", "lib.rs"), "")
+	writeFile(t, filepath.Join(dir, "Cargo.lock"), "version = 4\n")
+	writeFile(t, filepath.Join(dir, "s.rs"), "---\n[package]\nedition = \"2024\"\n---\nfn main() {}\n")
+	t.Chdir(dir)
+	for _, args := range [][]string{
+		{"-Zscript", "generate-lockfile", "--manifest-path", "s.rs"},
+		{"update", "-Zscript", "-ms.rs"},
+	} {
+		if ws, err := readCargoWorkspace(context.Background(), args); !errors.Is(err, errScriptLock) {
+			t.Errorf("cargo %v: lock %s (%v), want errScriptLock", args, ws.Lock, err)
+		}
+	}
+	if _, err := readCargoWorkspace(context.Background(), []string{"-Zscript", "generate-lockfile"}); err != nil {
+		t.Errorf("the project beside the script: %v", err)
 	}
 }
 
