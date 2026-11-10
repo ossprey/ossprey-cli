@@ -802,8 +802,8 @@ func recreateBlock(t *testing.T, prepare func(member string)) (string, string) {
 	return out, member
 }
 
-// A file cargo removed is created in place where the filesystem makes no hard links, and one that appears at its path meanwhile is left alone and named (OSS-2553).
-func TestRunCargoAdd_BlockRecreatesAFileWhereNoLinkCanBeMade(t *testing.T) {
+// A file cargo removed is created in place where no copy can be staged or linked, and one that appears at its path meanwhile is left alone and named (OSS-2553).
+func TestRunCargoAdd_BlockRecreatesInPlaceWhereNoCopyCanBeLinked(t *testing.T) {
 	for name, refusal := range map[string]error{"permission": fs.ErrPermission, "unsupported": errors.ErrUnsupported} {
 		t.Run("link refused for "+name, func(t *testing.T) {
 			out, member := recreateBlock(t, func(string) {
@@ -821,6 +821,36 @@ func TestRunCargoAdd_BlockRecreatesAFileWhereNoLinkCanBeMade(t *testing.T) {
 			}
 			if want := "ossprey: undid `cargo add -p a evil`: restored " + filepath.Join("a", "Cargo.toml") + ", removed Cargo.lock\n"; !strings.Contains(out, want) {
 				t.Errorf("output lacks %q:\n%s", want, out)
+			}
+		})
+	}
+	for name, appears := range map[string]bool{"staging refused": false, "staging refused as a file appears": true} {
+		t.Run(name, func(t *testing.T) {
+			const appeared = "[package]\nname = \"a\"\nversion = \"0.2.0\"\n"
+			staged := false
+			out, member := recreateBlock(t, func(member string) {
+				old := stageFile
+				stageFile = func(*os.Root, string) (*os.File, string, error) {
+					staged = true
+					if appears {
+						writeFile(t, member, appeared)
+					}
+					return nil, "", &fs.PathError{Op: "open", Path: ".Cargo.toml.ossprey-1", Err: fs.ErrPermission}
+				}
+				t.Cleanup(func() { stageFile = old })
+			})
+			want, kept := "ossprey: undid `cargo add -p a evil`: restored "+filepath.Join("a", "Cargo.toml")+", removed Cargo.lock\n", memberManifest
+			if appears {
+				want, kept = "ossprey: warning: did not undo `cargo add -p a evil` in "+filepath.Join("a", "Cargo.toml")+", changed again after cargo exited\n", appeared
+			}
+			if !staged {
+				t.Error("the recreate path never asked stageFile for a copy")
+			}
+			if got := readFile(t, member); got != kept {
+				t.Errorf("%s = %q, want %q", member, got, kept)
+			}
+			if !strings.Contains(out, want) || strings.Contains(out, "could not restore") {
+				t.Errorf("output:\n%s\nwant %q and no failed restore", out, want)
 			}
 		})
 	}

@@ -911,7 +911,7 @@ func recreateLeft(f savedFile) error {
 	if dir, err := os.OpenRoot(filepath.Dir(f.path)); err == nil {
 		defer dir.Close()
 		base := filepath.Base(f.path)
-		if tmp, name, err := stageIn(dir, base); err == nil {
+		if tmp, name, err := stageFile(dir, base); err == nil {
 			defer dir.Remove(name)
 			if err := writeStaged(tmp, f); err != nil {
 				return err
