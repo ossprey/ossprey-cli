@@ -771,33 +771,60 @@ func removeLeft(p string, left fs.FileInfo) error {
 	return os.Remove(real)
 }
 
-// rewriteLeft puts f's bytes back in the file left at its path, through a link as cargo wrote, and never in another file found there.
+// writeRestore writes a restore's staged copy; a test seam.
+var writeRestore = func(w io.Writer, data []byte) error {
+	_, err := w.Write(data)
+	return err
+}
+
+// rewriteLeft stages f's bytes and mode beside the file left at its path, through a link as cargo wrote, and renames the copy over it only while the path still reaches that file.
 func rewriteLeft(f, left savedFile) error {
-	flag := os.O_WRONLY | oNonblock
-	if !left.existed {
-		flag |= os.O_CREATE | os.O_EXCL
+	target := f.path
+	if left.existed {
+		real, err := filepath.EvalSymlinks(f.path)
+		if err != nil {
+			return err
+		}
+		target = real
 	}
-	fh, err := os.OpenFile(f.path, flag, f.mode)
+	tmp, err := os.CreateTemp(filepath.Dir(target), "."+filepath.Base(target)+".ossprey-*")
 	if err != nil {
 		return err
 	}
-	if left.existed {
-		if fi, serr := fh.Stat(); serr != nil || !os.SameFile(fi, left.info) {
-			fh.Close()
-			return errNotLeft
+	renamed := false
+	defer func() {
+		if !renamed {
+			os.Remove(tmp.Name())
 		}
-		err = fh.Truncate(0)
+	}()
+	err = writeRestore(tmp, f.data)
+	if err == nil {
+		err = tmp.Chmod(f.mode)
 	}
 	if err == nil {
-		_, err = fh.Write(f.data)
+		err = tmp.Sync()
 	}
-	if err == nil {
-		_ = fh.Chmod(f.mode)
-	}
-	if cerr := fh.Close(); err == nil {
+	if cerr := tmp.Close(); err == nil {
 		err = cerr
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	if !left.existed {
+		// A link, unlike a rename, fails when anything has appeared at the path since.
+		return os.Link(tmp.Name(), target)
+	}
+	if real, err := filepath.EvalSymlinks(f.path); err != nil || real != target {
+		return errNotLeft
+	}
+	if fi, err := os.Lstat(target); err != nil || !os.SameFile(fi, left.info) || fi.Mode().Perm() != left.mode {
+		return errNotLeft
+	}
+	if err := os.Rename(tmp.Name(), target); err != nil {
+		return err
+	}
+	renamed = true
+	return nil
 }
 
 // displayPath is p relative to the working directory, preferring whichever spelling of it, physical or as typed, holds p.

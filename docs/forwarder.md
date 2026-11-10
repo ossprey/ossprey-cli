@@ -115,7 +115,8 @@ directory swapped), is left as it is, and a warning line names it. A symlinked
 through it, and a lock cargo created through a dangling link is removed from the
 link's target. A file that could not be read before cargo ran (not a regular
 file, or over 32 MiB) is never touched and a warning line names it, and one
-that cannot be written back or removed is left as it is with a warning line.
+that cannot be written back or removed (on a full disk, say) is left exactly
+as cargo left it with a warning line.
 That includes `-p <member>`, `--manifest-path` and a member whose `Cargo.lock`
 sits at the workspace root. When cargo itself fails, its exit code is passed
 through (unless the lock it changed holds malware, which exits `1` as above), but a failure can still leave changes behind: `cargo fetch` writes

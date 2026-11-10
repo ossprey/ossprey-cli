@@ -5,8 +5,10 @@ package forward
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -200,5 +202,47 @@ func TestRunCargoAdd_BlockTouchesOnlyTheFileCargoLeft(t *testing.T) {
 				t.Errorf("output lacks %q:\n%s", tc.want, out)
 			}
 		})
+	}
+}
+
+// The path is checked again just before the staged copy replaces cargo's file, so a link retargeted while the copy was written is left alone (OSS-2553).
+func TestRunCargoAdd_RestoreChecksThePathAgainBeforeReplacing(t *testing.T) {
+	const oldLock = "version = 4\n# before\n"
+	root, ws := cargoProject(t)
+	writeFile(t, filepath.Join(root, "shared.lock"), oldLock)
+	if err := os.Symlink("shared.lock", ws.Lock); err != nil {
+		t.Fatal(err)
+	}
+	swap(t, func(context.Context, string, []string) error {
+		writeFile(t, ws.Lock, evilLock)
+		return nil
+	}, cleanSBOM)
+	swapScan(t, func(context.Context, scanRequest) (*ossbom.SBOM, error) { return evilSBOM(), nil })
+	swapWriteRestore(t, func(w io.Writer, data []byte) error {
+		writeFile(t, filepath.Join(root, "other.lock"), evilLock)
+		if err := os.Remove(ws.Lock); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("other.lock", ws.Lock); err != nil {
+			t.Fatal(err)
+		}
+		_, err := w.Write(data)
+		return err
+	})
+
+	out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"add", "-p", "a", "evil"}})
+	if !errors.Is(err, ErrBlocked) {
+		t.Fatalf("Run = %v, want ErrBlocked", err)
+	}
+	for _, f := range []string{"shared.lock", "other.lock"} {
+		if got := readFile(t, filepath.Join(root, f)); got != evilLock {
+			t.Errorf("%s = %q, want it left alone", f, got)
+		}
+	}
+	if got := dirNames(t, root); !slices.Equal(got, []string{"Cargo.lock", "Cargo.toml", "a", "other.lock", "shared.lock"}) {
+		t.Errorf("root holds %v, want no staged copy left", got)
+	}
+	if want := "ossprey: warning: did not undo `cargo add -p a evil` in Cargo.lock, changed again after cargo exited\n"; !strings.Contains(out, want) || strings.Contains(out, "undid") {
+		t.Errorf("output:\n%s\nwant %q and no undo", out, want)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -625,6 +626,125 @@ func TestRunCargoAdd_BlockLeavesAFileWhoseModeChangedAgain(t *testing.T) {
 	}
 	if line := "ossprey: warning: did not undo `cargo add -p a evil` in " + member + ", changed again after cargo exited\n"; !strings.Contains(out, line) {
 		t.Errorf("output lacks %q:\n%s", line, out)
+	}
+}
+
+// failAfter is a restore write that stops after n bytes with err, as on a full disk.
+func failAfter(n int, err error) func(io.Writer, []byte) error {
+	return func(w io.Writer, data []byte) error {
+		if _, werr := w.Write(data[:min(n, len(data))]); werr != nil {
+			return werr
+		}
+		return err
+	}
+}
+
+// swapWriteRestore replaces the seam that writes a restore's staged copy.
+func swapWriteRestore(t *testing.T, fn func(io.Writer, []byte) error) {
+	t.Helper()
+	old := writeRestore
+	writeRestore = fn
+	t.Cleanup(func() { writeRestore = old })
+}
+
+// dirNames lists dir's entries, so a test can see that no staged copy is left behind.
+func dirNames(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
+}
+
+// A restore that fails part way, as on a full disk, leaves each file exactly as cargo left it and no staged copy behind (OSS-2553).
+func TestRunCargoAdd_FailedRestoreLeavesCargosFiles(t *testing.T) {
+	root, ws := cargoProject(t)
+	writeFile(t, ws.Lock, "version = 4\n# before\n")
+	ran := false
+	swap(t, addEvil(t, root, &ran), cleanSBOM)
+	member := filepath.Join(root, "a", "Cargo.toml")
+	left := map[string]os.FileInfo{}
+	swapScan(t, func(context.Context, scanRequest) (*ossbom.SBOM, error) {
+		for _, p := range []string{ws.Lock, member} {
+			fi, err := os.Stat(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			left[p] = fi
+		}
+		return evilSBOM(), nil
+	})
+	swapWriteRestore(t, failAfter(4, errors.New("no space left on device")))
+
+	out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"add", "-p", "a", "evil"}})
+	if !errors.Is(err, ErrBlocked) {
+		t.Fatalf("Run = %v, want ErrBlocked", err)
+	}
+	for p, want := range map[string]string{ws.Lock: evilLock, member: memberManifest + "\n[dependencies]\nevil = \"1\"\n"} {
+		fi, err := os.Stat(p)
+		if got := readFile(t, p); err != nil || got != want || !os.SameFile(fi, left[p]) || fi.Mode() != left[p].Mode() {
+			t.Errorf("%s = %q (%v), want exactly the file cargo left", p, got, err)
+		}
+	}
+	if got := dirNames(t, root); !slices.Equal(got, []string{"Cargo.lock", "Cargo.toml", "a"}) {
+		t.Errorf("root holds %v, want no staged copy left", got)
+	}
+	if got := dirNames(t, filepath.Join(root, "a")); !slices.Equal(got, []string{"Cargo.toml"}) {
+		t.Errorf("member holds %v, want no staged copy left", got)
+	}
+	for _, line := range []string{
+		"ossprey: warning: could not restore " + filepath.Join("a", "Cargo.toml") + " (no space left on device)\n",
+		"ossprey: warning: could not restore Cargo.lock (no space left on device)\n",
+	} {
+		if !strings.Contains(out, line) {
+			t.Errorf("output lacks %q:\n%s", line, out)
+		}
+	}
+	if strings.Contains(out, "undid") {
+		t.Errorf("output claims an undo:\n%s", out)
+	}
+}
+
+// A file cargo removed is written back whole with its mode, and a write that fails part way leaves nothing at its path (OSS-2553).
+func TestRunCargoAdd_BlockWritesBackAFileCargoRemoved(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(map[bool]string{false: "written back", true: "the write fails part way"}[fail], func(t *testing.T) {
+			root, ws := cargoProject(t)
+			member := filepath.Join(root, "a", "Cargo.toml")
+			if err := os.Chmod(member, 0o640); err != nil {
+				t.Fatal(err)
+			}
+			swap(t, func(context.Context, string, []string) error {
+				writeFile(t, ws.Lock, evilLock)
+				return os.Remove(member)
+			}, cleanSBOM)
+			swapScan(t, func(context.Context, scanRequest) (*ossbom.SBOM, error) { return evilSBOM(), nil })
+			if fail {
+				swapWriteRestore(t, failAfter(4, errors.New("no space left on device")))
+			}
+
+			out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"add", "-p", "a", "evil"}})
+			if !errors.Is(err, ErrBlocked) {
+				t.Fatalf("Run = %v, want ErrBlocked", err)
+			}
+			if got := dirNames(t, filepath.Join(root, "a")); fail && len(got) != 0 || !fail && !slices.Equal(got, []string{"Cargo.toml"}) {
+				t.Fatalf("member holds %v", got)
+			}
+			want := "ossprey: undid `cargo add -p a evil`: restored " + filepath.Join("a", "Cargo.toml") + ", removed Cargo.lock\n"
+			if fail {
+				want = "ossprey: warning: could not restore " + filepath.Join("a", "Cargo.toml") + " (no space left on device)\n"
+			} else if fi, err := os.Stat(member); readFile(t, member) != memberManifest || err != nil || runtime.GOOS != "windows" && fi.Mode().Perm() != 0o640 {
+				t.Errorf("%s = %q (%v), want its old bytes and mode", member, readFile(t, member), err)
+			}
+			if !strings.Contains(out, want) {
+				t.Errorf("output lacks %q:\n%s", want, out)
+			}
+		})
 	}
 }
 
