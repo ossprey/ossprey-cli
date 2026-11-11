@@ -51,13 +51,14 @@ flowchart TD
     S["ossprey &lt;manager&gt; ..."] --> CA{"cargo add, update,<br/>generate-lockfile or fetch,<br/>not only printing help?"}
     CA -- "yes" --> CV{"OSSPREY_SKIP_CI?"}
     CV -- "set" --> U
-    CV -- "unset" --> CP{"passive mode?"}
+    CV -- "unset" --> CVG{"cargo 1.97 or later?"}
+    CVG -- "no: passive" --> U
+    CVG -- "no: gating" --> CX["refuse, exit 2:<br/>cargo never runs"]
+    CVG -- "yes" --> CP{"passive mode?"}
     CP -- "yes" --> CB["exec cargo first"]
     CB --> AE
-    CP -- "no: gating" --> CVG{"cargo 1.97 or later?"}
-    CVG -- "no" --> CX["refuse, exit 2:<br/>cargo never runs"]
-    CVG -- "yes: add --dry-run" --> U
-    CVG -- "yes" --> CG{"a line cargo takes (no update<br/>--breaking), a workspace cargo<br/>metadata can read, no lock<br/>lockfile-path may move, no script,<br/>a credential (bar update --dry-run)?"}
+    CP -- "no: add --dry-run" --> U
+    CP -- "no" --> CG{"a line cargo takes (no update<br/>--breaking), a workspace cargo<br/>metadata can read, no lock<br/>lockfile-path may move, no script,<br/>a credential (bar update --dry-run)?"}
     CG -- "no" --> CX
     CG -- "yes" --> CR["cargo resolves into a scratch<br/>Cargo.lock (add: in a mirror of<br/>the workspace); the project<br/>is not touched"]
     CR -- "a project file changed<br/>while cargo ran" --> CT["move what was found aside,<br/>put it back, exit 2"]

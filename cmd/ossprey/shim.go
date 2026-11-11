@@ -77,9 +77,9 @@ checks the repository itself before git runs. Private repos pass through.
 --brew also shims brew (opt-in): a formula install checks the GitHub
 repositories the formula and its dependencies build from.
 
---cargo also shims cargo (opt-in): cargo install checks the crate before it
-builds, and cargo add, update, generate-lockfile and fetch check the Cargo.lock
-they resolve before it reaches the project (cargo 1.97 or later). Rust
+--cargo also shims cargo (opt-in, cargo 1.97 or later): cargo install checks
+the crate before it builds, and cargo add, update, generate-lockfile and fetch
+check the Cargo.lock they resolve before it reaches the project. Rust
 (crates.io) is available on Teams and Enterprise plans.
 
 Shell profiles only reach login and interactive shells. A coding agent's

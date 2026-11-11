@@ -501,7 +501,19 @@ func Run(ctx context.Context, opts Options) error {
 	}
 
 	if m.resolveAt != nil {
-		if _, ok := m.resolveAt(opts.Args); ok {
+		_, resolves := m.resolveAt(opts.Args)
+		version, why := "", ""
+		if _, installs := m.installAt(opts.Args); (resolves || installs) && !opts.SkipCI {
+			// One floor for every cargo command ossprey checks or posts.
+			if version, why = cargoBelowFloor(ctx, opts.Args); why != "" && opts.Passive {
+				note("ossprey: forwarding %s unchecked: %s\n", cargoVerbOnly(m, opts.Args), why)
+				return forwardTo()
+			} else if why != "" {
+				flushWarnings(ctx)
+				return fmt.Errorf("did not run %s: %s", cargoVerbOnly(m, opts.Args), why)
+			}
+		}
+		if resolves {
 			if opts.SkipCI {
 				note("ossprey: skip-ci set; forwarding `%s %s` without checking\n",
 					m.Bin, strings.Join(opts.Args, " "))
@@ -510,7 +522,7 @@ func Run(ctx context.Context, opts Options) error {
 			if opts.Passive {
 				return postCargoLock(ctx, m, opts)
 			}
-			return checkCargoFirst(ctx, m, opts)
+			return checkCargoFirst(ctx, m, opts, version)
 		}
 	}
 

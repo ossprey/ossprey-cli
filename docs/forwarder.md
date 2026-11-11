@@ -98,11 +98,12 @@ ossprey cargo add serde          # resolved and checked, then written to your pr
 ossprey cargo install ripgrep    # ripgrep is checked, then cargo builds it
 ```
 
-`cargo add`, `cargo update`, `cargo generate-lockfile` and `cargo fetch` need
-cargo 1.97 or later. Older versions, and 1.97.0 pre-releases, are refused
-before cargo runs, with the version found and a pointer to `rustup update`.
+ossprey's cargo support needs cargo 1.97 or later. With an older cargo, every
+command ossprey checks is refused with exit code `2` before cargo runs; in
+passive mode it goes to cargo unchanged and nothing is posted.
 
-These four commands are checked before anything in your project changes.
+`cargo add`, `update`, `generate-lockfile` and `fetch` are checked before
+anything in your project changes.
 Cargo resolves into a scratch copy of your workspace's `Cargo.lock`, ossprey
 checks the lock it resolved, and only a clean result is written to your
 project. Nothing unchecked is on disk in the project at any point, so an
@@ -197,14 +198,13 @@ drive of your user cache directory that holds no part of your project. A
 very deep project path can make the copy's path longer than Windows allows a
 working directory (260 characters), and `cargo add` then fails with exit `2`,
 the project unchanged. If
-`Cargo.lock` or a `Cargo.toml` changes while cargo runs, whether cargo wrote it
-or another program did, ossprey moves what it found aside to
-`Cargo.lock.ossprey-found-<n>` (or the `Cargo.toml` equivalent), puts back what
-was there before, and exits `2`. A link at one of these files is followed only
-when it was there before cargo ran; one that appeared meanwhile is itself moved
-aside and the old file put back as a file. If the found file cannot be moved
-aside, the old file is still put back and the message says the found one was
-not kept.
+`Cargo.lock` or a `Cargo.toml` changes while cargo runs, ossprey moves what it
+found aside to `Cargo.lock.ossprey-found-<n>` (or the `Cargo.toml`
+equivalent), puts back what was there before, and exits `2`. A link at one of
+these files is followed only when it was there before cargo ran; one that
+appeared meanwhile is itself moved aside and the old file put back as a file.
+If the found file cannot be moved aside, the old file is still put back and
+the message says the found one was not kept.
 
 `cargo install` compiles the crate and runs its build scripts straight away, so
 the crates it names are checked first, and a block means cargo never starts.
@@ -251,11 +251,11 @@ or either or `-V`/`--version` before it.
 A rustup toolchain (`cargo +nightly add serde`) and cargo's options before the
 subcommand (`--config`, `-Z`, `--color`, `-C`) are understood, and so are short
 options grouped as cargo groups them (`-qF pcre2` names no crate `pcre2`).
-In passive mode nothing is checked in front of cargo, at any version: `cargo
-add` and the others run and the `Cargo.lock` they leave is then posted, even
-when cargo failed, and `cargo install` posts its crates alongside the build. A
-lock that a `resolver.lockfile-path` may have moved, or a cargo script's, is
-not posted, and a warning line says so.
+In passive mode nothing is checked in front of cargo: `cargo add` and the
+others run and the `Cargo.lock` they leave is then posted, even when cargo
+failed, and `cargo install` posts its crates alongside the build. A lock that
+a `resolver.lockfile-path` may have moved, or a cargo script's, is not posted,
+and a warning line says so.
 
 ## What is not checked
 

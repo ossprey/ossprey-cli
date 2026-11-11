@@ -264,17 +264,13 @@ func cargoReleases(ctx context.Context, specs []check.Spec) ([]check.Spec, error
 	return out, nil
 }
 
-// checkCargoFirst resolves a cargo verb that only locks into a scratch Cargo.lock, checks that, and writes it to the project only when clean, so nothing unchecked reaches the project at any point.
-func checkCargoFirst(ctx context.Context, m *Manager, opts Options) error {
+// checkCargoFirst resolves a cargo verb that only locks into a scratch Cargo.lock, checks that, and writes it to the project only when clean, so nothing unchecked reaches the project at any point; version is the cargo -V line the floor read.
+func checkCargoFirst(ctx context.Context, m *Manager, opts Options, version string) error {
 	args := opts.Args
 	verb := verbIndex("cargo", args)
 	// Named by its verb alone in what ossprey prints, since a --config value may hold a credential.
 	command := m.Bin + " " + args[verb]
 	flushWarnings(ctx)
-	version, err := cargoVersionGate(ctx, command, args)
-	if err != nil {
-		return err
-	}
 	rest := cargoSplitShorts(args[verb+1:], cargoResolveShorts)
 	// Even a -b an option might have taken refuses, since misreading it costs only a refusal.
 	if args[verb] == "update" && cargoHas(rest, "-b", "--breaking") {
@@ -432,16 +428,16 @@ func cargoFailedOnItsWorkspace(command string, runErr, wsErr error) bool {
 	return true
 }
 
-// cargoVersionGate refuses a cargo that may ignore resolver.lockfile-path and write the project's lock itself, and returns the version line it read.
-func cargoVersionGate(ctx context.Context, command string, args []string) (string, error) {
+// cargoBelowFloor reads the version line of the cargo args runs, and says why it is below ossprey's floor of cargo 1.97, or "" when it is not.
+func cargoBelowFloor(ctx context.Context, args []string) (line, why string) {
 	line, err := cargoVersionFn(ctx, "", args)
 	if err != nil {
-		return "", fmt.Errorf("did not run `%s`: could not read cargo's version (%v)", command, err)
+		return "", fmt.Sprintf("could not read cargo's version (%v)", err)
 	}
 	if !cargoRedirects(line) {
-		return "", fmt.Errorf("did not run `%s`: ossprey needs cargo 1.97 or later to check it before it changes the project, and found `%s`; upgrade cargo (`rustup update`)", command, line)
+		return line, fmt.Sprintf("ossprey needs cargo 1.97 or later, and found `%s`; upgrade cargo (`rustup update`)", line)
 	}
-	return line, nil
+	return line, ""
 }
 
 // cargoVersion runs `cargo -V` in dir ("" for ours), after rustup's +toolchain alone, since -C makes a stable cargo fail and no other option changes the answer (verified).
@@ -468,7 +464,7 @@ func cargoVersion(ctx context.Context, dir string, args []string) (string, error
 // cargoVersionLine is `cargo X.Y.Z[-pre] (hash date)` as every cargo -V prints it.
 var cargoVersionLine = regexp.MustCompile(`^cargo (\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.-]+)?(\s|$)`)
 
-// cargoRedirects reports whether the cargo printing line is 1.97.0 or later in semver order, the first to honour resolver.lockfile-path: 1.97.0-nightly ignored it, so a pre-release ranks below its release (verified).
+// cargoRedirects reports whether the cargo printing line is 1.97.0 or later in semver order, a pre-release below its release, since 1.97.0 first honours resolver.lockfile-path.
 func cargoRedirects(line string) bool {
 	m := cargoVersionLine.FindStringSubmatch(line)
 	if m == nil {
@@ -482,13 +478,8 @@ func cargoRedirects(line string) bool {
 		}
 		v[i] = n
 	}
-	switch c := slices.Compare(v, []int{1, 97, 0}); {
-	case c > 0:
-		return true
-	case c == 0:
-		return m[4] == ""
-	}
-	return false
+	c := slices.Compare(v, []int{1, 97, 0})
+	return c > 0 || c == 0 && m[4] == ""
 }
 
 // resolveCargoLock runs args with the lock redirected to a scratch copy of the project's, and returns what cargo locked there.
@@ -512,7 +503,7 @@ func resolveCargoLock(ctx context.Context, args []string, ws cargoWorkspace, bef
 	return []cargoFile{locked}, runErr, nil
 }
 
-// resolveCargoAdd runs cargo add in a mirror of the workspace, with the cargo whose version line the gate read, and returns the lock and manifests it left there, in before's order.
+// resolveCargoAdd runs cargo add in a mirror of the workspace, with the cargo whose version line the floor read, and returns the lock and manifests it left there, in before's order.
 func resolveCargoAdd(ctx context.Context, args []string, ws cargoWorkspace, before []cargoFile, version string) (after []cargoFile, runErr, err error) {
 	ctx, release := holdCargoSignals(ctx)
 	defer release()
@@ -921,7 +912,7 @@ func cargoTripwire(command string, before []cargoFile) error {
 	if len(changed) == 0 {
 		return nil
 	}
-	msg := fmt.Sprintf("%s changed while `%s` ran, by a cargo ignoring the scratch copy ossprey gave it or by another program, so it was put back unchecked", strings.Join(changed, ", "), command)
+	msg := fmt.Sprintf("%s changed while `%s` ran, so it was put back unchecked", strings.Join(changed, ", "), command)
 	if len(kept) > 0 {
 		msg += "; what was found is kept in " + strings.Join(kept, ", ")
 	}

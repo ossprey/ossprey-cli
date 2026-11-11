@@ -262,7 +262,7 @@ func swap(t *testing.T, exec func(context.Context, string, []string) error, chk 
 	origCheck := checkFn
 	origScanProject := scanProjectFn
 	origExpand := expandFn
-	origCargoRelease := cargoReleaseFn
+	origCargoRelease, origCargoVersion := cargoReleaseFn, cargoVersionFn
 	execFn = exec
 	handoffFn = exec
 	checkFn = chk
@@ -274,13 +274,14 @@ func swap(t *testing.T, exec func(context.Context, string, []string) error, chk 
 		return nil, nil
 	}
 	cargoReleaseFn = stubCargoReleases("")
+	cargoVersionFn = func(context.Context, string, []string) (string, error) { return cargo199, nil }
 	t.Cleanup(func() {
 		execFn = origExec
 		handoffFn = origHandoff
 		checkFn = origCheck
 		scanProjectFn = origScanProject
 		expandFn = origExpand
-		cargoReleaseFn = origCargoRelease
+		cargoReleaseFn, cargoVersionFn = origCargoRelease, origCargoVersion
 	})
 }
 

@@ -571,13 +571,13 @@ func TestCargoLockedFailureNamesTheProjectLock(t *testing.T) {
 	}
 }
 
-// A cargo older than 1.97 ignores the redirect and writes the project's lock (verified with 1.96.0 and 1.80.0), so it never runs (OSS-2553).
+// Below ossprey's floor of cargo 1.97 every command it checks is refused before cargo runs (OSS-2553).
 func TestCargoOlderThan197IsRefused(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the fake cargo is a shell script")
 	}
 	bin := t.TempDir()
-	// Only +old is 1.96.0, so a probe that dropped the toolchain would pass the gate and run it (verified with cargo 1.96.0).
+	// Only +old is 1.96.0, so a probe that dropped the toolchain would pass the floor and run it.
 	fake := "#!/bin/sh\nfor a; do [ \"$a\" = -V ] && { [ \"$1\" = +old ] && echo 'cargo 1.96.0 (30a34c682 2026-05-25)' || echo 'cargo 1.99.1 (5f94df478 2026-08-27)'; exit 0; }; done\necho \"$@\" >> \"$(dirname \"$0\")/ran\"\n"
 	if err := os.WriteFile(filepath.Join(bin, "cargo"), []byte(fake), 0o755); err != nil {
 		t.Fatal(err)
@@ -591,7 +591,7 @@ func TestCargoOlderThan197IsRefused(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, args := range [][]string{{"add", "itoa"}, {"update"}, {"generate-lockfile"}, {"fetch"}, {"add", "--dry-run", "itoa"}} {
+	for _, args := range [][]string{{"add", "itoa"}, {"update"}, {"generate-lockfile"}, {"fetch"}, {"add", "--dry-run", "itoa"}, {"install", "ripgrep"}} {
 		res := runForwardEnv(t, dir, env, binPath, append([]string{"cargo", "+old"}, args...)...)
 		if res.exitCode != 2 || !strings.Contains(res.stderr, "ossprey needs cargo 1.97 or later") || !strings.Contains(res.stderr, "cargo 1.96.0 (30a34c682 2026-05-25)") {
 			t.Errorf("cargo +old %v: exit %d, want 2 and the refusal\nstderr: %s", args, res.exitCode, res.stderr)

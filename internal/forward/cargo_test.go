@@ -431,8 +431,9 @@ func TestCargoFlagTablesMatchCargo(t *testing.T) {
 const memberManifest = "[package]\nname = \"a\"\nversion = \"0.1.0\"\n"
 
 const cargo199 = "cargo 1.99.1 (5f94df478 2026-08-27)"
+const cargo196 = "cargo 1.96.0 (30a34c682 2026-05-25)"
 
-// cargoProject is a workspace with one member and no lock yet, the working directory, and what the forwarder finds for it; cargo is 1.99.1 and must not run unless the test says how.
+// cargoProject is a workspace with one member and no lock yet, the working directory, and what the forwarder finds for it; cargo must not run unless the test says how.
 func cargoProject(t *testing.T) (string, cargoWorkspace) {
 	t.Helper()
 	root, err := filepath.EvalSymlinks(t.TempDir())
@@ -458,10 +459,9 @@ func cargoProject(t *testing.T) (string, cargoWorkspace) {
 		Manifests: []string{filepath.Join(root, "Cargo.toml"), filepath.Join(root, "a", "Cargo.toml")},
 		ConfigDir: root,
 	}
-	oldWS, oldVersion, oldMeta, oldRun, oldCommit, oldErr := cargoWorkspaceFn, cargoVersionFn, cargoMetadataFn, cargoRunFn, commitFn, cargoErrOut
+	oldWS, oldMeta, oldRun, oldCommit, oldErr := cargoWorkspaceFn, cargoMetadataFn, cargoRunFn, commitFn, cargoErrOut
 	cargoErrOut = &bytes.Buffer{}
 	cargoWorkspaceFn = func(context.Context, []string) (cargoWorkspace, error) { return ws, nil }
-	cargoVersionFn = func(context.Context, string, []string) (string, error) { return cargo199, nil }
 	// The mirror holds the workspace the project has.
 	cargoMetadataFn = func(ctx context.Context, dir string, args []string, _ string) (cargoWorkspace, error) {
 		ws, err := cargoWorkspaceFn(ctx, args)
@@ -472,7 +472,7 @@ func cargoProject(t *testing.T) (string, cargoWorkspace) {
 		return nil
 	}
 	t.Cleanup(func() {
-		cargoWorkspaceFn, cargoVersionFn, cargoMetadataFn, cargoRunFn, commitFn, cargoErrOut = oldWS, oldVersion, oldMeta, oldRun, oldCommit, oldErr
+		cargoWorkspaceFn, cargoMetadataFn, cargoRunFn, commitFn, cargoErrOut = oldWS, oldMeta, oldRun, oldCommit, oldErr
 	})
 	return root, ws
 }
@@ -516,12 +516,12 @@ const evilLock = "version = 4\n\n[[package]]\nname = \"evil\"\nversion = \"1.0.0
 
 const addedEvil = "\n[dependencies]\nevil = \"1\"\n"
 
-// fakeCargo is a cargo 1.97 that locks lock where the last --config resolver.lockfile-path, else CARGO_RESOLVER_LOCKFILE_PATH, else its root says, and for add appends addedEvil to the member manifest under its working directory.
+// fakeCargo is a cargo that locks lock where the last --config resolver.lockfile-path, else CARGO_RESOLVER_LOCKFILE_PATH, else its root says, and for add appends addedEvil to the member manifest under its working directory.
 type fakeCargo struct {
 	t    *testing.T
 	root string
 	lock string
-	// ignore writes the lock at root whatever points it elsewhere, as cargo before 1.97 does.
+	// ignore writes the lock at root whatever points it elsewhere, as another program might.
 	ignore bool
 	err    error
 	runs   []fakeRun
@@ -560,7 +560,7 @@ func swapCargo(t *testing.T, f *fakeCargo) {
 	t.Cleanup(func() { cargoRunFn = old })
 }
 
-// redirectedLock is where cargo 1.97 writes the lock for env and args: the last --config's resolver.lockfile-path, else the variable, else "".
+// redirectedLock is where cargo writes the lock for env and args: the last --config's resolver.lockfile-path, else the variable, else "".
 func redirectedLock(env, args []string) string {
 	at := ""
 	for _, c := range cargoConfigArgs(args) {
@@ -653,7 +653,7 @@ func projectState(t *testing.T, root string) map[string]string {
 	return got
 }
 
-// cargo before 1.97, and 1.97.0's pre-releases, ignore resolver.lockfile-path and write the project's lock (verified with 1.96.0, 1.80.0 and 1.97.0-nightly), so semver order decides, a pre-release below its release.
+// ossprey's floor is cargo 1.97.0 in semver order, a pre-release below its release.
 func TestCargoRedirects(t *testing.T) {
 	for _, tc := range []struct {
 		line string
@@ -668,7 +668,6 @@ func TestCargoRedirects(t *testing.T) {
 		{"cargo 1.97.0-beta.3 (31bcf52c8 2026-05-28)", false},
 		{"cargo 1.97.0-nightly (eb94155a9 2026-04-09)", false},
 		{"cargo 1.96.0 (30a34c682 2026-05-25)", false},
-		{"cargo 1.80.0 (376290515 2024-07-16)", false},
 		{"cargo 1.97", false},
 		{"cargo 1.970.0x", false},
 		{"rustc 1.99.1", false},
@@ -690,22 +689,17 @@ func TestRunCargo_RefusesBeforeCargoRuns(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	below := func(*testing.T, string, cargoWorkspace) {
+		cargoVersionFn = func(context.Context, string, []string) (string, error) { return cargo196, nil }
+	}
 	for _, tc := range []struct {
 		name    string
 		args    string
 		prepare func(t *testing.T, root string, ws cargoWorkspace)
 		want    string
 	}{
-		{"cargo 1.96.0", "update", func(*testing.T, string, cargoWorkspace) {
-			cargoVersionFn = func(context.Context, string, []string) (string, error) {
-				return "cargo 1.96.0 (30a34c682 2026-05-25)", nil
-			}
-		}, "ossprey needs cargo 1.97 or later to check it before it changes the project, and found `cargo 1.96.0 (30a34c682 2026-05-25)`"},
-		{"cargo 1.80.0 on add --dry-run", "add --dry-run evil", func(*testing.T, string, cargoWorkspace) {
-			cargoVersionFn = func(context.Context, string, []string) (string, error) {
-				return "cargo 1.80.0 (376290515 2024-07-16)", nil
-			}
-		}, "ossprey needs cargo 1.97 or later"},
+		{"cargo 1.96.0", "update", below, "did not run `cargo update`: ossprey needs cargo 1.97 or later, and found `cargo 1.96.0 (30a34c682 2026-05-25)`"},
+		{"cargo 1.96.0 on install", "install ripgrep", below, "did not run `cargo install`: ossprey needs cargo 1.97 or later"},
 		{"no version", "add evil", func(*testing.T, string, cargoWorkspace) {
 			cargoVersionFn = func(context.Context, string, []string) (string, error) { return "", errors.New("exit status 1") }
 		}, "could not read cargo's version (exit status 1)"},
@@ -790,11 +784,7 @@ func TestRunCargo_RefusesBeforeCargoRuns(t *testing.T) {
 			}
 		}, "(cargo metadata fails in ossprey's copy of the workspace with error: current package believes it's in a workspace when it's not: workspace: /c2/Cargo.toml; either a Cargo.toml names"},
 		// Every other refusal names only the verb too.
-		{"cargo 1.96.0 after a secret --config", `--config http.proxy="http://user:secret@proxy.example:3128" update`, func(*testing.T, string, cargoWorkspace) {
-			cargoVersionFn = func(context.Context, string, []string) (string, error) {
-				return "cargo 1.96.0 (30a34c682 2026-05-25)", nil
-			}
-		}, "did not run `cargo update`: ossprey needs cargo 1.97 or later"},
+		{"cargo 1.96.0 after a secret --config", `--config http.proxy="http://user:secret@proxy.example:3128" update`, below, "did not run `cargo update`: ossprey needs cargo 1.97 or later"},
 		{"no workspace after a secret --config", `fetch --config http.proxy="http://user:secret@proxy.example:3128"`, func(*testing.T, string, cargoWorkspace) {
 			cargoWorkspaceFn = func(context.Context, []string) (cargoWorkspace, error) {
 				return cargoWorkspace{}, errors.New("cargo metadata: error: could not find `Cargo.toml` in `/empty` or any parent directory")
@@ -818,14 +808,14 @@ func TestRunCargo_RefusesBeforeCargoRuns(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			root, ws := cargoProject(t)
 			writeFile(t, ws.Lock, "version = 4\n# before\n")
-			if tc.prepare != nil {
-				tc.prepare(t, root, ws)
-			}
-			before := projectState(t, root)
 			swap(t, func(_ context.Context, _ string, args []string) error {
 				t.Errorf("cargo %v ran", args)
 				return nil
 			}, cleanSBOM)
+			if tc.prepare != nil {
+				tc.prepare(t, root, ws)
+			}
+			before := projectState(t, root)
 			out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: strings.Fields(tc.args)})
 			if err == nil || !strings.Contains(err.Error(), tc.want) || strings.Contains(err.Error(), "secret") || errors.Is(err, ErrBlocked) {
 				t.Errorf("Run = %v, want an error naming %q and no credential", err, tc.want)
@@ -1332,7 +1322,7 @@ func TestRunCargo_TripwirePutsBackAndFails(t *testing.T) {
 				t.Fatalf("kept %v, want one file holding what was found", kept)
 			}
 			// Another program may have written it, so what was found is kept beside it.
-			if want := "Cargo.lock changed while `cargo update` ran, by a cargo ignoring the scratch copy ossprey gave it or by another program, so it was put back unchecked; what was found is kept in " + filepath.Base(kept[0]); err == nil || err.Error() != want || out != "" {
+			if want := "Cargo.lock changed while `cargo update` ran, so it was put back unchecked; what was found is kept in " + filepath.Base(kept[0]); err == nil || err.Error() != want || out != "" {
 				t.Errorf("Run = %v, output %q; want %q", err, out, want)
 			}
 			before[kept[0]] = evilLock
@@ -1398,7 +1388,7 @@ func TestRunCargo_TripwirePutsBackWhenTheFoundLockCannotBeKept(t *testing.T) {
 			swapCargo(t, &fakeCargo{t: t, root: root, lock: evilLock, ignore: true})
 			swap(t, nil, cleanSBOM)
 			out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"update"}})
-			if want := "Cargo.lock changed while `cargo update` ran, by a cargo ignoring the scratch copy ossprey gave it or by another program, so it was put back unchecked; what was found could not be kept: Cargo.lock (denied)"; err == nil || err.Error() != want || out != "" {
+			if want := "Cargo.lock changed while `cargo update` ran, so it was put back unchecked; what was found could not be kept: Cargo.lock (denied)"; err == nil || err.Error() != want || out != "" {
 				t.Errorf("Run = %v, output %q; want %q", err, out, want)
 			}
 			if !reflect.DeepEqual(projectState(t, root), before) {
@@ -2056,10 +2046,6 @@ func TestRunCargoAdd_Passive(t *testing.T) {
 		order = append(order, "workspace")
 		return inner(ctx, args)
 	}
-	cargoVersionFn = func(context.Context, string, []string) (string, error) {
-		t.Error("passive asks no version")
-		return "", nil
-	}
 	swap(t, func(ctx context.Context, bin string, args []string) error {
 		order = append(order, "cargo")
 		writeFile(t, filepath.Join(root, "a", "Cargo.toml"), memberManifest+addedEvil)
@@ -2591,7 +2577,7 @@ func TestRunCargoInstall_Passive(t *testing.T) {
 	}
 }
 
-// Every other cargo command reaches cargo untouched, with no lookup at all.
+// Every other cargo command reaches cargo untouched, with no lookup at all, as does a passive one below cargo 1.97.
 func TestRunCargoPassesEverythingElseThrough(t *testing.T) {
 	old := cargoWorkspaceFn
 	cargoWorkspaceFn = func(context.Context, []string) (cargoWorkspace, error) {
@@ -2610,6 +2596,14 @@ func TestRunCargoPassesEverythingElseThrough(t *testing.T) {
 		}
 		if !ex.called || !reflect.DeepEqual(ex.args, args) {
 			t.Errorf("cargo %v: forwarded %v (called %v)", args, ex.args, ex.called)
+		}
+	}
+	for _, args := range [][]string{{"install", "ripgrep"}, {"add", "serde"}, {"update"}, {"generate-lockfile"}, {"fetch"}} {
+		ex := &stubExec{}
+		swap(t, ex.fn, nil)
+		cargoVersionFn = func(context.Context, string, []string) (string, error) { return cargo196, nil }
+		if err := Run(context.Background(), Options{Bin: "cargo", Args: args, Passive: true}); err != nil || !slices.Equal(ex.args, args) {
+			t.Errorf("passive cargo %v: Run = %v, forwarded %v; want it forwarded unchanged", args, err, ex.args)
 		}
 	}
 }
