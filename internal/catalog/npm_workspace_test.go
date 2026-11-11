@@ -6,6 +6,15 @@ import (
 	"testing"
 )
 
+// treeLock is a root lock with a locked tree: a root-only lock covers no
+// workspace member.
+const (
+	treeYarnLock = "# yarn lockfile v1\n\nleft-pad@^1.3.0:\n  version \"1.3.0\"\n"
+	treePnpmLock = "lockfileVersion: '9.0'\n\npackages:\n  left-pad@1.3.0:\n    resolution: {integrity: sha512-x}\n"
+)
+
+const treeLock = `{"lockfileVersion":3,"packages":{"":{},"node_modules/left-pad":{"version":"1.3.0","resolved":"https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"}}}`
+
 func TestMatchesWorkspaceGlobs(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -114,7 +123,7 @@ func TestIsWorkspaceMember(t *testing.T) {
 			name: "npm workspace member under root lock",
 			files: map[string]string{
 				"package.json":            `{"workspaces":["packages/*"]}`,
-				"package-lock.json":       `{}`,
+				"package-lock.json":       treeLock,
 				"packages/a/package.json": `{"name":"a"}`,
 			},
 			dir:  "packages/a",
@@ -124,7 +133,7 @@ func TestIsWorkspaceMember(t *testing.T) {
 			name: "non-member under the same root lock still resolves",
 			files: map[string]string{
 				"package.json":               `{"workspaces":["packages/*"]}`,
-				"package-lock.json":          `{}`,
+				"package-lock.json":          treeLock,
 				"examples/demo/package.json": `{"name":"demo"}`,
 			},
 			dir:  "examples/demo",
@@ -143,7 +152,7 @@ func TestIsWorkspaceMember(t *testing.T) {
 			name: "yarn root lock counts",
 			files: map[string]string{
 				"package.json":            `{"workspaces":["packages/*"]}`,
-				"yarn.lock":               "",
+				"yarn.lock":               treeYarnLock,
 				"packages/a/package.json": `{"name":"a"}`,
 			},
 			dir:  "packages/a",
@@ -153,7 +162,7 @@ func TestIsWorkspaceMember(t *testing.T) {
 			name: "pnpm workspace member",
 			files: map[string]string{
 				"package.json":            `{"name":"root"}`,
-				"pnpm-lock.yaml":          "",
+				"pnpm-lock.yaml":          treePnpmLock,
 				"pnpm-workspace.yaml":     "packages:\n  - packages/*\n",
 				"packages/a/package.json": `{"name":"a"}`,
 			},
@@ -164,7 +173,7 @@ func TestIsWorkspaceMember(t *testing.T) {
 			name: "pnpm yaml wins over package.json workspaces",
 			files: map[string]string{
 				"package.json":            `{"workspaces":["examples/*"]}`,
-				"pnpm-lock.yaml":          "",
+				"pnpm-lock.yaml":          treePnpmLock,
 				"pnpm-workspace.yaml":     "packages:\n  - packages/*\n",
 				"examples/x/package.json": `{"name":"x"}`,
 			},
@@ -175,7 +184,7 @@ func TestIsWorkspaceMember(t *testing.T) {
 			name: "pnpm yaml with no packages key claims nothing",
 			files: map[string]string{
 				"package.json":            `{"name":"root"}`,
-				"pnpm-lock.yaml":          "",
+				"pnpm-lock.yaml":          treePnpmLock,
 				"pnpm-workspace.yaml":     "# nothing\n",
 				"packages/a/package.json": `{"name":"a"}`,
 			},
@@ -186,7 +195,7 @@ func TestIsWorkspaceMember(t *testing.T) {
 			name: "excluded member resolves",
 			files: map[string]string{
 				"package.json":                `{"workspaces":["packages/*","!packages/turbo"]}`,
-				"package-lock.json":           `{}`,
+				"package-lock.json":           treeLock,
 				"packages/turbo/package.json": `{"name":"turbo"}`,
 			},
 			dir:  "packages/turbo",
@@ -196,7 +205,7 @@ func TestIsWorkspaceMember(t *testing.T) {
 			name: "root manifest is not its own member",
 			files: map[string]string{
 				"package.json":      `{"workspaces":["."]}`,
-				"package-lock.json": `{}`,
+				"package-lock.json": treeLock,
 			},
 			dir:  ".",
 			want: false,
@@ -206,7 +215,7 @@ func TestIsWorkspaceMember(t *testing.T) {
 			files: map[string]string{
 				"package.json":                `{"name":"outer"}`,
 				"sub/package.json":            `{"workspaces":["packages/*"]}`,
-				"sub/yarn.lock":               "",
+				"sub/yarn.lock":               treeYarnLock,
 				"sub/packages/a/package.json": `{"name":"a"}`,
 			},
 			dir:  "sub/packages/a",
@@ -232,7 +241,7 @@ func TestIsWorkspaceMemberStopsAtScanRoot(t *testing.T) {
 	outer := t.TempDir()
 	writeTree(t, outer, map[string]string{
 		"package.json":                  `{"workspaces":["inner/packages/*"]}`,
-		"package-lock.json":             `{}`,
+		"package-lock.json":             treeLock,
 		"inner/packages/a/package.json": `{"name":"a"}`,
 	})
 	root := filepath.Join(outer, "inner")

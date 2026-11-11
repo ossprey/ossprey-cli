@@ -1230,7 +1230,7 @@ func resolveWithPip(ctx context.Context, python, dir string, specs, flags []stri
 		return nil, err
 	}
 	defer os.RemoveAll(tmp)
-	args := append([]string{"--only-binary=:all:"}, flags...)
+	args := slices.Clone(flags) // runPipResolve sets --only-binary=:all:
 	for _, spec := range specs {
 		// A requirements file travels as one "-r <path>" spec, a line uv's
 		// input reads as it is; pip takes it as two arguments.

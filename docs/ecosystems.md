@@ -13,12 +13,75 @@ Python, JavaScript and Rust, via syft's static catalogers.
 Rust (crates.io) scanning is available on Teams and Enterprise plans.
 
 The CLI never installs your dependencies. It does run a resolver — `npm install
---package-lock-only` (in a temporary directory) or `uv pip compile` — when a
-project ships a manifest with no lockfile, purely to work out which versions an
-install would pull; nothing is installed and your project is not modified. When
-that resolver is missing from PATH or disabled, expect direct deps only —
-supply a lockfile for full transitive coverage. Rust has no resolver tier, so a
-crate with no `Cargo.lock` always catalogues direct dependencies only.
+--package-lock-only` (in a temporary directory), `uv pip compile`/`uv export`,
+or `pip install --dry-run` on a host with no uv — when a project ships a
+manifest with no lockfile, purely to work out which versions an install would
+pull; nothing is installed and your project is not modified. When that resolver
+is missing from PATH or disabled, expect direct deps only — supply a lockfile
+for full transitive coverage. Rust has no resolver tier, so a crate with no
+`Cargo.lock` always catalogues direct dependencies only.
+
+### A scan never runs package code
+
+Resolving a Python dependency that ships only a source distribution (no wheel
+for your platform) normally means running its build backend to read its
+metadata — code from the dependency tree being scanned for malware. The scan
+never does that:
+
+- npm runs with `--ignore-scripts`.
+- uv runs with `--no-build`.
+- pip runs with `--only-binary=:all:`, in isolated mode (`python -I`, so a
+  `pip.py` in your repository is never what runs), and is handed a copy of each
+  requirements file holding only registry requirements. A `--no-binary`
+  option, a local path, an editable (`-e`) or a direct URL (`name @ url`) is
+  left out, since pip would build it whatever the flags say, and so is any line
+  that names an environment variable (`${VAR}`), which pip would fill in from
+  the scanning machine. A requirements file that names its own index or
+  find-links location (`--index-url`, `--extra-index-url`, `--find-links`) is
+  not resolved by pip at all and is reported unresolved: a wheel there can
+  declare a dependency by URL on a source distribution, which pip builds even
+  under `--only-binary`. uv refuses such a dependency, so with uv installed the
+  file resolves. An include (`-r`, `-c`) outside the scanned directory is not
+  read by either resolver, and its manifest is reported unresolved.
+- uv is never handed a requirements file (or one it includes) or a
+  `pyproject.toml` dependency list (`[project]` dependencies and extras,
+  `[dependency-groups]`, or `[tool.uv]`'s dev, override and constraint lists)
+  that names `${VAR}`, which uv fills in the same way, nor a requirements file
+  including a URL (`-r https://…`), which uv would fetch and fill in; that
+  manifest is reported unresolved instead. The same holds when any
+  `pyproject.toml` uv reads beside it names `${VAR}`: a member of its uv
+  workspace, a `[tool.uv.sources]` path source, a `file:` reference, or a
+  local project a requirements file names (`./lib`, `-e ./lib`); a local
+  project outside the scanned directory is reported unresolved as well. Keep a private index's
+  credentials in pip's or uv's own configuration, `PIP_INDEX_URL` /
+  `UV_INDEX_URL`, keyring or `.netrc`, which a repository cannot write.
+- A `pyproject.toml` with `[dependency-groups]` or `[tool.uv]`
+  `dev-dependencies` and no lock beside it is reported unresolved: without
+  a `uv.lock` neither resolver reads those lists.
+- A legacy `setup.py` project is not resolved at all: that would run
+  `setup.py`. Its literal `install_requires` are still read.
+- A `pyproject.toml` whose dependencies are `dynamic`, or a poetry project with
+  no `poetry.lock`, would have to be built to learn them, so it is not resolved
+  either.
+- The resolvers do not see `OSSPREY_API_KEY`, `API_KEY`, `OSSPREY_MONITOR_ID` or
+  any other `OSSPREY_*` variable.
+
+A Rust crate with dependencies (git and path ones included) and no
+`Cargo.lock` where cargo keeps it (beside the crate, or at its workspace root
+for a member, whose own `Cargo.lock` cargo ignores) is unresolved too, as is a `package.json` whose
+`package-lock.json` or `npm-shrinkwrap.json` cannot be parsed when no npm is
+available to resolve it instead. A manifest whose `uv.lock`, `poetry.lock`
+or `pdm.lock` parses is covered by that lock even when nothing could resolve it,
+as is a member of a uv workspace whose root `uv.lock` parses.
+
+A manifest that cannot be resolved this way keeps its direct dependencies and
+is reported **unresolved**: a warning names it, the
+[`--report`](output.md#machine-readable-verdict---report) file lists it in
+`unresolved_manifests`, and [`--require-complete`](ci.md#requiring-complete-coverage)
+fails the scan over it. Commit a lockfile (`uv.lock`,
+`poetry.lock`) to cover its whole tree. A legacy `setup.py` stays unresolved
+until its dependencies move to a `[project]` table, and a requirements file,
+even fully pinned, needs uv or pip to resolve.
 
 A `Cargo.toml` range takes its version only from its own workspace's
 `Cargo.lock`, the one beside its workspace root (chosen as described below) or

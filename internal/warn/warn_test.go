@@ -244,3 +244,20 @@ func TestShortHeadlineIsUntouched(t *testing.T) {
 		t.Errorf("Drain() = %q, want %q", got, want)
 	}
 }
+
+func TestUnresolvedSurvivesDrain(t *testing.T) {
+	ctx := NewContext(context.Background(), false)
+	MarkUnresolved(ctx, "b/requirements.txt")
+	MarkUnresolved(ctx, "a/pyproject.toml")
+	MarkUnresolved(ctx, "b/requirements.txt")
+	if out := Drain(ctx); out != "" {
+		t.Errorf("marking printed something: %q", out)
+	}
+	got := Unresolved(ctx)
+	if len(got) != 2 || got[0] != "a/pyproject.toml" || got[1] != "b/requirements.txt" {
+		t.Errorf("Unresolved = %v", got)
+	}
+	if Unresolved(context.Background()) != nil {
+		t.Error("no collector should mean no list")
+	}
+}

@@ -17,6 +17,8 @@ import (
 	"github.com/anchore/syft/syft/artifact"
 	"github.com/anchore/syft/syft/file"
 	"github.com/anchore/syft/syft/pkg"
+
+	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
 // PipCataloger resolves transitive Python deps by running
@@ -54,28 +56,47 @@ func (c *PipCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]p
 	python, ok := findPython(ctx)
 	if !ok {
 		warnNoPythonResolver("no Python interpreter on PATH")
+		c.markAllUnresolved(ctx, resolver)
 		return nil, nil, nil
 	}
 	if v, ok := pipReportVersion(ctx, python); !ok {
 		warnNoPythonResolver(python + " has no usable pip")
+		c.markAllUnresolved(ctx, resolver)
 		return nil, nil, nil
 	} else if v.olderThan(pipMinimum) {
 		warnNoPythonResolver(fmt.Sprintf("pip %s is older than %s (needs --dry-run --report)", v, pipMinimum))
+		c.markAllUnresolved(ctx, resolver)
 		return nil, nil, nil
 	}
 
 	cache, err := os.MkdirTemp("", "ossprey-pip-cache-")
 	if err != nil {
-		return nil, nil, fmt.Errorf("pip cache: %w", err)
+		warn.Add(ctx, catalogerEntry("pip", fmt.Errorf("pip cache: %w", err)))
+		c.markAllUnresolved(ctx, resolver)
+		return nil, nil, nil
 	}
 	defer os.RemoveAll(cache)
 
-	// requirements.txt goes to pip as-is: pip honours the `-r` includes,
-	// index URLs and constraints declared inside it, exactly as an install would.
+	// requirements.txt goes to pip as a sanitized copy (pipSanitizer): its
+	// includes, index URLs and constraints are kept, and anything pip would
+	// build is left out and the manifest reported unresolved.
 	reqParse := func(absPath string, loc file.Location) ([]pkg.Package, error) {
-		return runPipResolve(ctx, python, cache, cache, filepath.Dir(absPath), []string{"-r", absPath}, loc)
+		scratch, err := os.MkdirTemp(cache, "req-")
+		if err != nil {
+			return nil, fmt.Errorf("pip %s: %w", absPath, err)
+		}
+		san := newPipSanitizer(ctx, scratch, c.root)
+		reqFile, err := san.file(absPath)
+		if err != nil {
+			return nil, fmt.Errorf("pip %s: %w", absPath, err)
+		}
+		c.leftOut(ctx, absPath, san.dropped)
+		if san.ownIndex {
+			return nil, fmt.Errorf("pip %s %w", absPath, errPipOwnIndex)
+		}
+		return runPipResolve(ctx, python, cache, cache, filepath.Dir(absPath), []string{"-r", reqFile}, loc)
 	}
-	reqs, err := catalogByGlob(ctx, resolver, c.root, requirementsGlob, "pip", reqParse)
+	reqs, err := resolveByGlob(ctx, resolver, c.root, requirementsGlob, "pip", nil, reqParse)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -85,22 +106,85 @@ func (c *PipCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]p
 	// project's metadata, which executes its PEP 517 backend (setup.py, hatch
 	// hooks) — code from the very tree we are scanning for malware.
 	projParse := func(absPath string, loc file.Location) ([]pkg.Package, error) {
-		specs, err := pyprojectRequirementSpecs(absPath)
-		if err != nil || len(specs) == 0 {
+		if err := pyprojectNeedsBuild(absPath); err != nil {
 			return nil, err
 		}
+		specs, err := pyprojectRequirementSpecs(absPath)
+		if err != nil {
+			return nil, err
+		}
+		var safe, dropped []string
+		for _, spec := range specs {
+			if req, ok := pipSafeRequirement(spec); ok {
+				safe = append(safe, req)
+			} else {
+				dropped = append(dropped, describeUnsafeRequirement(spec))
+			}
+		}
+		c.leftOut(ctx, absPath, dropped)
+		if pp, _ := readPyProject(absPath); pp != nil && dynamicDependencies(pp) {
+			c.leftOut(ctx, absPath, []string{"dynamic dependencies"})
+		}
+		groupsLeftOut(ctx, c.root, "pip", absPath)
+		if len(safe) == 0 {
+			return nil, nil
+		}
 		reqFile := filepath.Join(cache, "req-"+requirementsFileID(absPath)+".txt")
-		if err := os.WriteFile(reqFile, []byte(strings.Join(specs, "\n")+"\n"), 0o600); err != nil {
+		if err := os.WriteFile(reqFile, []byte(strings.Join(safe, "\n")+"\n"), 0o600); err != nil {
 			return nil, fmt.Errorf("pip %s: write requirements: %w", absPath, err)
 		}
 		return runPipResolve(ctx, python, cache, cache, filepath.Dir(absPath), []string{"-r", reqFile}, loc)
 	}
-	projs, err := catalogByGlob(ctx, resolver, c.root, "**/pyproject.toml", "pip", projParse)
+	projs, err := resolveByGlob(ctx, resolver, c.root, "**/pyproject.toml", "pip", pythonCovered(c.root), projParse)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	return append(reqs, projs...), nil, nil
+}
+
+// leftOut records requirements a manifest declares that pip was not asked to
+// resolve because resolving them builds code, and marks the manifest
+// unresolved: what they pull in is missing from the scan.
+func (c *PipCataloger) leftOut(ctx context.Context, manifest string, lines []string) {
+	if len(lines) == 0 {
+		return
+	}
+	if filepath.Base(manifest) != "pyproject.toml" || !pythonCovered(c.root)(manifest) {
+		markUnresolved(ctx, c.root, manifest)
+	}
+	// lines describe what was left out, never quote it (see
+	// describeUnsafeRequirement).
+	for _, l := range lines {
+		warn.Add(ctx, warn.Entry{
+			Class: "pip:needs-build",
+			One:   fmt.Sprintf("pip: %s: %s left out of resolution, since it could build code or change what resolves", manifest, l),
+			Many:  "pip: %d requirements or options left out of resolution, since they could build code or change what resolves (OSSPREY_VERBOSE=1 lists them)",
+			Item:  manifest + ": " + l,
+		})
+	}
+}
+
+// markAllUnresolved records every Python manifest pip would have resolved,
+// for a host with no usable pip.
+func (c *PipCataloger) markAllUnresolved(ctx context.Context, resolver file.Resolver) {
+	locs, _ := resolver.FilesByGlob(requirementsGlob)
+	projs, _ := resolver.FilesByGlob("**/pyproject.toml")
+	for _, loc := range projs {
+		p := hostPath(c.root, loc.RealPath)
+		if pythonCovered(c.root)(p) {
+			continue // syft reads the lock beside it, or the workspace root's
+		}
+		pp, _ := readPyProject(p)
+		if specs, _ := pyprojectRequirementSpecs(p); len(specs) > 0 || declaresUVDependencies(p) || pyprojectNeedsBuild(p) != nil || (pp != nil && dynamicDependencies(pp)) {
+			locs = append(locs, loc)
+		}
+	}
+	for _, loc := range locs {
+		if !isVendoredPath(loc.RealPath) {
+			markUnresolved(ctx, c.root, hostPath(c.root, loc.RealPath))
+		}
+	}
 }
 
 // pyprojectRequirementSpecs returns the PEP 508 requirement strings declared in
@@ -164,10 +248,17 @@ func requirementsFileID(path string) string {
 
 // runPipResolve resolves one manifest and parses pip's installation report.
 //
-// pip is invoked as `<python> -m pip`, never as the `pip` binary: `pip` may be
-// an ossprey shim (see internal/shim), and a shim would route this straight back
-// into `ossprey pip install`, which scans the project again — an unbounded
-// recursion. `python` is not a shimmed manager.
+// pip is invoked as `<python> -I -m pip`, never as the `pip` binary: `pip` may
+// be an ossprey shim (see internal/shim), and a shim would route this straight
+// back into `ossprey pip install`, which scans the project again — an unbounded
+// recursion. `python` is not a shimmed manager. -I (isolated mode) keeps the
+// working directory, which is the manifest's, off sys.path, so a pip.py
+// planted beside the manifest is not what `-m pip` runs; it also drops
+// PYTHON* variables and the user site directory.
+//
+// --only-binary=:all: means pip never builds an sdist to read its metadata. A
+// dependency with no wheel fails the manifest, which is then reported
+// unresolved. It is not enough alone: see pipSanitizer.
 //
 // reportDir receives the report; cacheDir is pip's cache, or "" to leave pip
 // on the user's own (the forwarder's choice, since the real install follows).
@@ -188,8 +279,9 @@ func runPipResolve(ctx context.Context, python, reportDir, cacheDir, dir string,
 	defer os.Remove(report)
 
 	args := append([]string{
-		"-m", "pip", "install",
+		"-I", "-m", "pip", "install",
 		"--dry-run",
+		"--only-binary=:all:",
 		// Without this pip omits anything already present in the ambient
 		// environment from the report, so the SBOM would silently depend on
 		// whatever the host happens to have installed.
@@ -202,7 +294,7 @@ func runPipResolve(ctx context.Context, python, reportDir, cacheDir, dir string,
 
 	cmd := exec.CommandContext(ctx, python, args...)
 	cmd.Dir = dir // relative -r includes and local paths resolve against the manifest
-	cmd.Env = append(os.Environ(),
+	cmd.Env = toolEnv(
 		// A user or image with require-virtualenv set refuses every pip
 		// invocation outside a venv, including one that installs nothing.
 		"PIP_REQUIRE_VIRTUALENV=0",
@@ -211,7 +303,7 @@ func runPipResolve(ctx context.Context, python, reportDir, cacheDir, dir string,
 	if cacheDir != "" {
 		cmd.Env = append(cmd.Env, "PIP_CACHE_DIR="+cacheDir)
 	}
-	cmd.WaitDelay = 5 * time.Second // the kill lands on pip, but Output still waits on pipes a PEP 517 build backend may hold
+	cmd.WaitDelay = 5 * time.Second // the kill lands on pip, but Output still waits on pipes a grandchild may hold
 
 	if _, err = cmd.Output(); err != nil {
 		if ctx.Err() != nil {
@@ -246,9 +338,9 @@ type pipReport struct {
 }
 
 // parsePipReport turns an installation report into packages, dropping anything
-// resolved from a local path. A `file:` URL is the project itself or a path
-// dependency (`-e ./libs/foo`) — the repo's own code, not a registry package,
-// so emitting it would only yield a spurious NOT_FOUND finding.
+// resolved from a local project directory. Such a `file:` URL is the project
+// itself or a path dependency (`-e ./libs/foo`) — the repo's own code. A local
+// wheel or sdist (find-links) is a dependency and is kept (`localProjectURL`).
 func parsePipReport(data []byte, loc file.Location) ([]pkg.Package, error) {
 	var report pipReport
 	if err := json.Unmarshal(data, &report); err != nil {
@@ -262,7 +354,7 @@ func parsePipReport(data []byte, loc file.Location) ([]pkg.Package, error) {
 		if name == "" || version == "" {
 			continue
 		}
-		if strings.HasPrefix(strings.ToLower(entry.DownloadInfo.URL), "file:") {
+		if localProjectURL(entry.DownloadInfo.URL) {
 			continue
 		}
 		key := name + "@" + version
@@ -296,7 +388,9 @@ func findPython(ctx context.Context) (string, bool) {
 			continue
 		}
 		probe, cancel := context.WithTimeout(ctx, 10*time.Second)
-		err = exec.CommandContext(probe, path, "-c", "pass").Run()
+		cmd := exec.CommandContext(probe, path, "-I", "-c", "pass")
+		cmd.Env = toolEnv()
+		err = cmd.Run()
 		cancel()
 		if err == nil {
 			return path, true
@@ -327,7 +421,9 @@ func pipReportVersion(ctx context.Context, python string) (pipVersion, bool) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	out, err := exec.CommandContext(ctx, python, "-m", "pip", "--version").Output()
+	cmd := exec.CommandContext(ctx, python, "-I", "-m", "pip", "--version")
+	cmd.Env = toolEnv() // -I: a pip.py in the working directory must not answer
+	out, err := cmd.Output()
 	if err != nil {
 		return pipVersion{}, false
 	}

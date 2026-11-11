@@ -29,18 +29,25 @@ func NewRequirementsCataloger(root, uv string) *RequirementsCataloger {
 func (c *RequirementsCataloger) Name() string { return "ossprey-requirements-cataloger" }
 
 func (c *RequirementsCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]pkg.Package, []artifact.Relationship, error) {
-	cache, err := os.MkdirTemp("", "ossprey-uv-cache-")
-	if err != nil {
-		return nil, nil, fmt.Errorf("uv cache: %w", err)
+	// A cache that cannot be made fails each manifest, so each is recorded
+	// unresolved rather than the whole cataloger erroring past the accounting.
+	cache, cacheErr := os.MkdirTemp("", "ossprey-uv-cache-")
+	if cacheErr == nil {
+		defer os.RemoveAll(cache)
 	}
-	defer os.RemoveAll(cache)
 
 	parse := func(absPath string, loc file.Location) ([]pkg.Package, error) {
 		dir := filepath.Dir(absPath)
-		args := []string{"pip", "compile", "--universal", "--no-progress", absPath}
-		return runUV(ctx, c.uv, cache, dir, args, loc)
+		if err := uvExpandsEnv(ctx, absPath, c.root); err != nil {
+			return nil, err
+		}
+		if cacheErr != nil {
+			return nil, fmt.Errorf("uv cache: %w", cacheErr)
+		}
+		args := []string{"pip", "compile", "--universal", "--no-progress", "--no-build", absPath}
+		return runUV(ctx, c.uv, cache, dir, c.root, absPath, args, loc)
 	}
-	out, err := catalogByGlob(ctx, resolver, c.root, requirementsGlob, "requirements", parse)
+	out, err := resolveByGlob(ctx, resolver, c.root, requirementsGlob, "requirements", nil, parse)
 	return out, nil, err
 }
 

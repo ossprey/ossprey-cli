@@ -322,3 +322,66 @@ func TestReportOmitsUnscannedWhenFullyCovered(t *testing.T) {
 		t.Errorf("unscanned should be omitted when zero: %s", blob)
 	}
 }
+
+func TestReportCoverage(t *testing.T) {
+	r := NewReport(ossbom.New(ossbom.Environment{}), severity.FailingFloor)
+	if r.Incomplete() != "" {
+		t.Errorf("fresh report incomplete: %q", r.Incomplete())
+	}
+	raw, _ := json.Marshal(r)
+	if strings.Contains(string(raw), "transitive") || strings.Contains(string(raw), "unresolved_manifests") {
+		t.Errorf("coverage keys present without SetCoverage (check's report): %s", raw)
+	}
+
+	r.SetCoverage(nil, false)
+	raw, _ = json.Marshal(r)
+	if !strings.Contains(string(raw), `"transitive":"complete"`) || !strings.Contains(string(raw), `"unresolved_manifests":[]`) {
+		t.Errorf("complete scan report: %s", raw)
+	}
+
+	r.SetCoverage([]string{"a/requirements.txt", "b/pyproject.toml", "c/setup.py", "d/package.json"}, false)
+	r.Unscanned, r.Components = 2, 5
+	if r.Transitive != TransitivePartial {
+		t.Errorf("transitive = %q", r.Transitive)
+	}
+	why := r.Incomplete()
+	for _, want := range []string{"4 manifest(s)", "a/requirements.txt", "and 1 more", "2 of 5 package(s) not scanned"} {
+		if !strings.Contains(why, want) {
+			t.Errorf("Incomplete() = %q, missing %q", why, want)
+		}
+	}
+	if len(r.UnresolvedManifests) != 4 {
+		t.Errorf("Incomplete truncated the report's own list: %v", r.UnresolvedManifests)
+	}
+
+	if strings.Contains(string(raw), "deadline_reached") {
+		t.Errorf("deadline_reached present when false: %s", raw)
+	}
+	d := NewReport(ossbom.New(ossbom.Environment{}), severity.FailingFloor)
+	d.SetCoverage(nil, true)
+	if d.Transitive != TransitivePartial || !strings.Contains(d.Incomplete(), "deadline") {
+		t.Errorf("a catalogue stopped at its deadline reads as complete: %q, %q", d.Transitive, d.Incomplete())
+	}
+
+	s := SkippedReport(ossbom.New(ossbom.Environment{}), severity.FailingFloor, "quota", "")
+	if !strings.Contains(s.Incomplete(), "skipped") {
+		t.Errorf("a skipped scan is not complete: %q", s.Incomplete())
+	}
+}
+
+// A manifest path is repository content: the human explanation quotes it, so
+// a newline or an escape cannot forge a log line, while the JSON keeps it raw.
+func TestIncompleteQuotesManifestPaths(t *testing.T) {
+	evil := "a\nerror: forged\x1b[2J/requirements.txt"
+	r := NewReport(ossbom.New(ossbom.Environment{}), severity.FailingFloor)
+	r.SetCoverage([]string{evil}, false)
+	why := r.Incomplete()
+	if strings.ContainsAny(why, "\n\x1b") {
+		t.Errorf("Incomplete() carries a raw control character: %q", why)
+	}
+	raw, _ := json.Marshal(r)
+	var back Report
+	if err := json.Unmarshal(raw, &back); err != nil || back.UnresolvedManifests[0] != evil {
+		t.Errorf("the report's own path changed: %v %q", err, back.UnresolvedManifests)
+	}
+}

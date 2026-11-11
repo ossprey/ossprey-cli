@@ -613,7 +613,7 @@ func TestNpmResolveStandsDownOnlyForWorkspaceMembers(t *testing.T) {
 	root := t.TempDir()
 	writeTree(t, root, map[string]string{
 		"package.json":                 `{"name":"root-app","workspaces":{"packages":["packages/*","!packages/legacy"],"nohoist":["**/x"]}}`,
-		"yarn.lock":                    "",
+		"yarn.lock":                    treeYarnLock,
 		"packages/member/package.json": `{"name":"member-pkg"}`,
 		"packages/legacy/package.json": `{"name":"legacy-pkg"}`,
 		"examples/demo/package.json":   `{"name":"demo-pkg"}`,
@@ -697,7 +697,7 @@ func TestPipCatalogerNoResolverReasons(t *testing.T) {
 	}{
 		{"no interpreter", nil, "no Python interpreter on PATH"},
 		{"interpreter without pip", map[string]string{
-			"python3": "#!/bin/sh\n[ \"$1\" = \"-c\" ] && exit 0\necho 'No module named pip' >&2\nexit 1\n",
+			"python3": "#!/bin/sh\n[ \"$1\" = \"-I\" ] && shift\n[ \"$1\" = \"-c\" ] && exit 0\necho 'No module named pip' >&2\nexit 1\n",
 		}, "has no usable pip"},
 	}
 	for _, tc := range cases {
@@ -743,7 +743,7 @@ func TestPipCatalogerNoResolverReasons(t *testing.T) {
 func TestPipCatalogerInvocationIsSafe(t *testing.T) {
 	argLog := filepath.Join(t.TempDir(), "args")
 	pipRan := filepath.Join(t.TempDir(), "pip-ran")
-	python := strings.Replace(fakePythonScript, "report=\"\"\n", "echo \"$@\" >> "+argLog+"\nreport=\"\"\n", 1)
+	python := strings.Replace(fakePythonScript, "#!/bin/sh\n", "#!/bin/sh\necho \"$@\" >> "+argLog+"\n", 1)
 	pipCatalogEnv(t, map[string]string{
 		"python3": python,
 		"pip":     "#!/bin/sh\necho ran >> " + pipRan + "\nexit 0\n",
@@ -766,12 +766,21 @@ func TestPipCatalogerInvocationIsSafe(t *testing.T) {
 	}
 	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
 		args := strings.Fields(line)
-		if len(args) < 3 || args[0] != "-m" || args[1] != "pip" || args[2] != "install" {
+		// Every interpreter call is isolated, the probes included: the
+		// working directory must never be on sys.path.
+		if len(args) == 0 || args[0] != "-I" {
+			t.Errorf("python run without -I: %q", line)
+			continue
+		}
+		if slices.Equal(args, []string{"-I", "-c", "pass"}) || slices.Equal(args, []string{"-I", "-m", "pip", "--version"}) {
+			continue
+		}
+		if len(args) < 4 || args[1] != "-m" || args[2] != "pip" || args[3] != "install" {
 			t.Errorf("unexpected invocation %q", line)
 			continue
 		}
-		if !slices.Contains(args, "--dry-run") || !slices.Contains(args, "--ignore-installed") {
-			t.Errorf("resolve without --dry-run/--ignore-installed: %q", line)
+		if !slices.Contains(args, "--dry-run") || !slices.Contains(args, "--ignore-installed") || !slices.Contains(args, "--only-binary=:all:") {
+			t.Errorf("resolve without --dry-run/--ignore-installed/--only-binary=:all:: %q", line)
 		}
 		i := slices.Index(args, "-r")
 		if i < 0 || i+1 >= len(args) {

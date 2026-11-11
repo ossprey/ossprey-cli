@@ -3,6 +3,7 @@ package catalog
 import (
 	"bufio"
 	"bytes"
+	"fmt"
 	"os"
 	"regexp"
 	"strings"
@@ -131,10 +132,22 @@ func pinnedRequirements(data []byte) map[string][]string {
 
 // requirementLines splits a requirements file into logical lines: comments
 // stripped and backslash continuations joined.
+// The data is already in memory, so no line is too long to read.
 func requirementLines(data []byte) []string {
+	lines, _ := splitRequirementLines(data, len(data)+1)
+	return lines
+}
+
+// scanRequirementLines is requirementLines, failing on a line over 1 MiB
+// rather than stopping at it: what follows would go unread.
+func scanRequirementLines(data []byte) ([]string, error) {
+	return splitRequirementLines(data, 1024*1024)
+}
+
+func splitRequirementLines(data []byte, maxLine int) ([]string, error) {
 	var lines []string
 	sc := bufio.NewScanner(bytes.NewReader(data))
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	sc.Buffer(make([]byte, 0, 64*1024), max(maxLine, 64*1024))
 	var continued string
 	for sc.Scan() {
 		line := stripRequirementComment(strings.TrimRight(sc.Text(), "\r"))
@@ -146,7 +159,10 @@ func requirementLines(data []byte) []string {
 		line, continued = continued+line, ""
 		lines = append(lines, line)
 	}
-	return lines
+	if err := sc.Err(); err != nil {
+		return lines, fmt.Errorf("requirements line: %w", err)
+	}
+	return lines, nil
 }
 
 // parsePinnedRequirement extracts the canonical name and version from one

@@ -30,6 +30,9 @@ type report struct {
 		Name     string `json:"name"`
 		Severity string `json:"severity"`
 	} `json:"informational"`
+	Unscanned           int       `json:"unscanned"`
+	Transitive          string    `json:"transitive"`
+	UnresolvedManifests *[]string `json:"unresolved_manifests"`
 }
 
 func readReport(t *testing.T, path string) report {
@@ -96,6 +99,15 @@ func TestReportOnClean(t *testing.T) {
 	}
 	if len(r.Findings) != 0 {
 		t.Errorf("findings: got %d, want 0", len(r.Findings))
+	}
+	// A scan report always states its coverage.
+	if r.Transitive != "complete" && r.Transitive != "partial" {
+		t.Errorf("transitive: got %q, want complete or partial", r.Transitive)
+	}
+	if r.UnresolvedManifests == nil {
+		t.Error("unresolved_manifests missing; a scan report always carries it")
+	} else if (r.Transitive == "partial") != (len(*r.UnresolvedManifests) > 0) {
+		t.Errorf("transitive %q disagrees with unresolved_manifests %v", r.Transitive, *r.UnresolvedManifests)
 	}
 }
 

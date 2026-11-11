@@ -26,6 +26,9 @@ import (
 // crate that gitignores it catalogues to nothing.
 type CargoTomlCataloger struct {
 	root string
+	// coverage records a crate with no covering Cargo.lock as unresolved. Off
+	// for NoExec runs (the pre-commit hook's temp trees hold no lock).
+	coverage bool
 }
 
 func NewCargoTomlCataloger(root string) *CargoTomlCataloger {
@@ -38,7 +41,24 @@ func (c *CargoTomlCataloger) Catalog(ctx context.Context, resolver file.Resolver
 	// The scan root bounds the walk to a member's workspace root.
 	cache := &manifestCache{}
 	parse := func(path string, loc file.Location) ([]pkg.Package, error) {
-		return parseCargoTomlFile(ctx, path, loc, c.root, cache)
+		pkgs, err := parseCargoTomlFile(ctx, path, loc, c.root, cache)
+		// Without a Cargo.lock, here or at its workspace root, only the
+		// direct dependencies are known: Rust has no resolver tier. Git, path
+		// and private-registry dependencies are not emitted, but their trees
+		// are just as unknown, so the declared tables decide. A manifest that
+		// cannot be read or parsed declares nothing we know of, so only a lock
+		// can cover it.
+		if c.coverage && (err != nil || len(pkgs) > 0 || cargoDeclaresDependencies(path)) && !cargoLockCoversWith(path, c.root, cache) {
+			markUnresolved(ctx, c.root, path)
+			dir := filepath.Dir(path)
+			warn.Add(ctx, warn.Entry{
+				Class: "cargotoml:no-lock",
+				One:   fmt.Sprintf("cargotoml: %s has no readable Cargo.lock; direct dependencies only", dir),
+				Many:  "cargotoml: %d crates have no readable Cargo.lock; direct dependencies only (OSSPREY_VERBOSE=1 lists them)",
+				Item:  dir,
+			})
+		}
+		return pkgs, err
 	}
 	out, err := catalogByGlob(ctx, resolver, c.root, "**/Cargo.toml", "cargotoml", parse)
 	return out, nil, err
@@ -131,13 +151,9 @@ func parseCargoTomlFile(ctx context.Context, path string, loc file.Location, sca
 		}
 		emit(name, version, nil)
 	}
-	tables := []map[string]any{m.Dependencies, m.DevDependencies, m.BuildDependencies, m.DevDependenciesUS, m.BuildDependenciesUS}
-	for _, t := range m.Target {
-		tables = append(tables, t.Dependencies, t.DevDependencies, t.BuildDependencies, t.DevDependenciesUS, t.BuildDependenciesUS)
-	}
 	// [workspace.dependencies] is an inheritance pool, not a dependency list: it
 	// is consulted for `dep = { workspace = true }` but never emitted wholesale.
-	for _, table := range tables {
+	for _, table := range m.dependencyTables() {
 		for n, spec := range table {
 			add(n, spec)
 		}
@@ -165,6 +181,39 @@ func parseCargoTomlFile(ctx context.Context, path string, loc file.Location, sca
 	return out, nil
 }
 
+// dependencyTables is every table of the crate's own dependencies, platform
+// gated ones included; never [workspace.dependencies].
+func (m cargoManifest) dependencyTables() []map[string]any {
+	tables := []map[string]any{m.Dependencies, m.DevDependencies, m.BuildDependencies, m.DevDependenciesUS, m.BuildDependenciesUS}
+	for _, t := range m.Target {
+		tables = append(tables, t.Dependencies, t.DevDependencies, t.BuildDependencies, t.DevDependenciesUS, t.BuildDependenciesUS)
+	}
+	return tables
+}
+
+// cargoDeclaresDependencies reports a Cargo.toml declaring any dependency of
+// its own, whatever its source: a path dependency counts too, since the crate
+// it names may sit outside the scan and its tree is then read nowhere.
+func cargoDeclaresDependencies(path string) bool {
+	data, err := readManifest(path)
+	if err != nil {
+		return false
+	}
+	if proofTOMLError(data) != nil {
+		return true // unread, so only a lock can cover it
+	}
+	var m cargoManifest
+	if _, err := toml.Decode(string(data), &m); err != nil {
+		return false
+	}
+	for _, table := range m.dependencyTables() {
+		if len(table) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // maxManifestBytes is a sanity bound, not a fix for deeply nested TOML, which
 // allocates quadratically in every toml cataloguer here (OSS-2098).
 const maxManifestBytes = 1 << 20
@@ -182,7 +231,22 @@ func readManifest(path string) ([]byte, error) {
 }
 
 // manifestCache decodes each Cargo.toml a root search reads once per catalogue, since every member of a workspace climbs to the same root.
-type manifestCache struct{ m sync.Map }
+type manifestCache struct {
+	m sync.Map
+	// locks memoizes cargoLockReadable by root directory: every member of a
+	// workspace asks about the same lock.
+	locks sync.Map
+}
+
+// lockReadable is cargoLockReadable, judged once per directory.
+func (c *manifestCache) lockReadable(dir string) bool {
+	if v, ok := c.locks.Load(dir); ok {
+		return v.(bool)
+	}
+	ok := cargoLockReadable(dir)
+	c.locks.Store(dir, ok)
+	return ok
+}
 
 type cachedManifest struct {
 	once   sync.Once
@@ -490,4 +554,36 @@ func cargoExactVersion(spec string) string {
 		return ""
 	}
 	return s
+}
+
+// cargoLockCovers reports whether a Cargo.lock syft reads holds the tree of
+// the crate at manifestPath: the one at the workspace root cargo finds for it
+// (workspacePool: the root package.workspace names, else the nearest
+// ancestor [workspace] that does not exclude it), which for a crate outside
+// any workspace is its own directory. cargo locks a member at that root and
+// ignores a Cargo.lock beside the member (verified with cargo 1.99). A
+// manifest that cannot be read is covered only by a lock beside it, and a
+// lock that does not parse covers nothing.
+func cargoLockCovers(manifestPath, scanRoot string) bool {
+	return cargoLockCoversWith(manifestPath, scanRoot, &manifestCache{})
+}
+
+// cargoLockCoversWith is cargoLockCovers sharing a catalogue's manifest cache,
+// so each manifest is decoded and each root's lock judged once.
+func cargoLockCoversWith(manifestPath, scanRoot string, cache *manifestCache) bool {
+	manifestPath = filepath.Clean(manifestPath)
+	m, isRoot, err := cache.read(manifestPath)
+	if err != nil {
+		return cache.lockReadable(filepath.Dir(manifestPath))
+	}
+	_, rootDir, ok := workspacePool(m, isRoot, manifestPath, scanRoot, cache)
+	return ok && cache.lockReadable(rootDir)
+}
+
+func cargoLockReadable(dir string) bool {
+	data, err := readBoundedFile(filepath.Join(dir, "Cargo.lock"), maxLockfileBytes)
+	if err != nil {
+		return false
+	}
+	return tomlLockHasPackages(data, "Cargo.lock")
 }

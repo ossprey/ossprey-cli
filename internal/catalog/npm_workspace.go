@@ -17,7 +17,7 @@ func isWorkspaceMember(dir, root string) bool {
 		return false // the root manifest is never its own member
 	}
 	for a := filepath.Dir(dir); ; a = filepath.Dir(a) {
-		if hasNpmLockfile(a) && declaresMember(a, dir) {
+		if hasNpmLockTree(a) && declaresMember(a, dir) {
 			return true
 		}
 		if a == root || a == filepath.Dir(a) {
