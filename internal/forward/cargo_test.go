@@ -723,7 +723,10 @@ func TestRunCargo_RefusesBeforeCargoRuns(t *testing.T) {
 		{"fetch with a positional", "fetch serde", nil, "cargo fetch would reject `serde`"},
 		{"fetch with a value missing", "fetch --color --locked", nil, "cargo fetch would reject `--color`"},
 		{"fetch with an argument after --", "fetch -- serde", nil, "cargo fetch would reject `serde`"},
-		{"cargo add", "add -p a evil", nil, "ossprey does not check `cargo add` yet"},
+		// The refusal names only the verb, since the rest of the line may hold a credential.
+		{"cargo add", "add -p a evil", nil, "did not run `cargo add`: ossprey does not check `cargo add` yet"},
+		{"cargo add after a secret --config", `--config http.proxy="http://user:secret@proxy.example:3128" add evil`, nil, "did not run `cargo add`: ossprey does not check `cargo add` yet"},
+		{"cargo add before a secret --config", `add --config http.proxy="http://user:secret@proxy.example:3128" evil`, nil, "did not run `cargo add`: ossprey does not check `cargo add` yet"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root, ws := cargoProject(t)
@@ -1746,9 +1749,10 @@ func TestRunCargoInstall_RefusesWhenTheReleaseCannotBeFound(t *testing.T) {
 		}
 		return "1.0.19", nil
 	}
-	args := []string{"install", "itoa", "ripgrep"}
+	// The error names only the verb, since the rest of the line may hold a credential.
+	args := []string{"+stable", "--config", `http.proxy="http://user:secret@proxy.example:3128"`, "install", "itoa", "ripgrep"}
 	out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: args, ResolveLatest: latest})
-	want := "did not run `cargo install itoa ripgrep`: could not tell which release of ripgrep cargo would install (registry request: connection refused), so it was not checked"
+	want := "did not run `cargo install`: could not tell which release of ripgrep cargo would install (registry request: connection refused), so it was not checked"
 	if err == nil || err.Error() != want || errors.Is(err, ErrBlocked) || ex.called || out != "" {
 		t.Errorf("Run = %v, output %q, cargo ran %v; want %q alone", err, out, ex.called, want)
 	}
@@ -1879,6 +1883,79 @@ func TestCargoRegistryIsCratesIoReadsTheEnvironment(t *testing.T) {
 	t.Setenv("CARGO_REGISTRIES_MY_CIO_INDEX", "sparse+https://index.crates.io/")
 	if !cargoRegistryIsCratesIo(args, "my-cio") {
 		t.Error("CARGO_REGISTRIES_MY_CIO_INDEX names crates.io's index over the config")
+	}
+}
+
+// A crates.io replacement cargo install reads keeps the crates.io check and says, even when quiet, that the copy cargo installs was not checked (OSS-2553).
+func TestRunCargoInstall_WarnsWhenCratesIoIsReplaced(t *testing.T) {
+	repl := "[source.crates-io]\nreplace-with = \"mirror\"\n"
+	named := `crates.io is replaced by "mirror" in your cargo config, so cargo installs that source's copy, which was not checked`
+	for _, tc := range []struct {
+		name  string
+		files map[string]string
+		env   map[string]string
+		args  []string
+		want  string
+	}{
+		{"nothing replaces crates.io", nil, nil, []string{"install", "itoa"}, ""},
+		{"CARGO_HOME's config.toml", map[string]string{"home/.cargo/config.toml": repl}, nil, []string{"install", "itoa"}, named},
+		{"CARGO_HOME's legacy config", map[string]string{"home/.cargo/config": repl}, nil, []string{"install", "itoa"}, named},
+		{"a config above CARGO_HOME", map[string]string{".cargo/config.toml": repl}, nil, []string{"install", "itoa"}, named},
+		{"--config before the verb", nil, nil, []string{"--config", `source.crates-io.replace-with="mirror"`, "install", "itoa"}, named},
+		{"a --config file", map[string]string{"repl.toml": repl}, nil, []string{"install", "--config", "@repl.toml", "itoa"}, named},
+		{"the last --config wins", map[string]string{"home/.cargo/config.toml": repl}, nil, []string{"install", "--config", `source.crates-io.replace-with="vendored"`, "itoa"}, `crates.io is replaced by "vendored" in your cargo config, so cargo installs that source's copy, which was not checked`},
+		{"crates.io's index named", map[string]string{"home/.cargo/config.toml": repl}, nil, []string{"install", "--index", "sparse+https://index.crates.io/", "itoa"}, named},
+		{"an include", map[string]string{"home/.cargo/config.toml": "include = [\"repl.toml\"]\n"}, nil, []string{"install", "--registry", "crates-io", "itoa"}, "a cargo config includes another file, which may replace crates.io, so cargo may install another source's copy, which was not checked"},
+		{"a config too deep to read", map[string]string{"home/.cargo/config.toml": "x = " + strings.Repeat("[", 17) + strings.Repeat("]", 17) + "\n"}, nil, []string{"install", "--registry", "crates-io", "itoa"}, "a cargo config ossprey could not read may replace crates.io, so cargo may install another source's copy, which was not checked"},
+		{"cargo's test index variable", nil, map[string]string{cargoTestIndexEnv: "sparse+http://127.0.0.1:9/"}, []string{"install", "itoa"}, "crates.io is replaced by " + cargoTestIndexEnv + " in your environment, so cargo installs that source's copy, which was not checked"},
+		{"the project's config is not read", map[string]string{"cwd/.cargo/config.toml": repl}, nil, []string{"install", "itoa"}, ""},
+		{"no environment form", nil, map[string]string{"CARGO_SOURCE_CRATES_IO_REPLACE_WITH": "mirror"}, []string{"install", "itoa"}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := t.TempDir()
+			for _, d := range []string{"home/.cargo", "cwd/.cargo"} {
+				if err := os.MkdirAll(filepath.Join(base, d), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for name, data := range tc.files {
+				if err := os.MkdirAll(filepath.Dir(filepath.Join(base, name)), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				writeFile(t, filepath.Join(base, name), data)
+			}
+			t.Setenv("CARGO_HOME", filepath.Join(base, "home", ".cargo"))
+			for _, k := range []string{"CARGO_REGISTRY_DEFAULT", cargoTestIndexEnv, "CARGO_SOURCE_CRATES_IO_REPLACE_WITH"} {
+				unsetEnv(t, k)
+			}
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			t.Chdir(filepath.Join(base, "cwd"))
+			args := slices.Clone(tc.args)
+			for i, a := range args {
+				if strings.HasPrefix(a, "@") {
+					args[i] = filepath.Join(base, a[1:])
+				}
+			}
+			ex := &stubExec{}
+			var got []check.Spec
+			swap(t, ex.fn, func(ctx context.Context, o check.Options) (*ossbom.SBOM, error) {
+				got = o.Specs
+				return cleanSBOM(ctx, o)
+			})
+			cargoReleaseFn = stubCargoReleases("1.0.19")
+			out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: args})
+			if want := []check.Spec{{Ecosystem: "cargo", Name: "itoa", Version: "1.0.19"}}; err != nil || !ex.called || !reflect.DeepEqual(got, want) {
+				t.Fatalf("Run = %v, forwarded %v, checked %+v; want %+v checked and forwarded", err, ex.called, got, want)
+			}
+			if tc.want == "" && strings.Contains(out, "replace") {
+				t.Errorf("warned of a replacement cargo does not read:\n%s", out)
+			}
+			if line := "ossprey: warning: " + tc.want + "\n"; tc.want != "" && !strings.Contains(out, line) {
+				t.Errorf("quiet output lacks %q:\n%s", line, out)
+			}
+		})
 	}
 }
 

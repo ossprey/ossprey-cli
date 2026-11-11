@@ -288,7 +288,8 @@ func checkCargoFirst(ctx context.Context, m *Manager, opts Options) error {
 	}
 	if args[verb] == "add" {
 		// cargo add writes Cargo.toml before it resolves, and only the lock is redirected.
-		return fmt.Errorf("did not run `%s`: ossprey does not check `cargo add` yet", command)
+		cmd := cargoVerbOnly(m, args)
+		return fmt.Errorf("did not run %s: ossprey does not check %s yet", cmd, cmd)
 	}
 	ws, err := cargoWorkspaceFn(ctx, args)
 	if err != nil {
@@ -363,6 +364,11 @@ func checkCargoFirst(ctx context.Context, m *Manager, opts Options) error {
 		return fetchCheckedLock(ctx, command, cargoFetchLocked(args), ws, after[0].data)
 	}
 	return nil
+}
+
+// cargoVerbOnly is the command and its verb in backticks, leaving out the rest of the line, where a --config value may hold a credential.
+func cargoVerbOnly(m *Manager, args []string) string {
+	return "`" + m.Bin + " " + args[verbIndex("cargo", args)] + "`"
 }
 
 // fetchCheckedLock runs the user's fetch with --locked and the lock redirected to a private copy of the checked bytes, so a lock swapped into the project after landing is never what cargo downloads (verified with cargo 1.99.1).
@@ -1189,13 +1195,33 @@ func cargoRegistryIsCratesIo(args []string, name string) bool {
 	return catalog.IsCratesIoIndex(index)
 }
 
+// cargoTestIndexEnv is a test variable cargo 1.99.1 still honours, pointing crates.io at another index.
+const cargoTestIndexEnv = "__CARGO_TEST_CRATES_IO_URL_DO_NOT_USE_THIS"
+
+// cargoReplacement says what cargo install takes crates.io's crates from instead of crates.io, or "" when nothing replaces it.
+func cargoReplacement(args []string) string {
+	// cargo has no environment form for a [source] key (verified with cargo 1.99.1).
+	with, _ := cargoInstallConfig(args, "", "source", "crates-io", "replace-with")
+	switch {
+	case with == cargoUnreadConfig:
+		return "a cargo config ossprey could not read may replace crates.io, so cargo may install another source's copy, which was not checked"
+	case with == cargoIncludedConfig:
+		return "a cargo config includes another file, which may replace crates.io, so cargo may install another source's copy, which was not checked"
+	case with != "":
+		return fmt.Sprintf("crates.io is replaced by %q in your cargo config, so cargo installs that source's copy, which was not checked", with)
+	case os.Getenv(cargoTestIndexEnv) != "":
+		return "crates.io is replaced by " + cargoTestIndexEnv + " in your environment, so cargo installs that source's copy, which was not checked"
+	}
+	return ""
+}
+
 // Stand-ins for a value a config may set that cannot be read, which no registry name or index URL can equal.
 const (
 	cargoUnreadConfig   = "a config it cannot read"
 	cargoIncludedConfig = "an included config"
 )
 
-// cargoInstallConfig is the value `cargo install` reads for a config key, and whether one is set.
+// cargoInstallConfig is the value `cargo install` reads for a config key, also read from env unless that is "", and whether one is set.
 func cargoInstallConfig(args []string, env string, key ...string) (string, bool) {
 	// The value set nearest the line wins; an include, or a regular file that cannot be read or that the bounded parser refuses, may set it too.
 	pick := func(data []byte, err error) (string, bool) {
@@ -1226,8 +1252,10 @@ func cargoInstallConfig(args []string, env string, key ...string) (string, bool)
 			return v, true
 		}
 	}
-	if v := os.Getenv(env); v != "" {
-		return v, true
+	if env != "" {
+		if v := os.Getenv(env); v != "" {
+			return v, true
+		}
 	}
 	home := catalog.CargoHome(dir)
 	if home == "" {

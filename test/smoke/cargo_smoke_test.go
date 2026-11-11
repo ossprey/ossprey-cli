@@ -307,7 +307,7 @@ func TestCargoAddIsRefused(t *testing.T) {
 	beforeManifest, beforeLock := stateOf(t, manifest), stateOf(t, lock)
 
 	res := runForwardEnv(t, dir, env, binPath, "cargo", "add", "itoa@=1.0.15")
-	if want := "error: did not run `cargo add itoa@=1.0.15`: ossprey does not check `cargo add` yet"; res.exitCode != 2 || !strings.Contains(res.stderr, want) {
+	if want := "error: did not run `cargo add`: ossprey does not check `cargo add` yet"; res.exitCode != 2 || !strings.Contains(res.stderr, want) {
 		t.Fatalf("exit %d, want 2 and %q\nstderr: %s", res.exitCode, want, res.stderr)
 	}
 	if !stateOf(t, manifest).same(beforeManifest) || !stateOf(t, lock).same(beforeLock) {
@@ -491,7 +491,7 @@ func TestCargoInstallLooksUpTheIndexCargoReads(t *testing.T) {
 	api = newFakeAPI(t, "")
 	env = append(cargoEnv(t, api.URL), append(dead, "NO_PROXY=", "no_proxy=")...)
 	res = runForwardEnv(t, t.TempDir(), env, binPath, "cargo", "install", "--root", root, "itoa")
-	if requests, _ := api.stats(); res.exitCode != 2 || requests != 0 || !strings.Contains(res.stderr, "did not run `cargo install --root") || !dirEmpty(t, root) {
+	if requests, _ := api.stats(); res.exitCode != 2 || requests != 0 || !strings.Contains(res.stderr, "error: did not run `cargo install`: could not tell which release of itoa") || !dirEmpty(t, root) {
 		t.Errorf("index unreachable: exit %d, %d requests; want exit 2 before anything is asked or run\nstderr: %s", res.exitCode, requests, res.stderr)
 	}
 }
@@ -521,6 +521,32 @@ func TestCargoInstallChecksCratesIoUnderAnotherName(t *testing.T) {
 		if _, purls := api.stats(); res.exitCode != 1 || !slices.Equal(purls, []string{"pkg:cargo/itoa@1.0.14"}) || !dirEmpty(t, root) {
 			t.Errorf("%q %v: exit %d, submitted %v; want itoa checked and blocked before cargo runs\nstderr: %s", tc.config, tc.args, res.exitCode, purls, res.stderr)
 		}
+	}
+}
+
+// cargo 1.99.1 installs from a crates.io replacement in CARGO_HOME's config, so the crates.io crate is still checked and one line says, even when quiet, that cargo's copy was not (OSS-2553).
+func TestCargoInstallWarnsWhenCratesIoIsReplaced(t *testing.T) {
+	api := newFakeAPI(t, "")
+	env := cargoEnv(t, api.URL)
+	var home string
+	for _, kv := range env {
+		if v, ok := strings.CutPrefix(kv, "CARGO_HOME="); ok {
+			home = v
+		}
+	}
+	// An empty local registry, which cargo names in its error once it has taken the replacement.
+	config := "[source.crates-io]\nreplace-with = \"mirror\"\n\n[source.mirror]\nlocal-registry = '" + t.TempDir() + "'\n"
+	if err := writeFile(home, "config.toml", config); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	res := runForwardEnv(t, t.TempDir(), env, binPath, "cargo", "install", "--root", root, "itoa@1.0.14")
+	warning := `ossprey: warning: crates.io is replaced by "mirror" in your cargo config, so cargo installs that source's copy, which was not checked`
+	if _, purls := api.stats(); !slices.Equal(purls, []string{"pkg:cargo/itoa@1.0.14"}) || !strings.Contains(res.stderr, warning) {
+		t.Errorf("submitted %v; want itoa 1.0.14 checked and %q\nstderr: %s", purls, warning, res.stderr)
+	}
+	if !strings.Contains(res.stderr, "replaced source registry `crates-io`") || !dirEmpty(t, root) {
+		t.Errorf("exit %d; want cargo to take the replacement, which holds no itoa\nstderr: %s", res.exitCode, res.stderr)
 	}
 }
 

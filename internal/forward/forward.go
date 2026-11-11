@@ -601,9 +601,13 @@ func Run(ctx context.Context, opts Options) error {
 		stop()
 		if err != nil {
 			flushWarnings(ctx)
-			return fmt.Errorf("did not run `%s %s`: %w", m.Bin, strings.Join(opts.Args, " "), err)
+			return fmt.Errorf("did not run %s: %w", cargoVerbOnly(m, opts.Args), err)
 		}
 		parsed.Specs = specs
+		if line := cargoReplacement(opts.Args); line != "" {
+			// Printed even when quiet: the check covers crates.io's copy, not the one cargo installs.
+			fmt.Fprintf(errOut, "ossprey: warning: %s\n", line)
+		}
 	}
 
 	switch {
