@@ -77,9 +77,10 @@ A `Cargo.lock` crate that Cargo fetches from git or from a registry other than
 crates.io is sent marked with its source, as a `vcs_url` or `repository_url`
 purl qualifier with credentials removed (a registry by its origin only, and a
 source too long to send by its origin or scheme), so the platform can tell it
-apart from the crates.io crate of that name. A crate from a registry host
-spelled with non-ASCII characters is sent both marked and as the crates.io
-crate, since Cargo reads some such hosts as crates.io. A dependency that `[patch]`
+apart from the crates.io crate of that name. A registry host spelled with
+non-ASCII characters is read as Cargo reads it, so `ｇithub.com` is crates.io;
+one Ossprey cannot map that way is sent both marked and as the crates.io crate.
+A dependency that `[patch]`
 or `[replace]` redirects to git is sent both ways: the git crate, marked, and the
 crates.io crate `Cargo.toml` declares. When your workspace root's `Cargo.lock`
 records the git crate from the same URL with the same `branch`, `tag` or `rev`,

@@ -383,8 +383,7 @@ func TestCatalogTrustsCratesByTheirCargoLockIndex(t *testing.T) {
 		"cargo/acme-trailing-nbsp?repository_url=https://crates.corp.example/", // Go trims the NBSP, Cargo keeps it as /internal%C2%A0
 		"cargo/acme-twin", // locked from crates.io in rustapp2
 		"cargo/itoa",      // crates.io under its own sparse host's rule
-		"cargo/ryu",       // a non-ASCII host on crates.io's path goes out as twins, neither trusted
-		"cargo/ryu?repository_url=https://g%C4%B0thub.com/",
+		"cargo/ryu?repository_url=https://g%C4%B0thub.com/", // cargo's IDNA maps this host off github.com, and it is not trusted
 		"cargo/serde", // crates.io under a github.com rule
 	}
 	if strings.Join(trusted, " ") != strings.Join(wantTrusted, " ") {

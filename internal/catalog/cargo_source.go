@@ -15,6 +15,7 @@ import (
 
 	"github.com/anchore/syft/syft/file"
 	"github.com/anchore/syft/syft/pkg"
+	"golang.org/x/net/idna"
 )
 
 // cratesIoIndex is crates.io's index host and path for each Cargo.lock source kind.
@@ -32,7 +33,10 @@ func trimC0(s string) string { return strings.TrimFunc(s, func(r rune) bool { re
 // crateURLCleaner applies the WHATWG URL parser's tab and newline removal and its reading of '\' as '/'.
 var crateURLCleaner = strings.NewReplacer("\t", "", "\n", "", "\r", "", `\`, "/")
 
-// isCratesIo folds at least what Cargo's url crate and CanonicalUrl fold, and says whether a source is crates.io or, through IDNA, may be.
+// cargoIDNA maps a host as cargo's url crate does: UTS 46 without transitional mapping, STD3 rules or hyphen checks.
+var cargoIDNA = idna.New(idna.MapForLookup(), idna.Transitional(false), idna.StrictDomainName(false), idna.CheckHyphens(false), idna.BidiRule())
+
+// isCratesIo folds at least what Cargo's url crate and CanonicalUrl fold, and says whether a source is crates.io or, where Go's IDNA tables fail, may be.
 func isCratesIo(source string) (is, maybe bool) {
 	kind, raw, _ := strings.Cut(source, "+")
 	want, ok := cratesIoIndex[kind]
@@ -79,14 +83,20 @@ func isCratesIo(source string) (is, maybe bool) {
 	if strings.TrimSuffix(path.Clean("/"+strings.ToLower(p)), ".git") != want[1] {
 		return false, false
 	}
-	// Cargo's IDNA step maps some non-ASCII registry hosts to github.com and others elsewhere.
+	// Cargo's IDNA step maps some non-ASCII hosts to crates.io's (`ｉｎｄｅｘ.crates.io`) and others elsewhere.
 	if strings.ContainsFunc(host, nonASCII) {
-		return false, kind == "registry"
+		mapped, err := cargoIDNA.ToASCII(host)
+		if err != nil {
+			// Cargo's newer Unicode tables may map what Go's refuse, so either reading may hold.
+			return false, true
+		}
+		host = mapped
 	}
-	return strings.ToLower(host) == want[0], false
+	// A trailing dot names the same host to DNS, so cargo reaches crates.io's server through it.
+	return strings.TrimSuffix(strings.ToLower(host), ".") == want[0], false
 }
 
-// IsCratesIoIndex reports whether an `--index` URL is certainly crates.io's, read as cargo 1.99.1 reads it; one only IDNA could map there is not.
+// IsCratesIoIndex reports whether an `--index` URL is crates.io's, read as cargo 1.99.1 reads it, or may be through a host Go's IDNA tables cannot map.
 func IsCratesIoIndex(index string) bool {
 	// Cargo's parser trims the URL and drops tabs and newlines before it reads the scheme, whose case it folds.
 	clean := strings.NewReplacer("\t", "", "\n", "", "\r", "").Replace(trimC0(index))
@@ -108,8 +118,8 @@ func IsCratesIoIndex(index string) bool {
 	if _, special := defaultPort[inner]; !special && strings.Contains(rest, `\`) {
 		return false
 	}
-	is, _ := isCratesIo(kind + "+" + inner + ":" + rest)
-	return is
+	is, maybe := isCratesIo(kind + "+" + inner + ":" + rest)
+	return is || maybe
 }
 
 // sparseFirstParse is what follows the scheme of a sparse+ URL as cargo's first parse writes it back, false where that parse fails.

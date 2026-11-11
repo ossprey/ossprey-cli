@@ -720,6 +720,18 @@ func TestIsCratesIoIndexReadsTheURLAsCargoDoes(t *testing.T) {
 		{`sparse+https://index.crates.io/x\y/../`, true},
 		{`sparse+HTTPS://index.crates.io/x\y/%2E%2e/`, true},
 		{`sparse+https://index.crates.io/a\%2e%2e/`, true},
+		// cargo maps the host through IDNA and DNS reads a trailing dot as none, so each of these downloads crates.io's itoa.
+		{"sparse+https://ｉｎｄｅｘ.crates.io/", true},
+		{"sparse+https://in\u00addex.crates.io/", true},
+		{"sparse+https://index\u3002crates\u3002io/", true},
+		{"sparse+https://\U0001d422ndex.crates.io/", true},
+		{"sparse+https://index.crates.io./", true},
+		{"sparse+https://index.crates.io\u3002/", true},
+		{"https://ｇithub.com/rust-lang/crates.io-index", true},
+		// Go's tables predate this Unicode 16 letter, which cargo maps to i, so the crate is checked.
+		{"sparse+https://\U0001ccdendex.crates.io/", true},
+		// cargo maps this one to xn--index-7fd.crates.io.
+		{"sparse+https://\u0130ndex.crates.io/", false},
 		// A backslash in the host makes cargo fail, so nothing is installed.
 		{`sparse+https://index.crates.io\/`, false},
 		// Checked though cargo finds no crate under this path, which is harmless.

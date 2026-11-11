@@ -1418,7 +1418,7 @@ private-sparse-index = { version = "=9.0.0", registry-index = "sparse+https://in
 		"rand":                 "0.8.5",
 		"sparse-index":         "0.8.5",
 		"cased-sparse-index":   "0.8.5",
-		"idna-index":           "",
+		"idna-index":           "0.8.5",
 		"idna-foreign-index":   "",
 		"private":              "",
 		"private-index":        "",

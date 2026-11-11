@@ -605,6 +605,8 @@ func TestRunCargoInstall_RegistryDecidesTheCheck(t *testing.T) {
 		{"crates.io past a backslash and ..", "", "", []string{"install", "--index", `sparse+https://index.crates.io/\../`, "itoa"}, true},
 		{"crates.io past a slash and a backslash", "", "", []string{"install", "--index", `sparse+https:/\index.crates.io/`, "itoa"}, true},
 		{"crates.io behind backslashed userinfo", "", "", []string{"install", "--index", `sparse+https://mirror.example\@index.crates.io/`, "itoa"}, true},
+		{"crates.io's host with a trailing dot", "", "", []string{"install", "--index", "sparse+https://index.crates.io./", "itoa"}, true},
+		{"crates.io's host in full-width letters", "", "", []string{"install", "--index", "sparse+https://ｉｎｄｅｘ.crates.io/", "itoa"}, true},
 		{"corp by default in CARGO_HOME", corp + "[registry]\ndefault = \"corp\"\n", "", []string{"install", "itoa"}, false},
 		{"corp by default, crates.io by name", corp + "[registry]\ndefault = \"corp\"\n", "", []string{"install", "--registry", "crates-io", "itoa"}, true},
 		{"corp by CARGO_REGISTRY_DEFAULT", corp, "corp", []string{"install", "itoa"}, false},
