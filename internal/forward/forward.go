@@ -850,7 +850,12 @@ func printBlock(m *Manager, opts Options, summary scan.MalwareSummary) {
 	for _, msg := range summary.Failing {
 		fmt.Fprintln(errOut, profile.Red("Error: "+msg))
 	}
-	fmt.Fprintf(errOut, "ossprey: blocked `%s %s`\n", m.Bin, strings.Join(opts.Args, " "))
+	cmd := "`" + m.Bin + " " + strings.Join(opts.Args, " ") + "`"
+	if m.Bin == "cargo" {
+		// A --config value may hold a credential, as in the cargo refusals.
+		cmd = cargoVerbOnly(m, opts.Args)
+	}
+	fmt.Fprintf(errOut, "ossprey: blocked %s\n", cmd)
 }
 
 // CleanVerdict words a passed check without overstating it, for every

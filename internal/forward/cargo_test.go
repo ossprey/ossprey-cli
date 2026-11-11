@@ -804,6 +804,7 @@ func TestRunCargo_BlockLeavesTheProjectAsItWas(t *testing.T) {
 		{"update", true},
 		{"generate-lockfile", false},
 		{"fetch", true},
+		{`--config http.proxy="http://user:secret@proxy.example:3128" update`, false},
 	} {
 		t.Run(fmt.Sprintf("%s, lock %v", tc.args, tc.lock), func(t *testing.T) {
 			root, ws := cargoProject(t)
@@ -844,10 +845,13 @@ func TestRunCargo_BlockLeavesTheProjectAsItWas(t *testing.T) {
 					t.Errorf("%s is another file now (%v)", p, err)
 				}
 			}
-			for _, line := range []string{"Installation blocked.", "Error: WARNING: evil:1.0.0 contains malware", "ossprey: blocked `cargo " + tc.args + "`\nossprey: the project was not changed\n"} {
+			for _, line := range []string{"Installation blocked.", "Error: WARNING: evil:1.0.0 contains malware", "ossprey: blocked `cargo " + strings.Fields(tc.args)[len(strings.Fields(tc.args))-1] + "`\nossprey: the project was not changed\n"} {
 				if !strings.Contains(out, line) {
 					t.Errorf("output lacks %q:\n%s", line, out)
 				}
+			}
+			if strings.Contains(out, "secret") {
+				t.Errorf("output prints a --config credential:\n%s", out)
 			}
 		})
 	}
