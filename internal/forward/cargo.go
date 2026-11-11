@@ -242,7 +242,8 @@ func checkCargoFirst(ctx context.Context, m *Manager, opts Options) error {
 	}
 	verb := verbIndex("cargo", args)
 	rest := cargoSplitShorts(args[verb+1:], cargoResolveShorts)
-	if args[verb] == "update" && cargoOptionsHave(rest, cargoResolveShorts, "-b", "--breaking") {
+	// Even a -b an option might have taken refuses, since misreading it costs only a refusal.
+	if args[verb] == "update" && cargoHas(rest, "-b", "--breaking") {
 		// It rewrites Cargo.toml as well as the lock, and only the lock is redirected (verified with cargo 1.99.1).
 		return fmt.Errorf("did not run `%s`: --breaking edits Cargo.toml, which ossprey does not check yet", command)
 	}

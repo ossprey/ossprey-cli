@@ -200,7 +200,8 @@ Windows resolves it under `%LOCALAPPDATA%`.
      cargo resolves from nothing. `CARGO_CACHE_RUSTC_INFO=0` keeps
      `target/.rustc_info.json` out of the project.
    - **Refused before cargo runs.** `update --breaking`, which rewrites
-     `Cargo.toml` too. A `fetch` line `cargo fetch` rejects
+     `Cargo.toml` too, on any `-b` token, even one an option may have taken,
+     since a misread costs only a refusal. A `fetch` line `cargo fetch` rejects
      (`cargoFetchUnknown`), since the resolve passes on only what `update`
      takes and the lock would land first. A `resolver.lockfile-path` the run
      may read (`lockfileMoved`: the variable, a `--config`, a config, an

@@ -706,6 +706,10 @@ func TestRunCargo_RefusesBeforeCargoRuns(t *testing.T) {
 		{"update --breaking", "update -Zunstable-options --breaking evil", nil, "--breaking edits Cargo.toml"},
 		{"update -b in a group", "update -Zunstable-options -qb evil", nil, "--breaking edits Cargo.toml"},
 		{"update --breaking --dry-run", "update -Zunstable-options --breaking -n", nil, "--breaking edits Cargo.toml"},
+		// An empty -p takes no option token, so the flag after it is cargo's (verified with cargo 1.99.1).
+		{"update --breaking after an empty -p", "update -Zunstable-options -p evil -p --breaking", nil, "--breaking edits Cargo.toml"},
+		{"update -b after an empty -p", "update -Zunstable-options -p evil -p -b", nil, "--breaking edits Cargo.toml"},
+		{"update -b where a value may be", "update -Zunstable-options -m -b", nil, "--breaking edits Cargo.toml"},
 		// The resolve step passes on only what update takes, so the lock landed before cargo fetch rejected the line.
 		{"fetch with an option it lacks", "fetch --tagret x86_64-unknown-linux-gnu", nil, "cargo fetch would reject `--tagret`"},
 		{"fetch with a positional", "fetch serde", nil, "cargo fetch would reject `serde`"},
@@ -1156,7 +1160,7 @@ func TestRunCargoFetch_ResolvesThenFetchesLocked(t *testing.T) {
 
 // update --dry-run with no lock writes a whole one to the redirect (verified with cargo 1.99.1), so nothing is ever checked or written, and no credential is needed.
 func TestRunCargoUpdate_DryRunNeverLands(t *testing.T) {
-	for _, args := range []string{"update --dry-run", "update -qn"} {
+	for _, args := range []string{"update --dry-run", "update -qn", "update -p evil -p --dry-run"} {
 		root, ws := cargoProject(t)
 		unsetEnv(t, "OSSPREY_API_KEY")
 		f := &fakeCargo{t: t, root: root, lock: evilLock}
