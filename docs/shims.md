@@ -44,6 +44,7 @@ speaks up only for a block (the full malware report) or a platform error; set
 | `ossprey shim install --agent claude` | Also put the shims on PATH for Claude Code's Bash commands |
 
 Useful flags: `--git` to also shim git (opt-in, see [git.md](git.md)), `--brew` to also shim brew (opt-in, see [brew.md](brew.md)),
+`--cargo` to also shim cargo (opt-in, see [forwarder.md](forwarder.md#cargo)),
 `--managers npm,pip` to shim a subset, `--all` to shim managers
 you have not installed yet, `--no-path` to write the shims but manage PATH
 yourself, `--dir` / `$OSSPREY_SHIM_DIR` to relocate them.
@@ -52,7 +53,10 @@ yourself, `--dir` / `$OSSPREY_SHIM_DIR` to relocate them.
 
 - **Only installs are checked.** `npm run build`, `poetry run pytest`, `pip
   list` and friends are exec'd straight through. The allowlist is the same one
-  the forwarder uses, so there is only one place it can drift.
+  the forwarder uses, so there is only one place it can drift. With the cargo
+  shim, `cargo add`, `update`, `generate-lockfile` and `fetch` are refused
+  until ossprey can check the `Cargo.lock` they write; passive mode runs them
+  unchecked.
 - **It fails open.** If the ossprey binary goes missing the shim prints a
   warning and runs the real manager anyway. `OSSPREY_SHIM_BYPASS=1 npm install
   …` skips the check for one command, and `ossprey shim uninstall` removes them

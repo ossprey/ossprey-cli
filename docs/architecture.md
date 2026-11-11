@@ -48,7 +48,11 @@ install still works".
 
 ```mermaid
 flowchart TD
-    S["ossprey npm install ..."] --> T{"an install verb, or a<br/>tool run (npx, bunx, uvx)?"}
+    S["ossprey npm install ..."] --> CA{"cargo add, update,<br/>generate-lockfile or fetch,<br/>not only printing help?"}
+    CA -- "yes" --> CV{"OSSPREY_SKIP_CI or<br/>passive mode?"}
+    CV -- "yes" --> U
+    CV -- "no: gating" --> CX["refuse, exit 2:<br/>cargo never runs"]
+    CA -- "no" --> T{"an install verb, or a<br/>tool run (npx, bunx, uvx)?"}
     T -- "no, e.g. npm run" --> U["exec the real manager"]
     T -- "yes" --> V{"OSSPREY_SKIP_CI?"}
     V -- "set" --> U
@@ -88,6 +92,10 @@ checked at once (`internal/catalog/install_resolve.go`, driven from
 packages are checked alone and one warning line says so; the install is never
 blocked for want of a prediction.
 
+`cargo add`, `update`, `generate-lockfile` and `fetch` are refused in gating
+mode, since nothing checks their `Cargo.lock` before it reaches the project yet,
+and run unchecked in passive mode (`internal/forward/cargo.go`).
+
 The passive branch is the one worth reading twice. It never gates, so it never
 sits in front of the install: where a lockfile will land, the install runs
 first and Ossprey reads what it wrote, which is both faster and more accurate
@@ -95,7 +103,8 @@ than predicting the tree beforehand. Where one will not — pip, `uv pip
 install`, `uv tool install`, bun (whose `bun.lock` is not read yet), a tool
 run, a global or redirected install — there would be nothing to read, so
 the named packages are submitted beside the install instead (`writesLocalLockfile`
-in `internal/forward/forward.go` is the one place that decides).
+in `internal/forward/forward.go` is the one place that decides, for every
+command but the cargo ones above).
 
 ```mermaid
 sequenceDiagram

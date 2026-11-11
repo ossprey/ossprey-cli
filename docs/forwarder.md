@@ -25,7 +25,8 @@ ossprey uv pip install foo==1.2.3
 ```
 
 Supported managers: `npm`, `npx`, `pnpm`, `yarn`, `bun`, `bunx`, `pip`, `pip3`,
-`poetry`, `uv`, `uvx`.
+`poetry`, `uv`, `uvx` and [`cargo`](#cargo). Rust (crates.io) is available on
+Teams and Enterprise plans.
 
 ## What is checked
 
@@ -44,6 +45,7 @@ check and no API call.
 | `poetry` | `add`, `install`, `sync`, `update`, `lock` |
 | `uv` | `add`, `sync`, `lock`, `pip install`, `pip sync`, `tool install`, `tool run` |
 | `uvx` | every invocation (`uvx` is `uv tool run`) |
+| `cargo` | `install`, before it runs; `add`, `update`, `generate-lockfile` and `fetch` are refused ([below](#cargo)) |
 
 Each manager's global options are understood before the subcommand, so
 `pnpm --filter web add x` and `npm --prefix ./app install x` are checked like any
@@ -87,6 +89,48 @@ Bare `bun install` and `bun ci` are manifest installs (below). Ossprey cannot
 read `bun.lock` yet, so the scan resolves the project's `package.json` the way
 it does for a project with no lockfile.
 
+## cargo
+
+```sh
+ossprey cargo install ripgrep    # ripgrep is checked, then cargo builds it
+```
+
+`cargo install` compiles the crate and runs its build scripts straight away, so
+the crates it names are checked first, and a block means cargo never starts.
+An exact version given to `--version` (or `--vers`), or `name@1.2.3`, pins a
+release; anything else, a range given to `--version` or `name@^1` included, is
+checked at the latest release on crates.io. A crate is checked under the name
+typed, since `cargo install` takes no other spelling of it (`serde-json` does
+not find `serde_json`). Only the
+named crates are checked, not their dependencies, and one warning line says so.
+An install with `--git`, `--path`, or a `--registry` or `--index` other than
+crates.io is not from crates.io and is forwarded unchecked, and so is one that
+names no source while cargo's default registry is elsewhere. That is
+`registry.default` as cargo reads it for an install: from the last `--config`
+that sets it, else `CARGO_REGISTRY_DEFAULT`, else the cargo configs from
+`CARGO_HOME` up, nearest first (a relative `CARGO_HOME` counting from where
+cargo runs), or possibly set there by an `include` or by a config file too
+large or too deeply nested to read. A config that is not a regular file, such
+as a piped `--config /dev/stdin`, sets nothing here: `cargo install` reads its
+configuration a second time, when the pipe is already empty, and then installs
+from crates.io, so the crate is checked. `--registry crates-io` and crates.io's own index
+URL are checked like a plain install; an index URL with a non-ASCII host counts
+as another registry.
+`cargo install --list` is not an install, and nothing is checked for a line
+that only prints help or the version: `-h` or `--help` after the subcommand,
+or either or `-V`/`--version` before it.
+
+A rustup toolchain (`cargo +nightly install ripgrep`) and cargo's options
+before the subcommand (`--config`, `-Z`, `--color`, `-C`) are understood, and so
+are short options grouped as cargo groups them (`-qF pcre2` names no crate
+`pcre2`).
+
+`cargo add`, `cargo update`, `cargo generate-lockfile` and `cargo fetch` are
+not checked yet. Ossprey refuses them with exit code `2` before cargo runs, so
+these commands never write a `Cargo.lock` ossprey has not checked. A line that
+only prints help or the version still goes to cargo. In passive mode they run
+unchecked, and `cargo install` posts its crates alongside the build.
+
 ## What is not checked
 
 Pass-through commands are not checked, which is intended for `npm run`,
@@ -104,6 +148,15 @@ still put code on your machine:
   syncs the project environment before running (as `uv sync` would) and
   installs any `--with` packages, and that `bun` running a file with no
   `node_modules` auto-installs its imports; none of that is checked.
+- **cargo builds and aliases.** `cargo build`, `check`, `run`, `test`, `bench`
+  and every other cargo command not listed above are forwarded unchecked,
+  though they compile crates and run build scripts. They build what
+  `Cargo.lock` names, but a build with a missing or out-of-date `Cargo.lock`
+  resolves one on the spot, unchecked, and so does an editor such as
+  rust-analyzer after you edit `Cargo.toml` by hand. `cargo install` checks
+  only the crates it names, not their dependencies. A cargo `[alias]` and an
+  external subcommand (such as `cargo upgrade`) are not recognised, so a lock
+  they change is not checked.
 - **A named install whose dependencies could not be resolved.** The
   dependencies of a named install are worked out with a dry run of the
   manager's own kind of resolver (below). When that is not possible — no
@@ -274,6 +327,8 @@ function poetry { ossprey poetry @args }
 function uv     { ossprey uv     @args }
 function uvx    { ossprey uvx    @args }
 ```
+
+On a Teams or Enterprise plan, add `cargo` to the list.
 
 Open a new shell to pick them up. There's no recursion to worry about:
 `ossprey npm` resolves the real `npm` through `PATH` rather than through your
