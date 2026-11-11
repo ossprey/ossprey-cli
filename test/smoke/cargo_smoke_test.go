@@ -223,6 +223,34 @@ func TestCargoInstallWarnsWhenCratesIoIsReplaced(t *testing.T) {
 	}
 }
 
+// An include in CARGO_HOME's config may set registry.default, so a gating cargo install naming no registry is refused before cargo runs, and --registry crates-io settles it (OSS-2553).
+func TestCargoInstallRefusesWhenAnIncludeMaySetTheRegistry(t *testing.T) {
+	api := newFakeAPI(t, "pkg:cargo/itoa@1.0.14")
+	env := cargoEnv(t, api.URL)
+	var home string
+	for _, kv := range env {
+		if v, ok := strings.CutPrefix(kv, "CARGO_HOME="); ok {
+			home = v
+		}
+	}
+	if err := writeFile(home, "config.toml", "include = [\"extra.toml\"]\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFile(home, "extra.toml", "[build]\njobs = 2\n"); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	res := runForwardEnv(t, t.TempDir(), env, binPath, "cargo", "install", "--root", root, "itoa@1.0.14")
+	want := "error: did not run `cargo install`: a cargo config includes another file, which may set the registry it installs from, so nothing was checked; name the registry with --registry"
+	if _, purls := api.stats(); res.exitCode != 2 || len(purls) != 0 || !strings.Contains(res.stderr, want) || strings.Contains(res.stderr, "Downloaded") {
+		t.Errorf("exit %d, submitted %v; want exit 2 before cargo runs with %q\nstderr: %s", res.exitCode, purls, want, res.stderr)
+	}
+	res = runForwardEnv(t, t.TempDir(), env, binPath, "cargo", "install", "--registry", "crates-io", "--root", root, "itoa@1.0.14")
+	if _, purls := api.stats(); res.exitCode != 1 || !slices.Equal(purls, []string{"pkg:cargo/itoa@1.0.14"}) || !dirEmpty(t, root) {
+		t.Errorf("--registry crates-io: exit %d, submitted %v; want itoa checked and blocked\nstderr: %s", res.exitCode, purls, res.stderr)
+	}
+}
+
 // cargo 1.99.1 reads `-qF pcre2` as -q and -F pcre2, so only ripgrep is a crate.
 func TestCargoInstallGroupedShortsAreNotCrates(t *testing.T) {
 	api := newFakeAPI(t, "pkg:cargo/ripgrep@14.1.1")

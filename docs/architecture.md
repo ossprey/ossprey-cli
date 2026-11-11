@@ -96,7 +96,8 @@ blocked for want of a prediction.
 mode, since nothing checks their `Cargo.lock` before it reaches the project yet,
 and run unchecked in passive mode (`internal/forward/cargo.go`). A gating
 `cargo install` checks each crate at the release crates.io's index says cargo
-takes, and is refused with exit 2 when the index cannot say.
+takes, and is refused with exit 2 when the index cannot say, or when a config
+ossprey cannot read may set the registry and the line names none.
 
 The passive branch is the one worth reading twice. It never gates, so it never
 sits in front of the install: where a lockfile will land, the install runs

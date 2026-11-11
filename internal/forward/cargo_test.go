@@ -754,6 +754,56 @@ func TestRunCargoInstall_WarnsWhenCratesIoIsReplaced(t *testing.T) {
 	}
 }
 
+// An include or a config ossprey cannot read may set registry.default, so a gating install naming no source is refused before cargo runs, while one naming its registry is not (OSS-2553).
+func TestRunCargoInstall_RefusesWhenAConfigMaySetTheRegistry(t *testing.T) {
+	const unread = "did not run `cargo install`: a cargo config ossprey could not read may set the registry it installs from, so nothing was checked; name the registry with --registry"
+	for _, tc := range []struct {
+		name, home string
+		args       []string
+		want       string
+	}{
+		{"an include", "include = [\"extra.toml\"]\n", []string{"install", "itoa@1.0.14"}, "did not run `cargo install`: a cargo config includes another file, which may set the registry it installs from, so nothing was checked; name the registry with --registry"},
+		{"a config too deep to read", "x = " + strings.Repeat("[", 17) + strings.Repeat("]", 17) + "\n", []string{"install", "itoa@1.0.14"}, unread},
+		{"a --config with a line too long to read", "", []string{"--config", "env.NOTE='" + strings.Repeat("x", 4200) + "'", "install", "itoa@1.0.14"}, unread},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			if tc.home != "" {
+				writeFile(t, filepath.Join(home, "config.toml"), tc.home)
+			}
+			t.Setenv("CARGO_HOME", home)
+			unsetEnv(t, "CARGO_REGISTRY_DEFAULT")
+			unsetEnv(t, cargoTestIndexEnv)
+			t.Chdir(t.TempDir())
+			cargoReleaseFn = stubCargoReleases("1.0.14")
+			ex := &stubExec{}
+			swap(t, ex.fn, func(context.Context, check.Options) (*ossbom.SBOM, error) {
+				t.Error("nothing may be checked")
+				return nil, nil
+			})
+			out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: tc.args})
+			if err == nil || err.Error() != tc.want || ex.called || out != "" {
+				t.Errorf("Run = %v, cargo ran %v, output %q; want %q alone", err, ex.called, out, tc.want)
+			}
+			// Naming the registry settles it, and passive refuses nothing.
+			named := append(slices.Clone(tc.args), "--registry", "crates-io")
+			var checked []check.Spec
+			swap(t, ex.fn, func(ctx context.Context, o check.Options) (*ossbom.SBOM, error) {
+				checked = o.Specs
+				return cleanSBOM(ctx, o)
+			})
+			if _, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: named}); err != nil || !ex.called || len(checked) != 1 {
+				t.Errorf("--registry crates-io: Run = %v, cargo ran %v, checked %v; want the crate checked and cargo run", err, ex.called, checked)
+			}
+			ex.called = false
+			swap(t, ex.fn, nil)
+			if err := Run(context.Background(), Options{Bin: "cargo", Args: tc.args, Passive: true}); err != nil || !ex.called {
+				t.Errorf("passive: Run = %v, cargo ran %v; want cargo run", err, ex.called)
+			}
+		})
+	}
+}
+
 func TestRunCargoInstall_Passive(t *testing.T) {
 	ex := &stubExec{}
 	var submitted check.Options

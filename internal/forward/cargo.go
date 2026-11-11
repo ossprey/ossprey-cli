@@ -375,6 +375,17 @@ func cargoNamesCratesIo(args []string) bool {
 	return named == "" || named == "crates-io"
 }
 
+// cargoUnknownDefault says why registry.default may be set where ossprey cannot read it, or "".
+func cargoUnknownDefault(registry string) string {
+	switch registry {
+	case cargoUnreadConfig:
+		return "a cargo config ossprey could not read may set the registry it installs from"
+	case cargoIncludedConfig:
+		return "a cargo config includes another file, which may set the registry it installs from"
+	}
+	return ""
+}
+
 // Stand-ins for a value a config may set that cannot be read, which no registry name or index URL can equal.
 const (
 	cargoUnreadConfig   = "a config it cannot read"

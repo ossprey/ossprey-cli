@@ -182,8 +182,11 @@ Windows resolves it under `%LOCALAPPDATA%`.
      from `CARGO_HOME` up, never the project's, and the nearest setting wins:
      the last `--config`, `CARGO_REGISTRY_DEFAULT`, then those configs. An
      `include`, or a regular file it cannot read or parse, counts as setting
-     it. One that is not a regular file does not: the reload finds a one-shot
-     pipe empty and installs from crates.io (`cargo --config /dev/stdin`).
+     it, so gating refuses a line naming no registry (`cargoUnknownDefault`,
+     exit 2): forwarding it would install crates.io's crate unseen and
+     silently. One that is not a regular file does not: the reload finds a
+     one-shot pipe empty and installs from crates.io (`cargo --config
+     /dev/stdin`).
      A registry named there or by `--registry` is crates.io when its index,
      read the same way (`registries.<name>.index`,
      `CARGO_REGISTRIES_<NAME>_INDEX`), is (`cargoRegistryIsCratesIo`).

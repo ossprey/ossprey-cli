@@ -112,8 +112,10 @@ names no source while cargo's default registry is elsewhere. That is
 `registry.default` as cargo reads it for an install: from the last `--config`
 that sets it, else `CARGO_REGISTRY_DEFAULT`, else the cargo configs from
 `CARGO_HOME` up, nearest first (a relative `CARGO_HOME` counting from where
-cargo runs), or possibly set there by an `include` or by a config file too
-large or too deeply nested to read. A config that is not a regular file, such
+cargo runs). When an `include` or a config file too large or too deeply nested
+to read may set it, ossprey refuses an install that names no registry with
+exit code `2`, since the crates may come from crates.io unchecked; name the
+registry with `--registry`. A config that is not a regular file, such
 as a piped `--config /dev/stdin`, sets nothing here: `cargo install` reads its
 configuration a second time, when the pipe is already empty, and then installs
 from crates.io, so the crate is checked. `--registry crates-io`, a registry
