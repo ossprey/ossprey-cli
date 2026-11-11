@@ -182,17 +182,25 @@ Windows resolves it under `%LOCALAPPDATA%`.
      from `CARGO_HOME` up, never the project's, and the nearest setting wins:
      the last `--config`, `CARGO_REGISTRY_DEFAULT`, then those configs. An
      `include`, or a regular file it cannot read or parse, counts as setting
-     it. One that is not a regular file does not: the reload finds a one-shot
-     pipe empty and installs from crates.io (`cargo --config /dev/stdin`).
+     it, so gating refuses a line naming no registry (`cargoUnknownDefault`,
+     exit 2): forwarding it would install crates.io's crate unseen and
+     silently. One that is not a regular file does not: the reload finds a
+     one-shot pipe empty and installs from crates.io (`cargo --config
+     /dev/stdin`).
      A registry named there or by `--registry` is crates.io when its index,
      read the same way (`registries.<name>.index`,
      `CARGO_REGISTRIES_<NAME>_INDEX`), is (`cargoRegistryIsCratesIo`).
-     `[source.crates-io] replace-with`, read from the same configs (no
+     `[source.crates-io] replace-with`, or a location key on that table
+     (`cargoLocationKeys`), read from every config cargo install reads (no
      environment form), keeps the check and prints one warning even when quiet
      (`cargoReplacement`): cargo installs the replacement's copy however the
-     line names crates.io. An include or unreadable config warns too, and so
-     does `__CARGO_TEST_CRATES_IO_URL_DO_NOT_USE_THIS`, which cargo 1.99.1
-     honours.
+     line names crates.io. An include, an unreadable config or one that is not
+     a regular file (a FIFO may be written twice) warns too, as does any
+     `[source]` `replace-with` when `--index` or a registry other than
+     `crates-io` reaches crates.io (`cargoNamesCratesIo`), since cargo reads
+     such a spelling as its own source, and
+     `__CARGO_TEST_CRATES_IO_URL_DO_NOT_USE_THIS`, which cargo 1.99.1 honours.
+     A location's value is never printed, since a URL may hold a credential.
    - **Which configs, from where.** At each level cargo reads only the legacy
      `config` when it opens, else `config.toml` (`cargoConfigFile`); the
      catalogue's trust check reads both, since one more config only keeps a
@@ -667,7 +675,9 @@ nothing when one fails. It judges the replacement in effect where cargo
 would run, at each directory in the scan holding a `Cargo.toml` or a config, so
 at the scan root only when it holds one of them
 (`cratesIoReplacement`: the nearest level that sets `replace-with`, as
-`vendorDir` walks, then `CARGO_HOME`'s, which cargo reads last), and stays
+`vendorDir` walks, then `CARGO_HOME`'s, which cargo reads last, else a
+location set on `[source.crates-io]` itself, which cargo 1.99.1 also takes
+crates.io's crates from), and stays
 quiet only where that is a vendor directory the filter proved
 (`cargoVendored.vendors`), whose crates the lock pins to crates.io checksums,
 though the files cargo checks against `.cargo-checksum.json` are not compared
