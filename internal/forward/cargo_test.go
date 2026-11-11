@@ -883,6 +883,7 @@ func TestRunCargo_BlockLeavesTheProjectAsItWas(t *testing.T) {
 		{"update", true, false},
 		{"generate-lockfile", false, false},
 		{"fetch", true, false},
+		{`--config http.proxy="http://user:secret@proxy.example:3128" update`, false, false},
 	} {
 		t.Run(fmt.Sprintf("%s, lock %v", tc.args, tc.lock), func(t *testing.T) {
 			if tc.symlink {
@@ -926,13 +927,16 @@ func TestRunCargo_BlockLeavesTheProjectAsItWas(t *testing.T) {
 					t.Errorf("%s is another file now (%v)", p, err)
 				}
 			}
-			for _, line := range []string{"Installation blocked.", "Error: WARNING: evil:1.0.0 contains malware", "ossprey: blocked `cargo " + tc.args + "`\nossprey: the project was not changed\n"} {
+			for _, line := range []string{"Installation blocked.", "Error: WARNING: evil:1.0.0 contains malware", "ossprey: blocked `cargo " + blockedVerb(tc.args) + "`\nossprey: the project was not changed\n"} {
 				if !strings.Contains(out, line) {
 					t.Errorf("output lacks %q:\n%s", line, out)
 				}
 			}
 			if entries, _ := os.ReadDir(filepath.Join(os.Getenv("XDG_CACHE_HOME"), "ossprey")); len(entries) != 0 {
 				t.Errorf("the mirror is still there: %v", entries)
+			}
+			if strings.Contains(out, "secret") {
+				t.Errorf("output prints a --config credential:\n%s", out)
 			}
 		})
 	}
@@ -1008,6 +1012,16 @@ func TestRunCargoAdd_CleanLandsTheLockThenTheManifest(t *testing.T) {
 			}
 		})
 	}
+}
+
+// blockedVerb is the first word of args that is neither an option nor an option's value.
+func blockedVerb(args string) string {
+	for _, f := range strings.Fields(args) {
+		if !strings.HasPrefix(f, "-") && !strings.Contains(f, "=") {
+			return f
+		}
+	}
+	return ""
 }
 
 // A clean update resolves from the project's lock and writes the new one, keeping its mode, a linked lock through its link as cargo writes one, and prints the one verdict line (OSS-2553).
