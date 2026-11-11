@@ -158,8 +158,9 @@ Windows resolves it under `%LOCALAPPDATA%`.
      skips a `+toolchain` only first.
    - **`install`** builds and runs build scripts at once, so the named crates
      are checked in front, and only those (`errCargoNotResolved`), under the
-     name typed, since `cargo install` folds no spelling. A crate from anywhere
-     but crates.io forwards unchecked (`cargoSourceFlags`,
+     name typed, since `cargo install` folds no spelling. A parsed crate never
+     meets the archive check (`addCrate`): `tool@1.2.3-beta.zip` is a pin. A
+     crate from anywhere but crates.io forwards unchecked (`cargoSourceFlags`,
      `cargoDefaultRegistry`): checking crates.io's crate of that name would
      block an internal tool on a squat, or clear one never installed. Only a
      definite crates.io index counts (`catalog.IsCratesIoIndex`).

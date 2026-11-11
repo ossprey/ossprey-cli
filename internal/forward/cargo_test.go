@@ -160,6 +160,13 @@ func TestParseCargoInstall(t *testing.T) {
 		{"--bin -qF pcre2 ripgrep", "", ripgrep, nil},
 		{"-qF pcre2 --registry corp ripgrep", "", nil, []string{"ripgrep", "--registry corp"}},
 		{"./local", "", nil, []string{"./local"}},
+		// A release that ends like an archive name is still a pin, which cargo 1.99.1 installs (OSS-2553).
+		{"tool@1.2.3-beta.zip", "", crate("tool", "1.2.3-beta.zip"), nil},
+		{"tool@1.2.3+build.tar.gz", "", crate("tool", "1.2.3+build.tar.gz"), nil},
+		{"tool@=1.2.3-a.tgz tool@1.2.3-a.tgz", "", crate("tool", "1.2.3-a.tgz"), nil},
+		{"--version 1.2.3-x.whl tool", "", crate("tool", "1.2.3-x.whl"), nil},
+		{"--vers=1.2.3-a.tar.bz2 tool", "", crate("tool", "1.2.3-a.tar.bz2"), nil},
+		{"--version 1.2.3+b.tar tool", "", crate("tool", "1.2.3+b.tar"), nil},
 	} {
 		got := parseCargoInstall(strings.Fields(tc.args), tc.defaultRegistry)
 		if !reflect.DeepEqual(got.Specs, tc.specs) || !reflect.DeepEqual(got.NonPackages, tc.nonPkgs) {
@@ -436,6 +443,30 @@ func TestRunCargoInstall_BlockedBeforeCargoRuns(t *testing.T) {
 	want := []check.Spec{{Ecosystem: "cargo", Name: "evil", Version: "1.0.0"}, {Ecosystem: "cargo", Name: "other", Version: "1.0.0"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("checked %+v, want %+v", got, want)
+	}
+}
+
+// A pin whose release ends like an archive name is checked before cargo runs, not forwarded unchecked (OSS-2553).
+func TestRunCargoInstall_ChecksAReleaseNamedLikeAnArchive(t *testing.T) {
+	for _, tc := range []struct {
+		args    []string
+		version string
+	}{
+		{[]string{"install", "tool@1.2.3-beta.zip"}, "1.2.3-beta.zip"},
+		{[]string{"install", "--version", "1.2.3+build.tar.gz", "tool"}, "1.2.3+build.tar.gz"},
+	} {
+		ex := &stubExec{}
+		var got []check.Spec
+		swap(t, ex.fn, func(ctx context.Context, o check.Options) (*ossbom.SBOM, error) {
+			got = o.Specs
+			return malwareSBOM(ctx, o)
+		})
+		if err := Run(context.Background(), Options{Bin: "cargo", Args: tc.args}); !errors.Is(err, ErrBlocked) || ex.called {
+			t.Errorf("cargo %v: Run = %v, cargo ran %v; want ErrBlocked before cargo runs", tc.args, err, ex.called)
+		}
+		if want := []check.Spec{{Ecosystem: "cargo", Name: "tool", Version: tc.version}}; !reflect.DeepEqual(got, want) {
+			t.Errorf("cargo %v: checked %+v, want %+v", tc.args, got, want)
+		}
 	}
 }
 

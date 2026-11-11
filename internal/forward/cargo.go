@@ -187,14 +187,18 @@ func parseCargoInstall(args []string, defaultRegistry string) installArgs {
 	return out
 }
 
-// addCrate adds one crate to install; a range, which check refuses, resolves to the latest release as a PyPI range does.
+// addCrate adds one crate to install, never read as an archive, since a release such as 1.2.3-beta.zip is valid; a range, which check refuses, resolves to the latest release as a PyPI range does.
 func (p *installArgs) addCrate(token string) {
 	name, req, _ := strings.Cut(token, "@")
-	if _, err := check.ParseSpec("cargo", token); err != nil && req != "" && registry.IsCargoName(name) {
+	s, err := check.ParseSpec("cargo", token)
+	switch {
+	case err == nil:
+		p.addSpec(s, token)
+	case req != "" && registry.IsCargoName(name):
 		p.Specs = append(p.Specs, check.Spec{Ecosystem: "cargo", Name: name, Constraint: req})
-		return
+	default:
+		p.NonPackages = append(p.NonPackages, token)
 	}
-	p.addTarget("cargo", token)
 }
 
 // checkCargoFirst refuses a cargo command that only locks, since its Cargo.lock cannot be checked before it reaches the project yet.

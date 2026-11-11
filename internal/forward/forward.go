@@ -1293,6 +1293,11 @@ func (p *installArgs) addTarget(ecosystem, token string) {
 		p.NonPackages = append(p.NonPackages, token)
 		return
 	}
+	p.addSpec(s, token)
+}
+
+// addSpec adds a parsed package once, keeping each spelling of it.
+func (p *installArgs) addSpec(s check.Spec, token string) {
 	if p.Tokens == nil {
 		p.Tokens = map[check.Spec][]string{}
 	}
