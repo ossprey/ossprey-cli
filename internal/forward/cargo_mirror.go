@@ -173,7 +173,7 @@ func (mi *cargoMirror) args(args []string) ([]string, error) {
 			dep, path = rest[i+1], true
 			i++
 		case manifest, path:
-		case cargoResolveShorts[a] && i+1 < len(rest):
+		case cargoResolveShorts[a] && i+1 < len(rest) && !cargoOptionalSkips(a, rest[i+1]):
 			out = append(out, a, rest[i+1])
 			i++
 			continue

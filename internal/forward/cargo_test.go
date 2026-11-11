@@ -1454,6 +1454,8 @@ func TestBuildCargoMirror(t *testing.T) {
 		{"add --manifest-path " + ws.Manifests[1] + " evil", "add --manifest-path " + mi.at(ws.Manifests[1]) + " evil"},
 		{"add --manifest-path=" + ws.Manifests[1] + " evil", "add --manifest-path " + mi.at(ws.Manifests[1]) + " evil"},
 		{"add -qm ../a/Cargo.toml -p a evil", "add -q --manifest-path " + mi.at(ws.Manifests[1]) + " -p a evil"},
+		{"add -p -m ../a/Cargo.toml evil", "add -p --manifest-path " + mi.at(ws.Manifests[1]) + " evil"},
+		{"add -p-m evil", "add -p=-m evil"},
 		{"add -m ../crates/b/Cargo.toml evil", "add --manifest-path " + mi.at(linked) + " evil"},
 		{"-Zunstable-options -C docs add evil", "-Z unstable-options -C " + mirrorPath(mi.s, run) + " add evil"},
 		{"add --path " + dep, "add --path " + mirrorPath(mi.s, dep)},
