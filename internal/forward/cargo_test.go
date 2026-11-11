@@ -585,7 +585,7 @@ func noLanding(t *testing.T) {
 	t.Cleanup(func() { landFn = old })
 }
 
-// needSymlinks skips a test of the cargo add mirror where links cannot be made.
+// needSymlinks skips a test that makes links where links cannot be made.
 func needSymlinks(t *testing.T) {
 	t.Helper()
 	dir := t.TempDir()
