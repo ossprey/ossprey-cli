@@ -351,7 +351,7 @@ func (mi *cargoMirror) leaves(f cargoFile) (string, error) {
 	dir := mi.at(filepath.Dir(f.path))
 	top := mi.at(filepath.VolumeName(f.path) + string(filepath.Separator))
 	out := ""
-	cargoPaths(doc, "", func(p string) {
+	cargoPaths(doc, "", 0, func(p string) {
 		if out == "" && !filepath.IsAbs(p) && (driveRelative(p) || !within(top, filepath.Join(dir, p))) {
 			out = p
 		}
@@ -359,24 +359,24 @@ func (mi *cargoMirror) leaves(f cargoFile) (string, error) {
 	return out, nil
 }
 
-// cargoPaths yields every `path` value in a decoded manifest, and package.workspace, wherever they sit bar package.metadata and workspace.metadata.
-func cargoPaths(v any, key string, yield func(string)) {
+// cargoPaths yields every `path` value in a decoded manifest, and package.workspace, wherever they sit bar the top-level package.metadata, project.metadata and workspace.metadata; depth is v's distance from the document.
+func cargoPaths(v any, key string, depth int, yield func(string)) {
 	switch v := v.(type) {
 	case map[string]any:
 		for k, x := range v {
-			// Those tables hold whatever other tools put there, and cargo follows no path in them.
-			if k == "metadata" && (key == "package" || key == "project" || key == "workspace") {
+			// Those tables hold whatever other tools put there, and cargo follows no path in them; a metadata table deeper down, as in [patch.<registry>.metadata], may be a crate.
+			if depth == 1 && k == "metadata" && (key == "package" || key == "project" || key == "workspace") {
 				continue
 			}
-			cargoPaths(x, k, yield)
+			cargoPaths(x, k, depth+1, yield)
 		}
 	case []map[string]any:
 		for _, x := range v {
-			cargoPaths(x, key, yield)
+			cargoPaths(x, key, depth+1, yield)
 		}
 	case []any:
 		for _, x := range v {
-			cargoPaths(x, key, yield)
+			cargoPaths(x, key, depth+1, yield)
 		}
 	case string:
 		if key == "path" || key == "workspace" {

@@ -310,10 +310,12 @@ Windows resolves it under `%LOCALAPPDATA%`.
      `cargo metadata` must find the project's root and members as their copies
      there before the add (`sameWorkspace`) and after it (`added`), or the
      checked lock lacks a dev-dependency the project locks; a relative `path`
-     in a copy climbing out of its volume refuses, bar `package.metadata` and
-     `workspace.metadata`, which cargo never follows. Rewriting the copies' paths
-     was ruled out: linked ancestor manifests escape too, and no TOML parser
-     here gives value spans.
+     in a copy climbing out of its volume refuses, bar the top-level
+     `package.metadata`, `project.metadata` and `workspace.metadata`, which
+     cargo never follows; `[patch.package.metadata]` patches a crate named
+     `metadata` and is checked. Rewriting the copies' paths was ruled out:
+     linked ancestor manifests escape too, and no TOML parser here gives value
+     spans.
    - **Around the mirror.** The version probe runs again in the mirror and
      must match, since rustup keys `rustup override set` by the project's real
      path. A `.cargo/config` above the mirror that the project does not read

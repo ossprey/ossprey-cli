@@ -1926,7 +1926,7 @@ func TestCargoMirrorAdded(t *testing.T) {
 	})
 }
 
-// cargo follows no path in package.metadata or workspace.metadata, so one there climbing out of the mirror refuses nothing, while a dependency's still refuses, one named metadata too (OSS-2553).
+// cargo follows no path in the top-level package, project or workspace metadata table, so one there climbing out of the mirror refuses nothing, while a dependency's still refuses, one named metadata or patched as metadata too (OSS-2553).
 func TestCargoMirrorLeavesSkipsMetadata(t *testing.T) {
 	vol := filepath.VolumeName(os.TempDir()) + string(filepath.Separator)
 	mi := &cargoMirror{s: filepath.Join(t.TempDir(), "m"), real: map[string]bool{vol: true}}
@@ -1939,6 +1939,10 @@ func TestCargoMirrorLeavesSkipsMetadata(t *testing.T) {
 		{"a dependency", "[package]\nname = \"a\"\n\n[dependencies]\nx = { path = \"" + climb + "\" }\n", climb},
 		{"a dependency named metadata", "[package]\nname = \"a\"\n\n[dependencies]\nmetadata = { path = \"" + climb + "\" }\n", climb},
 		{"a workspace dependency named metadata", "[workspace.dependencies]\nmetadata = { path = \"" + climb + "\" }\n", climb},
+		// A patch of a crate named metadata from a registry named package is followed (verified with cargo 1.99.1).
+		{"patch.package.metadata", "[package]\nname = \"a\"\n\n[patch.package.metadata]\npath = \"" + climb + "\"\n", climb},
+		{"patch.workspace.metadata", "[patch.workspace]\nmetadata = { path = \"" + climb + "\" }\n", climb},
+		{"patch.project.metadata", "[patch.project.metadata]\npath = \"" + climb + "\"\n", climb},
 	} {
 		got, err := mi.leaves(cargoFile{path: manifest, existed: true, data: []byte(tc.data)})
 		if err != nil || got != tc.want {
