@@ -281,9 +281,11 @@ Windows resolves it under `%LOCALAPPDATA%`.
      `<name>.ossprey-found-<n>` (an editor may have saved it), the snapshot is
      put back even when that rename fails, since an unchecked lock must not
      stay, and the run fails (`cargoTripwire`). The snapshot records the
-     lock's link (`cargoLinkOf`), and only that same link is followed when
-     putting back or landing; a new one is moved aside or stops the landing,
-     so nothing is written outside the project. cargo's own failure returns
+     lock's link (`cargoLinkOf`) and where its directory led, and only that
+     same link is followed when putting back or landing; a new one is moved
+     aside or stops the landing, as does a directory relinked since, so
+     nothing is written outside the project (the directory is checked just
+     before the write, not with it). cargo's own failure returns
      its exit code. A block, a check error or a lock the platform checked
      none of leave the project as it was, errors exiting 2 since 1 means
      malware; trust comes from the configs where cargo runs

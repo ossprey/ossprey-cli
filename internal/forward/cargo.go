@@ -736,6 +736,8 @@ type cargoFile struct {
 	mode    fs.FileMode
 	// link is what the path's own link says and real where it leads, both "" for a file.
 	link, real string
+	// dir is where the path's directory led when it was read.
+	dir string
 }
 
 // same reports whether f and g hold the same bytes, or both did not exist.
@@ -750,17 +752,18 @@ func (f cargoFile) placed(g cargoFile) bool {
 
 // readCargoState reads p, failing when it is not a regular file, is over the bound, or is a link to nothing.
 func readCargoState(p string) (cargoFile, error) {
+	dir := canonicalDir(filepath.Dir(p))
 	data, fi, err := readCargoFile(p)
 	if errors.Is(err, fs.ErrNotExist) {
 		if _, lerr := os.Lstat(p); lerr == nil {
 			return cargoFile{}, fmt.Errorf("%s is a link to nothing", displayPath(p))
 		}
-		return cargoFile{path: p}, nil
+		return cargoFile{path: p, dir: dir}, nil
 	}
 	if err != nil {
 		return cargoFile{}, err
 	}
-	f := cargoFile{path: p, existed: true, data: data, mode: fi.Mode().Perm()}
+	f := cargoFile{path: p, existed: true, data: data, mode: fi.Mode().Perm(), dir: dir}
 	f.link, f.real = cargoLinkOf(p)
 	return f, nil
 }
@@ -858,7 +861,8 @@ func moveFound(p string) (string, error) {
 // landCargo writes each resolved file whose bytes changed over the project's, the lock first, so the project never names a crate its lock does not hold, once every file still holds what cargo started from.
 func landCargo(before, after []cargoFile) error {
 	for _, f := range before {
-		if now, err := readCargoState(f.path); err != nil || !now.same(f) || !now.placed(f) {
+		// A directory relinked since cargo started would lead the write out of the project.
+		if now, err := readCargoState(f.path); err != nil || !now.same(f) || !now.placed(f) || now.dir != f.dir {
 			return fmt.Errorf("%s changed while ossprey checked it, so nothing was written; run the command again", displayPath(f.path))
 		}
 	}
