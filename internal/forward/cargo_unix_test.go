@@ -443,3 +443,37 @@ func TestCargoChildKeepsAnIgnoredHangupIgnored(t *testing.T) {
 		t.Errorf("ended with %v, output %q; want cargo to finish through the hangup", err, out.String())
 	}
 }
+
+// A workspace directory relinked while the lock is scanned stops the landing, even over the same bytes, so nothing is written where the new link leads (OSS-2553).
+func TestRunCargoUpdate_DoesNotLandThroughADirectoryRelinkedDuringTheScan(t *testing.T) {
+	const old = "version = 4\n# before\n"
+	root, ws := cargoProject(t)
+	writeFile(t, ws.Lock, old)
+	outside := t.TempDir()
+	writeFile(t, filepath.Join(outside, "Cargo.lock"), old)
+	swapCargo(t, &fakeCargo{t: t, root: root, lock: evilLock})
+	swap(t, nil, cleanSBOM)
+	var req scanRequest
+	var scanned string
+	scan := lockScan(t, &req, &scanned, cleanCrates)
+	swapScan(t, func(ctx context.Context, r scanRequest) (*ossbom.SBOM, error) {
+		if err := os.Rename(root, root+".moved"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, root); err != nil {
+			t.Fatal(err)
+		}
+		return scan(ctx, r)
+	})
+	_, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"update"}})
+	// The working directory moved with the project, so the lock is named from there.
+	if want := "Cargo.lock changed while ossprey checked it, so nothing was written; run the command again"; err == nil || !strings.HasSuffix(err.Error(), want) {
+		t.Errorf("Run = %v, want %q", err, want)
+	}
+	if got := readFile(t, filepath.Join(outside, "Cargo.lock")); got != old {
+		t.Errorf("the lock outside the project holds %q, want it untouched", got)
+	}
+	if got := readFile(t, filepath.Join(root+".moved", "Cargo.lock")); got != old {
+		t.Errorf("the project's lock holds %q, want it untouched", got)
+	}
+}

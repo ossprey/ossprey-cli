@@ -526,6 +526,11 @@ func TestCatalogWarnsWhenCargoReplacesCratesIo(t *testing.T) {
 		}, files: map[string]string{"web/package.json": `{"name":"web","dependencies":{"left-pad":"^1.3.0"}}`}, home: mirrorConfig, want: 0},
 		{name: "CARGO_HOME mirror over a subdirectory", files: map[string]string{"rust/Cargo.toml": project, "web/package.json": `{"name":"web"}`}, home: mirrorConfig, want: 1},
 		{name: "mirror at a root holding no manifest", files: map[string]string{"rust/Cargo.toml": project, ".cargo/config.toml": mirrorConfig}, want: 1},
+		// cargo 1.99.1 takes crates.io's crates from a location set on its own table, with no replace-with.
+		{name: "a local registry set on crates.io", files: map[string]string{"Cargo.toml": project, ".cargo/config.toml": "[source.crates-io]\nlocal-registry = \"lreg\"\n"}, want: 1},
+		{name: "a directory set on crates.io in CARGO_HOME", files: map[string]string{"Cargo.toml": project}, home: "[source.crates-io]\ndirectory = \"/srv/vendor\"\n", want: 1},
+		{name: "a git repository set on crates.io", files: map[string]string{"Cargo.toml": project, ".cargo/config": "[source.crates-io]\ngit = \"https://git.example.com/acme/crates\"\n"}, want: 1},
+		{name: "a registry set on crates.io", files: map[string]string{"Cargo.toml": project, ".cargo/config.toml": "[source.crates-io]\nregistry = \"sparse+https://crates.corp.example/index/\"\n"}, want: 1},
 		{name: "not replaced", files: map[string]string{"Cargo.toml": project, ".cargo/config.toml": "[net]\ngit-fetch-with-cli = true\n"}, want: 0},
 		{name: "no crates", files: map[string]string{"package.json": `{"name":"web","dependencies":{"left-pad":"^1.3.0"}}`, ".cargo/config.toml": mirrorConfig}, want: 0},
 	} {

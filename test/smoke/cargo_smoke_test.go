@@ -634,14 +634,14 @@ func TestCargoMovedLockIsRefused(t *testing.T) {
 	}
 }
 
-// With no Cargo.toml, a gating command is refused on cargo's own error line, and passive leaves cargo's error alone.
+// With no Cargo.toml, a gating command is refused on cargo's own error line, naming only the verb, and passive leaves cargo's error alone.
 func TestCargoAddWithNoWorkspace(t *testing.T) {
 	api := newFakeAPI(t, "")
 	env := cargoEnv(t, api.URL)
 	dir := t.TempDir()
-	res := runForwardEnv(t, dir, env, binPath, "cargo", "add", "itoa", "--offline")
-	if res.exitCode != 2 || !strings.Contains(res.stderr, "did not run `cargo add itoa --offline`") || !strings.Contains(res.stderr, "could not find `Cargo.toml`") {
-		t.Errorf("gating: exit %d, want 2 and cargo's error in the refusal\nstderr: %s", res.exitCode, res.stderr)
+	res := runForwardEnv(t, dir, env, binPath, "cargo", "--config", `http.proxy="http://user:secret@proxy.invalid:3128"`, "add", "itoa", "--offline")
+	if res.exitCode != 2 || !strings.Contains(res.stderr, "error: did not run `cargo add`: its Cargo.lock cannot be checked") || !strings.Contains(res.stderr, "could not find `Cargo.toml`") || strings.Contains(res.stderr, "secret") {
+		t.Errorf("gating: exit %d, want 2 and cargo's error in the refusal, with no credential\nstderr: %s", res.exitCode, res.stderr)
 	}
 	res = runForwardEnv(t, dir, append(slices.Clone(env), "OSSPREY_PASSIVE=1"), binPath, "cargo", "add", "itoa", "--offline")
 	if res.exitCode != 101 || !strings.Contains(res.stderr, "could not find `Cargo.toml`") || strings.Contains(res.stderr, "ossprey:") {
@@ -652,14 +652,14 @@ func TestCargoAddWithNoWorkspace(t *testing.T) {
 	}
 }
 
-// With no Cargo.toml, a gating update is refused on cargo's own error line, and passive leaves cargo's error alone.
+// With no Cargo.toml, a gating update is refused on cargo's own error line, naming only the verb, and passive leaves cargo's error alone.
 func TestCargoUpdateWithNoWorkspace(t *testing.T) {
 	api := newFakeAPI(t, "")
 	env := cargoEnv(t, api.URL)
 	dir := t.TempDir()
-	res := runForwardEnv(t, dir, env, binPath, "cargo", "update", "--offline")
-	if res.exitCode != 2 || !strings.Contains(res.stderr, "did not run `cargo update --offline`") || !strings.Contains(res.stderr, "could not find `Cargo.toml`") {
-		t.Errorf("gating: exit %d, want 2 and cargo's error in the refusal\nstderr: %s", res.exitCode, res.stderr)
+	res := runForwardEnv(t, dir, env, binPath, "cargo", "--config", `http.proxy="http://user:secret@proxy.invalid:3128"`, "update", "--offline")
+	if res.exitCode != 2 || !strings.Contains(res.stderr, "error: did not run `cargo update`: its Cargo.lock cannot be checked") || !strings.Contains(res.stderr, "could not find `Cargo.toml`") || strings.Contains(res.stderr, "secret") {
+		t.Errorf("gating: exit %d, want 2 and cargo's error in the refusal, with no credential\nstderr: %s", res.exitCode, res.stderr)
 	}
 	res = runForwardEnv(t, dir, append(slices.Clone(env), "OSSPREY_PASSIVE=1"), binPath, "cargo", "update", "--offline")
 	if res.exitCode != 101 || !strings.Contains(res.stderr, "could not find `Cargo.toml`") || strings.Contains(res.stderr, "ossprey:") {
@@ -827,9 +827,50 @@ func TestCargoInstallChecksCratesIoUnderAnotherName(t *testing.T) {
 	}
 }
 
-// cargo 1.99.1 installs from a crates.io replacement in CARGO_HOME's config, so the crates.io crate is still checked and one line says, even when quiet, that cargo's copy was not (OSS-2553).
+// cargo 1.99.1 installs from a crates.io replacement in CARGO_HOME's config, a replace-with, a location on crates.io's own table or a replaced source that another spelling of crates.io's index names, so the crates.io crate is still checked and one line says, even when quiet, that cargo's copy was not (OSS-2553).
 func TestCargoInstallWarnsWhenCratesIoIsReplaced(t *testing.T) {
-	api := newFakeAPI(t, "")
+	for _, tc := range []struct {
+		name, config, warning string
+		args                  []string
+	}{
+		{"replace-with", "[source.crates-io]\nreplace-with = \"mirror\"\n\n[source.mirror]\nlocal-registry = '%s'\n",
+			`crates.io is replaced by "mirror" in your cargo config, so cargo installs that source's copy, which was not checked`, nil},
+		{"a location on crates.io", "[source.crates-io]\nlocal-registry = '%s'\n",
+			"crates.io is replaced by the local-registry set for it in your cargo config, so cargo installs that copy, which was not checked", nil},
+		{"another spelling of the index", "[source.x]\nregistry = \"sparse+https://INDEX.crates.io/\"\nreplace-with = \"mirror\"\n\n[source.mirror]\nlocal-registry = '%s'\n",
+			"a cargo config replaces a source, which may be crates.io as this install names it, so cargo may install another source's copy, which was not checked", []string{"--index", "sparse+https://INDEX.crates.io/"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := newFakeAPI(t, "")
+			env := cargoEnv(t, api.URL)
+			var home string
+			for _, kv := range env {
+				if v, ok := strings.CutPrefix(kv, "CARGO_HOME="); ok {
+					home = v
+				}
+			}
+			// An empty local registry, which cargo names in its error once it has taken the replacement.
+			lreg := t.TempDir()
+			if err := writeFile(home, "config.toml", fmt.Sprintf(tc.config, lreg)); err != nil {
+				t.Fatal(err)
+			}
+			root := t.TempDir()
+			args := append(append([]string{"cargo", "install", "--root", root}, tc.args...), "itoa@1.0.14")
+			res := runForwardEnv(t, t.TempDir(), env, binPath, args...)
+			warning := "ossprey: warning: " + tc.warning
+			if _, purls := api.stats(); !slices.Equal(purls, []string{"pkg:cargo/itoa@1.0.14"}) || !strings.Contains(res.stderr, warning) {
+				t.Errorf("submitted %v; want itoa 1.0.14 checked and %q\nstderr: %s", purls, warning, res.stderr)
+			}
+			if !strings.Contains(res.stderr, lreg) || !dirEmpty(t, root) {
+				t.Errorf("exit %d; want cargo to take the replacement, which holds no itoa\nstderr: %s", res.exitCode, res.stderr)
+			}
+		})
+	}
+}
+
+// An include in CARGO_HOME's config may set registry.default, so a gating cargo install naming no registry is refused before cargo runs, and --registry crates-io settles it (OSS-2553).
+func TestCargoInstallRefusesWhenAnIncludeMaySetTheRegistry(t *testing.T) {
+	api := newFakeAPI(t, "pkg:cargo/itoa@1.0.14")
 	env := cargoEnv(t, api.URL)
 	var home string
 	for _, kv := range env {
@@ -837,19 +878,21 @@ func TestCargoInstallWarnsWhenCratesIoIsReplaced(t *testing.T) {
 			home = v
 		}
 	}
-	// An empty local registry, which cargo names in its error once it has taken the replacement.
-	config := "[source.crates-io]\nreplace-with = \"mirror\"\n\n[source.mirror]\nlocal-registry = '" + t.TempDir() + "'\n"
-	if err := writeFile(home, "config.toml", config); err != nil {
+	if err := writeFile(home, "config.toml", "include = [\"extra.toml\"]\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFile(home, "extra.toml", "[build]\njobs = 2\n"); err != nil {
 		t.Fatal(err)
 	}
 	root := t.TempDir()
 	res := runForwardEnv(t, t.TempDir(), env, binPath, "cargo", "install", "--root", root, "itoa@1.0.14")
-	warning := `ossprey: warning: crates.io is replaced by "mirror" in your cargo config, so cargo installs that source's copy, which was not checked`
-	if _, purls := api.stats(); !slices.Equal(purls, []string{"pkg:cargo/itoa@1.0.14"}) || !strings.Contains(res.stderr, warning) {
-		t.Errorf("submitted %v; want itoa 1.0.14 checked and %q\nstderr: %s", purls, warning, res.stderr)
+	want := "error: did not run `cargo install`: a cargo config includes another file, which may set the registry it installs from, so nothing was checked; name the registry with --registry"
+	if _, purls := api.stats(); res.exitCode != 2 || len(purls) != 0 || !strings.Contains(res.stderr, want) || strings.Contains(res.stderr, "Downloaded") {
+		t.Errorf("exit %d, submitted %v; want exit 2 before cargo runs with %q\nstderr: %s", res.exitCode, purls, want, res.stderr)
 	}
-	if !strings.Contains(res.stderr, "replaced source registry `crates-io`") || !dirEmpty(t, root) {
-		t.Errorf("exit %d; want cargo to take the replacement, which holds no itoa\nstderr: %s", res.exitCode, res.stderr)
+	res = runForwardEnv(t, t.TempDir(), env, binPath, "cargo", "install", "--registry", "crates-io", "--root", root, "itoa@1.0.14")
+	if _, purls := api.stats(); res.exitCode != 1 || !slices.Equal(purls, []string{"pkg:cargo/itoa@1.0.14"}) || !dirEmpty(t, root) {
+		t.Errorf("--registry crates-io: exit %d, submitted %v; want itoa checked and blocked\nstderr: %s", res.exitCode, purls, res.stderr)
 	}
 }
 

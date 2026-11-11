@@ -789,6 +789,31 @@ func TestRunCargo_RefusesBeforeCargoRuns(t *testing.T) {
 				return cargoWorkspace{}, errors.New("cargo metadata: error: current package believes it's in a workspace when it's not: workspace: /c2/Cargo.toml")
 			}
 		}, "(cargo metadata fails in ossprey's copy of the workspace with error: current package believes it's in a workspace when it's not: workspace: /c2/Cargo.toml; either a Cargo.toml names"},
+		// Every other refusal names only the verb too.
+		{"cargo 1.96.0 after a secret --config", `--config http.proxy="http://user:secret@proxy.example:3128" update`, func(*testing.T, string, cargoWorkspace) {
+			cargoVersionFn = func(context.Context, string, []string) (string, error) {
+				return "cargo 1.96.0 (30a34c682 2026-05-25)", nil
+			}
+		}, "did not run `cargo update`: ossprey needs cargo 1.97 or later"},
+		{"no workspace after a secret --config", `fetch --config http.proxy="http://user:secret@proxy.example:3128"`, func(*testing.T, string, cargoWorkspace) {
+			cargoWorkspaceFn = func(context.Context, []string) (cargoWorkspace, error) {
+				return cargoWorkspace{}, errors.New("cargo metadata: error: could not find `Cargo.toml` in `/empty` or any parent directory")
+			}
+		}, "did not run `cargo fetch`: its Cargo.lock cannot be checked"},
+		{"a lock that cannot be read after a secret --config", `--config http.proxy="http://user:secret@proxy.example:3128" generate-lockfile`, func(t *testing.T, _ string, ws cargoWorkspace) { big(t, ws.Lock) }, "did not run `cargo generate-lockfile`: "},
+		{"update --breaking after a secret --config", `--config http.proxy="http://user:secret@proxy.example:3128" update -Zunstable-options --breaking evil`, nil, "did not run `cargo update`: --breaking edits Cargo.toml"},
+		{"fetch with an option it lacks after a secret --config", `--config http.proxy="http://user:secret@proxy.example:3128" fetch --tagret x86_64-unknown-linux-gnu`, nil, "did not run `cargo fetch`: cargo fetch would reject `--tagret`"},
+		{"cargo add with no workspace after a secret --config", `--config http.proxy="http://user:secret@proxy.example:3128" add itoa`, func(*testing.T, string, cargoWorkspace) {
+			cargoWorkspaceFn = func(context.Context, []string) (cargoWorkspace, error) {
+				return cargoWorkspace{}, errors.New("cargo metadata: error: could not find `Cargo.toml` in `/empty` or any parent directory")
+			}
+		}, "did not run `cargo add`: its Cargo.lock cannot be checked"},
+		{"cargo add with no workspace in the mirror before a secret --config", `add --config http.proxy="http://user:secret@proxy.example:3128" evil`, func(t *testing.T, _ string, _ cargoWorkspace) {
+			needSymlinks(t)
+			cargoMetadataFn = func(context.Context, string, []string, string) (cargoWorkspace, error) {
+				return cargoWorkspace{}, errors.New("cargo metadata: error: current package believes it's in a workspace when it's not: workspace: /c2/Cargo.toml")
+			}
+		}, "could not check `cargo add` (cargo metadata fails in ossprey's copy of the workspace"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root, ws := cargoProject(t)
@@ -802,8 +827,8 @@ func TestRunCargo_RefusesBeforeCargoRuns(t *testing.T) {
 				return nil
 			}, cleanSBOM)
 			out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: strings.Fields(tc.args)})
-			if err == nil || !strings.Contains(err.Error(), tc.want) || errors.Is(err, ErrBlocked) {
-				t.Errorf("Run = %v, want an error naming %q", err, tc.want)
+			if err == nil || !strings.Contains(err.Error(), tc.want) || strings.Contains(err.Error(), "secret") || errors.Is(err, ErrBlocked) {
+				t.Errorf("Run = %v, want an error naming %q and no credential", err, tc.want)
 			}
 			if out != "" {
 				t.Errorf("printed %q, want only main's error line", out)
@@ -1543,7 +1568,7 @@ func TestRunCargo_FailurePassesThrough(t *testing.T) {
 	}
 }
 
-// A cargo add that edits the manifest and locks nothing lands nothing, since the next build would resolve that manifest unchecked.
+// A cargo add that edits the manifest and locks nothing lands nothing, since the next build would resolve that manifest unchecked, and says so naming only the verb.
 func TestRunCargoAdd_NoLockLandsNothing(t *testing.T) {
 	needSymlinks(t)
 	root, _ := cargoProject(t)
@@ -1554,8 +1579,8 @@ func TestRunCargoAdd_NoLockLandsNothing(t *testing.T) {
 	}
 	swap(t, nil, cleanSBOM)
 	noLanding(t)
-	out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"add", "-p", "a", "evil"}})
-	if want := "`cargo add -p a evil` left no Cargo.lock, so nothing was checked and the project was not changed"; err == nil || err.Error() != want || out != "" {
+	out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"add", "--config", `http.proxy="http://user:secret@proxy.example:3128"`, "-p", "a", "evil"}})
+	if want := "`cargo add` left no Cargo.lock, so nothing was checked and the project was not changed"; err == nil || err.Error() != want || out != "" {
 		t.Errorf("Run = %v, output %q; want %q", err, out, want)
 	}
 	if !reflect.DeepEqual(projectState(t, root), before) {
@@ -1563,14 +1588,14 @@ func TestRunCargoAdd_NoLockLandsNothing(t *testing.T) {
 	}
 }
 
-// A generate-lockfile that locks nothing lands nothing and says nothing was checked.
+// A generate-lockfile that locks nothing lands nothing and says nothing was checked, naming only the verb.
 func TestRunCargoGenerateLockfile_NoLockLandsNothing(t *testing.T) {
 	root, _ := cargoProject(t)
 	before := projectState(t, root)
 	cargoRunFn = func(context.Context, string, []string, []string, io.Writer) error { return nil }
 	swap(t, nil, cleanSBOM)
 	noLanding(t)
-	out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"generate-lockfile"}})
+	out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"generate-lockfile", "--config", `http.proxy="http://user:secret@proxy.example:3128"`}})
 	if want := "`cargo generate-lockfile` left no Cargo.lock, so nothing was checked and the project was not changed"; err == nil || err.Error() != want || out != "" {
 		t.Errorf("Run = %v, output %q; want %q", err, out, want)
 	}
@@ -2411,6 +2436,12 @@ func TestCargoRegistryIsCratesIoReadsTheEnvironment(t *testing.T) {
 func TestRunCargoInstall_WarnsWhenCratesIoIsReplaced(t *testing.T) {
 	repl := "[source.crates-io]\nreplace-with = \"mirror\"\n"
 	named := `crates.io is replaced by "mirror" in your cargo config, so cargo installs that source's copy, which was not checked`
+	located := func(key string) string {
+		return "crates.io is replaced by the " + key + " set for it in your cargo config, so cargo installs that copy, which was not checked"
+	}
+	// cargo 1.99.1 reads this spelling of crates.io's index as a source of its own, which [source.x] replaces.
+	other := "[source.x]\nregistry = \"sparse+https://INDEX.crates.io/\"\nreplace-with = \"mirror\"\n"
+	another := "a cargo config replaces a source, which may be crates.io as this install names it, so cargo may install another source's copy, which was not checked"
 	for _, tc := range []struct {
 		name  string
 		files map[string]string
@@ -2431,6 +2462,16 @@ func TestRunCargoInstall_WarnsWhenCratesIoIsReplaced(t *testing.T) {
 		{"cargo's test index variable", nil, map[string]string{cargoTestIndexEnv: "sparse+http://127.0.0.1:9/"}, []string{"install", "itoa"}, "crates.io is replaced by " + cargoTestIndexEnv + " in your environment, so cargo installs that source's copy, which was not checked"},
 		{"the project's config is not read", map[string]string{"cwd/.cargo/config.toml": repl}, nil, []string{"install", "itoa"}, ""},
 		{"no environment form", nil, map[string]string{"CARGO_SOURCE_CRATES_IO_REPLACE_WITH": "mirror"}, []string{"install", "itoa"}, ""},
+		{"a local registry set on crates.io", map[string]string{"home/.cargo/config.toml": "[source.crates-io]\nlocal-registry = \"/srv/lreg\"\n"}, nil, []string{"install", "itoa"}, located("local-registry")},
+		{"a directory set on crates.io by --config", nil, nil, []string{"--config", `source.crates-io.directory="vendor"`, "install", "itoa"}, located("directory")},
+		{"a registry set on crates.io", map[string]string{".cargo/config.toml": "[source.crates-io]\nregistry = \"sparse+https://user:secret@mirror.example/index/\"\n"}, nil, []string{"install", "itoa"}, located("registry")},
+		{"a git repository set on crates.io", map[string]string{"home/.cargo/config": "[source.crates-io]\ngit = \"https://user:secret@git.example/crates\"\n"}, nil, []string{"install", "--registry", "crates-io", "itoa"}, located("git")},
+		{"a replace-with beats a location", map[string]string{"home/.cargo/config.toml": "[source.crates-io]\nlocal-registry = \"/srv/lreg\"\n", ".cargo/config.toml": repl}, nil, []string{"install", "itoa"}, named},
+		{"another source replaced, crates.io reached by registry.default", map[string]string{"home/.cargo/config.toml": "[registry]\ndefault = \"cio\"\n\n[registries.cio]\nindex = \"sparse+https://INDEX.crates.io/\"\n\n" + other}, nil, []string{"install", "itoa"}, another},
+		{"another source replaced, crates.io reached by --index", map[string]string{"home/.cargo/config.toml": other}, nil, []string{"install", "--index", "sparse+https://INDEX.crates.io/", "itoa"}, another},
+		{"another source replaced, crates.io reached by --registry", map[string]string{"home/.cargo/config.toml": "[registries.cio]\nindex = \"sparse+https://INDEX.crates.io/\"\n"}, nil, []string{"--config", "source.x.replace-with='mirror'", "install", "--registry=cio", "itoa"}, another},
+		{"another source replaced, crates.io named", map[string]string{"home/.cargo/config.toml": other}, nil, []string{"install", "itoa"}, ""},
+		{"another source replaced, crates-io named", map[string]string{"home/.cargo/config.toml": "[registry]\ndefault = \"cio\"\n\n[registries.cio]\nindex = \"sparse+https://INDEX.crates.io/\"\n\n" + other}, nil, []string{"install", "--registry", "crates-io", "itoa"}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			base := t.TempDir()
@@ -2473,8 +2514,61 @@ func TestRunCargoInstall_WarnsWhenCratesIoIsReplaced(t *testing.T) {
 			if tc.want == "" && strings.Contains(out, "replace") {
 				t.Errorf("warned of a replacement cargo does not read:\n%s", out)
 			}
+			if strings.Contains(out, "secret") {
+				t.Errorf("printed a credential from the config:\n%s", out)
+			}
 			if line := "ossprey: warning: " + tc.want + "\n"; tc.want != "" && !strings.Contains(out, line) {
 				t.Errorf("quiet output lacks %q:\n%s", line, out)
+			}
+		})
+	}
+}
+
+// An include or a config ossprey cannot read may set registry.default, so a gating install naming no source is refused before cargo runs, while one naming its registry is not (OSS-2553).
+func TestRunCargoInstall_RefusesWhenAConfigMaySetTheRegistry(t *testing.T) {
+	const unread = "did not run `cargo install`: a cargo config ossprey could not read may set the registry it installs from, so nothing was checked; name the registry with --registry"
+	for _, tc := range []struct {
+		name, home string
+		args       []string
+		want       string
+	}{
+		{"an include", "include = [\"extra.toml\"]\n", []string{"install", "itoa@1.0.14"}, "did not run `cargo install`: a cargo config includes another file, which may set the registry it installs from, so nothing was checked; name the registry with --registry"},
+		{"a config too deep to read", "x = " + strings.Repeat("[", 17) + strings.Repeat("]", 17) + "\n", []string{"install", "itoa@1.0.14"}, unread},
+		{"a --config with a line too long to read", "", []string{"--config", "env.NOTE='" + strings.Repeat("x", 4200) + "'", "install", "itoa@1.0.14"}, unread},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			if tc.home != "" {
+				writeFile(t, filepath.Join(home, "config.toml"), tc.home)
+			}
+			t.Setenv("CARGO_HOME", home)
+			unsetEnv(t, "CARGO_REGISTRY_DEFAULT")
+			unsetEnv(t, cargoTestIndexEnv)
+			t.Chdir(t.TempDir())
+			cargoReleaseFn = stubCargoReleases("1.0.14")
+			ex := &stubExec{}
+			swap(t, ex.fn, func(context.Context, check.Options) (*ossbom.SBOM, error) {
+				t.Error("nothing may be checked")
+				return nil, nil
+			})
+			out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: tc.args})
+			if err == nil || err.Error() != tc.want || ex.called || out != "" {
+				t.Errorf("Run = %v, cargo ran %v, output %q; want %q alone", err, ex.called, out, tc.want)
+			}
+			// Naming the registry settles it, and passive refuses nothing.
+			named := append(slices.Clone(tc.args), "--registry", "crates-io")
+			var checked []check.Spec
+			swap(t, ex.fn, func(ctx context.Context, o check.Options) (*ossbom.SBOM, error) {
+				checked = o.Specs
+				return cleanSBOM(ctx, o)
+			})
+			if _, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: named}); err != nil || !ex.called || len(checked) != 1 {
+				t.Errorf("--registry crates-io: Run = %v, cargo ran %v, checked %v; want the crate checked and cargo run", err, ex.called, checked)
+			}
+			ex.called = false
+			swap(t, ex.fn, nil)
+			if err := Run(context.Background(), Options{Bin: "cargo", Args: tc.args, Passive: true}); err != nil || !ex.called {
+				t.Errorf("passive: Run = %v, cargo ran %v; want cargo run", err, ex.called)
 			}
 		})
 	}
@@ -2714,7 +2808,7 @@ func TestCargoConfigThatIsADirectoryMayMoveTheLock(t *testing.T) {
 	assertIrregularConfig(t, func(p string) error { return os.Mkdir(p, 0o755) })
 }
 
-// assertIrregularConfig makes each config cargo reads with mk, which is not a regular file, and wants it to count as one that may move the lock but not to set registry.default.
+// assertIrregularConfig makes each config cargo reads with mk, which is not a regular file, and wants it to count as one that may move the lock or replace crates.io but not to set registry.default.
 func assertIrregularConfig(t *testing.T, mk func(string) error) {
 	t.Helper()
 	base := t.TempDir()
@@ -2741,6 +2835,10 @@ func assertIrregularConfig(t *testing.T, mk func(string) error) {
 	if got := cargoDefaultRegistry([]string{"install", "--config", arg, "x"}); got != "" {
 		t.Errorf("a --config file that is not a regular file: %q, want the crates.io crate checked", got)
 	}
+	const mayReplace = "a cargo config ossprey could not read may replace crates.io, so cargo may install another source's copy, which was not checked"
+	if got := cargoReplacement([]string{"install", "--config", arg, "x"}); got != mayReplace {
+		t.Errorf("replacement with a --config file that is not a regular file = %q, want %q", got, mayReplace)
+	}
 	if got := cargoDefaultRegistry([]string{"--config", `registry.default="corp"`, "install", "--config", arg, "x"}); got != "corp" {
 		t.Errorf("a --config file that is not a regular file after one that sets corp: %q, want corp", got)
 	}
@@ -2755,6 +2853,9 @@ func assertIrregularConfig(t *testing.T, mk func(string) error) {
 	}
 	if got := cargoDefaultRegistry([]string{"install", "x"}); got != "" {
 		t.Errorf("CARGO_HOME's config that is not a regular file: %q, want the crates.io crate checked", got)
+	}
+	if got := cargoReplacement([]string{"install", "x"}); got != mayReplace {
+		t.Errorf("replacement with CARGO_HOME's config not a regular file = %q, want %q", got, mayReplace)
 	}
 }
 

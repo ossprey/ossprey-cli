@@ -266,13 +266,14 @@ func cargoReleases(ctx context.Context, specs []check.Spec) ([]check.Spec, error
 // checkCargoFirst resolves a cargo verb that only locks into a scratch Cargo.lock, checks that, and writes it to the project only when clean, so nothing unchecked reaches the project at any point.
 func checkCargoFirst(ctx context.Context, m *Manager, opts Options) error {
 	args := opts.Args
-	command := m.Bin + " " + strings.Join(args, " ")
+	verb := verbIndex("cargo", args)
+	// Named by its verb alone in what ossprey prints, since a --config value may hold a credential.
+	command := m.Bin + " " + args[verb]
 	flushWarnings(ctx)
 	version, err := cargoVersionGate(ctx, command, args)
 	if err != nil {
 		return err
 	}
-	verb := verbIndex("cargo", args)
 	rest := cargoSplitShorts(args[verb+1:], cargoResolveShorts)
 	// Even a -b an option might have taken refuses, since misreading it costs only a refusal.
 	if args[verb] == "update" && cargoHas(rest, "-b", "--breaking") {
@@ -802,6 +803,8 @@ type cargoFile struct {
 	mode    fs.FileMode
 	// link is what the path's own link says and real where it leads, both "" for a file.
 	link, real string
+	// dir is where the path's directory led when it was read.
+	dir string
 }
 
 // same reports whether f and g hold the same bytes, or both did not exist.
@@ -824,17 +827,18 @@ func (f cargoFile) target() string {
 
 // readCargoState reads p, failing when it is not a regular file, is over the bound, or is a link to nothing.
 func readCargoState(p string) (cargoFile, error) {
+	dir := canonicalDir(filepath.Dir(p))
 	data, fi, err := readCargoFile(p)
 	if errors.Is(err, fs.ErrNotExist) {
 		if _, lerr := os.Lstat(p); lerr == nil {
 			return cargoFile{}, fmt.Errorf("%s is a link to nothing", displayPath(p))
 		}
-		return cargoFile{path: p}, nil
+		return cargoFile{path: p, dir: dir}, nil
 	}
 	if err != nil {
 		return cargoFile{}, err
 	}
-	f := cargoFile{path: p, existed: true, data: data, mode: fi.Mode().Perm()}
+	f := cargoFile{path: p, existed: true, data: data, mode: fi.Mode().Perm(), dir: dir}
 	f.link, f.real = cargoLinkOf(p)
 	return f, nil
 }
@@ -960,7 +964,8 @@ func landCargo(before, after []cargoFile) error {
 		files = append(files, s)
 	}
 	for _, f := range before {
-		if now, err := readCargoState(f.path); err != nil || !now.same(f) || !now.placed(f) {
+		// A directory relinked since cargo started would lead the write out of the project.
+		if now, err := readCargoState(f.path); err != nil || !now.same(f) || !now.placed(f) || now.dir != f.dir {
 			return fmt.Errorf("%s changed while ossprey checked it, so nothing was written; run the command again", displayPath(f.path))
 		}
 	}
@@ -1365,19 +1370,78 @@ func cargoRegistryIsCratesIo(args []string, name string) bool {
 // cargoTestIndexEnv is a test variable cargo 1.99.1 still honours, pointing crates.io at another index.
 const cargoTestIndexEnv = "__CARGO_TEST_CRATES_IO_URL_DO_NOT_USE_THIS"
 
+// cargoLocationKeys say where a [source] table's crates come from; set on crates.io's own table, any one replaces it as replace-with does (verified with cargo 1.99.1).
+var cargoLocationKeys = []string{"registry", "local-registry", "directory", "git"}
+
 // cargoReplacement says what cargo install takes crates.io's crates from instead of crates.io, or "" when nothing replaces it.
 func cargoReplacement(args []string) string {
+	const mayInstall = ", so cargo may install another source's copy, which was not checked"
+	line, files := cargoInstallLevels(args)
+	levels := slices.Concat(line, files)
 	// cargo has no environment form for a [source] key (verified with cargo 1.99.1).
-	with, _ := cargoInstallConfig(args, "", "source", "crates-io", "replace-with")
-	switch {
-	case with == cargoUnreadConfig:
-		return "a cargo config ossprey could not read may replace crates.io, so cargo may install another source's copy, which was not checked"
-	case with == cargoIncludedConfig:
-		return "a cargo config includes another file, which may replace crates.io, so cargo may install another source's copy, which was not checked"
-	case with != "":
-		return fmt.Sprintf("crates.io is replaced by %q in your cargo config, so cargo installs that source's copy, which was not checked", with)
-	case os.Getenv(cargoTestIndexEnv) != "":
+	for _, c := range levels {
+		if c.err != nil {
+			// One that is not a regular file counts too, since cargo reads it again and a FIFO may be written twice.
+			return "a cargo config ossprey could not read may replace crates.io" + mayInstall
+		}
+		if with, ok := cargoValue(c.doc, "source", "crates-io", "replace-with").(string); ok {
+			return fmt.Sprintf("crates.io is replaced by %q in your cargo config, so cargo installs that source's copy, which was not checked", with)
+		}
+		if c.doc["include"] != nil {
+			return "a cargo config includes another file, which may replace crates.io" + mayInstall
+		}
+	}
+	byName := cargoNamesCratesIo(args)
+	for _, c := range levels {
+		for _, k := range cargoLocationKeys {
+			if cargoValue(c.doc, "source", "crates-io", k) != nil {
+				// The value is left out, since a URL may hold a credential.
+				return fmt.Sprintf("crates.io is replaced by the %s set for it in your cargo config, so cargo installs that copy, which was not checked", k)
+			}
+		}
+		sources, _ := c.doc["source"].(map[string]any)
+		for name, s := range sources {
+			if !byName && name != "crates-io" && cargoValue(s, "replace-with") != nil {
+				return "a cargo config replaces a source, which may be crates.io as this install names it" + mayInstall
+			}
+		}
+	}
+	if os.Getenv(cargoTestIndexEnv) != "" {
 		return "crates.io is replaced by " + cargoTestIndexEnv + " in your environment, so cargo installs that source's copy, which was not checked"
+	}
+	return ""
+}
+
+// cargoNamesCratesIo reports whether cargo install reads crates.io by its own name, through no --index and no registry but crates-io, so only [source.crates-io] replaces it: cargo refuses a [source] naming crates.io's own index (verified with cargo 1.99.1).
+func cargoNamesCratesIo(args []string) bool {
+	split := cargoSplitShorts(args[verbIndex("cargo", args)+1:], valueFlags["cargo"])
+	named := ""
+	for i := 0; i < len(split) && split[i] != "--"; i++ {
+		flag, value, inline := splitFlagValue(split[i])
+		if !inline && valueFlags["cargo"][flag] && i+1 < len(split) && !cargoOptionalSkips(flag, split[i+1]) {
+			value = split[i+1]
+			i++
+		}
+		switch flag {
+		case "--index":
+			return false
+		case "--registry":
+			named = value
+		}
+	}
+	if named == "" {
+		named, _ = cargoInstallConfig(args, "CARGO_REGISTRY_DEFAULT", "registry", "default")
+	}
+	return named == "" || named == "crates-io"
+}
+
+// cargoUnknownDefault says why registry.default may be set where ossprey cannot read it, or "".
+func cargoUnknownDefault(registry string) string {
+	switch registry {
+	case cargoUnreadConfig:
+		return "a cargo config ossprey could not read may set the registry it installs from"
+	case cargoIncludedConfig:
+		return "a cargo config includes another file, which may set the registry it installs from"
 	}
 	return ""
 }
@@ -1388,52 +1452,85 @@ const (
 	cargoIncludedConfig = "an included config"
 )
 
-// cargoInstallConfig is the value `cargo install` reads for a config key, also read from env unless that is "", and whether one is set.
-func cargoInstallConfig(args []string, env string, key ...string) (string, bool) {
-	// The value set nearest the line wins; an include, or a regular file that cannot be read or that the bounded parser refuses, may set it too.
-	pick := func(data []byte, err error) (string, bool) {
-		if errors.Is(err, catalog.ErrNotRegular) {
-			// cargo install reads its config again from CARGO_HOME, when a pipe read once is empty, so one that is not a regular file sets nothing.
-			return "", false
-		}
-		doc, ok := cargoConfigDoc(data)
-		if err != nil || !ok {
-			return cargoUnreadConfig, true
-		}
-		var v any = doc
-		for _, k := range key {
-			t, _ := v.(map[string]any)
-			v = t[k]
-		}
-		if v, ok := v.(string); ok {
-			return v, true
-		}
-		if doc["include"] != nil {
-			return cargoIncludedConfig, true
-		}
-		return "", false
-	}
+// cargoLevel is one config cargo install reads: its document, or why it could not be read or parsed.
+type cargoLevel struct {
+	doc map[string]any
+	err error
+}
+
+// cargoInstallLevels are the configs cargo install reads, nearest first: the --config values from the last, then those from CARGO_HOME up, never the project's.
+func cargoInstallLevels(args []string) (line, files []cargoLevel) {
 	dir := cargoConfigDir(args[:max(verbIndex("cargo", args), 0)])
 	for _, c := range slices.Backward(cargoConfigArgs(args)) {
-		if v, ok := pick(cargoConfigArg(c, dir)); ok {
-			return v, true
-		}
-	}
-	if env != "" {
-		if v := os.Getenv(env); v != "" {
-			return v, true
-		}
+		line = append(line, cargoLevelOf(cargoConfigArg(c, dir)))
 	}
 	home := catalog.CargoHome(dir)
 	if home == "" {
-		return "", false
+		return line, nil
 	}
-	// cargo install reads no project config, only those from CARGO_HOME up.
 	for _, f := range append(cargoConfigFiles(home), cargoConfigFile(home)) {
 		if data, there, err := readConfig(f); there {
-			if v, ok := pick(data, err); ok {
-				return v, true
-			}
+			files = append(files, cargoLevelOf(data, err))
+		}
+	}
+	return line, files
+}
+
+// cargoLevelOf parses a config read with err, with the catalog's bounded parser.
+func cargoLevelOf(data []byte, err error) cargoLevel {
+	if err != nil {
+		return cargoLevel{err: err}
+	}
+	doc, ok := cargoConfigDoc(data)
+	if !ok {
+		return cargoLevel{err: errCargoConfigRefused}
+	}
+	return cargoLevel{doc: doc}
+}
+
+// errCargoConfigRefused is a config the bounded parser refuses.
+var errCargoConfigRefused = errors.New("refused by the bounded parser")
+
+// value is the string c sets for key, or a stand-in when an include or a failed read may set it; one that is not a regular file sets nothing, since cargo install reads it again, when a pipe read once is empty.
+func (c cargoLevel) value(key []string) (string, bool) {
+	switch {
+	case errors.Is(c.err, catalog.ErrNotRegular):
+		return "", false
+	case c.err != nil:
+		return cargoUnreadConfig, true
+	}
+	if v, ok := cargoValue(c.doc, key...).(string); ok {
+		return v, true
+	}
+	if c.doc["include"] != nil {
+		return cargoIncludedConfig, true
+	}
+	return "", false
+}
+
+// cargoValue is what the tables from v down keys hold, or nil.
+func cargoValue(v any, keys ...string) any {
+	for _, k := range keys {
+		t, _ := v.(map[string]any)
+		v = t[k]
+	}
+	return v
+}
+
+// cargoInstallConfig is the value `cargo install` reads for a config key, also read from env, and whether one is set: the value set nearest the line wins.
+func cargoInstallConfig(args []string, env string, key ...string) (string, bool) {
+	line, files := cargoInstallLevels(args)
+	for _, c := range line {
+		if v, ok := c.value(key); ok {
+			return v, true
+		}
+	}
+	if v := os.Getenv(env); env != "" && v != "" {
+		return v, true
+	}
+	for _, c := range files {
+		if v, ok := c.value(key); ok {
+			return v, true
 		}
 	}
 	return "", false

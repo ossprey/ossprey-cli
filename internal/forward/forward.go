@@ -562,7 +562,14 @@ func Run(ctx context.Context, opts Options) error {
 			return forwardTo()
 		}
 	} else if m.Ecosystem == "cargo" {
-		parsed = parseCargoInstall(opts.Args[start:], cargoDefaultRegistry(opts.Args), func(r string) bool { return cargoRegistryIsCratesIo(opts.Args, r) })
+		isCratesIo := func(r string) bool { return cargoRegistryIsCratesIo(opts.Args, r) }
+		def := cargoDefaultRegistry(opts.Args)
+		parsed = parseCargoInstall(opts.Args[start:], def, isCratesIo)
+		// Crates the unreadable default took off crates.io may still come from there, so gating refuses rather than forward them unseen.
+		if why := cargoUnknownDefault(def); why != "" && !opts.Passive && len(parsed.Specs) == 0 && len(parseCargoInstall(opts.Args[start:], "", isCratesIo).Specs) > 0 {
+			flushWarnings(ctx)
+			return fmt.Errorf("did not run %s: %s, so nothing was checked; name the registry with --registry", cargoVerbOnly(m, opts.Args), why)
+		}
 	} else {
 		parsed = parseInstallArgs(m, opts.Args[start:], m.reqFileArgs != nil && m.reqFileArgs(opts.Args))
 	}
