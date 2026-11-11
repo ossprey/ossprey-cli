@@ -10,12 +10,14 @@ import (
 	"io/fs"
 	"math/rand/v2"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"unicode/utf8"
 
 	"golang.org/x/term"
@@ -343,6 +345,8 @@ func checkCargoFirst(ctx context.Context, m *Manager, opts Options) error {
 
 // fetchCheckedLock runs the user's fetch with --locked and the lock redirected to a private copy of the checked bytes, so a lock swapped into the project after landing is never what cargo downloads (verified with cargo 1.99.1).
 func fetchCheckedLock(ctx context.Context, command string, args []string, ws cargoWorkspace, data []byte) error {
+	ctx, release := holdCargoSignals(ctx)
+	defer release()
 	scratch, at, err := cargoScratch(data, true)
 	if err != nil {
 		return fmt.Errorf("%s was checked and written, but `%s` could not run (%v)", displayPath(ws.Lock), command, err)
@@ -454,6 +458,8 @@ func cargoRedirects(line string) bool {
 
 // resolveCargoLock runs args with the lock redirected to a scratch copy of the project's, and returns what cargo locked there.
 func resolveCargoLock(ctx context.Context, args []string, ws cargoWorkspace, before cargoFile) (after []cargoFile, runErr, err error) {
+	ctx, release := holdCargoSignals(ctx)
+	defer release()
 	// cargo resolves from nothing when the redirect names no lock, so the project's goes there first (verified).
 	scratch, at, err := cargoScratch(before.data, before.existed)
 	if err != nil {
@@ -489,7 +495,35 @@ func cargoScratch(data []byte, existed bool) (dir, lock string, err error) {
 	return dir, lock, nil
 }
 
-// runCargo runs the real cargo as a child, with ossprey's stdin and stdout.
+// cargoSignals stop a cargo child rather than ossprey, which then removes the child's scratch and exits as cargo did.
+var cargoSignals = []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP}
+
+// signalCause is the signal that ended a cargo child's context.
+type signalCause struct{ os.Signal }
+
+func (s signalCause) Error() string { return "received " + s.String() }
+
+// holdCargoSignals catches cargoSignals until release, ending the context it returns with the first one.
+func holdCargoSignals(ctx context.Context) (context.Context, func()) {
+	ctx, cancel := context.WithCancelCause(ctx)
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, cargoSignals...)
+	done := make(chan struct{})
+	go func() {
+		select {
+		case s := <-ch:
+			cancel(signalCause{s})
+		case <-done:
+		}
+	}()
+	return ctx, func() {
+		signal.Stop(ch)
+		close(done)
+		cancel(nil)
+	}
+}
+
+// runCargo runs the real cargo as a child, with ossprey's stdin and stdout, passing it the signal that ends ctx.
 func runCargo(ctx context.Context, env, args []string, stderr io.Writer) error {
 	cmd, err := realCommand(ctx, "cargo", args)
 	if err != nil {
@@ -497,6 +531,13 @@ func runCargo(ctx context.Context, env, args []string, stderr io.Writer) error {
 	}
 	cmd.Env = append(cmd.Env, env...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, stderr
+	cmd.Cancel = func() error {
+		var s signalCause
+		if errors.As(context.Cause(ctx), &s) && cmd.Process.Signal(s.Signal) == nil {
+			return nil
+		}
+		return cmd.Process.Kill()
+	}
 	return cmd.Run()
 }
 

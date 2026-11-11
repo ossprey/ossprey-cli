@@ -138,7 +138,9 @@ built. If `Cargo.lock` changes while the check runs, nothing is written and the
 command exits `2`; run it again.
 
 When cargo itself fails, its exit code is passed through and nothing is
-written. Its messages name your `Cargo.lock`, not the scratch copy. `cargo
+written; one stopped by a signal, Ctrl-C included, exits 128 plus the signal,
+`130` for Ctrl-C, after ossprey removes its scratch copy. Its messages name your
+`Cargo.lock`, not the scratch copy. `cargo
 update --dry-run` runs against the scratch lock, so it writes nothing and
 nothing is checked.
 

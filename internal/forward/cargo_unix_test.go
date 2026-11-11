@@ -3,8 +3,10 @@
 package forward
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -184,5 +186,86 @@ func TestDisplayPathReadsADotDotNameAsInside(t *testing.T) {
 		if got, want := displayPath(filepath.Join(base, "..crate", "Cargo.toml")), filepath.Join("..crate", "Cargo.toml"); got != want {
 			t.Errorf("under %s: %q, want %q", base, got, want)
 		}
+	}
+}
+
+const cargoChildHelperEnv = "OSSPREY_TEST_CARGO_CHILD"
+
+// TestCargoChildHelperProcess is not a test: TestCargoChildInterrupted runs it in a process group of its own to signal a real cargo child.
+func TestCargoChildHelperProcess(t *testing.T) {
+	verb := os.Getenv(cargoChildHelperEnv)
+	if verb == "" {
+		return
+	}
+	ws := cargoWorkspace{Lock: filepath.Join(os.Getenv("HELPER_PROJECT"), "Cargo.lock")}
+	var err error
+	if verb == "fetch" {
+		err = fetchCheckedLock(context.Background(), "cargo fetch", []string{"fetch"}, ws, []byte("version = 4\n"))
+	} else {
+		_, err, _ = resolveCargoLock(context.Background(), []string{verb}, ws, cargoFile{path: ws.Lock})
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		if st, ok := ee.Sys().(syscall.WaitStatus); ok && st.Signaled() {
+			fmt.Println("cargo died by", st.Signal())
+			os.Exit(0)
+		}
+	}
+	fmt.Println("cargo returned", err)
+	os.Exit(0)
+}
+
+// Interrupted while a cargo child runs, ossprey outlives it, removes its scratch copy of the lock and reports cargo's death by the signal, passing on one sent to ossprey alone (OSS-2553).
+func TestCargoChildInterrupted(t *testing.T) {
+	for _, tc := range []struct {
+		verb string
+		// group sends the signal to the process group, as a terminal's Ctrl-C does, else to ossprey alone.
+		group bool
+		sig   syscall.Signal
+		died  string
+	}{
+		{"fetch", true, syscall.SIGINT, "cargo died by interrupt"},
+		{"update", true, syscall.SIGINT, "cargo died by interrupt"},
+		{"fetch", false, syscall.SIGTERM, "cargo died by terminated"},
+	} {
+		t.Run(fmt.Sprintf("%s %v", tc.verb, tc.sig), func(t *testing.T) {
+			verb := tc.verb
+			bin, tmp := t.TempDir(), t.TempDir()
+			started := filepath.Join(bin, "started")
+			if err := os.WriteFile(filepath.Join(bin, "cargo"), []byte("#!/bin/sh\n: > '"+started+"'\nexec sleep 30\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command(os.Args[0], "-test.run=^TestCargoChildHelperProcess$")
+			cmd.Env = append(os.Environ(), cargoChildHelperEnv+"="+verb, "HELPER_PROJECT="+t.TempDir(), "TMPDIR="+tmp,
+				"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			// A cargo left running holds the output pipe, so a failure ends at the delay rather than with it.
+			cmd.WaitDelay = 5 * time.Second
+			var out bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &out, &out
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) })
+			for deadline := time.Now().Add(20 * time.Second); !exists(started); time.Sleep(10 * time.Millisecond) {
+				if time.Now().After(deadline) {
+					cmd.Process.Kill()
+					t.Fatalf("cargo never started\n%s", out.String())
+				}
+			}
+			pid := cmd.Process.Pid
+			if tc.group {
+				pid = -pid
+			}
+			if err := syscall.Kill(pid, tc.sig); err != nil {
+				t.Fatal(err)
+			}
+			if err := cmd.Wait(); err != nil || !strings.Contains(out.String(), tc.died) {
+				t.Errorf("ossprey ended with %v, output %q; want it to outlive cargo and print %q", err, out.String(), tc.died)
+			}
+			if left, _ := os.ReadDir(tmp); len(left) != 0 {
+				t.Errorf("left %v in TMPDIR, want the scratch removed", left)
+			}
+		})
 	}
 }
