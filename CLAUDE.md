@@ -140,257 +140,144 @@ Windows resolves it under `%LOCALAPPDATA%`.
 
    **bun** finds its command by skipping options *without reading values* (in `bun --cwd web add x` its `command::which` takes `web` as the command, not `add`), so it has no `globalValueFlags` entry. Its `valueFlags` leave out `-c/--config` and `--catalog` because their value is optional — listing them would swallow a package name. It has no `Lockfile` because syft cannot read `bun.lock`/`bun.lockb`, so passive bun goes through `passiveAlongside` and a bare `bun install` scan resolves `package.json` via npm; teaching the catalogue `bun.lock` is what would change both.
 
-   **cargo** (`internal/forward/cargo.go`, `cargo_mirror.go`). Each cargo
-   behaviour below was checked against a real cargo (1.99.1 unless named); `test/smoke/cargo_smoke_test.go` and
-   `TestCargoFlagTablesMatchCargo` pin what a real cargo can show, and
-   `docs/forwarder.md` says what users see, its known gaps included. Opt-in like
-   git (`shim.optInManagers`, `--cargo`): crates are checked only on Teams and
-   Enterprise plans, so a default shim would cost most accounts a round trip for
-   an Unsupported answer.
+   **cargo** (`internal/forward/cargo.go`, `cargo_mirror.go`). Verified with
+   cargo 1.99.1 unless named; `test/smoke/cargo_smoke_test.go` and
+   `TestCargoFlagTablesMatchCargo` hold the code to a real cargo, and
+   `docs/forwarder.md` has what users see. Opt-in like git
+   (`shim.optInManagers`, `--cargo`): only Teams and Enterprise plans check
+   crates, so a default shim would cost most accounts a round trip for an
+   Unsupported answer.
 
-   - **Check first (OSS-2553).** In gating mode `add`, `update`,
-     `generate-lockfile` and `fetch` never change the project before the
-     check (`checkCargoFirst`): the user's requirement is that no unchecked
-     crate is ever where an IDE (rust-analyzer), a watcher (cargo-watch,
-     bacon) or CI could build it, and that cargo below 1.97 is refused. The
-     first revision ran cargo first and undid its changes on a block; that
-     left exactly such a window and its undo grew without end (symlinks,
-     hard links, ACLs, bind mounts, owners, races), so it was deleted. The
-     redirect and the version gate were verified with cargo 1.80.0, 1.96.0,
-     1.97.0, 1.97.0-nightly and 1.99.1 on Linux, the mirror, fetch and dry-run
-     facts with 1.97.0 and 1.99.1, and the rest with 1.99.1 unless named.
-   - **The version gate.** `resolver.lockfile-path` (and
-     `CARGO_RESOLVER_LOCKFILE_PATH`) is honoured from cargo 1.97.0. 1.96.0
-     ignores it with a warning, 1.80.0 silently, and so does
-     `1.97.0-nightly (eb94155a9 2026-04-09)`, each writing the project lock
-     and exiting 0, so nothing after the run can catch it. `cargoRedirects`
-     compares `cargo -V` in semver order, a pre-release below its release.
-     The probe runs bare (plus a leading `+toolchain`) in ossprey's cwd,
-     since `-C` makes a stable cargo exit 101, and again in the add mirror,
-     which must print the same line: rustup keys `rustup override set` by
-     the project's real path, so the mirror ran the default toolchain, 1.96
-     in the repro, with the redirect ignored. Passive mode and `install`
-     are not gated.
-   - **The redirect, twice.** The variable beats every config file, but a
-     user `--config` (inline or a file, before or after the verb) beats the
-     variable, and the last `--config` wins. So ossprey sets the variable and
-     appends its own `--config resolver.lockfile-path="<abs>"` last, before
-     any `--` (`cargoRedirectArgs`). The project lock is copied to the
-     scratch path first: with no lock there cargo resolves from nothing
-     (`update -p x` re-resolved everything). `CARGO_CACHE_RUSTC_INFO=0`
-     stops cargo writing `target/.rustc_info.json` into the project.
-   - **Refusals, before cargo runs.** `update --breaking` (`-b`) is refused:
-     it rewrites `Cargo.toml` too, and only the lock is redirected, so a
-     blocked run left the bumped requirement for the next build to resolve
-     unchecked; `cargo add <crate>@<version>` raises a requirement checked
-     first. A `fetch` with a token `cargo fetch` would reject
-     (`cargoFetchUnknown`, against `cargoFetchSwitches` and
-     `cargoFetchValues`) is refused, since its resolve step passes on only
-     what `update` takes and the lock would land before cargo rejected the
-     line; refused rather than handed to cargo, so an option the table lacks
-     can never fetch unchecked. The workspace comes from `cargo
-     metadata --no-deps` (`readCargoWorkspace`, root and manifests spelled as
-     cargo spells them), run through `realCommand` with the command's options bar a
-     `--config` naming a file (`withoutConfigFiles`: it emptied an inherited
-     `<(...)` pipe, and on macOS `/dev/fd/N` shares cargo's offset). Any
-     `resolver.lockfile-path` the run may read (`lockfileMoved`: the
-     variable, a `--config`, a config file or an `include`, or a config
-     ossprey cannot read, which covers a FIFO or a pipe) refuses, decided
-     before metadata runs so metadata never drains a pipe: the user's lock
-     would be elsewhere and ossprey would land the wrong one. Only the
-     decoded key counts (a table, dotted key or inline table, quoted escapes
-     such as `"lockfile\u002dpath"` read), so a crate, a `--manifest-path`
-     or a comment naming `lockfile-path` does not refuse; `-Z
-     lockfile-path` is a no-op since 1.97. A cargo script is refused too:
-     under `-Zscript` cargo locks it under `$CARGO_HOME/build`
-     (`errScriptLock`). Then the credential (`cargoCredentialFn`), then the
-     snapshot: the lock, and for `add` every manifest, read through
-     `catalog.ReadRegular`; one that is not a regular file, is over the
-     bound or is a link to nothing refuses.
-   - **fetch.** `cargo fetch` with the redirect downloads before it returns,
-     so it cannot be the resolve step. `cargo update --workspace` with the
-     redirect locks byte for byte what `cargo fetch` would (current, stale,
-     missing and v3 locks) and downloads no `.crate`, so it resolves, carrying
-     every fetch option but `--target`, which update lacks (`cargoFetchResolve`;
-     dropping `-q`, `-v` and `--color` printed what plain fetch keeps quiet),
-     and after the landing the user's fetch is handed off with `--locked`
-     added (`cargoFetchLocked`), which downloads exactly the landed lock or
-     exits 101 before downloading. Resolving still fetches and checks out each
-     git dependency under `CARGO_HOME/git`, `build.rs` included, before the
-     check (verified with cargo 1.99.1 for update, fetch and `add --git`), as
-     plain cargo does; nothing is built, and whether the gate should cover
-     git sources too is an open question.
-   - **Dry runs.** `update --dry-run` (`-n`) still writes a whole lock to the
-     redirect when there is none, so it runs redirected and nothing lands or
-     is checked, and no credential is asked. `add --dry-run` writes nothing
-     anywhere and is handed off as typed after the version gate.
-   - **The add mirror** (`cargo_mirror.go`). The redirect moves only the
-     lock, and `cargo add` writes `Cargo.toml` before it resolves (temp file
-     plus rename in the manifest's dir), so `add` runs in a link farm under
-     `os.UserCacheDir()/ossprey` (0700, refused when another user could
-     write it). Every dir on the way to the cwd, the `-C` dir, the root and
-     each member is real, the lock and manifests are copies, and every other
-     entry links to the project's. cargo starts from getcwd(), physical (as
-     set on Windows, `cargoCwd`), and only joins and normalizes paths from
-     there, a `members` glob, a `package.workspace`, a `--manifest-path` and
-     a path dependency alike, never resolving a link (verified with cargo
-     1.99.1: `crates/app/../lib` is `crates/lib` even when `crates/app` is a
-     link). So the mirror uses cargo metadata's spellings, not canonical
-     paths: a member reached through a linked dir was a link in a mirror of
-     canonical dirs, and `add -p` wrote the real manifest through it before
-     the check, while a `--manifest-path` through it resolved the member
-     alone and landed a one-crate lock over the workspace's. The lock's
-     name and each manifest's stay a copy or nothing, never a link: a lock
-     created after the snapshot was linked, and cargo wrote it through the
-     link. Its results were byte for byte those of a plain copy for single
-     crates, glob workspaces, `-p`, a cwd in a member, path deps outside the
-     root, workspace inheritance, features and an ancestor config with a
-     relative `[patch]`. Every `--manifest-path` (relative too, since a
-     relative path through a linked dir reaches the project), `-C` and
-     absolute `--path` is rewritten into the mirror, the last so cargo
-     records the same relative path as in the project (it climbed out
-     through the mirror's prefix), and a `--manifest-path` naming no
-     workspace manifest refuses. An absolute path in a manifest leads cargo
-     out of the mirror: an absolute `exclude` made the crate a member there,
-     reached through a link, and `add -p` wrote its real manifest before the
-     check, outside the tripwire's files, and an absolute path dependency
-     under a root stopped being a member and dropped its dev-dependencies
-     from the lock. So `cargo metadata` runs in the mirror too and must find
-     the project's root and members as their copies (`sameWorkspace`), else
-     the add refuses; rewriting the paths in the copies was rejected, since
-     linked ancestor manifests escape too and no TOML parser here gives value
-     spans. It runs again after the add (`added`), since what the add brings
-     in escapes the same way: an absolute `[workspace.dependencies]` path
-     under the root, or a crate outside reached by `--path` whose
-     `package.workspace` names the root absolutely, was a member only in the
-     project, so the checked lock lacked its dev-dependencies and the next
-     cargo or rust-analyzer run locked them unchecked. A new path dependency
-     outside the mirror under the root, or one whose `package.workspace`
-     leaves the mirror, refuses; old ones passed the first check, and an
-     absolute one outside the project with no pointer is the same crate both
-     ways. cargo writes every path it touches relative to the mirror's
-     manifest, so an absolute path dependency that `add --dev` or `--features`
-     rewrote climbed out of the mirror, which in the project stops at the
-     volume root and names another directory: a relative `path` in a copy
-     that climbs out of its volume refuses. A metadata failure shows cargo's
-     own lines (`firstErrorLine` keeps what a colon introduces), since a
-     `[workspace]` above the cache fails as an absolute path does. An absolute
-     `--path` finds its volume as Rust compares them (`sameVolume`: a drive
-     letter in either case, a share as spelled), and one on the mirror's own
-     drive that the mirror lacks refuses, since cargo would record it relative
-     to the mirror where plain cargo writes it absolute; `\dep`, `/dep` and
-     `C:dep` refuse too, as cargo would place them from the mirror. A path
-     dependency or `[patch]` (a config's too) naming a member by an absolute
-     path passes the first check, but cargo then reaches that member by two
-     paths and fails with a package collision (exit 101, nothing written), so
-     it fails closed and the docs say to make it relative. Volumes are a drive
-     letter or the volume in hex (`mirrorVolume`): `_` for `\` folded
-     `\\server\share_name` and `\\server_share\name` into one directory,
-     where one share's lock was linked as the other's and written through.
-     Copies are keyed by `fileKey` (the canonical directory, lowercased),
-     since NTFS and APFS make case and 8.3 spellings one mirror directory,
-     and a lock that appeared after the snapshot was linked under the cwd's
-     spelling at the redirect's path. A `.cargo/config` above
-     the mirror that cargo does not read for the project (an ancestor of the
-     mirror that is not one of the cwd's as cargo spells it, so on Windows
-     through a link unresolved) would apply to the run, so it
-     refuses, bar CARGO_HOME's, which cargo reads once by its canonical
-     path. Each mirror dir keeps its `.cargo` link: dropping the ones shared
-     with the mirror's own ancestors avoided a double read but broke a
-     `[patch]` into the workspace. Windows refuses `add` when links cannot be
-     made.
-   - **Tripwire, then check, then land.** After cargo exits, the project
-     lock and manifests must be byte-identical to the snapshot; if not, cargo
-     ignored the redirect or another program wrote them, so they are put
-     back, what was found is kept beside each as `<name>.ossprey-found-<n>`
-     (putting back alone erased an editor's save), and the run fails
-     (`cargoTripwire`). A non-zero exit returns cargo's code with nothing
-     landed. The resolved bytes are scanned (`scanCargoLock`), and a block, a
-     check error, or crates the platform checked none of leave the project
-     as it was: gating fails closed now, where the first revision kept
-     cargo's changes with a warning. Those errors exit 2, not 1, since exit
-     1 means malware and nothing else. `landCargo` re-reads every file and
-     lands nothing if one changed during the check, skips unchanged bytes
-     (cargo never rewrites an unchanged lock), and writes the lock first so
-     the project never names a crate its lock does not hold. `landFile`
-     copies cargo's own `Cargo.toml` writer (follow the link, `O_EXCL` file
-     beside the target, the old mode, rename) and syncs before the rename,
-     which cargo does not; a new lock gets 0666 less the umask, cargo's mode
-     for one.
-   - **cargo's stderr** goes through `cargoStderr`, which spells the scratch
-     lock and the mirror as the project's paths, line by line, and never
-     fails a write: cargo exits 101 without locking when its stderr closes.
-     `CARGO_TERM_COLOR=always` keeps a terminal's colours through the pipe,
-     set only where cargo's own auto mode would colour (`cargoColours`: not
-     under `NO_COLOR` or `CLICOLOR=0`, and with a `TERM` other than `dumb`,
-     `CLICOLOR` or `CI`), since setting it on any terminal overrode those.
-   - **Passive** still runs cargo first and posts the lock it leaves
-     (`postCargoLock`), even after a failure, since it observes and never
-     blocks; a lock that may have moved, or a script's, is not posted, with
-     a warning, and a failure for want of a workspace leaves cargo's error
-     alone (`cargoFailedOnItsWorkspace`).
-   - **Bounded, regular reads.** Every manifest, lock and config read goes
-     through `catalog.ReadRegular` (refused unless regular both by `os.Stat`
-     before the open and on the handle opened `O_NONBLOCK`, read no further
-     than the bound, at offsets from 0 since on macOS opening `/dev/stdin` or
-     `/dev/fd/N` dups the descriptor and moved cargo's offset), shared with
-     the catalogue's `readRegularFile` so the guard cannot drift: a passive
-     run whose cargo failed at once hung on a FIFO `Cargo.lock` and read a
-     link to `/dev/zero` until out of memory. The type is checked before the
-     open because opening a FIFO releases a writer blocked on it into a
-     SIGPIPE and opening a device can reset it; the check on the handle
-     closes the race.
-   - **Not checked yet.** `cargo install` checks the named crates only (next
-     PR). A `cargo build` with a stale or missing lock still resolves on the
-     spot, and an IDE resolves a hand-edited `Cargo.toml` the same way,
-     outside ossprey. `lockfileMoved` and `cargoConfigFiles` walk the
-     canonical config dir's ancestors, while Windows cargo reads configs above
-     the cwd as spelled, so one above a linked cwd is missed there. A linked
-     ancestor or non-member `Cargo.toml` edited between the mirror's first
-     metadata check and `cargo add` is not watched by the tripwire, so an
-     `add -p` naming a member that edit made could write through a link.
-   - **Which configs.** At each level, `CARGO_HOME` included, cargo reads only
-     the legacy `config` when it opens, else `config.toml`, and
-     `cargoConfigFile` picks the same: reading an ignored `config.toml` that set
-     `registry.default` made `cargo install` forward unchecked. The catalogue's
-     trust check reads both on purpose (`cargoConfigsIn`), since one more config
-     can only keep a crate checked. A `--config` value is a file when that path
-     exists, read from where cargo runs after `-C`, and TOML otherwise.
-   - **`install`** builds at once, so it is a named check in front, of the named
-     crates only (`errCargoNotResolved`). A crate from anywhere but crates.io
-     forwards unchecked (`cargoSourceFlags`, `catalog.IsCratesIoIndex`, and
-     `cargoDefaultRegistry`), since checking crates.io's crate of that name
-     would block an internal tool on a squat, or clear one never installed;
-     only a definite crates.io index counts, so a non-ASCII host that only IDNA
-     could map to github.com is another registry. `cargo install` folds no
-     spelling, so the name is sent as typed, without `CanonicalCrate`.
+   - **Reading the line.** clap reads a group of shorts as switches up to one
+     taking a value, which takes the rest less one `=`, else the next token
+     (`-qjF 2` is `-j F`), so `cargoSplitShorts` splits groups. `--bin`,
+     `--example` and `--target` take an optional value clap never fills with
+     an option (`cargoOptionalValues`). `cargoPrintsOnly` passes through help
+     and version lines, and `verbIndex` skips a `+toolchain` only first.
+   - **`install`** builds and runs build scripts at once, so the named crates
+     are checked in front, and only those (`errCargoNotResolved`), under the
+     name typed, since `cargo install` folds no spelling. A crate from anywhere
+     but crates.io forwards unchecked (`cargoSourceFlags`,
+     `cargoDefaultRegistry`): checking crates.io's crate of that name would
+     block an internal tool on a squat, or clear one never installed. Only a
+     definite crates.io index counts (`catalog.IsCratesIoIndex`).
    - **`registry.default` for `install`.** `cargo install` reloads its config
-     rooted at `CARGO_HOME`, so it reads no project config, and the value set
-     nearest the line wins: the last `--config`, then `CARGO_REGISTRY_DEFAULT`,
-     then the configs from `CARGO_HOME` up, nearest first. `cargoDefaultRegistry`
-     takes the first source that sets it, so a value further out never hides a
-     nearer one. An `include`, or a regular file it cannot read or the bounded
-     parser refuses, counts as setting it, but one that is not a regular file
-     does not: the reload reads each `--config` again, and a one-shot pipe is
-     empty by then (`cat cfg | cargo --config /dev/stdin install` goes to
-     crates.io whatever `cfg` sets), so counting it forwarded a crates.io
-     install unchecked.
-   - **Where cargo runs.** A relative `CARGO_HOME` is joined to cargo's physical
-     working directory, after `-C`, with `..` cleaned and links left alone
-     (`catalog.CargoHome`, shared with the catalogue; a Windows home rooted
-     without a drive, or drive-relative, resolves on its own drive), while `-C`
-     goes where chdir(2) goes, each link followed before the `..` after it
-     (`cargoConfigDir`).
-   - **Reading the line.** `cargoPrintsOnly` passes through a line that only
-     prints help or the version, grouped shorts included (`cargo -qV`), for
-     `install` and the resolving verbs alike. `--bin`, `--example` and `--target` take an
-     optional value clap fills from the next token unless it is an option, so
-     they are value flags and `cargoOptionalValues`. clap reads a group of
-     shorts as switches up to one taking a value, which takes the rest less one
-     `=`, else the next token (`-qjF 2` is `-j F`), so `cargoSplitShorts` splits
-     groups before the verb, after `install` and after the resolving verbs
-     (`cargoResolveShorts`). A `+toolchain` is rustup's and valid only first
-     (cargo alone rejects it), so `verbIndex` skips it there alone.
+     from `CARGO_HOME` up, never the project's, and the nearest setting wins:
+     the last `--config`, `CARGO_REGISTRY_DEFAULT`, then those configs. An
+     `include`, or a regular file it cannot read or parse, counts as setting
+     it. One that is not a regular file does not: the reload finds a one-shot
+     pipe empty and installs from crates.io (`cargo --config /dev/stdin`).
+   - **Which configs, from where.** At each level cargo reads only the legacy
+     `config` when it opens, else `config.toml` (`cargoConfigFile`); the
+     catalogue's trust check reads both, since one more config only keeps a
+     crate checked. A `--config` value is a file when that path exists where
+     cargo runs. `-C` resolves as chdir(2), each link followed before the `..`
+     after it (`cargoConfigDir`); a relative `CARGO_HOME` joins cargo's
+     physical cwd with `..` cleaned and links kept (`catalog.CargoHome`, shared
+     with the catalogue).
+   - **Bounded, regular reads.** Manifests, locks and configs go through
+     `catalog.ReadRegular`: regular by `os.Stat` before the open (opening a
+     FIFO releases a blocked writer, opening a device can reset it) and on the
+     handle opened `O_NONBLOCK`, read to the bound only, from offset 0 (on
+     macOS `/dev/fd/N` shares cargo's offset).
+   - **Check first.** In gating mode `add`, `update`, `generate-lockfile` and
+     `fetch` never change the project before the check (`checkCargoFirst`):
+     no unchecked crate may sit where an IDE (rust-analyzer), a watcher
+     (cargo-watch, bacon) or CI could build it, so running cargo first and
+     undoing a block is out, since that is the window.
+   - **The version gate.** `resolver.lockfile-path` works from cargo 1.97.0;
+     1.96.0, 1.80.0 and `1.97.0-nightly` write the project lock and exit 0, so
+     nothing after the run can catch it. `cargoRedirects` reads `cargo -V` in
+     semver order, a pre-release below its release, probed bare plus a leading
+     `+toolchain` (`-C` makes stable cargo exit 101). `install` and passive
+     mode are not gated.
+   - **The redirect.** A user `--config` beats
+     `CARGO_RESOLVER_LOCKFILE_PATH`, which beats config files, and the last
+     `--config` wins, so ossprey sets both, its `--config` last before any `--`
+     (`cargoRedirectArgs`). The project lock is copied to scratch first, or
+     cargo resolves from nothing. `CARGO_CACHE_RUSTC_INFO=0` keeps
+     `target/.rustc_info.json` out of the project.
+   - **Refused before cargo runs.** `update --breaking`, which rewrites
+     `Cargo.toml` too. A `fetch` line `cargo fetch` rejects
+     (`cargoFetchUnknown`), since the resolve passes on only what `update`
+     takes and the lock would land first. A `resolver.lockfile-path` the run
+     may read (`lockfileMoved`: the variable, a `--config`, a config, an
+     `include`, or a config ossprey cannot read), since the user's lock would
+     be elsewhere and ossprey would check and land the wrong one; decided
+     before `cargo metadata` so it never drains a pipe, and only the decoded
+     key counts. A `-Zscript` manifest, which cargo locks under
+     `$CARGO_HOME/build`.
+   - **Workspace and snapshot.** `cargo metadata --no-deps`
+     (`readCargoWorkspace`) names the root and members as cargo spells them,
+     run as the command runs (`realCommand`) minus any `--config` naming a
+     file (`withoutConfigFiles`), which it would drain. Then the credential,
+     then a snapshot of the lock and, for `add`, every manifest; one that is
+     not a regular file, is over the bound or links to nothing refuses.
+   - **fetch.** `cargo fetch` downloads before it returns, so `cargo update
+     --workspace` resolves instead, locking byte for byte what fetch would and
+     downloading no crate (`cargoFetchResolve`, every option but `--target`).
+     After landing, the user's fetch runs with `--locked` (`cargoFetchLocked`).
+     Git dependencies are still checked out under `CARGO_HOME/git` to resolve,
+     as plain cargo does; nothing is built. Whether to refuse git sources too,
+     whose checkout (`build.rs` included) lands before the check, is open.
+   - **Dry runs.** `update --dry-run` writes a whole lock to the redirect when
+     there is none, so it runs redirected and nothing is checked or landed.
+     `add --dry-run` writes nothing and goes to cargo after the gate.
+   - **Tripwire, check, land.** After cargo exits the snapshot must still
+     match, else each file is put back, what was found kept beside it as
+     `<name>.ossprey-found-<n>` (an editor may have saved it), and the run
+     fails (`cargoTripwire`). cargo's own failure returns its exit code. A
+     block, a check error or a lock the platform checked none of leave the
+     project as it was, errors exiting 2 since 1 means malware; trust comes
+     from the configs where cargo runs (`CargoConfigDir`). `landCargo` lands
+     nothing if a file changed during the check, skips unchanged bytes and
+     writes the lock first, so a manifest never names a crate the lock lacks;
+     `landFile` writes as cargo writes `Cargo.toml` and syncs first.
+   - **cargo's stderr** goes through `cargoStderr`, which spells scratch and
+     mirror paths as the project's and never fails a write: cargo exits 101
+     without locking when its stderr closes. `CARGO_TERM_COLOR=always` is set
+     only where cargo's own auto mode would colour (`cargoColours`).
+   - **Passive** runs cargo first and posts the lock it leaves, even after a
+     failure (`postCargoLock`); a lock that may have moved, or a script's, is
+     not posted, with a warning, and a missing workspace leaves cargo's error
+     alone.
+   - **The add mirror** (`cargo_mirror.go`). `cargo add` writes `Cargo.toml`
+     before it resolves, so it runs in a link farm under
+     `os.UserCacheDir()/ossprey` (0700, refused if others can write it): the
+     dirs down to the cwd and `-C` dir, the root and each member are real, the
+     lock and manifests are copies, the rest links to the project. cargo
+     normalizes paths from getcwd() and never resolves a link, so the mirror
+     keeps cargo metadata's spellings, or `add -p` writes a member reached
+     through a linked dir through that link. Copies are never links, since
+     cargo writes through one (`fileKey`: NTFS and APFS fold case and short
+     names). `-C`, every `--manifest-path` (a relative one through a linked
+     dir reaches the project) and an absolute `--path` are rewritten into the
+     mirror, the last so cargo records the path it would in the project.
+   - **Leaving the mirror.** An absolute path in a manifest leads cargo out
+     of the mirror, to another root or to a member reached through a link. So
+     `cargo metadata` must find the project's root and members as their copies
+     there before the add (`sameWorkspace`) and after it (`added`), or the
+     checked lock lacks a dev-dependency the project locks; a relative `path`
+     in a copy climbing out of its volume refuses. Rewriting the copies' paths
+     was ruled out: linked ancestor manifests escape too, and no TOML parser
+     here gives value spans.
+   - **Around the mirror.** The version probe runs again in the mirror and
+     must match, since rustup keys `rustup override set` by the project's real
+     path. A `.cargo/config` above the mirror that the project does not read
+     would apply to the run, so it refuses, bar `CARGO_HOME`'s; each mirror dir
+     keeps its `.cargo` link, or a `[patch]` into the workspace breaks. On
+     Windows each volume is one mirror dir, named by its drive letter or in
+     hex (`mirrorVolume`): `_` for `\` folded `\\server\share_name` and
+     `\\server_share\name` into one, and one share's lock was written through
+     the other's link. A `--path` cargo would place from the mirror (`\dep`,
+     `C:dep`, the mirror's own drive, `sameVolume`) refuses, as does `add`
+     where links cannot be made.
+   - **Not checked.** A `cargo build` with a stale or missing lock resolves on
+     the spot, as does an IDE after a hand edit of `Cargo.toml`. `cargo
+     install` checks the named crates only. Configs above a linked cwd are
+     missed on Windows, where cargo reads them as spelled. A linked or
+     non-member `Cargo.toml` edited between the mirror's first metadata check
+     and the add is not under the tripwire.
 
    **Not covered, deliberately (for now):** `pnpm dlx`, `yarn dlx`, and initializers (`npm init <x>`, `npm create`, `bun create`, `yarn create`, which fetch `create-<x>`). Do **not** close `dlx` by adding it to a `verbAt` list (same argv problem: `pnpm dlx cowsay moo` would check `moo`); give it a `toolRunAt`/`parseRun` like npm's. `docs/forwarder.md`'s "What is not checked" section is the user-facing statement of this.
 
@@ -508,11 +395,10 @@ Every rule is a hole in the scan by design, so the rules are narrow:
   filter reads through them as before, since a dotfile manager links
   `~/.cargo/config.toml`. `CARGO_HOME` itself is followed, being the scanning
   user's environment, unless the walk above the root reaches it first as an
-  ancestor's `.cargo`. A relative one is joined to where cargo runs
-  (`CargoConfigDir`, else the scan's physical working directory, `cargoCwd`)
-  with `..` cleaned and links left alone (`CargoHome`, verified with cargo
-  1.99.1), for trust, the replacement warning and the vendor filter alike;
-  read as given, `lnk/../h` reached the link target's parent.
+  ancestor's `.cargo`. A relative one joins where cargo runs (`CargoConfigDir`
+  for a copied lock, else the scan's physical working directory) with `..`
+  cleaned and links kept (`CargoHome`), as cargo does, for trust, the
+  replacement warning and the vendor filter alike.
   Not checked: a typed `--config`, environment such as `CARGO_HTTP_PROXY` and
   `CARGO_HTTP_CAINFO` (cargo has no environment form for `[source]` keys),
   `[http]` `proxy`/`cainfo`, a config only a build run from inside a sink would
@@ -632,7 +518,7 @@ A `Cargo.lock` crate from git or a non-crates.io registry is **sent, marked** (`
 
 A versionless crate folds per manifest, and only into a release the `Cargo.lock` at that manifest's workspace root locks (`workspacePool` returns the root, which travels with the manifest's requirements as the range's `cargoRange` metadata to `foldCargoRanges`) and that meets a requirement the manifest declares for it (`registry.CargoSatisfies`, which reads core numbers as the u64 Cargo does and refuses a version Cargo's parser rejects; a requirement it cannot read, such as one past u64, is not met). Folding on the name alone let one member's `=` pin swallow another member's range, a dev-dependency's pin replace the runtime range, and a decoy lock anywhere in the tree set a lockless crate's version, so none of those ranges reached the registry (OSS-2099). Any lock above the manifest is not enough either: a scan-root `Cargo.lock` says nothing about a nested crate with no `[workspace]` over it, and a stale or forged root lock holding only a release outside the range says nothing about what the range builds. The cost is an over-report: any range that no governing `Cargo.lock` locks goes out at its latest release, including one Cargo would unify with an `=` pin elsewhere in the workspace or in the same manifest, and a path dependency outside any workspace whose parent's lock covers it.
 
-**A git `[patch]` or `[replace]` target the root's `Cargo.lock` does not record is read from the manifest** (`cargoGitTargets`, OSS-2099). Cargo honours both tables only in the workspace root, so a member's are skipped (a manifest whose `workspacePool` root is not its own directory; one whose root cannot be found counts as a root, so its targets go out), and a target the lock beside the root records as a package, from the same repository with the same `branch`, `tag` or `rev`, at the manifest's full `rev` when it names one and at a version the target's own requirement accepts (a `[patch]` entry's `version`, or the full version a `[replace]` spec must name, which matches nothing when we cannot read it) (`lockRecords`), adds nothing, since syft reads the same git source from the lock. Cargo matches the selector exactly as written once both sides are read back (`cargoGitRef`: the query form-decoded, the last key winning, `ref` meaning `branch`), so the manifest's selector is spelled as cargo would write it for the lock's version (form-encoded from version 4, as written before) and read back the same way; cargo 1.99 rewrites the lock when the branch, tag or rev changes, from the default branch too, and even to a longer prefix of the locked commit (verified), so each of those targets goes out. It fetches the branch afresh too when that requirement no longer accepts the locked version, and builds the new commit (verified), while a dependency requirement moved past the locked fork leaves the patch unused and builds the crates.io release (verified), which the manifest's own declaration sends. A git URL with a query, two selectors or one that is not a string is never recorded, since cargo 1.99 takes a stale lock as current for a queried URL while it builds the new branch (verified). The lock is read only as a regular file of at most `maxCargoProofBytes` (`readRegularFile`, shared with `readCargoFileAt` and built on `ReadRegular`, which the cargo forwarder reads through too), so a FIFO or a link to a device named `Cargo.lock` can neither block the scan nor read without end, and one it refuses records nothing. The mere presence of a lock used to hide it, but a lock can predate the patch: cargo 1.99 without `--locked` rewrites such a lock and builds a fork published at the locked version, and records one at another version as unused until `cargo update` (verified), so the target goes out in both cases. An unused patch records nothing, since the lockfile cataloguer sends nothing for it and cargo 1.99 builds the fork at the commit `[[patch.unused]]` holds once a changed requirement reaches its version (verified). The accepted over-report: a member directory scanned on its own has no root above it inside the scan, so it counts as its own root and its git targets are sent, although cargo run from the full checkout ignores them. Each target is carried as a `pkg.RustCargoLockEntry` whose source is spelled as the lock would spell it without the query, `git+<url>` plus `#<rev>` only for a full 40 or 64 hex commit (a short rev is not what a lock records), so `cargoSourceMarks` strips credentials and falls back exactly as it does for a lock. `catalogByGlob` keys its dedup on that source too, or a versionless git target and its versionless crates.io twin collapse into one. A `path` target is the project's own code and is not sent; the crates.io twin stays, as above. Two more behaviours are kept by decision: an exact `Cargo.toml` pin that disagrees with `Cargo.lock` goes out at both versions, since cargo rebuilds to the pin unless run `--locked`, which fails instead, so neither file alone says what builds; and an exact pin keeps its build metadata as written (`=1.0.0+abc`), since the service fetches the `.crate` by that exact string and a crate published with metadata carries it in its file name.
+**A git `[patch]` or `[replace]` target the root's `Cargo.lock` does not record is read from the manifest** (`cargoGitTargets`, OSS-2099). Cargo honours both tables only in the workspace root, so a member's are skipped (a manifest whose `workspacePool` root is not its own directory; one whose root cannot be found counts as a root, so its targets go out), and a target the lock beside the root records as a package, from the same repository with the same `branch`, `tag` or `rev`, at the manifest's full `rev` when it names one and at a version the target's own requirement accepts (a `[patch]` entry's `version`, or the full version a `[replace]` spec must name, which matches nothing when we cannot read it) (`lockRecords`), adds nothing, since syft reads the same git source from the lock. Cargo matches the selector exactly as written once both sides are read back (`cargoGitRef`: the query form-decoded, the last key winning, `ref` meaning `branch`), so the manifest's selector is spelled as cargo would write it for the lock's version (form-encoded from version 4, as written before) and read back the same way; cargo 1.99 rewrites the lock when the branch, tag or rev changes, from the default branch too, and even to a longer prefix of the locked commit (verified), so each of those targets goes out. It fetches the branch afresh too when that requirement no longer accepts the locked version, and builds the new commit (verified), while a dependency requirement moved past the locked fork leaves the patch unused and builds the crates.io release (verified), which the manifest's own declaration sends. A git URL with a query, two selectors or one that is not a string is never recorded, since cargo 1.99 takes a stale lock as current for a queried URL while it builds the new branch (verified). The lock is read only as a regular file of at most `maxCargoProofBytes` (`readRegularFile`, shared with `readCargoFileAt`, on `ReadRegular` like the cargo forwarder's reads), so a FIFO or a link to a device named `Cargo.lock` can neither block the scan nor read without end, and one it refuses records nothing. The mere presence of a lock used to hide it, but a lock can predate the patch: cargo 1.99 without `--locked` rewrites such a lock and builds a fork published at the locked version, and records one at another version as unused until `cargo update` (verified), so the target goes out in both cases. An unused patch records nothing, since the lockfile cataloguer sends nothing for it and cargo 1.99 builds the fork at the commit `[[patch.unused]]` holds once a changed requirement reaches its version (verified). The accepted over-report: a member directory scanned on its own has no root above it inside the scan, so it counts as its own root and its git targets are sent, although cargo run from the full checkout ignores them. Each target is carried as a `pkg.RustCargoLockEntry` whose source is spelled as the lock would spell it without the query, `git+<url>` plus `#<rev>` only for a full 40 or 64 hex commit (a short rev is not what a lock records), so `cargoSourceMarks` strips credentials and falls back exactly as it does for a lock. `catalogByGlob` keys its dedup on that source too, or a versionless git target and its versionless crates.io twin collapse into one. A `path` target is the project's own code and is not sent; the crates.io twin stays, as above. Two more behaviours are kept by decision: an exact `Cargo.toml` pin that disagrees with `Cargo.lock` goes out at both versions, since cargo rebuilds to the pin unless run `--locked`, which fails instead, so neither file alone says what builds; and an exact pin keeps its build metadata as written (`=1.0.0+abc`), since the service fetches the `.crate` by that exact string and a crate published with metadata carries it in its file name.
 
 **Package sinks are excluded from the syft index itself** (`packageSinks`,
 `newDirectorySource`). Filtering `node_modules` packages after cataloguing was
@@ -775,9 +661,9 @@ config that redirects the vendored source without restating `replace-with`,
 and warned about a `CARGO_HOME` mirror that the project's own vendor config
 overrides everywhere in the project; judging a scan root holding neither file
 warned about that mirror in a monorepo whose Rust project, in a subdirectory,
-builds from a proven vendor tree. A lock copied out of its workspace (`CargoConfigDir`, the cargo forwarder's
-check) is judged where cargo runs instead, from the configs there and above
-and `CARGO_HOME`'s. It runs only when a
+builds from a proven vendor tree. A lock copied out of its workspace
+(`CargoConfigDir`) is judged where cargo runs, from the configs there and
+above and `CARGO_HOME`'s. It runs only when a
 crate goes out unmarked, so a scan with no Rust never mentions cargo.
 
 #### Why the npm resolve skips workspace members (OSS-1353)
