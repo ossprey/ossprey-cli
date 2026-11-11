@@ -244,6 +244,31 @@ func TestCargoAddAnAbsolutePath(t *testing.T) {
 	}
 }
 
+// On Linux a cargo.toml beside Cargo.toml is another file, and cargo add reads one given to --config in the mirror as it would in the project (OSS-2553).
+func TestCargoAddWithAConfigNamedCargoToml(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Windows and macOS fold case, so cargo.toml is Cargo.toml there")
+	}
+	api := newFakeAPI(t, "")
+	env := cargoEnv(t, api.URL)
+	dir := cargoCrate(t, env, "", false)
+	const config = "[term]\nquiet = false\n"
+	if err := os.WriteFile(filepath.Join(dir, "cargo.toml"), []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res := runForwardEnv(t, dir, env, binPath, "cargo", "add", "--config", "cargo.toml", "itoa@=1.0.15")
+	if res.exitCode != 0 || !strings.Contains(res.stderr, "ossprey: no malware found in 1 package in Cargo.lock") {
+		t.Fatalf("exit %d, want 0 and the verdict\nstderr: %s", res.exitCode, res.stderr)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dir, "Cargo.toml")); !strings.Contains(string(got), `itoa = "=1.0.15"`) {
+		t.Errorf("Cargo.toml = %q, want cargo's edit", got)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dir, "cargo.toml")); string(got) != config {
+		t.Errorf("cargo.toml = %q, want it untouched", got)
+	}
+}
+
 // A clean fetch lands the lock it checked and downloads exactly that.
 func TestCargoFetchCleanDownloadsTheCheckedLock(t *testing.T) {
 	api := newFakeAPI(t, "")

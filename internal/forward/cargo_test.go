@@ -1628,6 +1628,27 @@ func TestCargoMirrorAdded(t *testing.T) {
 	})
 }
 
+// cargo follows no path in package.metadata or workspace.metadata, so one there climbing out of the mirror refuses nothing, while a dependency's still refuses, one named metadata too (OSS-2553).
+func TestCargoMirrorLeavesSkipsMetadata(t *testing.T) {
+	vol := filepath.VolumeName(os.TempDir()) + string(filepath.Separator)
+	mi := &cargoMirror{s: filepath.Join(t.TempDir(), "m"), real: map[string]bool{vol: true}}
+	manifest := filepath.Join(vol, "p", "a", "Cargo.toml")
+	climb := "../../../assets"
+	for _, tc := range []struct{ name, data, want string }{
+		{"package.metadata", "[package]\nname = \"a\"\n\n[package.metadata.docs]\npath = \"" + climb + "\"\n", ""},
+		{"workspace.metadata", "[workspace]\n\n[workspace.metadata]\nassets = { path = \"" + climb + "\" }\n", ""},
+		{"project.metadata", "[project]\nname = \"a\"\nmetadata = { path = \"" + climb + "\" }\n", ""},
+		{"a dependency", "[package]\nname = \"a\"\n\n[dependencies]\nx = { path = \"" + climb + "\" }\n", climb},
+		{"a dependency named metadata", "[package]\nname = \"a\"\n\n[dependencies]\nmetadata = { path = \"" + climb + "\" }\n", climb},
+		{"a workspace dependency named metadata", "[workspace.dependencies]\nmetadata = { path = \"" + climb + "\" }\n", climb},
+	} {
+		got, err := mi.leaves(cargoFile{path: manifest, existed: true, data: []byte(tc.data)})
+		if err != nil || got != tc.want {
+			t.Errorf("%s: %q (%v), want %q", tc.name, got, err, tc.want)
+		}
+	}
+}
+
 // Rust reads a drive letter in either case as one drive and any other volume as spelled (OSS-2553).
 func TestSameVolume(t *testing.T) {
 	for _, tc := range []struct {

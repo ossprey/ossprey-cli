@@ -179,7 +179,9 @@ path dependency or `[workspace.dependencies]` entry under a workspace root),
 and when a `Cargo.toml` with a `[workspace]` sits in a directory above your
 user cache directory; cargo's own error then names it. It is refused when a
 `Cargo.toml` would hold a relative path that climbs out of the mirror, as
-cargo writes when it rewrites a path dependency you gave by an absolute path.
+cargo writes when it rewrites a path dependency you gave by an absolute path;
+a path in `[package.metadata]` or `[workspace.metadata]` does not count, since
+cargo never follows one.
 Make such paths relative to their `Cargo.toml`. A path dependency or `[patch]`
 that names a workspace member by an absolute path makes cargo itself fail in
 the mirror with a package collision (exit `101`, nothing written); make that

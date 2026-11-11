@@ -7,6 +7,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 
@@ -353,11 +354,15 @@ func (mi *cargoMirror) leaves(f cargoFile) (string, error) {
 	return out, nil
 }
 
-// cargoPaths yields every `path` value in a decoded manifest, and package.workspace, wherever they sit.
+// cargoPaths yields every `path` value in a decoded manifest, and package.workspace, wherever they sit bar package.metadata and workspace.metadata.
 func cargoPaths(v any, key string, yield func(string)) {
 	switch v := v.(type) {
 	case map[string]any:
 		for k, x := range v {
+			// Those tables hold whatever other tools put there, and cargo follows no path in them.
+			if k == "metadata" && (key == "package" || key == "project" || key == "workspace") {
+				continue
+			}
 			cargoPaths(x, k, yield)
 		}
 	case []map[string]any:
@@ -420,9 +425,13 @@ func mirrorVolume(vol string) string {
 	return hex.EncodeToString([]byte(vol))
 }
 
-// fileKey is one key for every spelling of the file p, since Windows and macOS fold case and Windows takes short names.
+// fileKey is one key for every spelling of the file p, folding case only on Windows and macOS, whose filesystems may fold it, and taking Windows' short names.
 func fileKey(p string) string {
-	return strings.ToLower(filepath.Join(canonicalDir(filepath.Dir(p)), filepath.Base(p)))
+	k := filepath.Join(canonicalDir(filepath.Dir(p)), filepath.Base(p))
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+		return strings.ToLower(k)
+	}
+	return k
 }
 
 // ancestors are dir and every directory above it, nearest first.

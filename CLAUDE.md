@@ -255,8 +255,9 @@ Windows resolves it under `%LOCALAPPDATA%`.
      normalizes paths from getcwd() and never resolves a link, so the mirror
      keeps cargo metadata's spellings, or `add -p` writes a member reached
      through a linked dir through that link. Copies are never links, since
-     cargo writes through one (`fileKey`: NTFS and APFS fold case and short
-     names). `-C`, every `--manifest-path` (a relative one through a linked
+     cargo writes through one (`fileKey` folds case only on Windows and
+     macOS, so a Linux `cargo.toml` beside `Cargo.toml` is linked, and takes
+     NTFS short names). `-C`, every `--manifest-path` (a relative one through a linked
      dir reaches the project) and an absolute `--path` are rewritten into the
      mirror, the last so cargo records the path it would in the project.
    - **Leaving the mirror.** An absolute path in a manifest leads cargo out
@@ -264,7 +265,8 @@ Windows resolves it under `%LOCALAPPDATA%`.
      `cargo metadata` must find the project's root and members as their copies
      there before the add (`sameWorkspace`) and after it (`added`), or the
      checked lock lacks a dev-dependency the project locks; a relative `path`
-     in a copy climbing out of its volume refuses. Rewriting the copies' paths
+     in a copy climbing out of its volume refuses, bar `package.metadata` and
+     `workspace.metadata`, which cargo never follows. Rewriting the copies' paths
      was ruled out: linked ancestor manifests escape too, and no TOML parser
      here gives value spans.
    - **Around the mirror.** The version probe runs again in the mirror and
