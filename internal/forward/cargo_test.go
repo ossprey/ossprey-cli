@@ -170,6 +170,13 @@ func TestParseCargoInstall(t *testing.T) {
 		{"--bin -qF pcre2 ripgrep", "", ripgrep, nil},
 		{"-qF pcre2 --registry corp ripgrep", "", nil, []string{"ripgrep", "--registry corp"}},
 		{"./local", "", nil, []string{"./local"}},
+		// A release that ends like an archive name is still a pin, which cargo 1.99.1 installs (OSS-2553).
+		{"tool@1.2.3-beta.zip", "", crate("tool", "1.2.3-beta.zip"), nil},
+		{"tool@1.2.3+build.tar.gz", "", crate("tool", "1.2.3+build.tar.gz"), nil},
+		{"tool@=1.2.3-a.tgz tool@1.2.3-a.tgz", "", crate("tool", "1.2.3-a.tgz"), nil},
+		{"--version 1.2.3-x.whl tool", "", crate("tool", "1.2.3-x.whl"), nil},
+		{"--vers=1.2.3-a.tar.bz2 tool", "", crate("tool", "1.2.3-a.tar.bz2"), nil},
+		{"--version 1.2.3+b.tar tool", "", crate("tool", "1.2.3+b.tar"), nil},
 	} {
 		got := parseCargoInstall(strings.Fields(tc.args), tc.defaultRegistry)
 		if !reflect.DeepEqual(got.Specs, tc.specs) || !reflect.DeepEqual(got.NonPackages, tc.nonPkgs) {
@@ -1521,6 +1528,30 @@ func TestRunCargoInstall_BlockedBeforeCargoRuns(t *testing.T) {
 	}
 }
 
+// A pin whose release ends like an archive name is checked before cargo runs, not forwarded unchecked (OSS-2553).
+func TestRunCargoInstall_ChecksAReleaseNamedLikeAnArchive(t *testing.T) {
+	for _, tc := range []struct {
+		args    []string
+		version string
+	}{
+		{[]string{"install", "tool@1.2.3-beta.zip"}, "1.2.3-beta.zip"},
+		{[]string{"install", "--version", "1.2.3+build.tar.gz", "tool"}, "1.2.3+build.tar.gz"},
+	} {
+		ex := &stubExec{}
+		var got []check.Spec
+		swap(t, ex.fn, func(ctx context.Context, o check.Options) (*ossbom.SBOM, error) {
+			got = o.Specs
+			return malwareSBOM(ctx, o)
+		})
+		if err := Run(context.Background(), Options{Bin: "cargo", Args: tc.args}); !errors.Is(err, ErrBlocked) || ex.called {
+			t.Errorf("cargo %v: Run = %v, cargo ran %v; want ErrBlocked before cargo runs", tc.args, err, ex.called)
+		}
+		if want := []check.Spec{{Ecosystem: "cargo", Name: "tool", Version: tc.version}}; !reflect.DeepEqual(got, want) {
+			t.Errorf("cargo %v: checked %+v, want %+v", tc.args, got, want)
+		}
+	}
+}
+
 // Only the named crates are checked, and the line says the dependencies were not.
 func TestRunCargoInstall_SaysDependenciesWereNotChecked(t *testing.T) {
 	ex := &stubExec{}
@@ -1586,6 +1617,9 @@ func TestRunCargoInstall_RegistryDecidesTheCheck(t *testing.T) {
 		{"crates.io by name, joined", "", "", []string{"install", "--registry=crates-io", "itoa"}, true},
 		{"crates.io's sparse index", "", "", []string{"install", "--index", "sparse+https://index.crates.io/", "itoa"}, true},
 		{"crates.io's git index", "", "", []string{"install", "--index=https://github.com/rust-lang/crates.io-index", "itoa"}, true},
+		// cargo 1.99.1 reads sparse+ in any case, and keeps a backslash in a sparse+ URL, so this host is mirror.example (OSS-2553).
+		{"crates.io's sparse index in capitals", "", "", []string{"install", "--index", "SPARSE+https://index.crates.io/", "itoa"}, true},
+		{"a mirror behind a backslash", "", "", []string{"install", "--index", `sparse+https://index.crates.io\@mirror.example/../`, "itoa"}, false},
 		{"corp by default in CARGO_HOME", corp + "[registry]\ndefault = \"corp\"\n", "", []string{"install", "itoa"}, false},
 		{"corp by default, crates.io by name", corp + "[registry]\ndefault = \"corp\"\n", "", []string{"install", "--registry", "crates-io", "itoa"}, true},
 		{"corp by CARGO_REGISTRY_DEFAULT", corp, "corp", []string{"install", "itoa"}, false},
@@ -1695,6 +1729,37 @@ func TestCargoConfigDirReadsGroupedShorts(t *testing.T) {
 	for _, globals := range []string{"-C sub", "-qC sub", "-qCsub", "-vC=sub", "-Z unstable-options -qC sub", "-qZ unstable-options -C sub"} {
 		if got := cargoConfigDir(strings.Fields(globals)); got != want {
 			t.Errorf("cargo %s: %s, want %s", globals, got, want)
+		}
+	}
+}
+
+// On Windows -C lands where cargo's chdir puts it: rooted on this drive, relative to this drive under the working directory, and relative to another drive as Abs places it (OSS-2553).
+func TestCargoChdirPlacesWindowsPathsByVolume(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("only Windows has rooted and drive-relative paths")
+	}
+	t.Chdir(t.TempDir())
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	vol, other := filepath.VolumeName(wd), "Q:"
+	if strings.EqualFold(vol, other) {
+		other = "R:"
+	}
+	elsewhere, err := filepath.Abs(other + "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ dir, want string }{
+		{`\x`, vol + `\x`},
+		{vol + "sub", filepath.Join(wd, "sub")},
+		{other + "x", elsewhere},
+		{`sub\..\x`, filepath.Join(wd, "x")},
+	} {
+		globals := []string{"-Zunstable-options", "-C", tc.dir}
+		if got := cargoChdir(globals); got != tc.want {
+			t.Errorf("cargo %v from %s: %s, want %s", globals, wd, got, tc.want)
 		}
 	}
 }

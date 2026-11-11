@@ -656,19 +656,93 @@ func TestCatalogReportsCargoReplacementWhereCargoRuns(t *testing.T) {
 	}
 }
 
-// Windows resolves a CARGO_HOME rooted without a drive, or relative to another drive, on that drive, as cargo's join leaves it (OSS-2553).
-func TestCargoHomeKeepsAWindowsRootedHomeOnItsDrive(t *testing.T) {
+// Windows places a path by volume: rooted on the directory's, relative to the directory's drive under it, and relative to another drive by that drive's own directory, which JoinIn leaves to the caller (OSS-2553).
+func TestJoinInPlacesPathsAsWindowsDoes(t *testing.T) {
+	// Windows' volumes, spelled with '/', which every OS reads as a separator.
+	vol := func(p string) string {
+		if len(p) >= 2 && p[1] == ':' {
+			return p[:2]
+		}
+		if rest, ok := strings.CutPrefix(p, "//"); ok {
+			if parts := strings.SplitN(rest, "/", 3); len(parts) >= 2 {
+				return "//" + parts[0] + "/" + parts[1]
+			}
+		}
+		return ""
+	}
+	for _, tc := range []struct {
+		dir, p, want string
+		ok           bool
+	}{
+		{"D:/work", "cargo", "D:/work/cargo", true},
+		{"D:/work", "../cargo", "D:/work/../cargo", true},
+		{"D:/work", "D:cargo", "D:/work/cargo", true},
+		{"D:/work", "d:cargo", "D:/work/cargo", true},
+		{"D:/work", "D:", "D:/work/", true},
+		{"D:/work", "/cargo", "D:/cargo", true},
+		{"//srv/share/work", "/cargo", "//srv/share/cargo", true},
+		{"D:/work", "C:/cargo", "C:/cargo", true},
+		{"D:/work", "//srv/share", "//srv/share", true},
+		{"D:/work", "C:cargo", "", false},
+		{"//srv/share/work", "D:cargo", "", false},
+		{"", "cargo", "cargo", true},
+		{"", "/cargo", "/cargo", true},
+	} {
+		got, ok := JoinIn(tc.dir, tc.p, vol)
+		if ok != tc.ok || ok && filepath.ToSlash(got) != tc.want {
+			t.Errorf("JoinIn(%q, %q) = %q, %v; want %q, %v", tc.dir, tc.p, got, ok, tc.want, tc.ok)
+		}
+	}
+}
+
+// Windows places CARGO_HOME from the directory cargo runs in, not this process's: rooted on its volume, relative to its drive under it, and relative to another drive as Abs does (OSS-2553).
+func TestCargoHomeOnWindowsFollowsTheDirectoryCargoRunsIn(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("only Windows has rooted and drive-relative paths")
 	}
-	for _, home := range []string{`\cargo`, `D:cargo`} {
-		t.Setenv("CARGO_HOME", home)
-		want, err := filepath.Abs(home)
-		if err != nil {
-			t.Fatal(err)
+	other, err := filepath.Abs(`R:cargo`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ cwd, home, want string }{
+		{`Q:\work`, `\cargo`, `Q:\cargo`},
+		{`Q:\work`, `Q:cargo`, `Q:\work\cargo`},
+		{`Q:\work`, `q:..\cargo`, `Q:\cargo`},
+		{`\\srv\share\work`, `\cargo`, `\\srv\share\cargo`},
+		{`Q:\work`, `R:cargo`, other},
+		{`Q:\work`, `\\srv\share\cargo`, `\\srv\share\cargo`},
+	} {
+		t.Setenv("CARGO_HOME", tc.home)
+		if got := CargoHome(tc.cwd); got != tc.want {
+			t.Errorf("CARGO_HOME=%s in %s: %s, want %s", tc.home, tc.cwd, got, tc.want)
 		}
-		if got := CargoHome(`C:\elsewhere`); got != want {
-			t.Errorf("CARGO_HOME=%s: %s, want %s", home, got, want)
+	}
+}
+
+// IsCratesIoIndex reads an --index URL as cargo 1.99.1 does: sparse+ in any case after trimming, and a backslash as a separator only in a special scheme such as https (OSS-2553).
+func TestIsCratesIoIndexReadsTheURLAsCargoDoes(t *testing.T) {
+	for _, tc := range []struct {
+		index string
+		want  bool
+	}{
+		{"sparse+https://index.crates.io/", true},
+		{"https://github.com/rust-lang/crates.io-index", true},
+		// cargo downloads crates.io's itoa from each of these.
+		{`https://github.com\rust-lang\crates.io-index`, true},
+		{`https://github.com\@mirror.example/../rust-lang/crates.io-index`, true},
+		{"SPARSE+https://index.crates.io/", true},
+		{" sparse+https://index.crates.io/", true},
+		{"Sparse+HTTPS://index.crates.io/", true},
+		{"spa\trse+https://index.crates.io/", true},
+		// cargo fetches these from mirror.example, the backslash being userinfo.
+		{`sparse+https://index.crates.io\@mirror.example/../`, false},
+		{`ssh://git@github.com\@mirror.example/../rust-lang/crates.io-index`, false},
+		// cargo reads this as another registry, which finds no crates.io crate.
+		{`sparse+https://index.crates.io/\/`, false},
+		{"sparse+https://crates.corp.example/", false},
+	} {
+		if got := IsCratesIoIndex(tc.index); got != tc.want {
+			t.Errorf("IsCratesIoIndex(%q) = %v, want %v", tc.index, got, tc.want)
 		}
 	}
 }

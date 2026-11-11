@@ -181,8 +181,9 @@ large or too deeply nested to read. A config that is not a regular file, such
 as a piped `--config /dev/stdin`, sets nothing here: `cargo install` reads its
 configuration a second time, when the pipe is already empty, and then installs
 from crates.io, so the crate is checked. `--registry crates-io` and crates.io's own index
-URL are checked like a plain install; an index URL with a non-ASCII host counts
-as another registry.
+URL (`sparse+` in any case) are checked like a plain install; an index URL with
+a non-ASCII host, or a `sparse+` or `ssh://` one holding a backslash, counts as
+another registry.
 `cargo install --list` is not an install, and nothing is checked for a line
 that only prints help or the version: `-h` or `--help` after the subcommand,
 or either or `-V`/`--version` before it.

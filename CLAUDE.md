@@ -158,11 +158,15 @@ Windows resolves it under `%LOCALAPPDATA%`.
      skips a `+toolchain` only first.
    - **`install`** builds and runs build scripts at once, so the named crates
      are checked in front, and only those (`errCargoNotResolved`), under the
-     name typed, since `cargo install` folds no spelling. A crate from anywhere
-     but crates.io forwards unchecked (`cargoSourceFlags`,
+     name typed, since `cargo install` folds no spelling. A parsed crate never
+     meets the archive check (`addCrate`): `tool@1.2.3-beta.zip` is a pin. A
+     crate from anywhere but crates.io forwards unchecked (`cargoSourceFlags`,
      `cargoDefaultRegistry`): checking crates.io's crate of that name would
      block an internal tool on a squat, or clear one never installed. Only a
-     definite crates.io index counts (`catalog.IsCratesIoIndex`).
+     definite crates.io index counts (`catalog.IsCratesIoIndex`), read as
+     cargo reads it: trimmed, `sparse+` in any case, and `\` a separator only
+     under a special scheme such as `https`, so in
+     `sparse+https://index.crates.io\@host/` it is userinfo and `host` serves.
    - **`registry.default` for `install`.** `cargo install` reloads its config
      from `CARGO_HOME` up, never the project's, and the nearest setting wins:
      the last `--config`, `CARGO_REGISTRY_DEFAULT`, then those configs. An
@@ -176,7 +180,12 @@ Windows resolves it under `%LOCALAPPDATA%`.
      cargo runs. `-C` resolves as chdir(2), each link followed before the `..`
      after it (`cargoConfigDir`); a relative `CARGO_HOME` joins cargo's
      physical cwd with `..` cleaned and links kept (`catalog.CargoHome`, shared
-     with the catalogue).
+     with the catalogue). On Windows both are placed by volume
+     (`catalog.JoinIn`): a rooted path on the starting directory's volume, one
+     relative to its drive under it. One relative to another drive goes where
+     `filepath.Abs` puts it: exact for `-C`, which cargo takes once, from our
+     cwd and environment, and for `CARGO_HOME` unless `-C` left the drive it
+     names.
    - **Bounded, regular reads.** Locks and configs go through
      `catalog.ReadRegular`: regular by `os.Stat` before the open (opening a
      FIFO releases a blocked writer, opening a device can reset it) and on the

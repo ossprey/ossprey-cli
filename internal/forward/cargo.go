@@ -222,14 +222,18 @@ func parseCargoInstall(args []string, defaultRegistry string) installArgs {
 	return out
 }
 
-// addCrate adds one crate to install; a range, which check refuses, resolves to the latest release as a PyPI range does.
+// addCrate adds one crate to install, never read as an archive, since a release such as 1.2.3-beta.zip is valid; a range, which check refuses, resolves to the latest release as a PyPI range does.
 func (p *installArgs) addCrate(token string) {
 	name, req, _ := strings.Cut(token, "@")
-	if _, err := check.ParseSpec("cargo", token); err != nil && req != "" && registry.IsCargoName(name) {
+	s, err := check.ParseSpec("cargo", token)
+	switch {
+	case err == nil:
+		p.addSpec(s, token)
+	case req != "" && registry.IsCargoName(name):
 		p.Specs = append(p.Specs, check.Spec{Ecosystem: "cargo", Name: name, Constraint: req})
-		return
+	default:
+		p.NonPackages = append(p.NonPackages, token)
 	}
-	p.addTarget("cargo", token)
 }
 
 // checkCargoFirst resolves a cargo verb that only locks into a scratch Cargo.lock, checks that, and writes it to the project only when clean, so nothing unchecked reaches the project at any point.
@@ -1011,11 +1015,16 @@ func cargoChdir(globals []string) string {
 		default:
 			continue
 		}
-		if !filepath.IsAbs(v) {
-			// Not cleaned yet: the kernel follows a link before the `..` after it, so `lnk/..` is the link target's parent (verified).
-			v = dir + string(filepath.Separator) + v
+		// Not cleaned yet: the kernel follows a link before the `..` after it, so `lnk/..` is the link target's parent (verified).
+		next, ok := catalog.JoinIn(dir, v, filepath.VolumeName)
+		if !ok {
+			// cargo takes one -C, from this process's directory and environment, so Abs places a path relative to another drive as Windows does for cargo.
+			next = v
+			if abs, err := filepath.Abs(v); err == nil {
+				next = abs
+			}
 		}
-		dir = v
+		dir = next
 	}
 	if runtime.GOOS == "windows" {
 		// Windows takes `..` off the path as written, before it opens anything.
