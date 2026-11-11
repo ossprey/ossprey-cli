@@ -99,11 +99,12 @@ ossprey cargo update             # resolved and checked, then written to your pr
 ossprey cargo install ripgrep    # ripgrep is checked, then cargo builds it
 ```
 
-`cargo update`, `cargo generate-lockfile` and `cargo fetch` need cargo 1.97 or
-later. Older versions, and 1.97.0 pre-releases, are refused before cargo runs,
-with the version found and a pointer to `rustup update`.
+ossprey's cargo support needs cargo 1.97 or later. With an older cargo, every
+command ossprey checks is refused with exit code `2` before cargo runs; in
+passive mode it goes to cargo unchanged and nothing is posted.
 
-These three commands are checked before anything in your project changes.
+`cargo update`, `generate-lockfile` and `fetch` are checked before anything in
+your project changes.
 Cargo resolves into a scratch copy of your workspace's `Cargo.lock`, ossprey
 checks the lock it resolved, and only a clean result is written to your
 project. Nothing unchecked is on disk in the project at any point, so an
@@ -114,7 +115,7 @@ found in N packages in Cargo.lock` after cargo's output for `cargo update` and
 
 `cargo add` edits `Cargo.toml` as well as the lock, so it is refused with exit
 code `2` before cargo runs, until it can be checked the same way. `cargo add
---dry-run` writes nothing, so on cargo 1.97 or later it goes to cargo as typed.
+--dry-run` writes nothing, so it goes to cargo as typed.
 
 - `Cargo.lock` is written the way cargo writes `Cargo.toml`: a new file beside
   the real one (through a symlink, if it is one), given the old file's
@@ -211,11 +212,11 @@ or either or `-V`/`--version` before it.
 A rustup toolchain (`cargo +nightly update`) and cargo's options before the
 subcommand (`--config`, `-Z`, `--color`, `-C`) are understood, and so are short
 options grouped as cargo groups them (`-qF pcre2` names no crate `pcre2`).
-In passive mode nothing is checked in front of cargo, at any version: `cargo
-add` and the others run and the `Cargo.lock` they leave is then posted, even
-when cargo failed, and `cargo install` posts its crates alongside the build. A
-lock that a `resolver.lockfile-path` may have moved, or a cargo script's, is
-not posted, and a warning line says so.
+In passive mode nothing is checked in front of cargo: `cargo add` and the
+others run and the `Cargo.lock` they leave is then posted, even when cargo
+failed, and `cargo install` posts its crates alongside the build. A lock that
+a `resolver.lockfile-path` may have moved, or a cargo script's, is not posted,
+and a warning line says so.
 
 ## What is not checked
 

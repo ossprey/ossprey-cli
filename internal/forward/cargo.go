@@ -267,9 +267,6 @@ func checkCargoFirst(ctx context.Context, m *Manager, opts Options) error {
 	// Named by its verb alone in what ossprey prints, since a --config value may hold a credential.
 	command := m.Bin + " " + args[verb]
 	flushWarnings(ctx)
-	if err := cargoVersionGate(ctx, command, args); err != nil {
-		return err
-	}
 	rest := cargoSplitShorts(args[verb+1:], cargoResolveShorts)
 	// Even a -b an option might have taken refuses, since misreading it costs only a refusal.
 	if args[verb] == "update" && cargoHas(rest, "-b", "--breaking") {
@@ -427,16 +424,16 @@ func cargoFailedOnItsWorkspace(command string, runErr, wsErr error) bool {
 	return true
 }
 
-// cargoVersionGate refuses a cargo that may ignore resolver.lockfile-path and write the project's lock itself.
-func cargoVersionGate(ctx context.Context, command string, args []string) error {
+// cargoBelowFloor says why the cargo args run is below ossprey's floor of cargo 1.97, or "" when it is not.
+func cargoBelowFloor(ctx context.Context, args []string) string {
 	line, err := cargoVersionFn(ctx, args)
 	if err != nil {
-		return fmt.Errorf("did not run `%s`: could not read cargo's version (%v)", command, err)
+		return fmt.Sprintf("could not read cargo's version (%v)", err)
 	}
 	if !cargoRedirects(line) {
-		return fmt.Errorf("did not run `%s`: ossprey needs cargo 1.97 or later to check it before it changes the project, and found `%s`; upgrade cargo (`rustup update`)", command, line)
+		return fmt.Sprintf("ossprey needs cargo 1.97 or later, and found `%s`; upgrade cargo (`rustup update`)", line)
 	}
-	return nil
+	return ""
 }
 
 // cargoVersion runs `cargo -V`, after rustup's +toolchain alone, since -C makes a stable cargo fail and no other option changes the answer (verified).
@@ -476,13 +473,8 @@ func cargoRedirects(line string) bool {
 		}
 		v[i] = n
 	}
-	switch c := slices.Compare(v, []int{1, 97, 0}); {
-	case c > 0:
-		return true
-	case c == 0:
-		return m[4] == ""
-	}
-	return false
+	c := slices.Compare(v, []int{1, 97, 0})
+	return c > 0 || c == 0 && m[4] == ""
 }
 
 // resolveCargoLock runs args with the lock redirected to a scratch copy of the project's, and returns what cargo locked there.

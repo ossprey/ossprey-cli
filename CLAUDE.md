@@ -221,12 +221,10 @@ Windows resolves it under `%LOCALAPPDATA%`.
      no unchecked crate may sit where an IDE (rust-analyzer), a watcher
      (cargo-watch, bacon) or CI could build it, so running cargo first and
      undoing a block is out, since that is the window.
-   - **The version gate.** `resolver.lockfile-path` works from cargo 1.97.0;
-     1.96.0, 1.80.0 and `1.97.0-nightly` write the project lock and exit 0, so
-     nothing after the run can catch it. `cargoRedirects` reads `cargo -V` in
-     semver order, a pre-release below its release, probed bare plus a leading
-     `+toolchain` (`-C` makes stable cargo exit 101). `install` and passive
-     mode are not gated.
+   - **The floor.** ossprey's cargo support needs cargo 1.97 or later, the
+     first to honour `resolver.lockfile-path`. `cargoBelowFloor` reads `cargo
+     -V` before every command ossprey checks or posts: gating refuses below
+     it (exit 2), passive forwards the line unchanged and posts nothing.
    - **The redirect.** A user `--config` beats
      `CARGO_RESOLVER_LOCKFILE_PATH`, which beats config files, and the last
      `--config` wins, so ossprey sets both, its `--config` last before any `--`
@@ -272,7 +270,7 @@ Windows resolves it under `%LOCALAPPDATA%`.
      whose checkout (`build.rs` included) lands before the check, is open.
    - **Dry runs.** `update --dry-run` writes a whole lock to the redirect when
      there is none, so it runs redirected and nothing is checked or landed.
-     `add --dry-run` writes nothing and goes to cargo after the gate.
+     `add --dry-run` writes nothing and goes to cargo as typed.
    - **Tripwire, check, land.** After cargo exits the snapshot must still
      match, else what was found is renamed aside unread, any size, to
      `<name>.ossprey-found-<n>` (an editor may have saved it), the snapshot is
