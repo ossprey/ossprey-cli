@@ -574,6 +574,24 @@ func TestCargoAddWithNoWorkspace(t *testing.T) {
 	}
 }
 
+// With no Cargo.toml, a gating update is refused on cargo's own error line, and passive leaves cargo's error alone.
+func TestCargoUpdateWithNoWorkspace(t *testing.T) {
+	api := newFakeAPI(t, "")
+	env := cargoEnv(t, api.URL)
+	dir := t.TempDir()
+	res := runForwardEnv(t, dir, env, binPath, "cargo", "update", "--offline")
+	if res.exitCode != 2 || !strings.Contains(res.stderr, "did not run `cargo update --offline`") || !strings.Contains(res.stderr, "could not find `Cargo.toml`") {
+		t.Errorf("gating: exit %d, want 2 and cargo's error in the refusal\nstderr: %s", res.exitCode, res.stderr)
+	}
+	res = runForwardEnv(t, dir, append(slices.Clone(env), "OSSPREY_PASSIVE=1"), binPath, "cargo", "update", "--offline")
+	if res.exitCode != 101 || !strings.Contains(res.stderr, "could not find `Cargo.toml`") || strings.Contains(res.stderr, "ossprey:") {
+		t.Errorf("passive: exit %d, want cargo's 101 and its error alone\nstderr: %s", res.exitCode, res.stderr)
+	}
+	if n, _ := api.stats(); n != 0 {
+		t.Errorf("%d API requests, want none", n)
+	}
+}
+
 // Passive runs cargo first and posts the lock it wrote, never blocking.
 func TestCargoAddPassivePostsTheLock(t *testing.T) {
 	api := newFakeAPI(t, "pkg:cargo/itoa@1.0.15")
@@ -726,15 +744,21 @@ func TestCargoInstallReadsTheRegistryAboveARelativeHome(t *testing.T) {
 	}
 }
 
-func TestCargoAddWithoutACredentialStopsBeforeCargo(t *testing.T) {
-	api := newFakeAPI(t, "")
+// noCredentialEnv is cargoEnv with no API key and an empty config directory, so the forwarder finds no credential.
+func noCredentialEnv(t *testing.T, apiURL string) []string {
+	t.Helper()
 	var env []string
-	for _, kv := range cargoEnv(t, api.URL) {
+	for _, kv := range cargoEnv(t, apiURL) {
 		if k, _, _ := strings.Cut(kv, "="); k != "OSSPREY_API_KEY" && k != "OSSPREY_CONFIG_DIR" {
 			env = append(env, kv)
 		}
 	}
-	env = append(env, "OSSPREY_CONFIG_DIR="+t.TempDir())
+	return append(env, "OSSPREY_CONFIG_DIR="+t.TempDir())
+}
+
+func TestCargoAddWithoutACredentialStopsBeforeCargo(t *testing.T) {
+	api := newFakeAPI(t, "")
+	env := noCredentialEnv(t, api.URL)
 	dir := cargoCrate(t, env, "", false)
 
 	res := runForwardEnv(t, dir, env, binPath, "cargo", "add", "itoa@=1.0.15")
@@ -743,6 +767,28 @@ func TestCargoAddWithoutACredentialStopsBeforeCargo(t *testing.T) {
 	}
 	if got, _ := os.ReadFile(filepath.Join(dir, "Cargo.toml")); string(got) != smokeManifest {
 		t.Errorf("Cargo.toml = %q, want cargo never run", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "Cargo.lock")); !os.IsNotExist(err) {
+		t.Errorf("a Cargo.lock was written (%v), want cargo never run", err)
+	}
+	if n, _ := api.stats(); n != 0 {
+		t.Errorf("the API got %d requests, want none", n)
+	}
+}
+
+// A gating update with no credential stops before cargo runs, so no lock is written.
+func TestCargoUpdateWithoutACredentialStopsBeforeCargo(t *testing.T) {
+	api := newFakeAPI(t, "")
+	env := noCredentialEnv(t, api.URL)
+	deps := `itoa = "=1.0.15"`
+	dir := cargoCrate(t, env, deps, false)
+
+	res := runForwardEnv(t, dir, env, binPath, "cargo", "update")
+	if res.exitCode != 2 || !strings.Contains(res.stderr, "error: no credentials") {
+		t.Fatalf("exit %d, want 2 on the credentials error\nstderr: %s", res.exitCode, res.stderr)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dir, "Cargo.toml")); string(got) != smokeManifest+deps+"\n" {
+		t.Errorf("Cargo.toml = %q, want it untouched", got)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "Cargo.lock")); !os.IsNotExist(err) {
 		t.Errorf("a Cargo.lock was written (%v), want cargo never run", err)

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -400,6 +401,15 @@ func TestCargoFlagTablesMatchCargo(t *testing.T) {
 			}
 		}
 	}
+	// cargoFetchUnknown lets through exactly what these two tables hold, so they must match what cargo fetch lists.
+	out, err := exec.Command(cargo, "fetch", "--help").Output()
+	if err != nil {
+		t.Skipf("cargo fetch --help: %v", err)
+	}
+	takes, _, switches := clapHelpFlags(string(out))
+	if !maps.Equal(takes, cargoFetchValues) || !maps.Equal(switches, cargoFetchSwitches) {
+		t.Errorf("cargo fetch lists values %v and switches %v, want %v and %v", takes, switches, cargoFetchValues, cargoFetchSwitches)
+	}
 }
 
 const memberManifest = "[package]\nname = \"a\"\nversion = \"0.1.0\"\n"
@@ -687,6 +697,10 @@ func TestRunCargo_RefusesBeforeCargoRuns(t *testing.T) {
 			cargoWorkspaceFn = readCargoWorkspace
 			t.Setenv("CARGO_RESOLVER_LOCKFILE_PATH", "elsewhere/Cargo.lock")
 		}, "its Cargo.lock cannot be checked (a resolver.lockfile-path may move it)"},
+		{"a moved lock on update", "update", func(t *testing.T, _ string, _ cargoWorkspace) {
+			cargoWorkspaceFn = readCargoWorkspace
+			t.Setenv("CARGO_RESOLVER_LOCKFILE_PATH", "elsewhere/Cargo.lock")
+		}, "its Cargo.lock cannot be checked (a resolver.lockfile-path may move it)"},
 		{"a config that cannot be read", "update", func(t *testing.T, root string, _ cargoWorkspace) {
 			cargoWorkspaceFn = readCargoWorkspace
 			t.Setenv("CARGO_HOME", t.TempDir())
@@ -698,6 +712,11 @@ func TestRunCargo_RefusesBeforeCargoRuns(t *testing.T) {
 			cargoWorkspaceFn = func(context.Context, []string) (cargoWorkspace, error) { return cargoWorkspace{}, errScriptLock }
 		}, "its Cargo.lock cannot be checked (a cargo script keeps it in the build directory)"},
 		{"no workspace", "add evil", func(*testing.T, string, cargoWorkspace) {
+			cargoWorkspaceFn = func(context.Context, []string) (cargoWorkspace, error) {
+				return cargoWorkspace{}, errors.New("cargo metadata: error: could not find `Cargo.toml` in `/empty` or any parent directory")
+			}
+		}, "its Cargo.lock cannot be checked (cargo metadata: error: could not find `Cargo.toml`"},
+		{"no workspace on update", "update", func(*testing.T, string, cargoWorkspace) {
 			cargoWorkspaceFn = func(context.Context, []string) (cargoWorkspace, error) {
 				return cargoWorkspace{}, errors.New("cargo metadata: error: could not find `Cargo.toml` in `/empty` or any parent directory")
 			}
@@ -774,24 +793,26 @@ func TestRunCargo_RefusesBeforeCargoRuns(t *testing.T) {
 			}
 		})
 	}
-	t.Run("no credential", func(t *testing.T) {
-		root, _ := cargoProject(t)
-		unsetEnv(t, "OSSPREY_API_KEY")
-		ex := &stubExec{}
-		swap(t, ex.fn, check.Run)
-		_, want := quietOutput(t, context.Background(), Options{Bin: "npm", Args: []string{"install", "left-pad@1.0.0"}})
-		if want == nil || ex.called {
-			t.Fatalf("npm install = %v, npm ran = %v; want a credentials error before npm", want, ex.called)
-		}
-		before := projectState(t, root)
-		out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"add", "-p", "a", "evil"}})
-		if err == nil || err.Error() != want.Error() || out != "" {
-			t.Fatalf("Run = %v, output %q; want %v alone", err, out, want)
-		}
-		if !reflect.DeepEqual(projectState(t, root), before) {
-			t.Error("the project changed")
-		}
-	})
+	for _, args := range []string{"add -p a evil", "update"} {
+		t.Run("no credential on "+args, func(t *testing.T) {
+			root, _ := cargoProject(t)
+			unsetEnv(t, "OSSPREY_API_KEY")
+			ex := &stubExec{}
+			swap(t, ex.fn, check.Run)
+			_, want := quietOutput(t, context.Background(), Options{Bin: "npm", Args: []string{"install", "left-pad@1.0.0"}})
+			if want == nil || ex.called {
+				t.Fatalf("npm install = %v, npm ran = %v; want a credentials error before npm", want, ex.called)
+			}
+			before := projectState(t, root)
+			out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: strings.Fields(args)})
+			if err == nil || err.Error() != want.Error() || out != "" {
+				t.Fatalf("Run = %v, output %q; want %v alone", err, out, want)
+			}
+			if !reflect.DeepEqual(projectState(t, root), before) {
+				t.Error("the project changed")
+			}
+		})
+	}
 }
 
 // ossprey's --config comes last before any `--`, since the last --config beats the variable and every earlier --config (verified with cargo 1.97.0 and 1.99.1).
@@ -823,6 +844,7 @@ func TestRunCargo_BlockLeavesTheProjectAsItWas(t *testing.T) {
 	}{
 		{"add -p a evil", false, true},
 		{"add -p a evil", true, true},
+		{"update", false, false},
 		{"update", true, false},
 		{"generate-lockfile", false, false},
 		{"fetch", true, false},
@@ -953,6 +975,70 @@ func TestRunCargoAdd_CleanLandsTheLockThenTheManifest(t *testing.T) {
 	}
 }
 
+// A clean update resolves from the project's lock and writes the new one, keeping its mode, a linked lock through its link as cargo writes one, and prints the one verdict line (OSS-2553).
+func TestRunCargoUpdate_CleanLandsTheLock(t *testing.T) {
+	for _, lock := range []string{"none", "file", "link"} {
+		lockExisted := lock != "none"
+		t.Run("lock "+lock, func(t *testing.T) {
+			if lock == "link" {
+				needSymlinks(t)
+			}
+			root, ws := cargoProject(t)
+			target := ws.Lock
+			if lock == "link" {
+				target = filepath.Join(root, "shared.lock")
+				if err := os.Symlink("shared.lock", ws.Lock); err != nil {
+					t.Fatal(err)
+				}
+			}
+			old := ""
+			if lockExisted {
+				old = "version = 4\n# before\n"
+				writeFile(t, target, old)
+				if err := os.Chmod(target, 0o640); err != nil {
+					t.Fatal(err)
+				}
+			}
+			f := &fakeCargo{t: t, root: root, lock: evilLock}
+			swapCargo(t, f)
+			swap(t, nil, cleanSBOM)
+			landed := landings(t)
+			var req scanRequest
+			var scanned string
+			swapScan(t, lockScan(t, &req, &scanned, cleanCrates))
+
+			out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"update"}})
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if want := "ossprey: no malware found in 2 packages in Cargo.lock\n"; out != want {
+				t.Errorf("output = %q, want %q", out, want)
+			}
+			if f.runs[0].seen != old || scanned != evilLock {
+				t.Errorf("cargo started from %q and %q was scanned, want the project's lock and then cargo's", f.runs[0].seen, scanned)
+			}
+			if want := []string{ws.Lock}; !reflect.DeepEqual(*landed, want) {
+				t.Errorf("wrote %v, want %v", *landed, want)
+			}
+			if got := readFile(t, target); got != evilLock {
+				t.Errorf("lock = %q, want cargo's", got)
+			}
+			if fi, err := os.Lstat(ws.Lock); err != nil || (fi.Mode()&fs.ModeSymlink != 0) != (lock == "link") {
+				t.Errorf("Cargo.lock is a link: %v (%v), want %v", fi.Mode()&fs.ModeSymlink != 0, err, lock == "link")
+			}
+			if runtime.GOOS != "windows" {
+				want := map[bool]fs.FileMode{true: 0o640, false: 0o666 &^ umask(t)}[lockExisted]
+				if fi, err := os.Stat(ws.Lock); err != nil || fi.Mode().Perm() != want {
+					t.Errorf("lock mode %v (%v), want %v", fi.Mode().Perm(), err, want)
+				}
+			}
+			if got, want := cargoErrOut.(*bytes.Buffer).String(), "     Locking 1 package to "+ws.Lock+"\n"; got != want {
+				t.Errorf("cargo's stderr = %q, want %q naming the project's lock", got, want)
+			}
+		})
+	}
+}
+
 // umask is the process's file creation mask, read from a new file.
 func umask(t *testing.T) fs.FileMode {
 	p := filepath.Join(t.TempDir(), "f")
@@ -1013,6 +1099,28 @@ func TestRunCargoAdd_ChangedDuringTheCheckLandsNothing(t *testing.T) {
 				t.Error("the project changed beyond the edit")
 			}
 		})
+	}
+}
+
+// A lock changed while the check of an update ran is kept and nothing lands (OSS-2553).
+func TestRunCargoUpdate_ChangedDuringTheCheckLandsNothing(t *testing.T) {
+	root, ws := cargoProject(t)
+	writeFile(t, ws.Lock, "version = 4\n# before\n")
+	swapCargo(t, &fakeCargo{t: t, root: root, lock: evilLock})
+	swap(t, nil, cleanSBOM)
+	noLanding(t)
+	swapScan(t, func(context.Context, scanRequest) (*ossbom.SBOM, error) {
+		writeFile(t, ws.Lock, "# edited meanwhile\n")
+		return cleanCrates(), nil
+	})
+	before := projectState(t, root)
+	before[ws.Lock] = "# edited meanwhile\n"
+	out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"update"}})
+	if want := "Cargo.lock changed while ossprey checked it, so nothing was written; run the command again"; err == nil || err.Error() != want || out != "" {
+		t.Errorf("Run = %v, output %q; want %q alone", err, out, want)
+	}
+	if !reflect.DeepEqual(projectState(t, root), before) {
+		t.Error("the project changed beyond the edit")
 	}
 }
 
@@ -1160,6 +1268,22 @@ func TestRunCargoAdd_NoLockLandsNothing(t *testing.T) {
 	noLanding(t)
 	out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"add", "-p", "a", "evil"}})
 	if want := "`cargo add -p a evil` left no Cargo.lock, so nothing was checked and the project was not changed"; err == nil || err.Error() != want || out != "" {
+		t.Errorf("Run = %v, output %q; want %q", err, out, want)
+	}
+	if !reflect.DeepEqual(projectState(t, root), before) {
+		t.Error("the project changed")
+	}
+}
+
+// A generate-lockfile that locks nothing lands nothing and says nothing was checked.
+func TestRunCargoGenerateLockfile_NoLockLandsNothing(t *testing.T) {
+	root, _ := cargoProject(t)
+	before := projectState(t, root)
+	cargoRunFn = func(context.Context, string, []string, []string, io.Writer) error { return nil }
+	swap(t, nil, cleanSBOM)
+	noLanding(t)
+	out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"generate-lockfile"}})
+	if want := "`cargo generate-lockfile` left no Cargo.lock, so nothing was checked and the project was not changed"; err == nil || err.Error() != want || out != "" {
 		t.Errorf("Run = %v, output %q; want %q", err, out, want)
 	}
 	if !reflect.DeepEqual(projectState(t, root), before) {
