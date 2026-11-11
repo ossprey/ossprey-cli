@@ -145,11 +145,13 @@ nothing is checked.
 Everything else fails closed: the project is left as it was, cargo's changes
 are dropped, and the command exits `2` with one line saying why. That happens
 when the API cannot be reached, when the platform checked none of the crates
-(Rust is checked on Teams and Enterprise plans), when there is no credential
-(before cargo runs), and, before cargo runs, for a workspace `cargo metadata`
-cannot read (cargo's own error is shown), a cargo script run with `-Zscript`,
-a `Cargo.lock` that is not a regular file or is over 32 MiB, and a
-`resolver.lockfile-path` that would put the lock elsewhere. That last one may
+(Rust is checked on Teams and Enterprise plans), when the scan quota is
+exhausted (a skipped scan exits `0` elsewhere, but here the command did
+nothing), when there is no credential (before cargo runs), and, before cargo
+runs, for a workspace `cargo metadata` cannot read (cargo's own error is
+shown), a cargo script run with `-Zscript`, a `Cargo.lock` that is not a
+regular file or is over 32 MiB, and a `resolver.lockfile-path` that would put
+the lock elsewhere. That last one may
 come from the environment, a `--config` or a cargo config, and is assumed for
 a config ossprey cannot read (a piped `--config /dev/stdin`, say), one too
 large or too deeply nested to read, and one with an `include`. `cargo update

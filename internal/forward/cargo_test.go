@@ -23,6 +23,7 @@ import (
 
 	"github.com/ossprey/ossprey-cli/internal/catalog"
 	"github.com/ossprey/ossprey-cli/internal/check"
+	"github.com/ossprey/ossprey-cli/internal/client"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
 	"github.com/ossprey/ossprey-cli/internal/trust"
 )
@@ -991,6 +992,35 @@ func TestRunCargo_CheckErrorFailsClosed(t *testing.T) {
 			out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"update"}})
 			if err == nil || err.Error() != tc.want || errors.Is(err, ErrBlocked) || out != "" {
 				t.Errorf("Run = %v, output %q; want %q alone", err, out, tc.want)
+			}
+			if !reflect.DeepEqual(projectState(t, root), before) {
+				t.Error("the project changed")
+			}
+		})
+	}
+}
+
+// A quota skip is an error, exit 2, not the skip other forwarders exit 0 on, since gated cargo then did nothing; nothing lands or is fetched (OSS-2553).
+func TestRunCargo_QuotaSkipFailsClosed(t *testing.T) {
+	for _, verb := range []string{"update", "fetch"} {
+		t.Run(verb, func(t *testing.T) {
+			root, ws := cargoProject(t)
+			writeFile(t, ws.Lock, "version = 4\n# before\n")
+			before := projectState(t, root)
+			f := &fakeCargo{t: t, root: root, lock: evilLock}
+			swapCargo(t, f)
+			swap(t, nil, cleanSBOM)
+			noLanding(t)
+			swapScan(t, func(context.Context, scanRequest) (*ossbom.SBOM, error) {
+				return nil, &client.ErrSkipped{Message: "Quota exhausted."}
+			})
+			out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{verb}})
+			var skipped *client.ErrSkipped
+			if want := "Cargo.lock not checked (scan skipped: Quota exhausted.); the project was not changed"; err == nil || err.Error() != want || errors.As(err, &skipped) || errors.Is(err, ErrBlocked) || out != "" {
+				t.Errorf("Run = %v, output %q; want %q alone, not a skip", err, out, want)
+			}
+			if len(f.runs) != 1 {
+				t.Errorf("cargo ran %d times, want the resolve alone", len(f.runs))
 			}
 			if !reflect.DeepEqual(projectState(t, root), before) {
 				t.Error("the project changed")
