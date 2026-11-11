@@ -172,8 +172,8 @@ func cargoOptionalSkips(flag, next string) bool {
 // cargoSourceFlags install every crate named from somewhere other than crates.io.
 var cargoSourceFlags = flagSet("--git", "--path", "--index", "--registry")
 
-// parseCargoInstall classifies `cargo install`'s arguments: each positional is a crate, --version pins them all, and a source flag other than crates.io, or else a defaultRegistry, takes them off crates.io.
-func parseCargoInstall(args []string, defaultRegistry string) installArgs {
+// parseCargoInstall classifies `cargo install`'s arguments: each positional is a crate, --version pins them all, and a source flag other than crates.io, or else a defaultRegistry, takes them off crates.io; isCratesIo says whether a named registry is crates.io.
+func parseCargoInstall(args []string, defaultRegistry string, isCratesIo func(registry string) bool) installArgs {
 	args = cargoSplitShorts(args, valueFlags["cargo"])
 	var crates []string
 	version, source, cratesIo := "", "", false
@@ -198,7 +198,7 @@ func parseCargoInstall(args []string, defaultRegistry string) installArgs {
 		switch {
 		case flag == "--version" || flag == "--vers":
 			version = value
-		case flag == "--registry" && value == "crates-io" || flag == "--index" && catalog.IsCratesIoIndex(value):
+		case flag == "--registry" && isCratesIo(value) || flag == "--index" && catalog.IsCratesIoIndex(value):
 			source, cratesIo = "", true
 		case cargoSourceFlags[flag]:
 			source = flag + " " + value
@@ -236,6 +236,28 @@ func (p *installArgs) addCrate(token string) {
 	default:
 		p.NonPackages = append(p.NonPackages, token)
 	}
+}
+
+// cargoReleaseFn finds the releases cargo install may take for a crate; a var so tests need no network.
+var cargoReleaseFn = registry.CargoInstallReleases
+
+// cargoReleases pins each crate to the release cargo install takes from crates.io's index, failing when one cannot be found there.
+func cargoReleases(ctx context.Context, specs []check.Spec) ([]check.Spec, error) {
+	var out []check.Spec
+	for _, s := range specs {
+		req := s.Constraint
+		if s.Version != "" {
+			req = "=" + s.Version
+		}
+		vs, err := cargoReleaseFn(ctx, s.Name, req)
+		if err != nil {
+			return nil, fmt.Errorf("could not tell which release of %s cargo would install (%w), so it was not checked", s.Name, err)
+		}
+		for _, v := range vs {
+			out = append(out, check.Spec{Ecosystem: "cargo", Name: s.Name, Version: v})
+		}
+	}
+	return out, nil
 }
 
 // checkCargoFirst resolves a cargo verb that only locks into a scratch Cargo.lock, checks that, and writes it to the project only when clean, so nothing unchecked reaches the project at any point.
@@ -1141,6 +1163,35 @@ func lockfileMoved(args []string, configDir string) bool {
 
 // cargoDefaultRegistry is the registry other than crates.io that `cargo install` takes a crate from when the line names none, or "".
 func cargoDefaultRegistry(args []string) string {
+	v, _ := cargoInstallConfig(args, "CARGO_REGISTRY_DEFAULT", "registry", "default")
+	if cargoRegistryIsCratesIo(args, v) {
+		return ""
+	}
+	return v
+}
+
+// cargoRegistryIsCratesIo reports whether cargo install reads a named registry as crates.io: by its name, or by an index that is crates.io's.
+func cargoRegistryIsCratesIo(args []string, name string) bool {
+	if name == "crates-io" {
+		return true
+	}
+	if name == "" || name == cargoUnreadConfig || name == cargoIncludedConfig {
+		return false
+	}
+	// cargo spells a key as an environment variable in capitals, with '-' as '_'.
+	env := "CARGO_REGISTRIES_" + strings.ToUpper(strings.ReplaceAll(name, "-", "_")) + "_INDEX"
+	index, _ := cargoInstallConfig(args, env, "registries", name, "index")
+	return catalog.IsCratesIoIndex(index)
+}
+
+// Stand-ins for a value a config may set that cannot be read, which no registry name or index URL can equal.
+const (
+	cargoUnreadConfig   = "a config it cannot read"
+	cargoIncludedConfig = "an included config"
+)
+
+// cargoInstallConfig is the value `cargo install` reads for a config key, and whether one is set.
+func cargoInstallConfig(args []string, env string, key ...string) (string, bool) {
 	// The value set nearest the line wins; an include, or a regular file that cannot be read or that the bounded parser refuses, may set it too.
 	pick := func(data []byte, err error) (string, bool) {
 		if errors.Is(err, catalog.ErrNotRegular) {
@@ -1149,46 +1200,43 @@ func cargoDefaultRegistry(args []string) string {
 		}
 		doc, ok := cargoConfigDoc(data)
 		if err != nil || !ok {
-			return "a config it cannot read", true
+			return cargoUnreadConfig, true
 		}
-		if reg, _ := doc["registry"].(map[string]any); reg != nil {
-			if v, ok := reg["default"].(string); ok {
-				return v, true
-			}
+		var v any = doc
+		for _, k := range key {
+			t, _ := v.(map[string]any)
+			v = t[k]
+		}
+		if v, ok := v.(string); ok {
+			return v, true
 		}
 		if doc["include"] != nil {
-			return "an included config", true
+			return cargoIncludedConfig, true
 		}
 		return "", false
-	}
-	found := func(v string) string {
-		if v == "crates-io" {
-			return ""
-		}
-		return v
 	}
 	dir := cargoConfigDir(args[:max(verbIndex("cargo", args), 0)])
 	for _, c := range slices.Backward(cargoConfigArgs(args)) {
 		if v, ok := pick(cargoConfigArg(c, dir)); ok {
-			return found(v)
+			return v, true
 		}
 	}
-	if v := os.Getenv("CARGO_REGISTRY_DEFAULT"); v != "" {
-		return found(v)
+	if v := os.Getenv(env); v != "" {
+		return v, true
 	}
 	home := catalog.CargoHome(dir)
 	if home == "" {
-		return ""
+		return "", false
 	}
 	// cargo install reads no project config, only those from CARGO_HOME up.
 	for _, f := range append(cargoConfigFiles(home), cargoConfigFile(home)) {
 		if data, there, err := readConfig(f); there {
 			if v, ok := pick(data, err); ok {
-				return found(v)
+				return v, true
 			}
 		}
 	}
-	return ""
+	return "", false
 }
 
 // cargoConfigArgs are the --config values on the line, in order, before any `--`.

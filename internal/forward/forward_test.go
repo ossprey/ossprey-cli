@@ -262,6 +262,7 @@ func swap(t *testing.T, exec func(context.Context, string, []string) error, chk 
 	origCheck := checkFn
 	origScanProject := scanProjectFn
 	origExpand := expandFn
+	origCargoRelease := cargoReleaseFn
 	execFn = exec
 	handoffFn = exec
 	checkFn = chk
@@ -272,13 +273,28 @@ func swap(t *testing.T, exec func(context.Context, string, []string) error, chk 
 	expandFn = func(context.Context, *Manager, []string, int, installArgs) ([]catalog.Resolved, error) {
 		return nil, nil
 	}
+	cargoReleaseFn = stubCargoReleases("")
 	t.Cleanup(func() {
 		execFn = origExec
 		handoffFn = origHandoff
 		checkFn = origCheck
 		scanProjectFn = origScanProject
 		expandFn = origExpand
+		cargoReleaseFn = origCargoRelease
 	})
+}
+
+// stubCargoReleases answers a pin with its release and anything else with latest, or an error when latest is "".
+func stubCargoReleases(latest string) func(context.Context, string, string) ([]string, error) {
+	return func(_ context.Context, name, req string) ([]string, error) {
+		if v, ok := strings.CutPrefix(req, "="); ok {
+			return []string{v}, nil
+		}
+		if latest == "" {
+			return nil, fmt.Errorf("no release of %s stubbed for %q", name, req)
+		}
+		return []string{latest}, nil
+	}
 }
 
 // swapExpand replaces the dependency-expansion seam.

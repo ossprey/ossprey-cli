@@ -119,7 +119,8 @@ dependencies to resolve them), and once the lock is written it runs with
 `--locked` against a scratch copy of the checked lock. `cargo add` edits
 `Cargo.toml` as well as the lock, so it is refused in gating mode until it can
 be checked the same way. In passive mode cargo runs first and the lock is
-posted.
+posted. A gating `cargo install` checks each crate at the release crates.io's
+index says cargo takes, and is refused with exit 2 when the index cannot say.
 
 The passive branch is the one worth reading twice. It never gates, so it never
 sits in front of the install: where a lockfile will land, the install runs

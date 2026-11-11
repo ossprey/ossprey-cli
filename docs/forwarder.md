@@ -168,9 +168,12 @@ the old lock is still put back and the message says the found one was not kept.
 
 `cargo install` compiles the crate and runs its build scripts straight away, so
 the crates it names are checked first, and a block means cargo never starts.
-An exact version given to `--version` (or `--vers`), or `name@1.2.3`, pins a
-release; anything else, a range given to `--version` or `name@^1` included, is
-checked at the latest release on crates.io. A crate is checked under the name
+Each crate is checked at the release cargo would take, read from crates.io's
+index as cargo reads it: the newest release a range such as `name@^1` or
+`--version '<2'` allows, and a pin such as `name@1.2.3` as crates.io spells it,
+build metadata included. When the index cannot be read or holds no such
+release, ossprey refuses the install with exit code `2` before cargo runs.
+A crate is checked under the name
 typed, since `cargo install` takes no other spelling of it (`serde-json` does
 not find `serde_json`). Only the
 named crates are checked, not their dependencies, and one warning line says so.
@@ -184,10 +187,15 @@ cargo runs), or possibly set there by an `include` or by a config file too
 large or too deeply nested to read. A config that is not a regular file, such
 as a piped `--config /dev/stdin`, sets nothing here: `cargo install` reads its
 configuration a second time, when the pipe is already empty, and then installs
-from crates.io, so the crate is checked. `--registry crates-io` and crates.io's own index
-URL (`sparse+` in any case) are checked like a plain install; an index URL with
-a non-ASCII host, or a `sparse+` or `ssh://` one holding a backslash, counts as
-another registry.
+from crates.io, so the crate is checked. `--registry crates-io`, a registry
+whose index is crates.io's (named by `--registry` or `registry.default`), and
+crates.io's own index URL (`sparse+` in any case) are checked like a plain
+install. A `sparse+` URL
+is read as cargo reads it, once as given and again without `sparse+`, so a
+backslash before its host is userinfo and one after it a `/`. A host is read
+through IDNA as cargo reads it (`ｉｎｄｅｘ.crates.io` is crates.io), and a
+trailing dot changes nothing. An `ssh://` index URL holding a backslash counts
+as another registry.
 `cargo install --list` is not an install, and nothing is checked for a line
 that only prints help or the version: `-h` or `--help` after the subcommand,
 or either or `-V`/`--version` before it.

@@ -562,7 +562,7 @@ func Run(ctx context.Context, opts Options) error {
 			return forwardTo()
 		}
 	} else if m.Ecosystem == "cargo" {
-		parsed = parseCargoInstall(opts.Args[start:], cargoDefaultRegistry(opts.Args))
+		parsed = parseCargoInstall(opts.Args[start:], cargoDefaultRegistry(opts.Args), func(r string) bool { return cargoRegistryIsCratesIo(opts.Args, r) })
 	} else {
 		parsed = parseInstallArgs(m, opts.Args[start:], m.reqFileArgs != nil && m.reqFileArgs(opts.Args))
 	}
@@ -593,6 +593,17 @@ func Run(ctx context.Context, opts Options) error {
 		note("ossprey: no crates.io crate named; forwarding `%s %s` unchecked\n",
 			m.Bin, strings.Join(opts.Args, " "))
 		return forwardTo()
+	}
+	if m.Ecosystem == "cargo" && !opts.Passive {
+		// The release cargo picks from crates.io's index is the one checked, and an install whose release cannot be found does not run.
+		stop := progress.Start(progressTo(), "ossprey: looking up crates.io's index")
+		specs, err := cargoReleases(ctx, parsed.Specs)
+		stop()
+		if err != nil {
+			flushWarnings(ctx)
+			return fmt.Errorf("did not run `%s %s`: %w", m.Bin, strings.Join(opts.Args, " "), err)
+		}
+		parsed.Specs = specs
 	}
 
 	switch {
