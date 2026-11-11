@@ -88,11 +88,18 @@ func TestCargoDetection(t *testing.T) {
 		{"install -F-h ripgrep", "before"},
 		{"-Zunstable-options -C-h add serde", "resolve"},
 		{"add -p-h serde", "resolve"},
+		{"update -p-h", "resolve"},
+		{"update -qp-h", "resolve"},
+		{"update -p=-h", "resolve"},
 		// An optional value never takes an option token, so the help after it is help (cargo 1.99.1).
 		{"install --bin --help ripgrep", "through"},
 		{"install --example -h ripgrep", "through"},
 		{"install --target -qh ripgrep", "through"},
 		{"install --bin rg ripgrep", "before"},
+		{"add -p -h", "through"},
+		{"update -p --help", "through"},
+		{"update -qp -h", "through"},
+		{"update -p serde -p -h", "through"},
 		{"build", "through"},
 		{"+nightly build", "through"},
 		{"check", "through"},
@@ -367,6 +374,7 @@ func TestCargoFlagTablesMatchCargo(t *testing.T) {
 		{install, cargoOptionalValues, nil, func(_ string, optional bool) bool { return optional }},
 		// One table serves the four verbs, so no short may be a switch in one and take a value in another.
 		{resolve, cargoResolveShorts, nil, func(name string, _ bool) bool { return !strings.HasPrefix(name, "--") }},
+		{resolve, cargoResolveOptional, nil, func(name string, optional bool) bool { return optional && !strings.HasPrefix(name, "--") }},
 	} {
 		var help strings.Builder
 		for _, args := range tc.helps {
@@ -737,6 +745,10 @@ func TestRunCargo_RefusesBeforeCargoRuns(t *testing.T) {
 		{"update --breaking", "update -Zunstable-options --breaking evil", nil, "--breaking edits Cargo.toml"},
 		{"update -b in a group", "update -Zunstable-options -qb evil", nil, "--breaking edits Cargo.toml"},
 		{"update --breaking --dry-run", "update -Zunstable-options --breaking -n", nil, "--breaking edits Cargo.toml"},
+		// An empty -p takes no option token, so the flag after it is cargo's (verified with cargo 1.99.1).
+		{"update --breaking after an empty -p", "update -Zunstable-options -p evil -p --breaking", nil, "--breaking edits Cargo.toml"},
+		{"update -b after an empty -p", "update -Zunstable-options -p evil -p -b", nil, "--breaking edits Cargo.toml"},
+		{"update -b where a value may be", "update -Zunstable-options -m -b", nil, "--breaking edits Cargo.toml"},
 		// The resolve step passes on only what update takes, so the lock landed before cargo fetch rejected the line.
 		{"fetch with an option it lacks", "fetch --tagret x86_64-unknown-linux-gnu", nil, "cargo fetch would reject `--tagret`"},
 		{"fetch with a positional", "fetch serde", nil, "cargo fetch would reject `serde`"},
@@ -1343,7 +1355,7 @@ func TestRunCargoFetch_ResolvesThenFetchesLocked(t *testing.T) {
 
 // update --dry-run with no lock writes a whole one to the redirect (verified with cargo 1.99.1), so nothing is ever checked or written, and no credential is needed.
 func TestRunCargoUpdate_DryRunNeverLands(t *testing.T) {
-	for _, args := range []string{"update --dry-run", "update -qn"} {
+	for _, args := range []string{"update --dry-run", "update -qn", "update -p evil -p --dry-run"} {
 		root, ws := cargoProject(t)
 		unsetEnv(t, "OSSPREY_API_KEY")
 		f := &fakeCargo{t: t, root: root, lock: evilLock}

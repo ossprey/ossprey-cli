@@ -112,7 +112,13 @@ func cargoShorts(a string, takes map[string]bool) (split []string, owes bool) {
 			if i == len(a) {
 				return split, true
 			}
-			return append(split, strings.TrimPrefix(a[i:], "=")), false
+			v := strings.TrimPrefix(a[i:], "=")
+			if cargoOptionalSkips(short, v) {
+				// clap reads `-p-h` as -p's value, so it stays one token, `-p=-h`, that no reader takes for an option.
+				split[len(split)-1] = short + "=" + v
+				return split, false
+			}
+			return append(split, v), false
 		}
 	}
 	return split, false
@@ -156,9 +162,12 @@ func cargoHas(args []string, flags ...string) bool {
 // cargoOptionalValues are install's options whose value is optional (TestCargoFlagTablesMatchCargo).
 var cargoOptionalValues = flagSet("--bin", "--example", "--target")
 
+// cargoResolveOptional are the cargoResolveShorts whose value is optional: add's -p, and update's, which `cargo update --help` hides (TestCargoFlagTablesMatchCargo).
+var cargoResolveOptional = flagSet("-p")
+
 // cargoOptionalSkips reports whether clap leaves next alone for flag: an optional value is never an option token, so `--bin -F pcre2` gives pcre2 to -F.
 func cargoOptionalSkips(flag, next string) bool {
-	return cargoOptionalValues[flag] && len(next) > 1 && next[0] == '-'
+	return (cargoOptionalValues[flag] || cargoResolveOptional[flag]) && len(next) > 1 && next[0] == '-'
 }
 
 // cargoSourceFlags install every crate named from somewhere other than crates.io.
@@ -237,7 +246,8 @@ func checkCargoFirst(ctx context.Context, m *Manager, opts Options) error {
 	}
 	verb := verbIndex("cargo", args)
 	rest := cargoSplitShorts(args[verb+1:], cargoResolveShorts)
-	if args[verb] == "update" && cargoOptionsHave(rest, cargoResolveShorts, "-b", "--breaking") {
+	// Even a -b an option might have taken refuses, since misreading it costs only a refusal.
+	if args[verb] == "update" && cargoHas(rest, "-b", "--breaking") {
 		// It rewrites Cargo.toml as well as the lock, and only the lock is redirected (verified with cargo 1.99.1).
 		return fmt.Errorf("did not run `%s`: --breaking edits Cargo.toml, which ossprey checks first only for `cargo add`; raise the requirement with `cargo add <crate>@<version>` instead", command)
 	}

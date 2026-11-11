@@ -118,7 +118,7 @@ type Manager struct {
 	// parseRun classifies a tool run's arguments from start on. Unset means
 	// uv's syntax, parseToolRun.
 	parseRun func(args []string) installArgs
-	// resolveAt matches a command that only resolves and locks (`cargo add`), checked before its lock reaches the project.
+	// resolveAt matches a command that only resolves and locks (`cargo update`), checked before its lock reaches the project.
 	resolveAt func(args []string) (start int, ok bool)
 }
 
