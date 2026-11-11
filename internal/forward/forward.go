@@ -595,6 +595,17 @@ func Run(ctx context.Context, opts Options) error {
 			m.Bin, strings.Join(opts.Args, " "))
 		return forwardTo()
 	}
+	if m.Ecosystem == "cargo" && !opts.Passive {
+		// The release cargo picks from crates.io's index is the one checked, and an install whose release cannot be found does not run.
+		stop := progress.Start(progressTo(), "ossprey: looking up crates.io's index")
+		specs, err := cargoReleases(ctx, parsed.Specs)
+		stop()
+		if err != nil {
+			flushWarnings(ctx)
+			return fmt.Errorf("did not run `%s %s`: %w", m.Bin, strings.Join(opts.Args, " "), err)
+		}
+		parsed.Specs = specs
+	}
 
 	switch {
 	case len(parsed.Specs) > 0 && len(parsed.ReqFiles) > 0:

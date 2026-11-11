@@ -201,6 +201,28 @@ func (p *installArgs) addCrate(token string) {
 	}
 }
 
+// cargoReleaseFn finds the releases cargo install may take for a crate; a var so tests need no network.
+var cargoReleaseFn = registry.CargoInstallReleases
+
+// cargoReleases pins each crate to the release cargo install takes from crates.io's index, failing when one cannot be found there.
+func cargoReleases(ctx context.Context, specs []check.Spec) ([]check.Spec, error) {
+	var out []check.Spec
+	for _, s := range specs {
+		req := s.Constraint
+		if s.Version != "" {
+			req = "=" + s.Version
+		}
+		vs, err := cargoReleaseFn(ctx, s.Name, req)
+		if err != nil {
+			return nil, fmt.Errorf("could not tell which release of %s cargo would install (%w), so it was not checked", s.Name, err)
+		}
+		for _, v := range vs {
+			out = append(out, check.Spec{Ecosystem: "cargo", Name: s.Name, Version: v})
+		}
+	}
+	return out, nil
+}
+
 // checkCargoFirst refuses a cargo command that only locks, since its Cargo.lock cannot be checked before it reaches the project yet.
 func checkCargoFirst(ctx context.Context, m *Manager, opts Options) error {
 	flushWarnings(ctx)

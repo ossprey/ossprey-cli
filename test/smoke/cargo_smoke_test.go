@@ -100,6 +100,59 @@ func TestCargoInstallBlockedBeforeItBuilds(t *testing.T) {
 	}
 }
 
+// cargoDownloads is the release real cargo downloads for an install line, read from its own output.
+func cargoDownloads(t *testing.T, env []string, crate string, args ...string) string {
+	t.Helper()
+	res := runForwardEnv(t, t.TempDir(), env, "cargo", append([]string{"install", "--root", t.TempDir()}, args...)...)
+	for _, line := range strings.Split(res.stderr, "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "Downloaded "+crate+" v"); ok {
+			return strings.Fields(v)[0]
+		}
+	}
+	t.Fatalf("cargo install %v downloaded no %s\nstderr: %s", args, crate, res.stderr)
+	return ""
+}
+
+// The release checked is the one real cargo downloads: a range's highest match and a pin's release as crates.io spells it (OSS-2553).
+func TestCargoInstallChecksTheReleaseCargoDownloads(t *testing.T) {
+	for _, tc := range []struct{ crate, spec string }{
+		{"itoa", "itoa@^0.4"},
+		{"itoa", "itoa@1.0.14+zzz"},
+		{"wasi", "wasi@0.11.0"},
+	} {
+		t.Run(tc.spec, func(t *testing.T) {
+			v := cargoDownloads(t, cargoEnv(t, "http://127.0.0.1:9"), tc.crate, tc.spec)
+			purl := "pkg:cargo/" + tc.crate + "@" + v
+			api := newFakeAPI(t, purl)
+			root := t.TempDir()
+			res := runForwardEnv(t, t.TempDir(), cargoEnv(t, api.URL), binPath, "cargo", "install", "--root", root, tc.spec)
+			if _, purls := api.stats(); res.exitCode != 1 || !slices.Equal(purls, []string{purl}) || !dirEmpty(t, root) {
+				t.Errorf("exit %d, submitted %v; want %s alone checked and blocked before cargo runs\nstderr: %s", res.exitCode, purls, purl, res.stderr)
+			}
+		})
+	}
+}
+
+// With crates.io's API unreachable the release comes from the index cargo reads, and with that unreachable too the install is refused before cargo runs (OSS-2553).
+func TestCargoInstallLooksUpTheIndexCargoReads(t *testing.T) {
+	dead := []string{"HTTPS_PROXY=http://127.0.0.1:9", "https_proxy=http://127.0.0.1:9"}
+	latest := cargoDownloads(t, cargoEnv(t, "http://127.0.0.1:9"), "itoa", "itoa")
+	api := newFakeAPI(t, "pkg:cargo/itoa@"+latest)
+	root := t.TempDir()
+	env := append(cargoEnv(t, api.URL), append(dead, "NO_PROXY=index.crates.io,static.crates.io", "no_proxy=index.crates.io,static.crates.io")...)
+	res := runForwardEnv(t, t.TempDir(), env, binPath, "cargo", "install", "--root", root, "itoa")
+	if _, purls := api.stats(); res.exitCode != 1 || !slices.Equal(purls, []string{"pkg:cargo/itoa@" + latest}) || !dirEmpty(t, root) {
+		t.Errorf("API unreachable: exit %d, submitted %v; want itoa %s checked and blocked\nstderr: %s", res.exitCode, purls, latest, res.stderr)
+	}
+
+	api = newFakeAPI(t, "")
+	env = append(cargoEnv(t, api.URL), append(dead, "NO_PROXY=", "no_proxy=")...)
+	res = runForwardEnv(t, t.TempDir(), env, binPath, "cargo", "install", "--root", root, "itoa")
+	if requests, _ := api.stats(); res.exitCode != 2 || requests != 0 || !strings.Contains(res.stderr, "did not run `cargo install --root") || !dirEmpty(t, root) {
+		t.Errorf("index unreachable: exit %d, %d requests; want exit 2 before anything is asked or run\nstderr: %s", res.exitCode, requests, res.stderr)
+	}
+}
+
 // cargo 1.99.1 reads `-qF pcre2` as -q and -F pcre2, so only ripgrep is a crate.
 func TestCargoInstallGroupedShortsAreNotCrates(t *testing.T) {
 	api := newFakeAPI(t, "pkg:cargo/ripgrep@14.1.1")

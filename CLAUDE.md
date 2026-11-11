@@ -159,7 +159,14 @@ Windows resolves it under `%LOCALAPPDATA%`.
    - **`install`** builds and runs build scripts at once, so the named crates
      are checked in front, and only those (`errCargoNotResolved`), under the
      name typed, since `cargo install` folds no spelling. A parsed crate never
-     meets the archive check (`addCrate`): `tool@1.2.3-beta.zip` is a pin. A
+     meets the archive check (`addCrate`): `tool@1.2.3-beta.zip` is a pin.
+     In gating mode each crate is checked at the release cargo takes
+     (`registry.CargoInstallReleases`, from the sparse index cargo reads, so a
+     host cargo reaches answers it): a range's newest unyanked match, a pin as
+     the index spells it with build metadata, and both candidates when only
+     an entry newer than cargo's index format `v2` differs. A failed lookup
+     refuses the install (exit 2), unlike other forwarders' registry outages;
+     passive still resolves the latest release. A
      crate from anywhere but crates.io forwards unchecked (`cargoSourceFlags`,
      `cargoDefaultRegistry`): checking crates.io's crate of that name would
      block an internal tool on a squat, or clear one never installed. Only a
@@ -763,7 +770,7 @@ told a user with an expired key nothing about how to recover.
   per-manifest diagnostic directly — that is what OSS-2001 was.
 - **The wait is announced** (`internal/progress`): submitting an SBOM and polling for a verdict prints nothing until the verdict arrives, so a healthy multi-second wait reads as a hang. `progress.Scan(w, n)` owns the one sentence every caller uses — `scan`, `check` and the forwarders — so the same wait cannot start describing itself differently depending on where it was started from. Passive waits get `progress.Submit(w, n)` instead, and the split is the point rather than a wording preference: passive posts the SBOM and returns, so a message that said it was *checking* packages would promise a verdict nobody waits for, in front of an install that proceeds regardless. Both `scan --passive` and a passive forwarded install go through it; `TestPassiveInstallDoesNotClaimToCheck` pins that the two never collapse into one message. Three rules hold it up. It draws to **stderr** (`progressOut` in both main.go and `forward`, kept apart from `forward`'s `errOut` so a test capturing verdict lines is not handed the animation), never stdout, which `--local` owns for the OSSBOM and CI greps for the verdict: an indicator that corrupted a machine-readable stream to fix a human-readable one is a bad trade. And it animates **only on a terminal** — `progress.Start` falls back to one plain line into a pipe, a file or a CI log, where a carriage-returned line is noise rather than motion. Nothing is announced for a path that does no waiting: a dry run, or `--local`.
 - **API text is untrusted for display** (`internal/apitext`): finding justifications and descriptions are free text from the wire, printed straight to a developer's terminal. `apitext.OneLine` collapses control and formatting characters so a newline cannot forge an extra report line, a carriage return cannot overwrite one, and an ESC cannot start an ANSI sequence. Run any API-supplied string through it before interpolating it into terminal output.
-- **Fail-open vs fail-closed:** the `check`/forward path fails *closed* for unpinned packages it can pin (resolves latest via `internal/registry`), but fails *open* (skips with a warning) when the registry is unreachable or a token has no parseable package name — a registry outage must never block development.
+- **Fail-open vs fail-closed:** the `check`/forward path fails *closed* for unpinned packages it can pin (resolves latest via `internal/registry`), but fails *open* (skips with a warning) when the registry is unreachable or a token has no parseable package name — a registry outage must never block development. A gating `cargo install` is the exception: it refuses when crates.io's index cannot say which release cargo takes.
 - **Dry-run flags** (`--dry-run-safe`, `--dry-run-malicious`) and `--local` skip the API entirely and need no key — useful for testing catalog output without a live backend.
 - **Test seams:** `forward` exposes `execFn`/`checkFn` and `registry` exposes `DefaultHTTP` + base-URL vars so tests run without a real package manager or network. `client.PollBackoff` is overridable for sub-second test polling.
 - Test fixtures for every supported ecosystem/manifest combo live under `test/test_packages/` and are driven by the smoke tests.

@@ -97,9 +97,12 @@ ossprey cargo install ripgrep    # ripgrep is checked, then cargo builds it
 
 `cargo install` compiles the crate and runs its build scripts straight away, so
 the crates it names are checked first, and a block means cargo never starts.
-An exact version given to `--version` (or `--vers`), or `name@1.2.3`, pins a
-release; anything else, a range given to `--version` or `name@^1` included, is
-checked at the latest release on crates.io. A crate is checked under the name
+Each crate is checked at the release cargo would take, read from crates.io's
+index as cargo reads it: the newest release a range such as `name@^1` or
+`--version '<2'` allows, and a pin such as `name@1.2.3` as crates.io spells it,
+build metadata included. When the index cannot be read or holds no such
+release, ossprey refuses the install with exit code `2` before cargo runs.
+A crate is checked under the name
 typed, since `cargo install` takes no other spelling of it (`serde-json` does
 not find `serde_json`). Only the
 named crates are checked, not their dependencies, and one warning line says so.

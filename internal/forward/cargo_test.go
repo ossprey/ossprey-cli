@@ -432,8 +432,7 @@ func TestRunCargoInstall_BlockedBeforeCargoRuns(t *testing.T) {
 		got = o.Specs
 		return malwareSBOM(ctx, o)
 	})
-	latest := func(context.Context, string, string) (string, error) { return "2.0.0", nil }
-	err := Run(context.Background(), Options{Bin: "cargo", Args: []string{"install", "evil", "--vers", "1.0.0", "other"}, ResolveLatest: latest})
+	err := Run(context.Background(), Options{Bin: "cargo", Args: []string{"install", "evil", "--vers", "1.0.0", "other"}})
 	if !errors.Is(err, ErrBlocked) {
 		t.Fatalf("Run = %v, want ErrBlocked", err)
 	}
@@ -470,15 +469,79 @@ func TestRunCargoInstall_ChecksAReleaseNamedLikeAnArchive(t *testing.T) {
 	}
 }
 
+// Each crate is checked at the release cargo takes from crates.io's index for what was typed, not at crates.io's latest or as typed (OSS-2553).
+func TestRunCargoInstall_ChecksTheReleaseCargoTakes(t *testing.T) {
+	for _, tc := range []struct {
+		args          []string
+		req, released string
+	}{
+		{[]string{"install", "itoa@^0.4"}, "^0.4", "0.4.8"},
+		{[]string{"install", "--version", "<1", "itoa"}, "<1", "0.4.8"},
+		{[]string{"install", "itoa@1.0.14+zzz"}, "=1.0.14+zzz", "1.0.14"},
+		{[]string{"install", "wasi@0.11.0"}, "=0.11.0", "0.11.0+wasi-snapshot-preview1"},
+		{[]string{"install", "itoa"}, "", "1.0.19"},
+	} {
+		ex := &stubExec{}
+		var got []check.Spec
+		swap(t, ex.fn, func(ctx context.Context, o check.Options) (*ossbom.SBOM, error) {
+			got = o.Specs
+			return malwareSBOM(ctx, o)
+		})
+		name, _, _ := strings.Cut(tc.args[len(tc.args)-1], "@")
+		var asked []string
+		cargoReleaseFn = func(_ context.Context, n, req string) ([]string, error) {
+			asked = append(asked, n+" "+req)
+			return []string{tc.released}, nil
+		}
+		latest := func(context.Context, string, string) (string, error) { return "9.9.9", nil }
+		if err := Run(context.Background(), Options{Bin: "cargo", Args: tc.args, ResolveLatest: latest}); !errors.Is(err, ErrBlocked) || ex.called {
+			t.Errorf("cargo %v: Run = %v, cargo ran %v; want ErrBlocked before cargo runs", tc.args, err, ex.called)
+		}
+		if want := []string{name + " " + tc.req}; !reflect.DeepEqual(asked, want) {
+			t.Errorf("cargo %v: looked up %q, want %q", tc.args, asked, want)
+		}
+		if want := []check.Spec{{Ecosystem: "cargo", Name: name, Version: tc.released}}; !reflect.DeepEqual(got, want) {
+			t.Errorf("cargo %v: checked %+v, want %+v", tc.args, got, want)
+		}
+	}
+}
+
+// An install whose release cannot be found in crates.io's index is refused with exit code 2, every crate unchecked and cargo never run (OSS-2553).
+func TestRunCargoInstall_RefusesWhenTheReleaseCannotBeFound(t *testing.T) {
+	ex := &stubExec{}
+	swap(t, ex.fn, func(ctx context.Context, o check.Options) (*ossbom.SBOM, error) {
+		t.Errorf("checked %+v; nothing is checked when a crate cannot be looked up", o.Specs)
+		return cleanSBOM(ctx, o)
+	})
+	cargoReleaseFn = func(_ context.Context, name, req string) ([]string, error) {
+		if name == "ripgrep" {
+			return nil, errors.New("registry request: connection refused")
+		}
+		return []string{"1.0.19"}, nil
+	}
+	latest := func(_ context.Context, _, name string) (string, error) {
+		if name == "ripgrep" {
+			return "", errors.New("registry request: connection refused")
+		}
+		return "1.0.19", nil
+	}
+	args := []string{"install", "itoa", "ripgrep"}
+	out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: args, ResolveLatest: latest})
+	want := "did not run `cargo install itoa ripgrep`: could not tell which release of ripgrep cargo would install (registry request: connection refused), so it was not checked"
+	if err == nil || err.Error() != want || errors.Is(err, ErrBlocked) || ex.called || out != "" {
+		t.Errorf("Run = %v, output %q, cargo ran %v; want %q alone", err, out, ex.called, want)
+	}
+}
+
 // Only the named crates are checked, and the line says the dependencies were not.
 func TestRunCargoInstall_SaysDependenciesWereNotChecked(t *testing.T) {
 	ex := &stubExec{}
 	_, chk := checkedSpecs(t)
 	swap(t, ex.fn, chk)
 	swapExpand(t, expandInstall)
-	latest := func(context.Context, string, string) (string, error) { return "14.1.1", nil }
+	cargoReleaseFn = stubCargoReleases("14.1.1")
 	args := []string{"+stable", "install", "--locked", "ripgrep"}
-	out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: args, ResolveLatest: latest})
+	out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: args})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -562,8 +625,8 @@ func TestRunCargoInstall_RegistryDecidesTheCheck(t *testing.T) {
 				checked = true
 				return cleanSBOM(ctx, o)
 			})
-			latest := func(context.Context, string, string) (string, error) { return "1.0.19", nil }
-			if err := Run(context.Background(), Options{Bin: "cargo", Args: tc.args, ResolveLatest: latest}); err != nil {
+			cargoReleaseFn = stubCargoReleases("1.0.19")
+			if err := Run(context.Background(), Options{Bin: "cargo", Args: tc.args}); err != nil {
 				t.Fatalf("Run: %v", err)
 			}
 			if checked != tc.checked || !ex.called {
