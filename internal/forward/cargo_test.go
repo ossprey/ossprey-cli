@@ -168,7 +168,7 @@ func TestParseCargoInstall(t *testing.T) {
 		{"--vers=1.2.3-a.tar.bz2 tool", "", crate("tool", "1.2.3-a.tar.bz2"), nil},
 		{"--version 1.2.3+b.tar tool", "", crate("tool", "1.2.3+b.tar"), nil},
 	} {
-		got := parseCargoInstall(strings.Fields(tc.args), tc.defaultRegistry)
+		got := parseCargoInstall(strings.Fields(tc.args), tc.defaultRegistry, func(r string) bool { return r == "crates-io" || r == "cio" })
 		if !reflect.DeepEqual(got.Specs, tc.specs) || !reflect.DeepEqual(got.NonPackages, tc.nonPkgs) {
 			t.Errorf("cargo install %s (default %q): specs %+v, non-packages %q; want %+v, %q", tc.args, tc.defaultRegistry, got.Specs, got.NonPackages, tc.specs, tc.nonPkgs)
 		}
@@ -589,6 +589,7 @@ func TestRunCargoInstall_FromElsewhereForwardsUnchecked(t *testing.T) {
 // crates.io named by --registry or --index, or by no flag at all, is checked; a default registry elsewhere is not.
 func TestRunCargoInstall_RegistryDecidesTheCheck(t *testing.T) {
 	corp := "[registries.corp]\nindex = \"sparse+https://crates.corp.example/\"\n"
+	cio := "[registries.cio]\nindex = \"sparse+https://index.crates.io/\"\n"
 	for _, tc := range []struct {
 		name, config, env string
 		args              []string
@@ -612,6 +613,13 @@ func TestRunCargoInstall_RegistryDecidesTheCheck(t *testing.T) {
 		{"corp by CARGO_REGISTRY_DEFAULT", corp, "corp", []string{"install", "itoa"}, false},
 		{"corp by --config", corp, "", []string{"--config", `registry.default="corp"`, "install", "itoa"}, false},
 		{"crates-io by default", "[registry]\ndefault = \"crates-io\"\n", "", []string{"install", "itoa"}, true},
+		// cargo 1.99.1 reads a registry whose index is crates.io's as crates.io (OSS-2553).
+		{"crates.io under another name", cio, "", []string{"install", "--registry", "cio", "itoa"}, true},
+		{"crates.io under another name by default", cio + "[registry]\ndefault = \"cio\"\n", "", []string{"install", "itoa"}, true},
+		{"crates.io under another name by CARGO_REGISTRY_DEFAULT", cio, "cio", []string{"install", "itoa"}, true},
+		{"crates.io under another name by --config", "", "", []string{"--config", `registries.cio.index="sparse+https://index.crates.io/"`, "install", "--registry=cio", "itoa"}, true},
+		{"another name moved off crates.io by --config", cio, "", []string{"--config", `registries.cio.index="sparse+https://crates.corp.example/"`, "install", "--registry", "cio", "itoa"}, false},
+		{"another name with no index", "", "", []string{"install", "--registry", "cio", "itoa"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home := t.TempDir()
@@ -635,6 +643,21 @@ func TestRunCargoInstall_RegistryDecidesTheCheck(t *testing.T) {
 				t.Errorf("checked = %v, forwarded = %v; want checked %v and forwarded", checked, ex.called, tc.checked)
 			}
 		})
+	}
+}
+
+// cargo reads a registry's index from CARGO_REGISTRIES_<NAME>_INDEX, its name in capitals with '-' as '_', over the configs (OSS-2553).
+func TestCargoRegistryIsCratesIoReadsTheEnvironment(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("CARGO_HOME", home)
+	writeFile(t, filepath.Join(home, "config.toml"), "[registries.my-cio]\nindex = \"sparse+https://crates.corp.example/\"\n")
+	args := []string{"install", "--registry", "my-cio", "itoa"}
+	if cargoRegistryIsCratesIo(args, "my-cio") {
+		t.Error("my-cio's index is crates.corp.example in CARGO_HOME")
+	}
+	t.Setenv("CARGO_REGISTRIES_MY_CIO_INDEX", "sparse+https://index.crates.io/")
+	if !cargoRegistryIsCratesIo(args, "my-cio") {
+		t.Error("CARGO_REGISTRIES_MY_CIO_INDEX names crates.io's index over the config")
 	}
 }
 

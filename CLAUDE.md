@@ -184,6 +184,9 @@ Windows resolves it under `%LOCALAPPDATA%`.
      `include`, or a regular file it cannot read or parse, counts as setting
      it. One that is not a regular file does not: the reload finds a one-shot
      pipe empty and installs from crates.io (`cargo --config /dev/stdin`).
+     A registry named there or by `--registry` is crates.io when its index,
+     read the same way (`registries.<name>.index`,
+     `CARGO_REGISTRIES_<NAME>_INDEX`), is (`cargoRegistryIsCratesIo`).
    - **Which configs, from where.** At each level cargo reads only the legacy
      `config` when it opens, else `config.toml` (`cargoConfigFile`); the
      catalogue's trust check reads both, since one more config only keeps a

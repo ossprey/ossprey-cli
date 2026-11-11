@@ -116,8 +116,10 @@ cargo runs), or possibly set there by an `include` or by a config file too
 large or too deeply nested to read. A config that is not a regular file, such
 as a piped `--config /dev/stdin`, sets nothing here: `cargo install` reads its
 configuration a second time, when the pipe is already empty, and then installs
-from crates.io, so the crate is checked. `--registry crates-io` and crates.io's own index
-URL (`sparse+` in any case) are checked like a plain install. A `sparse+` URL
+from crates.io, so the crate is checked. `--registry crates-io`, a registry
+whose index is crates.io's (named by `--registry` or `registry.default`), and
+crates.io's own index URL (`sparse+` in any case) are checked like a plain
+install. A `sparse+` URL
 is read as cargo reads it, once as given and again without `sparse+`, so a
 backslash before its host is userinfo and one after it a `/`. A host is read
 through IDNA as cargo reads it (`ｉｎｄｅｘ.crates.io` is crates.io), and a

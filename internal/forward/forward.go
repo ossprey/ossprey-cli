@@ -563,7 +563,7 @@ func Run(ctx context.Context, opts Options) error {
 			return forwardTo()
 		}
 	} else if m.Ecosystem == "cargo" {
-		parsed = parseCargoInstall(opts.Args[start:], cargoDefaultRegistry(opts.Args))
+		parsed = parseCargoInstall(opts.Args[start:], cargoDefaultRegistry(opts.Args), func(r string) bool { return cargoRegistryIsCratesIo(opts.Args, r) })
 	} else {
 		parsed = parseInstallArgs(m, opts.Args[start:], m.reqFileArgs != nil && m.reqFileArgs(opts.Args))
 	}

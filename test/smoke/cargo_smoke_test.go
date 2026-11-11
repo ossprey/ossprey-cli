@@ -153,6 +153,34 @@ func TestCargoInstallLooksUpTheIndexCargoReads(t *testing.T) {
 	}
 }
 
+// cargo 1.99.1 reads a registry whose index is crates.io's as crates.io, by --registry or registry.default, so its crate is checked (OSS-2553).
+func TestCargoInstallChecksCratesIoUnderAnotherName(t *testing.T) {
+	for _, tc := range []struct {
+		config string
+		args   []string
+	}{
+		{"", []string{"--registry", "cio"}},
+		{"[registry]\ndefault = \"cio\"\n", nil},
+	} {
+		api := newFakeAPI(t, "pkg:cargo/itoa@1.0.14")
+		env := cargoEnv(t, api.URL)
+		var home string
+		for _, kv := range env {
+			if v, ok := strings.CutPrefix(kv, "CARGO_HOME="); ok {
+				home = v
+			}
+		}
+		if err := writeFile(home, "config.toml", "[registries.cio]\nindex = \"sparse+https://index.crates.io/\"\n"+tc.config); err != nil {
+			t.Fatal(err)
+		}
+		root := t.TempDir()
+		res := runForwardEnv(t, t.TempDir(), env, binPath, append(append([]string{"cargo", "install", "--root", root}, tc.args...), "itoa@1.0.14")...)
+		if _, purls := api.stats(); res.exitCode != 1 || !slices.Equal(purls, []string{"pkg:cargo/itoa@1.0.14"}) || !dirEmpty(t, root) {
+			t.Errorf("%q %v: exit %d, submitted %v; want itoa checked and blocked before cargo runs\nstderr: %s", tc.config, tc.args, res.exitCode, purls, res.stderr)
+		}
+	}
+}
+
 // cargo 1.99.1 reads `-qF pcre2` as -q and -F pcre2, so only ripgrep is a crate.
 func TestCargoInstallGroupedShortsAreNotCrates(t *testing.T) {
 	api := newFakeAPI(t, "pkg:cargo/ripgrep@14.1.1")
