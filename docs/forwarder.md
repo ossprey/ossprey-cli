@@ -215,11 +215,12 @@ still put code on your machine:
   `Cargo.lock` names, which `cargo update` and `generate-lockfile` have
   checked, but a build with a missing or out-of-date `Cargo.lock` resolves one
   on the spot, unchecked, and so does an editor such as rust-analyzer after
-  you edit `Cargo.toml` by hand: run `ossprey cargo generate-lockfile` (or
-  `ossprey cargo fetch`) after editing it. `cargo install` checks only the
-  crates it names, not their dependencies. A cargo `[alias]` and an external
-  subcommand (such as `cargo upgrade`) are not recognised, so a lock they
-  change is not checked.
+  you edit `Cargo.toml` by hand: run `ossprey cargo fetch` after editing it,
+  which locks only what changed (`cargo generate-lockfile` moves every crate
+  to its latest release). `cargo install` checks only the crates it names,
+  not their dependencies. A cargo `[alias]` and an external subcommand (such
+  as `cargo upgrade`) are not recognised, so a lock they change is not
+  checked.
 - **A named install whose dependencies could not be resolved.** The
   dependencies of a named install are worked out with a dry run of the
   manager's own kind of resolver (below). When that is not possible — no
