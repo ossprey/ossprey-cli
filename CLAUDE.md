@@ -207,9 +207,10 @@ Windows resolves it under `%LOCALAPPDATA%`.
      offset 0 (on macOS `/dev/fd/N` shares cargo's offset).
    - **Not checked.** `add`, `update`, `generate-lockfile` and `fetch` are
      refused in gating mode and forwarded unchecked in passive mode, since
-     nothing checks their lock before it lands yet. A `cargo build` with a
-     stale or missing lock resolves on the spot. `cargo install` checks the
-     named crates only.
+     nothing checks their lock before it lands yet. A refusal names only the
+     verb (`cargoVerbOnly`), since a `--config` value may hold a credential.
+     A `cargo build` with a stale or missing lock resolves on the spot.
+     `cargo install` checks the named crates only.
 
    **Not covered, deliberately (for now):** `pnpm dlx`, `yarn dlx`, and initializers (`npm init <x>`, `npm create`, `bun create`, `yarn create`, which fetch `create-<x>`). Do **not** close `dlx` by adding it to a `verbAt` list (same argv problem: `pnpm dlx cowsay moo` would check `moo`); give it a `toolRunAt`/`parseRun` like npm's. `docs/forwarder.md`'s "What is not checked" section is the user-facing statement of this.
 

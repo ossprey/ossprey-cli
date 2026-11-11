@@ -226,8 +226,13 @@ func cargoReleases(ctx context.Context, specs []check.Spec) ([]check.Spec, error
 // checkCargoFirst refuses a cargo command that only locks, since its Cargo.lock cannot be checked before it reaches the project yet.
 func checkCargoFirst(ctx context.Context, m *Manager, opts Options) error {
 	flushWarnings(ctx)
-	verb := opts.Args[verbIndex("cargo", opts.Args)]
-	return fmt.Errorf("did not run `%s %s`: ossprey does not check `cargo %s` yet", m.Bin, strings.Join(opts.Args, " "), verb)
+	cmd := cargoVerbOnly(m, opts.Args)
+	return fmt.Errorf("did not run %s: ossprey does not check %s yet", cmd, cmd)
+}
+
+// cargoVerbOnly is the command and its verb in backticks, leaving out the rest of the line, where a --config value may hold a credential.
+func cargoVerbOnly(m *Manager, args []string) string {
+	return "`" + m.Bin + " " + args[verbIndex("cargo", args)] + "`"
 }
 
 // canonicalDir is dir with every link resolved, or as cleaned when it cannot be.

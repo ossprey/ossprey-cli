@@ -602,7 +602,7 @@ func Run(ctx context.Context, opts Options) error {
 		stop()
 		if err != nil {
 			flushWarnings(ctx)
-			return fmt.Errorf("did not run `%s %s`: %w", m.Bin, strings.Join(opts.Args, " "), err)
+			return fmt.Errorf("did not run %s: %w", cargoVerbOnly(m, opts.Args), err)
 		}
 		parsed.Specs = specs
 	}

@@ -525,9 +525,10 @@ func TestRunCargoInstall_RefusesWhenTheReleaseCannotBeFound(t *testing.T) {
 		}
 		return "1.0.19", nil
 	}
-	args := []string{"install", "itoa", "ripgrep"}
+	// The error names only the verb, since the rest of the line may hold a credential.
+	args := []string{"+stable", "--config", `http.proxy="http://user:secret@proxy.example:3128"`, "install", "itoa", "ripgrep"}
 	out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: args, ResolveLatest: latest})
-	want := "did not run `cargo install itoa ripgrep`: could not tell which release of ripgrep cargo would install (registry request: connection refused), so it was not checked"
+	want := "did not run `cargo install`: could not tell which release of ripgrep cargo would install (registry request: connection refused), so it was not checked"
 	if err == nil || err.Error() != want || errors.Is(err, ErrBlocked) || ex.called || out != "" {
 		t.Errorf("Run = %v, output %q, cargo ran %v; want %q alone", err, out, ex.called, want)
 	}
@@ -697,7 +698,7 @@ func TestRunCargoPassesEverythingElseThrough(t *testing.T) {
 	}
 }
 
-// In gating mode the verbs that only lock are refused before cargo runs or anything is checked, and passive and skip-ci hand them to cargo as typed.
+// In gating mode the verbs that only lock are refused before cargo runs or anything is checked, naming only the verb, and passive and skip-ci hand them to cargo as typed.
 func TestRunCargo_LockingCommandsAreRefused(t *testing.T) {
 	for _, tc := range []struct{ line, verb string }{
 		{"add serde", "add"},
@@ -706,6 +707,8 @@ func TestRunCargo_LockingCommandsAreRefused(t *testing.T) {
 		{"update --dry-run", "update"},
 		{"-q generate-lockfile", "generate-lockfile"},
 		{"fetch --locked", "fetch"},
+		{`--config http.proxy="http://user:secret@proxy.example:3128" update`, "update"},
+		{`add --config http.proxy="http://user:secret@proxy.example:3128" serde`, "add"},
 	} {
 		args := strings.Fields(tc.line)
 		ex := &stubExec{}
@@ -713,7 +716,7 @@ func TestRunCargo_LockingCommandsAreRefused(t *testing.T) {
 			t.Errorf("cargo %s was checked", tc.line)
 			return nil, nil
 		})
-		want := "did not run `cargo " + tc.line + "`: ossprey does not check `cargo " + tc.verb + "` yet"
+		want := "did not run `cargo " + tc.verb + "`: ossprey does not check `cargo " + tc.verb + "` yet"
 		out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: args})
 		if err == nil || err.Error() != want || errors.Is(err, ErrBlocked) || out != "" || ex.called {
 			t.Errorf("cargo %s: Run = %v, output %q, cargo ran %v; want %q alone", tc.line, err, out, ex.called, want)

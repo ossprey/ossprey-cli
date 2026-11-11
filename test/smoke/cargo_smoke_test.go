@@ -61,7 +61,7 @@ func TestCargoLockingCommandsAreRefused(t *testing.T) {
 	}
 	for _, args := range [][]string{{"add", "itoa"}, {"add", "--dry-run", "itoa"}, {"update"}, {"generate-lockfile"}, {"fetch"}} {
 		res := runForwardEnv(t, dir, env, binPath, append([]string{"cargo"}, args...)...)
-		want := "error: did not run `cargo " + strings.Join(args, " ") + "`: ossprey does not check `cargo " + args[0] + "` yet"
+		want := "error: did not run `cargo " + args[0] + "`: ossprey does not check `cargo " + args[0] + "` yet"
 		if res.exitCode != 2 || !strings.Contains(res.stderr, want) {
 			t.Errorf("cargo %v: exit %d, want 2 and %q\nstderr: %s", args, res.exitCode, want, res.stderr)
 		}
@@ -148,7 +148,7 @@ func TestCargoInstallLooksUpTheIndexCargoReads(t *testing.T) {
 	api = newFakeAPI(t, "")
 	env = append(cargoEnv(t, api.URL), append(dead, "NO_PROXY=", "no_proxy=")...)
 	res = runForwardEnv(t, t.TempDir(), env, binPath, "cargo", "install", "--root", root, "itoa")
-	if requests, _ := api.stats(); res.exitCode != 2 || requests != 0 || !strings.Contains(res.stderr, "did not run `cargo install --root") || !dirEmpty(t, root) {
+	if requests, _ := api.stats(); res.exitCode != 2 || requests != 0 || !strings.Contains(res.stderr, "error: did not run `cargo install`: could not tell which release of itoa") || !dirEmpty(t, root) {
 		t.Errorf("index unreachable: exit %d, %d requests; want exit 2 before anything is asked or run\nstderr: %s", res.exitCode, requests, res.stderr)
 	}
 }
