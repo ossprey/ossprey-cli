@@ -119,7 +119,11 @@ configuration a second time, when the pipe is already empty, and then installs
 from crates.io, so the crate is checked. `--registry crates-io`, a registry
 whose index is crates.io's (named by `--registry` or `registry.default`), and
 crates.io's own index URL (`sparse+` in any case) are checked like a plain
-install. A `sparse+` URL
+install. When the cargo configs `cargo install` reads replace crates.io
+(`[source.crates-io] replace-with`), the crate is still checked on crates.io,
+and one warning line says that cargo installs the replacement's copy, which
+was not checked; a config that includes another file or cannot be read may
+replace it, and gets the warning too. A `sparse+` URL
 is read as cargo reads it, once as given and again without `sparse+`, so a
 backslash before its host is userinfo and one after it a `/`. A host is read
 through IDNA as cargo reads it (`ｉｎｄｅｘ.crates.io` is crates.io), and a

@@ -181,6 +181,32 @@ func TestCargoInstallChecksCratesIoUnderAnotherName(t *testing.T) {
 	}
 }
 
+// cargo 1.99.1 installs from a crates.io replacement in CARGO_HOME's config, so the crates.io crate is still checked and one line says, even when quiet, that cargo's copy was not (OSS-2553).
+func TestCargoInstallWarnsWhenCratesIoIsReplaced(t *testing.T) {
+	api := newFakeAPI(t, "")
+	env := cargoEnv(t, api.URL)
+	var home string
+	for _, kv := range env {
+		if v, ok := strings.CutPrefix(kv, "CARGO_HOME="); ok {
+			home = v
+		}
+	}
+	// An empty local registry, which cargo names in its error once it has taken the replacement.
+	config := "[source.crates-io]\nreplace-with = \"mirror\"\n\n[source.mirror]\nlocal-registry = '" + t.TempDir() + "'\n"
+	if err := writeFile(home, "config.toml", config); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	res := runForwardEnv(t, t.TempDir(), env, binPath, "cargo", "install", "--root", root, "itoa@1.0.14")
+	warning := `ossprey: warning: crates.io is replaced by "mirror" in your cargo config, so cargo installs that source's copy, which was not checked`
+	if _, purls := api.stats(); !slices.Equal(purls, []string{"pkg:cargo/itoa@1.0.14"}) || !strings.Contains(res.stderr, warning) {
+		t.Errorf("submitted %v; want itoa 1.0.14 checked and %q\nstderr: %s", purls, warning, res.stderr)
+	}
+	if !strings.Contains(res.stderr, "replaced source registry `crates-io`") || !dirEmpty(t, root) {
+		t.Errorf("exit %d; want cargo to take the replacement, which holds no itoa\nstderr: %s", res.exitCode, res.stderr)
+	}
+}
+
 // cargo 1.99.1 reads `-qF pcre2` as -q and -F pcre2, so only ripgrep is a crate.
 func TestCargoInstallGroupedShortsAreNotCrates(t *testing.T) {
 	api := newFakeAPI(t, "pkg:cargo/ripgrep@14.1.1")
