@@ -247,9 +247,10 @@ Windows resolves it under `%LOCALAPPDATA%`.
      before `cargo metadata` so it never drains a pipe, and only the decoded
      key counts. A `-Zscript` manifest, which cargo locks under
      `$CARGO_HOME/build`. And `add` (not `add --dry-run`), which writes
-     `Cargo.toml` before it resolves while only the lock is redirected; its
-     refusal names only the verb (`cargoVerbOnly`), since a `--config` value
-     may hold a credential.
+     `Cargo.toml` before it resolves while only the lock is redirected. Every
+     message `checkCargoFirst` returns names the command by its verb alone
+     (`cargoVerbOnly` for `add`), since a `--config` value may hold a
+     credential.
    - **Workspace and snapshot.** `cargo metadata --no-deps`
      (`readCargoWorkspace`) names the workspace root as cargo spells it, run
      as the command runs (`realCommand`) minus any `--config` naming a file

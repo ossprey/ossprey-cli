@@ -372,14 +372,14 @@ func TestCargoMovedLockIsRefused(t *testing.T) {
 	}
 }
 
-// With no Cargo.toml, a gating update is refused on cargo's own error line, and passive leaves cargo's error alone.
+// With no Cargo.toml, a gating update is refused on cargo's own error line, naming only the verb, and passive leaves cargo's error alone.
 func TestCargoUpdateWithNoWorkspace(t *testing.T) {
 	api := newFakeAPI(t, "")
 	env := cargoEnv(t, api.URL)
 	dir := t.TempDir()
-	res := runForwardEnv(t, dir, env, binPath, "cargo", "update", "--offline")
-	if res.exitCode != 2 || !strings.Contains(res.stderr, "did not run `cargo update --offline`") || !strings.Contains(res.stderr, "could not find `Cargo.toml`") {
-		t.Errorf("gating: exit %d, want 2 and cargo's error in the refusal\nstderr: %s", res.exitCode, res.stderr)
+	res := runForwardEnv(t, dir, env, binPath, "cargo", "--config", `http.proxy="http://user:secret@proxy.invalid:3128"`, "update", "--offline")
+	if res.exitCode != 2 || !strings.Contains(res.stderr, "error: did not run `cargo update`: its Cargo.lock cannot be checked") || !strings.Contains(res.stderr, "could not find `Cargo.toml`") || strings.Contains(res.stderr, "secret") {
+		t.Errorf("gating: exit %d, want 2 and cargo's error in the refusal, with no credential\nstderr: %s", res.exitCode, res.stderr)
 	}
 	res = runForwardEnv(t, dir, append(slices.Clone(env), "OSSPREY_PASSIVE=1"), binPath, "cargo", "update", "--offline")
 	if res.exitCode != 101 || !strings.Contains(res.stderr, "could not find `Cargo.toml`") || strings.Contains(res.stderr, "ossprey:") {

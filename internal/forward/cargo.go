@@ -263,12 +263,13 @@ func cargoReleases(ctx context.Context, specs []check.Spec) ([]check.Spec, error
 // checkCargoFirst resolves a cargo verb that only locks into a scratch Cargo.lock, checks that, and writes it to the project only when clean, so nothing unchecked reaches the project at any point.
 func checkCargoFirst(ctx context.Context, m *Manager, opts Options) error {
 	args := opts.Args
-	command := m.Bin + " " + strings.Join(args, " ")
+	verb := verbIndex("cargo", args)
+	// Named by its verb alone in what ossprey prints, since a --config value may hold a credential.
+	command := m.Bin + " " + args[verb]
 	flushWarnings(ctx)
 	if err := cargoVersionGate(ctx, command, args); err != nil {
 		return err
 	}
-	verb := verbIndex("cargo", args)
 	rest := cargoSplitShorts(args[verb+1:], cargoResolveShorts)
 	// Even a -b an option might have taken refuses, since misreading it costs only a refusal.
 	if args[verb] == "update" && cargoHas(rest, "-b", "--breaking") {

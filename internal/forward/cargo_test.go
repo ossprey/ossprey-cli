@@ -727,6 +727,20 @@ func TestRunCargo_RefusesBeforeCargoRuns(t *testing.T) {
 		{"cargo add", "add -p a evil", nil, "did not run `cargo add`: ossprey does not check `cargo add` yet"},
 		{"cargo add after a secret --config", `--config http.proxy="http://user:secret@proxy.example:3128" add evil`, nil, "did not run `cargo add`: ossprey does not check `cargo add` yet"},
 		{"cargo add before a secret --config", `add --config http.proxy="http://user:secret@proxy.example:3128" evil`, nil, "did not run `cargo add`: ossprey does not check `cargo add` yet"},
+		// Every other refusal names only the verb too.
+		{"cargo 1.96.0 after a secret --config", `--config http.proxy="http://user:secret@proxy.example:3128" update`, func(*testing.T, string, cargoWorkspace) {
+			cargoVersionFn = func(context.Context, []string) (string, error) {
+				return "cargo 1.96.0 (30a34c682 2026-05-25)", nil
+			}
+		}, "did not run `cargo update`: ossprey needs cargo 1.97 or later"},
+		{"no workspace after a secret --config", `fetch --config http.proxy="http://user:secret@proxy.example:3128"`, func(*testing.T, string, cargoWorkspace) {
+			cargoWorkspaceFn = func(context.Context, []string) (cargoWorkspace, error) {
+				return cargoWorkspace{}, errors.New("cargo metadata: error: could not find `Cargo.toml` in `/empty` or any parent directory")
+			}
+		}, "did not run `cargo fetch`: its Cargo.lock cannot be checked"},
+		{"a lock that cannot be read after a secret --config", `--config http.proxy="http://user:secret@proxy.example:3128" generate-lockfile`, func(t *testing.T, _ string, ws cargoWorkspace) { big(t, ws.Lock) }, "did not run `cargo generate-lockfile`: "},
+		{"update --breaking after a secret --config", `--config http.proxy="http://user:secret@proxy.example:3128" update -Zunstable-options --breaking evil`, nil, "did not run `cargo update`: --breaking edits Cargo.toml"},
+		{"fetch with an option it lacks after a secret --config", `--config http.proxy="http://user:secret@proxy.example:3128" fetch --tagret x86_64-unknown-linux-gnu`, nil, "did not run `cargo fetch`: cargo fetch would reject `--tagret`"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root, ws := cargoProject(t)
@@ -740,8 +754,8 @@ func TestRunCargo_RefusesBeforeCargoRuns(t *testing.T) {
 				return nil
 			}, cleanSBOM)
 			out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: strings.Fields(tc.args)})
-			if err == nil || !strings.Contains(err.Error(), tc.want) || errors.Is(err, ErrBlocked) {
-				t.Errorf("Run = %v, want an error naming %q", err, tc.want)
+			if err == nil || !strings.Contains(err.Error(), tc.want) || strings.Contains(err.Error(), "secret") || errors.Is(err, ErrBlocked) {
+				t.Errorf("Run = %v, want an error naming %q and no credential", err, tc.want)
 			}
 			if out != "" {
 				t.Errorf("printed %q, want only main's error line", out)
@@ -1336,14 +1350,14 @@ func TestRunCargo_FailurePassesThrough(t *testing.T) {
 	}
 }
 
-// A generate-lockfile that locks nothing lands nothing and says nothing was checked.
+// A generate-lockfile that locks nothing lands nothing and says nothing was checked, naming only the verb.
 func TestRunCargoGenerateLockfile_NoLockLandsNothing(t *testing.T) {
 	root, _ := cargoProject(t)
 	before := projectState(t, root)
 	cargoRunFn = func(context.Context, []string, []string, io.Writer) error { return nil }
 	swap(t, nil, cleanSBOM)
 	noLanding(t)
-	out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"generate-lockfile"}})
+	out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"generate-lockfile", "--config", `http.proxy="http://user:secret@proxy.example:3128"`}})
 	if want := "`cargo generate-lockfile` left no Cargo.lock, so nothing was checked and the project was not changed"; err == nil || err.Error() != want || out != "" {
 		t.Errorf("Run = %v, output %q; want %q", err, out, want)
 	}
