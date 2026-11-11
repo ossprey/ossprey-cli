@@ -477,12 +477,19 @@ func cargoReplacementLevels(r file.Resolver, root, home string) (map[string][]ca
 	return cargoConfigLevels(configLocs, configs, aboveConfigs, rootSlash), nil
 }
 
-// cratesIoReplacement is the replace-with for crates.io in effect for cargo run in dir: the nearest level that sets one, else home's.
+// cratesIoReplacement is the replace-with for crates.io in effect for cargo run in dir, the nearest level that sets one, else home's, or else the key of a location set on crates.io's own table, which cargo 1.99.1 takes crates.io's crates from too.
 func cratesIoReplacement(levels map[string][]cargoFile, dir, home string) string {
 	at := func(d string) string {
 		for _, c := range levels[foldPath(d)] {
 			if with, _ := tomlLookup(c.doc, "source", "crates-io", "replace-with").(string); with != "" {
 				return with
+			}
+		}
+		for _, c := range levels[foldPath(d)] {
+			for _, k := range []string{"registry", "local-registry", "directory", "git"} {
+				if tomlLookup(c.doc, "source", "crates-io", k) != nil {
+					return k
+				}
 			}
 		}
 		return ""

@@ -590,7 +590,9 @@ nothing when one fails. It judges the replacement in effect where cargo
 would run, at each directory in the scan holding a `Cargo.toml` or a config, so
 at the scan root only when it holds one of them
 (`cratesIoReplacement`: the nearest level that sets `replace-with`, as
-`vendorDir` walks, then `CARGO_HOME`'s, which cargo reads last), and stays
+`vendorDir` walks, then `CARGO_HOME`'s, which cargo reads last, else a
+location set on `[source.crates-io]` itself, which cargo 1.99.1 also takes
+crates.io's crates from), and stays
 quiet only where that is a vendor directory the filter proved
 (`cargoVendored.vendors`), whose crates the lock pins to crates.io checksums,
 though the files cargo checks against `.cargo-checksum.json` are not compared
