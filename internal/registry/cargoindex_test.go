@@ -71,8 +71,8 @@ func TestCargoInstallReleasesPicksAsCargoDoes(t *testing.T) {
 		}
 	}
 	// Cargo matches the name exactly, so another spelling finds nothing.
-	if got, err := CargoInstallReleases(context.Background(), "ITOA", ""); !errors.Is(err, ErrNotFound) {
-		t.Errorf("CargoInstallReleases(ITOA) = %q, %v; want ErrNotFound", got, err)
+	if got, err := CargoInstallReleases(context.Background(), "ITOA", ""); !errors.Is(err, ErrNotFound) || err.Error() != "crates.io's index has no release of ITOA matching *" {
+		t.Errorf("CargoInstallReleases(ITOA) = %q, %v; want ErrNotFound saying no release matches", got, err)
 	}
 }
 
@@ -92,8 +92,8 @@ func TestCargoInstallReleasesFailsWhenTheIndexCannotAnswer(t *testing.T) {
 	if got, err := CargoInstallReleases(context.Background(), "cc", ""); err == nil || errors.Is(err, ErrNotFound) {
 		t.Errorf("CargoInstallReleases on a 503 = %q, %v; want an outage error", got, err)
 	}
-	if got, err := CargoInstallReleases(context.Background(), "x", ""); !errors.Is(err, ErrNotFound) {
-		t.Errorf("CargoInstallReleases on a 404 = %q, %v; want ErrNotFound", got, err)
+	if got, err := CargoInstallReleases(context.Background(), "x", ""); !errors.Is(err, ErrNotFound) || err.Error() != "crates.io's index has no crate x" {
+		t.Errorf("CargoInstallReleases on a 404 = %q, %v; want ErrNotFound saying there is no such crate", got, err)
 	}
 }
 
