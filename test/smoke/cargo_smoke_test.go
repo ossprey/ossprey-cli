@@ -318,6 +318,154 @@ func TestCargoAddInAWorkspaceMember(t *testing.T) {
 	}
 }
 
+// cargoTree writes files under base, each a crate with a src/lib.rs when it names a [package].
+func cargoTree(t *testing.T, base string, files map[string]string) {
+	t.Helper()
+	for name, data := range files {
+		p := filepath.Join(base, name)
+		if err := os.MkdirAll(filepath.Join(filepath.Dir(p), "src"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(data, "[package]") {
+			if err := os.WriteFile(filepath.Join(filepath.Dir(p), "src", "lib.rs"), nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
+// treeState is every file under dir and its state.
+func treeState(t *testing.T, dir string) map[string]fileState {
+	t.Helper()
+	got := map[string]fileState{}
+	if err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			got[p] = stateOf(t, p)
+		}
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
+func crateManifest(name, extra string) string {
+	return fmt.Sprintf("[package]\nname = %q\nversion = \"0.1.0\"\nedition = \"2021\"\n%s", name, extra)
+}
+
+// An absolute path in a Cargo.toml leads cargo out of ossprey's copy of the workspace, where `add -p` wrote a manifest it reached through a link before the check, a crate the add brought in was a member only in the project, so the checked lock lacked its dev-dependencies, and a path cargo rewrote named another directory in the project; so the add is refused and the project is left as it was (OSS-2553).
+func TestCargoAddRefusesAWorkspaceItsCopyCannotHold(t *testing.T) {
+	excluded := func(base string) map[string]string {
+		return map[string]string{
+			"Cargo.toml":          fmt.Sprintf("[workspace]\nmembers = [\"crates/*\"]\nexclude = ['%s']\nresolver = \"2\"\n", filepath.Join(base, "crates", "b")),
+			"crates/a/Cargo.toml": crateManifest("a", ""),
+			"crates/b/Cargo.toml": crateManifest("b", ""),
+		}
+	}
+	for _, tc := range []struct {
+		name  string
+		files func(base string) map[string]string
+		cwd   string
+		args  []string
+		want  string
+	}{
+		{"an absolute exclude, adding to the excluded crate", excluded, ".", []string{"add", "-p", "b", "itoa@=1.0.15"}, "cargo would see another workspace in ossprey's copy of it, since"},
+		{"an absolute exclude in an outer manifest the copy links", excluded, filepath.Join("crates", "b"), []string{"add", "-p", "a", "itoa@=1.0.15"}, "cargo would see another workspace in ossprey's copy of it, since"},
+		{"an absolute path dependency under a workspace root", func(base string) map[string]string {
+			return map[string]string{
+				"Cargo.toml":     crateManifest("app", fmt.Sprintf("\n[workspace]\n\n[dependencies]\nfoo = { path = '%s' }\n", filepath.Join(base, "foo"))),
+				"foo/Cargo.toml": crateManifest("foo", ""),
+			}
+		}, ".", []string{"add", "itoa@=1.0.15"}, "cargo would see another workspace in ossprey's copy of it, since"},
+		{"an absolute package.workspace", func(base string) map[string]string {
+			return map[string]string{
+				"ws/Cargo.toml": "[workspace]\nmembers = [\"../m\"]\nresolver = \"2\"\n",
+				"m/Cargo.toml":  crateManifest("m", fmt.Sprintf("workspace = '%s'\n", filepath.Join(base, "ws"))),
+			}
+		}, "m", []string{"add", "itoa@=1.0.15"}, "cargo metadata fails in ossprey's copy of the workspace with error: current package believes it's in a workspace when it's not"},
+		{"an absolute [workspace.dependencies] path the add first uses", func(base string) map[string]string {
+			return map[string]string{
+				"Cargo.toml":          fmt.Sprintf("[workspace]\nmembers = [\"crates/*\"]\nresolver = \"2\"\n\n[workspace.dependencies]\nfoo = { path = '%s' }\n", filepath.Join(base, "foo")),
+				"crates/a/Cargo.toml": crateManifest("a", ""),
+				"foo/Cargo.toml":      crateManifest("foo", "\n[dev-dependencies]\nitoa = \"=1.0.15\"\n"),
+			}
+		}, filepath.Join("crates", "a"), []string{"add", "foo"}, "after the add, since it would not take " + string(filepath.Separator)},
+		{"a crate outside the project naming its root by an absolute package.workspace", func(base string) map[string]string {
+			return map[string]string{
+				"proj/Cargo.toml":          "[workspace]\nmembers = [\"crates/*\"]\nresolver = \"2\"\n",
+				"proj/crates/a/Cargo.toml": crateManifest("a", ""),
+				"outside/x/Cargo.toml":     crateManifest("x", fmt.Sprintf("workspace = '%s'\n\n[dev-dependencies]\nitoa = \"=1.0.15\"\n", filepath.Join(base, "proj"))),
+			}
+		}, filepath.Join("proj", "crates", "a"), []string{"add", "--path", filepath.Join("..", "..", "..", "outside", "x")}, "after the add, since it would not take " + string(filepath.Separator)},
+		{"an absolute path dependency cargo add writes again", func(base string) map[string]string {
+			return map[string]string{
+				"Cargo.toml":     crateManifest("app", fmt.Sprintf("\n[dependencies]\nfoo = { path = '%s' }\n", filepath.Join(base, "foo"))),
+				"foo/Cargo.toml": crateManifest("foo", ""),
+			}
+		}, ".", []string{"add", "--dev", "foo"}, "Cargo.toml would hold the path \""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := newFakeAPI(t, "pkg:cargo/itoa@1.0.15")
+			env := cargoEnv(t, api.URL)
+			base, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			cargoTree(t, base, tc.files(base))
+			before := treeState(t, base)
+
+			res := runForwardEnv(t, filepath.Join(base, tc.cwd), env, binPath, append([]string{"cargo"}, tc.args...)...)
+			if res.exitCode != 2 || !strings.Contains(res.stderr, tc.want) || !strings.Contains(res.stderr, "absolute path") && !strings.Contains(res.stderr, "relative to its Cargo.toml") {
+				t.Errorf("exit %d, want 2 and the refusal\nstderr: %s", res.exitCode, res.stderr)
+			}
+			after := treeState(t, base)
+			for p, s := range before {
+				if !after[p].same(s) {
+					t.Errorf("%s changed", p)
+				}
+			}
+			for p := range after {
+				if _, ok := before[p]; !ok {
+					t.Errorf("%s was written", p)
+				}
+			}
+			if n, _ := api.stats(); n != 0 {
+				t.Errorf("the API got %d requests, want none", n)
+			}
+		})
+	}
+}
+
+// An absolute path dependency under a crate with no workspace is no member, so an add that leaves it alone runs and lands what plain cargo writes.
+func TestCargoAddAnAbsolutePathDependency(t *testing.T) {
+	api := newFakeAPI(t, "")
+	env := cargoEnv(t, api.URL)
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := func(crate string) string {
+		return crateManifest("app", fmt.Sprintf("\n[dependencies]\nfoo = { path = '%s' }\n", filepath.Join(base, crate, "foo")))
+	}
+	cargoTree(t, base, map[string]string{"checked/foo/Cargo.toml": crateManifest("foo", ""), "checked/Cargo.toml": app("checked"), "plain/foo/Cargo.toml": crateManifest("foo", ""), "plain/Cargo.toml": app("plain")})
+
+	res := runForwardEnv(t, filepath.Join(base, "checked"), env, binPath, "cargo", "add", "itoa@=1.0.15")
+	if res.exitCode != 0 {
+		t.Fatalf("exit %d\nstderr: %s", res.exitCode, res.stderr)
+	}
+	cargoRun(t, filepath.Join(base, "plain"), env, "add", "itoa@=1.0.15")
+	for _, name := range []string{"Cargo.toml", "Cargo.lock"} {
+		got, _ := os.ReadFile(filepath.Join(base, "checked", name))
+		want, _ := os.ReadFile(filepath.Join(base, "plain", name))
+		if len(want) == 0 || strings.ReplaceAll(string(got), "checked", "plain") != string(want) {
+			t.Errorf("%s = %q, want plain cargo's %q", name, got, want)
+		}
+	}
+}
+
 // cargo's error names the redirected lock, which the user reads as the project's (OSS-2553).
 func TestCargoLockedFailureNamesTheProjectLock(t *testing.T) {
 	api := newFakeAPI(t, "")

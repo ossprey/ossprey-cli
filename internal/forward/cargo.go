@@ -42,6 +42,9 @@ var cargoCredentialFn = func(ctx context.Context, apiURL, apiKey string) error {
 // cargoVersionFn is the version line of the cargo a command runs; a test seam.
 var cargoVersionFn = cargoVersion
 
+// cargoMetadataFn is the workspace cargo metadata finds for a command run in dir; a test seam.
+var cargoMetadataFn = cargoMetadata
+
 // cargoRunFn runs cargo as a child in dir ("" for ours) with env added and its stderr to stderr; a test seam.
 var cargoRunFn = runCargo
 
@@ -477,6 +480,16 @@ func resolveCargoAdd(ctx context.Context, args []string, ws cargoWorkspace, befo
 	if line != version {
 		return nil, nil, fmt.Errorf("the mirror of the workspace runs `%s`, not the project's `%s` (a rustup override set for the project's directory does not apply there); name the toolchain with `cargo +<toolchain>` or RUSTUP_TOOLCHAIN", line, version)
 	}
+	// cargo add writes only a member's manifest, so the mirror's members must be the project's, all copies.
+	project := strings.NewReplacer(mi.strip()...)
+	got, err := cargoMetadataFn(ctx, dir, run, ws.ConfigDir)
+	if err != nil {
+		// cargo's own error names the manifest at fault, an absolute path or a [workspace] above the cache (verified with cargo 1.99.1).
+		return nil, nil, fmt.Errorf("cargo metadata fails in ossprey's copy of the workspace with %s; either a Cargo.toml names the workspace or a member by an absolute path, which must be made relative to its Cargo.toml, or a Cargo.toml above %s has a [workspace]", project.Replace(strings.TrimPrefix(err.Error(), "cargo metadata: ")), filepath.Dir(mi.s))
+	}
+	if err := mi.sameWorkspace(got, ws); err != nil {
+		return nil, nil, fmt.Errorf("cargo would see another workspace in ossprey's copy of it, since %s; %s", project.Replace(err.Error()), cargoAbsoluteHint)
+	}
 	at := mi.at(ws.Lock)
 	stderr := newCargoStderr(cargoErrOut, mi.strip()...)
 	runErr = cargoRunFn(ctx, dir, cargoRedirectEnv(at), cargoRedirectArgs(run, at), stderr)
@@ -488,8 +501,22 @@ func resolveCargoAdd(ctx context.Context, args []string, ws cargoWorkspace, befo
 		}
 		after[i].path = f.path
 	}
-	return after, runErr, nil
+	if runErr != nil {
+		return after, runErr, nil
+	}
+	// What the add brought in may lead cargo out of the mirror, so the project would lock what the mirror did not (verified with cargo 1.99.1).
+	added, err := cargoMetadataFn(ctx, dir, run, ws.ConfigDir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("after the add, cargo metadata fails in ossprey's copy of the workspace with %s", project.Replace(strings.TrimPrefix(err.Error(), "cargo metadata: ")))
+	}
+	if err := mi.added(got, added, ws, after); err != nil {
+		return nil, nil, errors.New(project.Replace(err.Error()))
+	}
+	return after, nil, nil
 }
+
+// cargoAbsoluteHint says what leads cargo out of the mirror and how to stop it.
+const cargoAbsoluteHint = "a Cargo.toml names the workspace or a member by an absolute path, in package.workspace, workspace.members, default-members or exclude, or a path dependency; make it relative to its Cargo.toml"
 
 // runCargo runs the real cargo as a child, with ossprey's stdin and stdout.
 func runCargo(ctx context.Context, dir string, env, args []string, stderr io.Writer) error {
@@ -830,6 +857,8 @@ type cargoWorkspace struct {
 	Lock string
 	// Manifests are the root's Cargo.toml, then each member's.
 	Manifests []string
+	// Deps are the directories of the members' path dependencies.
+	Deps      []string
 	ConfigDir string
 }
 
@@ -850,6 +879,12 @@ func readCargoWorkspace(ctx context.Context, args []string) (cargoWorkspace, err
 	if lockfileMoved(args, configDir) {
 		return cargoWorkspace{}, errLockfileMoved
 	}
+	return cargoMetadata(ctx, "", args, configDir)
+}
+
+// cargoMetadata asks `cargo metadata --no-deps` in dir ("" for ours) for the root and members a cargo command would use, with relative --config paths read from configDir.
+func cargoMetadata(ctx context.Context, dir string, args []string, configDir string) (cargoWorkspace, error) {
+	verb := verbIndex("cargo", args)
 	// The options before the verb, rustup's +toolchain included, pick the same workspace and configuration.
 	cmdArgs := append(withoutConfigFiles(args[:verb], configDir), "metadata", "--no-deps", "--format-version", "1")
 	cmdArgs = append(cmdArgs, withoutConfigFiles(cargoWorkspaceFlags(args[verb+1:]), configDir)...)
@@ -858,6 +893,7 @@ func readCargoWorkspace(ctx context.Context, args []string) (cargoWorkspace, err
 	if err != nil {
 		return cargoWorkspace{}, err
 	}
+	cmd.Dir = dir
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -868,6 +904,9 @@ func readCargoWorkspace(ctx context.Context, args []string) (cargoWorkspace, err
 		WorkspaceRoot string `json:"workspace_root"`
 		Packages      []struct {
 			ManifestPath string `json:"manifest_path"`
+			Dependencies []struct {
+				Path string `json:"path"`
+			} `json:"dependencies"`
 		} `json:"packages"`
 	}
 	if err := json.Unmarshal(out, &meta); err != nil || meta.WorkspaceRoot == "" {
@@ -890,6 +929,11 @@ func readCargoWorkspace(ctx context.Context, args []string) (cargoWorkspace, err
 		}
 		if m := filepath.Clean(p.ManifestPath); !slices.Contains(ws.Manifests, m) {
 			ws.Manifests = append(ws.Manifests, m)
+		}
+		for _, d := range p.Dependencies {
+			if d.Path != "" {
+				ws.Deps = append(ws.Deps, filepath.Clean(d.Path))
+			}
 		}
 	}
 	return ws, nil
@@ -928,12 +972,23 @@ func withoutConfigFiles(opts []string, dir string) []string {
 	return out
 }
 
-// firstErrorLine is cargo's own error line, else its first line, else err.
+// firstErrorLine is cargo's own error line, with the lines up to a blank one when it ends in a colon, else its first line, else err.
 func firstErrorLine(stderr string, err error) string {
 	first := ""
-	for _, line := range strings.Split(stderr, "\n") {
+	lines := strings.Split(stderr, "\n")
+	for i, line := range lines {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "error") {
+			if !strings.HasSuffix(line, ":") {
+				return line
+			}
+			// cargo names what it means on the lines after, such as the workspace a member believes it is in.
+			for _, next := range lines[i+1:] {
+				if next = strings.TrimSpace(next); next == "" {
+					break
+				}
+				line += " " + next
+			}
 			return line
 		}
 		if first == "" {

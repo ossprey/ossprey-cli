@@ -162,14 +162,31 @@ one too large or too deeply nested to read, and one with an `include`.
 the requirement with `cargo add <crate>@<version>`, which is checked first. So
 is a `cargo fetch` with an option or argument cargo fetch would reject.
 `cargo add` is also refused when a cargo config sits in a directory above the
-mirror that cargo would not read for your project, when the mirror runs
-another cargo than your project does (a `rustup override` is set for your
-project's directory, so name the toolchain with `cargo +<toolchain>` or
-`RUSTUP_TOOLCHAIN`), and on Windows when the mirror's links cannot be made
-(Windows allows them in Developer Mode). If `Cargo.lock` or a `Cargo.toml`
-changes while cargo runs, whether cargo wrote it or another program did,
-ossprey puts back what was there before, keeps what it found beside it as
-`Cargo.lock.ossprey-found-<n>` (or the `Cargo.toml` equivalent), and exits `2`.
+mirror that cargo would not read for your project. It is refused when the
+mirror runs another cargo than your project does: a `rustup override` is set
+for your project's directory, so name the toolchain with `cargo +<toolchain>`
+or `RUSTUP_TOOLCHAIN`. It is refused when cargo would find another root or
+other members in the mirror than in your project before the add, or after it
+when a crate the add brings in would be a member only in your project, since
+the checked lock would then miss crates your project locks. That happens
+when a `Cargo.toml` names the workspace or a member by an absolute path
+(`package.workspace`, `workspace.members`, `default-members`, `exclude`, or a
+path dependency or `[workspace.dependencies]` entry under a workspace root),
+and when a `Cargo.toml` with a `[workspace]` sits in a directory above your
+user cache directory; cargo's own error then names it. It is refused when a
+`Cargo.toml` would hold a relative path that climbs out of the mirror, as
+cargo writes when it rewrites a path dependency you gave by an absolute path.
+Make such paths relative to their `Cargo.toml`. A path dependency or `[patch]`
+that names a workspace member by an absolute path makes cargo itself fail in
+the mirror with a package collision (exit `101`, nothing written); make that
+path relative too. On Windows, `cargo add` is refused when the mirror's links
+cannot be made (Windows allows them in Developer Mode), for a `--path`
+relative to a drive or its root (`\dep`, `C:dep`), and for a `--path` on the
+drive of your user cache directory that holds no part of your project. If
+`Cargo.lock` or a `Cargo.toml` changes while cargo runs, whether cargo wrote it
+or another program did, ossprey puts back what was there before, keeps what it
+found beside it as `Cargo.lock.ossprey-found-<n>` (or the `Cargo.toml`
+equivalent), and exits `2`.
 
 `cargo install` compiles the crate and runs its build scripts straight away, so
 the crates it names are checked first, and a block means cargo never starts.

@@ -432,18 +432,33 @@ func cargoProject(t *testing.T) (string, cargoWorkspace) {
 		Manifests: []string{filepath.Join(root, "Cargo.toml"), filepath.Join(root, "a", "Cargo.toml")},
 		ConfigDir: root,
 	}
-	oldWS, oldVersion, oldRun, oldLand, oldErr := cargoWorkspaceFn, cargoVersionFn, cargoRunFn, landFn, cargoErrOut
+	oldWS, oldVersion, oldMeta, oldRun, oldLand, oldErr := cargoWorkspaceFn, cargoVersionFn, cargoMetadataFn, cargoRunFn, landFn, cargoErrOut
 	cargoErrOut = &bytes.Buffer{}
 	cargoWorkspaceFn = func(context.Context, []string) (cargoWorkspace, error) { return ws, nil }
 	cargoVersionFn = func(context.Context, string, []string) (string, error) { return cargo199, nil }
+	// The mirror holds the workspace the project has.
+	cargoMetadataFn = func(ctx context.Context, dir string, args []string, _ string) (cargoWorkspace, error) {
+		ws, err := cargoWorkspaceFn(ctx, args)
+		return mirroredWorkspace(dir, ws), err
+	}
 	cargoRunFn = func(_ context.Context, _ string, _, args []string, _ io.Writer) error {
 		t.Errorf("cargo %v ran", args)
 		return nil
 	}
 	t.Cleanup(func() {
-		cargoWorkspaceFn, cargoVersionFn, cargoRunFn, landFn, cargoErrOut = oldWS, oldVersion, oldRun, oldLand, oldErr
+		cargoWorkspaceFn, cargoVersionFn, cargoMetadataFn, cargoRunFn, landFn, cargoErrOut = oldWS, oldVersion, oldMeta, oldRun, oldLand, oldErr
 	})
 	return root, ws
+}
+
+// mirroredWorkspace is ws as cargo spells it in the mirror where it runs in dir, the working directory's place there.
+func mirroredWorkspace(dir string, ws cargoWorkspace) cargoWorkspace {
+	s := strings.TrimSuffix(dir, mirrorPath("", cargoCwd(nil)))
+	out := cargoWorkspace{Lock: mirrorPath(s, ws.Lock), ConfigDir: ws.ConfigDir}
+	for _, m := range ws.Manifests {
+		out.Manifests = append(out.Manifests, mirrorPath(s, m))
+	}
+	return out
 }
 
 // unsetEnv removes a variable for the test, since cargo reads an empty one as set.
@@ -718,6 +733,23 @@ func TestRunCargo_RefusesBeforeCargoRuns(t *testing.T) {
 				return "cargo 1.96.0 (30a34c682 2026-05-25)", nil
 			}
 		}, "the mirror of the workspace runs `cargo 1.96.0 (30a34c682 2026-05-25)`, not the project's `" + cargo199 + "`"},
+		// An absolute path in a Cargo.toml leads cargo out of the mirror, where add -p wrote a member's manifest through a link (verified with cargo 1.99.1).
+		{"a member only the mirror has", "add -p b evil", func(t *testing.T, _ string, _ cargoWorkspace) {
+			needSymlinks(t)
+			inner := cargoMetadataFn
+			cargoMetadataFn = func(ctx context.Context, dir string, args []string, configDir string) (cargoWorkspace, error) {
+				ws, err := inner(ctx, dir, args, configDir)
+				ws.Manifests = append(ws.Manifests, filepath.Join(filepath.Dir(ws.Lock), "b", "Cargo.toml"))
+				return ws, err
+			}
+		}, "cargo would see another workspace in ossprey's copy of it, since it would take "},
+		// cargo's own error, not the absolute-path explanation, since a [workspace] above the cache fails the same way.
+		{"no workspace in the mirror", "add evil", func(t *testing.T, _ string, _ cargoWorkspace) {
+			needSymlinks(t)
+			cargoMetadataFn = func(context.Context, string, []string, string) (cargoWorkspace, error) {
+				return cargoWorkspace{}, errors.New("cargo metadata: error: current package believes it's in a workspace when it's not: workspace: /c2/Cargo.toml")
+			}
+		}, "(cargo metadata fails in ossprey's copy of the workspace with error: current package believes it's in a workspace when it's not: workspace: /c2/Cargo.toml; either a Cargo.toml names"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root, ws := cargoProject(t)
@@ -911,7 +943,7 @@ func TestRunCargoAdd_CleanLandsTheLockThenTheManifest(t *testing.T) {
 					}
 				}
 			}
-			if run := f.runs[0]; run.dir == root || !strings.HasPrefix(run.dir, os.Getenv("XDG_CACHE_HOME")) {
+			if run := f.runs[0]; run.dir == root || !strings.HasPrefix(run.dir, canonicalDir(os.Getenv("XDG_CACHE_HOME"))) {
 				t.Errorf("cargo add ran in %s, want the mirror", run.dir)
 			}
 			if got, want := cargoErrOut.(*bytes.Buffer).String(), "     Locking 1 package to "+ws.Lock+"\n"; got != want {
@@ -1313,6 +1345,159 @@ func TestBuildCargoMirror(t *testing.T) {
 	if _, err := os.Lstat(mi2.at(ws.Lock)); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("the mirror holds %s (%v), want nothing there", mi2.at(ws.Lock), err)
 	}
+	// Nor under another spelling of its directory, which Windows and macOS make the same mirror directory when only case or a short name differs (OSS-2553).
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(root, alias); err != nil {
+		t.Fatal(err)
+	}
+	mi3, err := buildCargoMirror(ws, []cargoFile{{path: ws.Lock}}, alias, alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mi3.remove()
+	if _, err := os.Lstat(mi3.at(filepath.Join(alias, "Cargo.lock"))); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the mirror holds the lock under %s (%v), want nothing there", alias, err)
+	}
+}
+
+// cargo must find the project's root and members in the mirror, all as their copies there, or cargo add could write a manifest it reaches through a link (OSS-2553).
+func TestCargoMirrorSameWorkspace(t *testing.T) {
+	root := filepath.Join(filepath.VolumeName(os.TempDir())+string(filepath.Separator), "p")
+	mi := &cargoMirror{s: filepath.Join(t.TempDir(), "m"), real: map[string]bool{filepath.VolumeName(root) + string(filepath.Separator): true}}
+	ws := cargoWorkspace{Lock: filepath.Join(root, "Cargo.lock"), Manifests: []string{filepath.Join(root, "Cargo.toml"), filepath.Join(root, "a", "Cargo.toml"), filepath.Join(root, "b", "Cargo.toml")}}
+	at := func(ps ...string) []string {
+		var out []string
+		for _, p := range ps {
+			out = append(out, mi.at(p))
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name string
+		got  cargoWorkspace
+		want string
+	}{
+		{"the same, in another order", cargoWorkspace{Lock: mi.at(ws.Lock), Manifests: at(ws.Manifests[0], ws.Manifests[2], ws.Manifests[1])}, ""},
+		{"another root", cargoWorkspace{Lock: mi.at(filepath.Join(filepath.Dir(root), "Cargo.lock")), Manifests: at(ws.Manifests...)}, "it would take " + filepath.Dir(root) + " as the workspace root, not " + root},
+		{"a member more", cargoWorkspace{Lock: mi.at(ws.Lock), Manifests: at(append(ws.Manifests, filepath.Join(root, "c", "Cargo.toml"))...)}, "it would take " + filepath.Join(root, "c", "Cargo.toml") + " as a member too"},
+		{"a member less", cargoWorkspace{Lock: mi.at(ws.Lock), Manifests: at(ws.Manifests[:2]...)}, "it would not take " + ws.Manifests[2] + " as a member"},
+		{"a member outside the mirror", cargoWorkspace{Lock: mi.at(ws.Lock), Manifests: append(at(ws.Manifests[:2]...), ws.Manifests[2])}, "it would take " + ws.Manifests[2] + " as a member too"},
+	} {
+		err := mi.sameWorkspace(tc.got, ws)
+		if (err == nil) != (tc.want == "") || err != nil && err.Error() != tc.want {
+			t.Errorf("%s: %v, want %q", tc.name, err, tc.want)
+		}
+	}
+}
+
+// After cargo add, the mirror must still stand for the project: a path dependency the add brought in that the project would take as a member, and the mirror cannot, left its dev-dependencies out of the checked lock, and a copy's path climbing out of the mirror names another directory in the project (OSS-2553).
+func TestCargoMirrorAdded(t *testing.T) {
+	top, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, out := filepath.Join(top, "p"), filepath.Join(top, "out")
+	mi := &cargoMirror{s: filepath.Join(top, "m"), real: map[string]bool{filepath.VolumeName(root) + string(filepath.Separator): true}}
+	ws := cargoWorkspace{Lock: filepath.Join(root, "Cargo.lock"), Manifests: []string{filepath.Join(root, "Cargo.toml"), filepath.Join(root, "a", "Cargo.toml")}}
+	crate := func(dir, extra string) string {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, filepath.Join(dir, "Cargo.toml"), "[package]\nname = \"x\"\nversion = \"0.1.0\"\n"+extra)
+		return dir
+	}
+	under, outside := crate(filepath.Join(root, "foo"), ""), crate(filepath.Join(out, "x"), "")
+	absolute := crate(mi.at(filepath.Join(out, "y")), "workspace = '"+root+"'\n")
+	relative := crate(mi.at(filepath.Join(out, "z")), "workspace = \"../../p\"\n")
+	before := cargoWorkspace{Lock: mi.at(ws.Lock), Manifests: []string{mi.at(ws.Manifests[0]), mi.at(ws.Manifests[1])}}
+	withDeps := func(deps ...string) cargoWorkspace {
+		w := before
+		w.Deps = deps
+		return w
+	}
+	vol, _ := filepath.Rel(filepath.VolumeName(root)+string(filepath.Separator), filepath.Join(root, "a"))
+	climb := strings.Repeat("../", len(strings.Split(vol, string(filepath.Separator)))+1) + "x"
+	manifest := func(dep string) []cargoFile {
+		return []cargoFile{{path: ws.Lock, existed: true, data: []byte("version = 4\n")}, {path: ws.Manifests[0], existed: true, data: []byte("[workspace]\nmembers = [\"a\"]\n")}, {path: ws.Manifests[1], existed: true, data: []byte("[package]\nname = \"a\"\n\n[dependencies]\nx = { path = '" + dep + "' }\n")}}
+	}
+	plain := manifest("../foo")
+	for _, tc := range []struct {
+		name          string
+		before, after cargoWorkspace
+		files         []cargoFile
+		want          string
+	}{
+		{"a new path dependency under the root, outside the mirror", before, withDeps(under), plain, "would not take " + under + " as a member"},
+		{"a new path dependency outside the project", before, withDeps(outside), plain, ""},
+		{"an old one under the root", withDeps(under), withDeps(under), plain, ""},
+		{"a new one naming its workspace by an absolute path", before, withDeps(absolute), plain, "would not take " + absolute + " as a member"},
+		{"a new one naming its workspace relatively", before, withDeps(relative), plain, ""},
+		{"a new member", before, cargoWorkspace{Lock: before.Lock, Manifests: append(slices.Clone(before.Manifests), mi.at(filepath.Join(root, "v", "Cargo.toml"))), Deps: []string{mi.at(filepath.Join(root, "v"))}}, plain, ""},
+		{"a copy's path climbing out of the mirror", before, before, manifest(climb), "would hold the path \"" + climb + "\""},
+		{"a copy's absolute path", before, before, manifest(outside), ""},
+		{"another root", before, cargoWorkspace{Lock: mi.at(filepath.Join(top, "Cargo.lock"))}, plain, "rooted at " + mi.at(top)},
+	} {
+		err := mi.added(tc.before, tc.after, ws, tc.files)
+		if (err == nil) != (tc.want == "") || err != nil && !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: %v, want %q", tc.name, err, tc.want)
+		}
+	}
+	// cargo takes a dependency spelled under the root as a member though a link leads it elsewhere, since it compares spellings.
+	t.Run("a new path dependency spelled under the root through a link", func(t *testing.T) {
+		needSymlinks(t)
+		if err := os.Symlink(out, filepath.Join(root, "link")); err != nil {
+			t.Fatal(err)
+		}
+		linked := filepath.Join(root, "link", "x")
+		if err := mi.added(before, withDeps(linked), ws, plain); err == nil || !strings.Contains(err.Error(), "would not take "+linked+" as a member") {
+			t.Errorf("%v, want %s refused", err, linked)
+		}
+	})
+}
+
+// Rust reads a drive letter in either case as one drive and any other volume as spelled (OSS-2553).
+func TestSameVolume(t *testing.T) {
+	for _, tc := range []struct {
+		a, b string
+		want bool
+	}{
+		{"C:", "c:", true},
+		{"C:", "D:", false},
+		{`\\srv\share`, `\\srv\share`, true},
+		{`\\srv\share`, `\\SRV\share`, false},
+		{`\\?\C:`, "C:", false},
+		{"", "", true},
+	} {
+		if got := sameVolume(tc.a, tc.b); got != tc.want {
+			t.Errorf("sameVolume(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
+// cargo names what it means on the lines after an error ending in a colon, such as the workspace a member believes it is in (OSS-2553).
+func TestFirstErrorLineKeepsWhatAColonIntroduces(t *testing.T) {
+	stderr := "error: current package believes it's in a workspace when it's not:\ncurrent:   /p/Cargo.toml\nworkspace: /c2/Cargo.toml\n\nthis may be fixable by adding\n"
+	if got, want := firstErrorLine(stderr, nil), "error: current package believes it's in a workspace when it's not: current:   /p/Cargo.toml workspace: /c2/Cargo.toml"; got != want {
+		t.Errorf("firstErrorLine = %q, want %q", got, want)
+	}
+	if got, want := firstErrorLine("error: no such command\n\nhelp: x\n", nil), "error: no such command"; got != want {
+		t.Errorf("firstErrorLine = %q, want %q", got, want)
+	}
+}
+
+// Each Windows volume gets a directory in the mirror no other volume gets, in any case, and one a Windows directory name can hold (OSS-2553).
+func TestMirrorVolumeNamesEachVolumeApart(t *testing.T) {
+	seen := map[string]string{}
+	for _, vol := range []string{"", `C:`, `c:`, `D:`, `\\server\share_name`, `\\server_share\name`, `\\?\C:`, `\\?\UNC\server\share`} {
+		got := mirrorVolume(vol)
+		if isDrive(vol) && got != vol[:1] || !isDrive(vol) && vol != "" && (len(got) < 2 || strings.ContainsAny(got, `\/:*?"<>|`)) {
+			t.Errorf("%q: %q, want its letter for a drive, else a name of two or more legal characters", vol, got)
+		}
+		if other, ok := seen[strings.ToLower(got)]; ok && !strings.EqualFold(vol, other) {
+			t.Errorf("%q and %q share the mirror directory %q", vol, other, got)
+		}
+		seen[strings.ToLower(got)] = vol
+	}
 }
 
 // A cargo config above the mirror that cargo would not read for the project would apply to cargo add there (verified), so the mirror is refused, unless it is CARGO_HOME's.
@@ -1326,7 +1511,7 @@ func TestBuildCargoMirrorRefusesAConfigAboveIt(t *testing.T) {
 	writeFile(t, filepath.Join(cache, ".cargo", "config.toml"), "[patch.crates-io]\nitoa = { path = \"x\" }\n")
 	t.Setenv("CARGO_HOME", t.TempDir())
 	_, err := buildCargoMirror(ws, nil, ws.ConfigDir, ws.ConfigDir)
-	if err == nil || !strings.Contains(err.Error(), filepath.Join(cache, ".cargo", "config.toml")) {
+	if err == nil || !strings.Contains(err.Error(), filepath.Join(canonicalDir(cache), ".cargo", "config.toml")) {
 		t.Errorf("err = %v, want the config named", err)
 	}
 	if entries, _ := os.ReadDir(filepath.Join(cache, "ossprey")); len(entries) != 0 {

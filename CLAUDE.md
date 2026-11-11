@@ -250,9 +250,50 @@ Windows resolves it under `%LOCALAPPDATA%`.
      absolute `--path` is rewritten into the mirror, the last so cargo
      records the same relative path as in the project (it climbed out
      through the mirror's prefix), and a `--manifest-path` naming no
-     workspace manifest refuses. A `.cargo/config` above
+     workspace manifest refuses. An absolute path in a manifest leads cargo
+     out of the mirror: an absolute `exclude` made the crate a member there,
+     reached through a link, and `add -p` wrote its real manifest before the
+     check, outside the tripwire's files, and an absolute path dependency
+     under a root stopped being a member and dropped its dev-dependencies
+     from the lock. So `cargo metadata` runs in the mirror too and must find
+     the project's root and members as their copies (`sameWorkspace`), else
+     the add refuses; rewriting the paths in the copies was rejected, since
+     linked ancestor manifests escape too and no TOML parser here gives value
+     spans. It runs again after the add (`added`), since what the add brings
+     in escapes the same way: an absolute `[workspace.dependencies]` path
+     under the root, or a crate outside reached by `--path` whose
+     `package.workspace` names the root absolutely, was a member only in the
+     project, so the checked lock lacked its dev-dependencies and the next
+     cargo or rust-analyzer run locked them unchecked. A new path dependency
+     outside the mirror under the root, or one whose `package.workspace`
+     leaves the mirror, refuses; old ones passed the first check, and an
+     absolute one outside the project with no pointer is the same crate both
+     ways. cargo writes every path it touches relative to the mirror's
+     manifest, so an absolute path dependency that `add --dev` or `--features`
+     rewrote climbed out of the mirror, which in the project stops at the
+     volume root and names another directory: a relative `path` in a copy
+     that climbs out of its volume refuses. A metadata failure shows cargo's
+     own lines (`firstErrorLine` keeps what a colon introduces), since a
+     `[workspace]` above the cache fails as an absolute path does. An absolute
+     `--path` finds its volume as Rust compares them (`sameVolume`: a drive
+     letter in either case, a share as spelled), and one on the mirror's own
+     drive that the mirror lacks refuses, since cargo would record it relative
+     to the mirror where plain cargo writes it absolute; `\dep`, `/dep` and
+     `C:dep` refuse too, as cargo would place them from the mirror. A path
+     dependency or `[patch]` (a config's too) naming a member by an absolute
+     path passes the first check, but cargo then reaches that member by two
+     paths and fails with a package collision (exit 101, nothing written), so
+     it fails closed and the docs say to make it relative. Volumes are a drive
+     letter or the volume in hex (`mirrorVolume`): `_` for `\` folded
+     `\\server\share_name` and `\\server_share\name` into one directory,
+     where one share's lock was linked as the other's and written through.
+     Copies are keyed by `fileKey` (the canonical directory, lowercased),
+     since NTFS and APFS make case and 8.3 spellings one mirror directory,
+     and a lock that appeared after the snapshot was linked under the cwd's
+     spelling at the redirect's path. A `.cargo/config` above
      the mirror that cargo does not read for the project (an ancestor of the
-     mirror that is not one of the cwd's) would apply to the run, so it
+     mirror that is not one of the cwd's as cargo spells it, so on Windows
+     through a link unresolved) would apply to the run, so it
      refuses, bar CARGO_HOME's, which cargo reads once by its canonical
      path. Each mirror dir keeps its `.cargo` link: dropping the ones shared
      with the mirror's own ancestors avoided a double read but broke a
@@ -302,7 +343,12 @@ Windows resolves it under `%LOCALAPPDATA%`.
    - **Not checked yet.** `cargo install` checks the named crates only (next
      PR). A `cargo build` with a stale or missing lock still resolves on the
      spot, and an IDE resolves a hand-edited `Cargo.toml` the same way,
-     outside ossprey.
+     outside ossprey. `lockfileMoved` and `cargoConfigFiles` walk the
+     canonical config dir's ancestors, while Windows cargo reads configs above
+     the cwd as spelled, so one above a linked cwd is missed there. A linked
+     ancestor or non-member `Cargo.toml` edited between the mirror's first
+     metadata check and `cargo add` is not watched by the tripwire, so an
+     `add -p` naming a member that edit made could write through a link.
    - **Which configs.** At each level, `CARGO_HOME` included, cargo reads only
      the legacy `config` when it opens, else `config.toml`, and
      `cargoConfigFile` picks the same: reading an ignored `config.toml` that set
