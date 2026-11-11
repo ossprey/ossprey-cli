@@ -201,10 +201,9 @@ read or is not a regular file may replace it, and so may a `[source]` with
 `replace-with` when the install reaches crates.io through `--index` or a
 registry name other than `crates-io`; each gets the warning too. A `sparse+` URL
 is read as cargo reads it, once as given and again without `sparse+`, so a
-backslash before its host is userinfo and one after it a `/`. A host is read
-through IDNA as cargo reads it (`ｉｎｄｅｘ.crates.io` is crates.io), and a
-trailing dot changes nothing. An `ssh://` index URL holding a backslash counts
-as another registry.
+backslash before its host is userinfo and one after it a `/`. An index URL with
+a non-ASCII host, or an `ssh://` one holding a backslash, counts as another
+registry.
 `cargo install --list` is not an install, and nothing is checked for a line
 that only prints help or the version: `-h` or `--help` after the subcommand,
 or either or `-V`/`--version` before it.
