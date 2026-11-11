@@ -48,13 +48,14 @@ install still works".
 
 ```mermaid
 flowchart TD
-    S["ossprey &lt;manager&gt; ..."] --> CA{"cargo add, update,<br/>generate-lockfile or fetch,<br/>not only printing help?"}
+    S["ossprey &lt;manager&gt; ..."] --> CA{"cargo install, add, update,<br/>generate-lockfile or fetch,<br/>not only printing help?"}
     CA -- "yes" --> CV{"OSSPREY_SKIP_CI?"}
     CV -- "set" --> U
     CV -- "unset" --> CVG{"cargo 1.97 or later?"}
     CVG -- "no: passive" --> U
     CVG -- "no: gating" --> CX["refuse, exit 2:<br/>cargo never runs"]
     CVG -- "yes" --> CP{"passive mode?"}
+    CVG -- "yes: install" --> W
     CP -- "yes" --> CB["exec cargo first"]
     CB --> AE
     CP -- "no: add --dry-run" --> U
