@@ -231,15 +231,21 @@ const (
 	configLinked   = "a symlink in the scan could point cargo at another config"
 )
 
-// cargoReplacement says why no crate is trusted by registry: a symlink in the scan, or a cargo config cargo may read for root that replaces a source, includes a file, has an alias passing --config or cannot be read.
-func cargoReplacement(ctx context.Context, r file.Resolver, root string) string {
-	root = resolvedRoot(root)
-	inScan, why := cargoConfigsInScan(ctx, r, root)
-	if why != "" {
-		return why
+// cargoReplacement says why no crate is trusted by registry: a symlink in the scan, or a cargo config cargo may read for root (or from configDir, when set) that replaces a source, includes a file, has an alias passing --config or cannot be read.
+func cargoReplacement(ctx context.Context, r file.Resolver, root, configDir string) string {
+	var inScan []cargoFile
+	if configDir != "" {
+		// cargoFilesAbove starts at its argument's parent, so this reads configDir's own .cargo first.
+		root = filepath.Join(configDir, "Cargo.lock")
+	} else {
+		root = resolvedRoot(root)
+		var why string
+		if inScan, why = cargoConfigsInScan(ctx, r, root); why != "" {
+			return why
+		}
 	}
 	// A manifest above the root names no source, so only configs decide trust.
-	_, above, ok := cargoFilesAbove(root, CargoHome(cargoCwd()), false, true)
+	_, above, ok := cargoFilesAbove(root, CargoHome(cargoCwd(configDir)), false, true)
 	if !ok {
 		return configUnread
 	}

@@ -78,9 +78,10 @@ checks the repository itself before git runs. Private repos pass through.
 repositories the formula and its dependencies build from.
 
 --cargo also shims cargo (opt-in): cargo install checks the crate before it
-builds. cargo add, update, generate-lockfile and fetch are refused until
-ossprey can check the Cargo.lock they write. Rust (crates.io) is available
-on Teams and Enterprise plans.
+builds, and cargo update, generate-lockfile and fetch check the Cargo.lock
+they resolve before it reaches the project (cargo 1.97 or later). cargo add
+is refused until it can be checked the same way. Rust (crates.io) is
+available on Teams and Enterprise plans.
 
 Shell profiles only reach login and interactive shells. A coding agent's
 commands run in neither, so --agent claude also puts the shim directory on PATH
@@ -151,7 +152,7 @@ through a Claude Code SessionStart hook in ~/.claude/settings.json.`,
 	cmd.Flags().StringVar(&monitorID, "monitor", "", "passive mode: submit scans through a monitor's id, needing no login or API key")
 	cmd.Flags().BoolVar(&git, "git", false, "also shim git: check public GitHub repos on clone/pull (opt-in)")
 	cmd.Flags().BoolVar(&brew, "brew", false, "also shim brew: check formula source repos on install (opt-in)")
-	cmd.Flags().BoolVar(&cargo, "cargo", false, "also shim cargo: check crates on install (opt-in)")
+	cmd.Flags().BoolVar(&cargo, "cargo", false, "also shim cargo: check crates on install and update (opt-in)")
 	cmd.Flags().StringSliceVar(&agents, "agent", nil, "also put the shims on PATH for this coding agent's commands (supported: "+strings.Join(shim.SupportedAgents(), ", ")+")")
 	cmd.Flags().BoolVar(&noPassive, "no-passive", false, "go back to blocking installs, dropping a watchdog or monitor mode already installed")
 	cmd.MarkFlagsMutuallyExclusive("watchdog", "monitor")
