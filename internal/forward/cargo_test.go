@@ -666,6 +666,12 @@ func TestCargoRegistryIsCratesIoReadsTheEnvironment(t *testing.T) {
 func TestRunCargoInstall_WarnsWhenCratesIoIsReplaced(t *testing.T) {
 	repl := "[source.crates-io]\nreplace-with = \"mirror\"\n"
 	named := `crates.io is replaced by "mirror" in your cargo config, so cargo installs that source's copy, which was not checked`
+	located := func(key string) string {
+		return "crates.io is replaced by the " + key + " set for it in your cargo config, so cargo installs that copy, which was not checked"
+	}
+	// cargo 1.99.1 reads this spelling of crates.io's index as a source of its own, which [source.x] replaces.
+	other := "[source.x]\nregistry = \"sparse+https://INDEX.crates.io/\"\nreplace-with = \"mirror\"\n"
+	another := "a cargo config replaces a source, which may be crates.io as this install names it, so cargo may install another source's copy, which was not checked"
 	for _, tc := range []struct {
 		name  string
 		files map[string]string
@@ -686,6 +692,16 @@ func TestRunCargoInstall_WarnsWhenCratesIoIsReplaced(t *testing.T) {
 		{"cargo's test index variable", nil, map[string]string{cargoTestIndexEnv: "sparse+http://127.0.0.1:9/"}, []string{"install", "itoa"}, "crates.io is replaced by " + cargoTestIndexEnv + " in your environment, so cargo installs that source's copy, which was not checked"},
 		{"the project's config is not read", map[string]string{"cwd/.cargo/config.toml": repl}, nil, []string{"install", "itoa"}, ""},
 		{"no environment form", nil, map[string]string{"CARGO_SOURCE_CRATES_IO_REPLACE_WITH": "mirror"}, []string{"install", "itoa"}, ""},
+		{"a local registry set on crates.io", map[string]string{"home/.cargo/config.toml": "[source.crates-io]\nlocal-registry = \"/srv/lreg\"\n"}, nil, []string{"install", "itoa"}, located("local-registry")},
+		{"a directory set on crates.io by --config", nil, nil, []string{"--config", `source.crates-io.directory="vendor"`, "install", "itoa"}, located("directory")},
+		{"a registry set on crates.io", map[string]string{".cargo/config.toml": "[source.crates-io]\nregistry = \"sparse+https://user:secret@mirror.example/index/\"\n"}, nil, []string{"install", "itoa"}, located("registry")},
+		{"a git repository set on crates.io", map[string]string{"home/.cargo/config": "[source.crates-io]\ngit = \"https://user:secret@git.example/crates\"\n"}, nil, []string{"install", "--registry", "crates-io", "itoa"}, located("git")},
+		{"a replace-with beats a location", map[string]string{"home/.cargo/config.toml": "[source.crates-io]\nlocal-registry = \"/srv/lreg\"\n", ".cargo/config.toml": repl}, nil, []string{"install", "itoa"}, named},
+		{"another source replaced, crates.io reached by registry.default", map[string]string{"home/.cargo/config.toml": "[registry]\ndefault = \"cio\"\n\n[registries.cio]\nindex = \"sparse+https://INDEX.crates.io/\"\n\n" + other}, nil, []string{"install", "itoa"}, another},
+		{"another source replaced, crates.io reached by --index", map[string]string{"home/.cargo/config.toml": other}, nil, []string{"install", "--index", "sparse+https://INDEX.crates.io/", "itoa"}, another},
+		{"another source replaced, crates.io reached by --registry", map[string]string{"home/.cargo/config.toml": "[registries.cio]\nindex = \"sparse+https://INDEX.crates.io/\"\n"}, nil, []string{"--config", "source.x.replace-with='mirror'", "install", "--registry=cio", "itoa"}, another},
+		{"another source replaced, crates.io named", map[string]string{"home/.cargo/config.toml": other}, nil, []string{"install", "itoa"}, ""},
+		{"another source replaced, crates-io named", map[string]string{"home/.cargo/config.toml": "[registry]\ndefault = \"cio\"\n\n[registries.cio]\nindex = \"sparse+https://INDEX.crates.io/\"\n\n" + other}, nil, []string{"install", "--registry", "crates-io", "itoa"}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			base := t.TempDir()
@@ -727,6 +743,9 @@ func TestRunCargoInstall_WarnsWhenCratesIoIsReplaced(t *testing.T) {
 			}
 			if tc.want == "" && strings.Contains(out, "replace") {
 				t.Errorf("warned of a replacement cargo does not read:\n%s", out)
+			}
+			if strings.Contains(out, "secret") {
+				t.Errorf("printed a credential from the config:\n%s", out)
 			}
 			if line := "ossprey: warning: " + tc.want + "\n"; tc.want != "" && !strings.Contains(out, line) {
 				t.Errorf("quiet output lacks %q:\n%s", line, out)
@@ -858,7 +877,7 @@ func TestCargoInstallChecksACrateWhoseConfigIsADirectory(t *testing.T) {
 	assertIrregularConfig(t, func(p string) error { return os.Mkdir(p, 0o755) })
 }
 
-// assertIrregularConfig makes each config cargo install reads with mk, which is not a regular file, and wants it not to set registry.default.
+// assertIrregularConfig makes each config cargo install reads with mk, which is not a regular file, and wants it not to set registry.default but to count as one that may replace crates.io, since cargo may read it again and find that set.
 func assertIrregularConfig(t *testing.T, mk func(string) error) {
 	t.Helper()
 	base := t.TempDir()
@@ -881,6 +900,10 @@ func assertIrregularConfig(t *testing.T, mk func(string) error) {
 	if got := cargoDefaultRegistry([]string{"install", "--config", arg, "x"}); got != "" {
 		t.Errorf("a --config file that is not a regular file: %q, want the crates.io crate checked", got)
 	}
+	const mayReplace = "a cargo config ossprey could not read may replace crates.io, so cargo may install another source's copy, which was not checked"
+	if got := cargoReplacement([]string{"install", "--config", arg, "x"}); got != mayReplace {
+		t.Errorf("replacement with a --config file that is not a regular file = %q, want %q", got, mayReplace)
+	}
 	if got := cargoDefaultRegistry([]string{"--config", `registry.default="corp"`, "install", "--config", arg, "x"}); got != "corp" {
 		t.Errorf("a --config file that is not a regular file after one that sets corp: %q, want corp", got)
 	}
@@ -889,6 +912,9 @@ func assertIrregularConfig(t *testing.T, mk func(string) error) {
 	}
 	if got := cargoDefaultRegistry([]string{"install", "x"}); got != "" {
 		t.Errorf("CARGO_HOME's config that is not a regular file: %q, want the crates.io crate checked", got)
+	}
+	if got := cargoReplacement([]string{"install", "x"}); got != mayReplace {
+		t.Errorf("replacement with CARGO_HOME's config not a regular file = %q, want %q", got, mayReplace)
 	}
 }
 
