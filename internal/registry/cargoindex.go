@@ -52,7 +52,7 @@ func CargoInstallReleases(ctx context.Context, name, req string) ([]string, erro
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("%w (crates.io's index has no crate %s)", ErrNotFound, name)
+		return nil, notFound("crates.io's index has no crate " + name)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("crates.io's index returned status %d", resp.StatusCode)
@@ -94,7 +94,7 @@ func CargoInstallReleases(ctx context.Context, name, req string) ([]string, erro
 		return nil, fmt.Errorf("read crates.io's index: %w", err)
 	}
 	if best == "" {
-		return nil, fmt.Errorf("%w (no release of %s matches %s)", ErrNotFound, name, req)
+		return nil, notFound(fmt.Sprintf("crates.io's index has no release of %s matching %s", name, req))
 	}
 	out := []string{best}
 	if bestOld != "" && bestOld != best {
@@ -118,6 +118,12 @@ func cargoInstallReq(req string) (string, error) {
 	}
 	return "", fmt.Errorf("cargo reads no version in %q", req)
 }
+
+// notFound is an ErrNotFound in words of its own.
+type notFound string
+
+func (e notFound) Error() string        { return string(e) }
+func (e notFound) Is(target error) bool { return target == ErrNotFound }
 
 // stripBuild drops a release's build metadata, which semver ignores when it matches.
 func stripBuild(v string) string {
