@@ -39,6 +39,20 @@ func cargoEnv(t *testing.T, apiURL string) []string {
 	return append(env, "CARGO_HOME="+filepath.Join(home, ".cargo"), "RUSTUP_HOME="+rustup)
 }
 
+// shortTempDir is a temp dir, links resolved, named without the test's name, since the add mirror nests a project's whole path under the cache and Windows limits a working directory to 260 characters.
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	d, err := os.MkdirTemp("", "o")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(d) })
+	if d, err = filepath.EvalSymlinks(d); err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
 // cargoHome is the CARGO_HOME env sets.
 func cargoHome(env []string) string {
 	for _, kv := range env {
@@ -392,14 +406,14 @@ func TestCargoAddRefusesAWorkspaceItsCopyCannotHold(t *testing.T) {
 				"crates/a/Cargo.toml": crateManifest("a", ""),
 				"foo/Cargo.toml":      crateManifest("foo", "\n[dev-dependencies]\nitoa = \"=1.0.15\"\n"),
 			}
-		}, filepath.Join("crates", "a"), []string{"add", "foo"}, "after the add, since it would not take " + string(filepath.Separator)},
+		}, filepath.Join("crates", "a"), []string{"add", "foo"}, "after the add, since it would not take "},
 		{"a crate outside the project naming its root by an absolute package.workspace", func(base string) map[string]string {
 			return map[string]string{
 				"proj/Cargo.toml":          "[workspace]\nmembers = [\"crates/*\"]\nresolver = \"2\"\n",
 				"proj/crates/a/Cargo.toml": crateManifest("a", ""),
 				"outside/x/Cargo.toml":     crateManifest("x", fmt.Sprintf("workspace = '%s'\n\n[dev-dependencies]\nitoa = \"=1.0.15\"\n", filepath.Join(base, "proj"))),
 			}
-		}, filepath.Join("proj", "crates", "a"), []string{"add", "--path", filepath.Join("..", "..", "..", "outside", "x")}, "after the add, since it would not take " + string(filepath.Separator)},
+		}, filepath.Join("proj", "crates", "a"), []string{"add", "--path", filepath.Join("..", "..", "..", "outside", "x")}, "after the add, since it would not take "},
 		{"an absolute path dependency cargo add writes again", func(base string) map[string]string {
 			return map[string]string{
 				"Cargo.toml":     crateManifest("app", fmt.Sprintf("\n[dependencies]\nfoo = { path = '%s' }\n", filepath.Join(base, "foo"))),
@@ -409,11 +423,9 @@ func TestCargoAddRefusesAWorkspaceItsCopyCannotHold(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			api := newFakeAPI(t, "pkg:cargo/itoa@1.0.15")
-			env := cargoEnv(t, api.URL)
-			base, err := filepath.EvalSymlinks(t.TempDir())
-			if err != nil {
-				t.Fatal(err)
-			}
+			cache := shortTempDir(t)
+			env := append(cargoEnv(t, api.URL), "LOCALAPPDATA="+cache, "XDG_CACHE_HOME="+cache)
+			base := shortTempDir(t)
 			cargoTree(t, base, tc.files(base))
 			before := treeState(t, base)
 

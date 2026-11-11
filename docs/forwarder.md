@@ -182,7 +182,10 @@ the mirror with a package collision (exit `101`, nothing written); make that
 path relative too. On Windows, `cargo add` is refused when the mirror's links
 cannot be made (Windows allows them in Developer Mode), for a `--path`
 relative to a drive or its root (`\dep`, `C:dep`), and for a `--path` on the
-drive of your user cache directory that holds no part of your project. If
+drive of your user cache directory that holds no part of your project. A
+very deep project path can make the copy's path longer than Windows allows a
+working directory (260 characters), and `cargo add` then fails with exit `2`,
+the project unchanged. If
 `Cargo.lock` or a `Cargo.toml` changes while cargo runs, whether cargo wrote it
 or another program did, ossprey puts back what was there before, keeps what it
 found beside it as `Cargo.lock.ossprey-found-<n>` (or the `Cargo.toml`
