@@ -936,8 +936,21 @@ func moveFound(p string) (string, error) {
 // staged is data written and synced to tmp beside target, the real file path names, to be renamed over it.
 type staged struct{ path, target, tmp string }
 
-// landCargo stages each file cargo changed beside its target, checks every project file still holds what cargo started from, then renames them back to back, the lock first so a manifest never names a crate the lock lacks, and puts back what it renamed if a later rename fails.
+// landCargo checks every project file still holds what cargo started from, stages each file cargo changed beside its target, checks again, then renames them back to back, the lock first so a manifest never names a crate the lock lacks, and puts back what it renamed if a later rename fails.
 func landCargo(before, after []cargoFile) error {
+	unchanged := func() error {
+		for _, f := range before {
+			// A directory relinked since cargo started would lead the write out of the project.
+			if now, err := readCargoState(f.path); err != nil || !now.same(f) || !now.placed(f) || now.dir != f.dir {
+				return fmt.Errorf("%s changed while ossprey checked it, so nothing was written; run the command again", displayPath(f.path))
+			}
+		}
+		return nil
+	}
+	// Before staging too, so nothing is created through a directory relinked during the scan.
+	if err := unchanged(); err != nil {
+		return err
+	}
 	var changed []int
 	for i, f := range after {
 		if f.same(before[i]) {
@@ -956,18 +969,15 @@ func landCargo(before, after []cargoFile) error {
 		}
 	}()
 	for _, i := range changed {
-		// Staged where the file was when cargo started, so a link planted since leads nothing out of the project.
+		// Staged where the file was when cargo started, so a link planted at it since leads nothing out of the project.
 		s, err := stageFile(after[i].path, before[i].target(), after[i].data)
 		if err != nil {
 			return fmt.Errorf("could not write %s (%v); the project was not changed", displayPath(after[i].path), err)
 		}
 		files = append(files, s)
 	}
-	for _, f := range before {
-		// A directory relinked since cargo started would lead the write out of the project.
-		if now, err := readCargoState(f.path); err != nil || !now.same(f) || !now.placed(f) || now.dir != f.dir {
-			return fmt.Errorf("%s changed while ossprey checked it, so nothing was written; run the command again", displayPath(f.path))
-		}
+	if err := unchanged(); err != nil {
+		return err
 	}
 	for ; done < len(files); done++ {
 		if err := commitFn(files[done]); err != nil {

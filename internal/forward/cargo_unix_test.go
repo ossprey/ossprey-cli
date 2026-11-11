@@ -278,6 +278,46 @@ func TestRunCargoAdd_StagesNothingThroughALinkPlantedDuringTheScan(t *testing.T)
 	}
 }
 
+// A member directory relinked to a copy outside the project while the lock is scanned stops the landing before anything is staged, even over the same bytes (OSS-2553).
+func TestRunCargoAdd_StagesNothingThroughADirectoryRelinkedDuringTheScan(t *testing.T) {
+	needSymlinks(t)
+	if os.Geteuid() == 0 {
+		t.Skip("root writes to a directory without write permission")
+	}
+	root, ws := cargoProject(t)
+	writeFile(t, ws.Lock, "version = 4\n# before\n")
+	swapCargo(t, &fakeCargo{t: t, root: root, lock: evilLock})
+	swap(t, nil, cleanSBOM)
+	noLanding(t)
+	member := ws.Manifests[1]
+	outsideDir := t.TempDir()
+	outside := filepath.Join(outsideDir, "Cargo.toml")
+	writeFile(t, outside, readFile(t, member))
+	if err := os.Chmod(outsideDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(outsideDir, 0o755) })
+	swapScan(t, func(context.Context, scanRequest) (*ossbom.SBOM, error) {
+		if err := os.Rename(filepath.Dir(member), filepath.Dir(member)+".moved"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outsideDir, filepath.Dir(member)); err != nil {
+			t.Fatal(err)
+		}
+		return cleanCrates(), nil
+	})
+	out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"add", "-p", "a", "evil"}})
+	if want := filepath.Join("a", "Cargo.toml") + " changed while ossprey checked it, so nothing was written; run the command again"; err == nil || err.Error() != want || out != "" {
+		t.Errorf("Run = %v, output %q; want %q alone", err, out, want)
+	}
+	if entries, _ := os.ReadDir(outsideDir); len(entries) != 1 || readFile(t, outside) != memberManifest {
+		t.Errorf("outside the project now holds %v, want its one file untouched", entries)
+	}
+	if got := readFile(t, filepath.Join(filepath.Dir(member)+".moved", "Cargo.toml")); got != memberManifest {
+		t.Errorf("the member's manifest holds %q, want it untouched", got)
+	}
+}
+
 const cargoChildHelperEnv = "OSSPREY_TEST_CARGO_CHILD"
 
 // TestCargoChildHelperProcess is not a test: TestCargoChildInterrupted runs it in a process group of its own to signal a real cargo child.
