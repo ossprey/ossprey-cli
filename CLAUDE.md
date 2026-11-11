@@ -163,7 +163,10 @@ Windows resolves it under `%LOCALAPPDATA%`.
      crate from anywhere but crates.io forwards unchecked (`cargoSourceFlags`,
      `cargoDefaultRegistry`): checking crates.io's crate of that name would
      block an internal tool on a squat, or clear one never installed. Only a
-     definite crates.io index counts (`catalog.IsCratesIoIndex`).
+     definite crates.io index counts (`catalog.IsCratesIoIndex`), read as
+     cargo reads it: trimmed, `sparse+` in any case, and `\` a separator only
+     under a special scheme such as `https`, so in
+     `sparse+https://index.crates.io\@host/` it is userinfo and `host` serves.
    - **`registry.default` for `install`.** `cargo install` reloads its config
      from `CARGO_HOME` up, never the project's, and the nearest setting wins:
      the last `--config`, `CARGO_REGISTRY_DEFAULT`, then those configs. An

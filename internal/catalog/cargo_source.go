@@ -86,12 +86,21 @@ func isCratesIo(source string) (is, maybe bool) {
 	return strings.ToLower(host) == want[0], false
 }
 
-// IsCratesIoIndex reports whether an `--index` URL is certainly crates.io's; one only IDNA could map there is not.
+// IsCratesIoIndex reports whether an `--index` URL is certainly crates.io's, read as cargo 1.99.1 reads it; one only IDNA could map there is not.
 func IsCratesIoIndex(index string) bool {
-	if !strings.HasPrefix(index, "sparse+") {
-		index = "registry+" + index
+	// Cargo's parser trims the URL and drops tabs and newlines before it reads the scheme, whose case it folds.
+	clean := crateURLCleaner.Replace(trimC0(index))
+	scheme, _, _ := strings.Cut(clean, ":")
+	scheme = strings.ToLower(scheme)
+	kind := "registry"
+	if strings.HasPrefix(scheme, "sparse+") {
+		kind, clean = "sparse", clean[len("sparse+"):]
 	}
-	is, _ := isCratesIo(index)
+	// Only a special scheme such as https reads '\' as '/'; sparse+ and the rest keep it, so `index.crates.io\@host` fetches from host.
+	if _, special := defaultPort[scheme]; strings.Contains(index, `\`) && !special {
+		return false
+	}
+	is, _ := isCratesIo(kind + "+" + clean)
 	return is
 }
 

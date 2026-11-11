@@ -648,3 +648,31 @@ func TestCargoHomeKeepsAWindowsRootedHomeOnItsDrive(t *testing.T) {
 		}
 	}
 }
+
+// IsCratesIoIndex reads an --index URL as cargo 1.99.1 does: sparse+ in any case after trimming, and a backslash as a separator only in a special scheme such as https (OSS-2553).
+func TestIsCratesIoIndexReadsTheURLAsCargoDoes(t *testing.T) {
+	for _, tc := range []struct {
+		index string
+		want  bool
+	}{
+		{"sparse+https://index.crates.io/", true},
+		{"https://github.com/rust-lang/crates.io-index", true},
+		// cargo downloads crates.io's itoa from each of these.
+		{`https://github.com\rust-lang\crates.io-index`, true},
+		{`https://github.com\@mirror.example/../rust-lang/crates.io-index`, true},
+		{"SPARSE+https://index.crates.io/", true},
+		{" sparse+https://index.crates.io/", true},
+		{"Sparse+HTTPS://index.crates.io/", true},
+		{"spa\trse+https://index.crates.io/", true},
+		// cargo fetches these from mirror.example, the backslash being userinfo.
+		{`sparse+https://index.crates.io\@mirror.example/../`, false},
+		{`ssh://git@github.com\@mirror.example/../rust-lang/crates.io-index`, false},
+		// cargo reads this as another registry, which finds no crates.io crate.
+		{`sparse+https://index.crates.io/\/`, false},
+		{"sparse+https://crates.corp.example/", false},
+	} {
+		if got := IsCratesIoIndex(tc.index); got != tc.want {
+			t.Errorf("IsCratesIoIndex(%q) = %v, want %v", tc.index, got, tc.want)
+		}
+	}
+}
