@@ -233,11 +233,16 @@ func cargoChdir(globals []string) string {
 		default:
 			continue
 		}
-		if !filepath.IsAbs(v) {
-			// Not cleaned yet: the kernel follows a link before the `..` after it, so `lnk/..` is the link target's parent (verified).
-			v = dir + string(filepath.Separator) + v
+		// Not cleaned yet: the kernel follows a link before the `..` after it, so `lnk/..` is the link target's parent (verified).
+		next, ok := catalog.JoinIn(dir, v, filepath.VolumeName)
+		if !ok {
+			// cargo takes one -C, from this process's directory and environment, so Abs places a path relative to another drive as Windows does for cargo.
+			next = v
+			if abs, err := filepath.Abs(v); err == nil {
+				next = abs
+			}
 		}
-		dir = v
+		dir = next
 	}
 	if runtime.GOOS == "windows" {
 		// Windows takes `..` off the path as written, before it opens anything.

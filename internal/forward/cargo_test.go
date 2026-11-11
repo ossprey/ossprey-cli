@@ -654,6 +654,37 @@ func TestCargoConfigDirReadsGroupedShorts(t *testing.T) {
 	}
 }
 
+// On Windows -C lands where cargo's chdir puts it: rooted on this drive, relative to this drive under the working directory, and relative to another drive as Abs places it (OSS-2553).
+func TestCargoChdirPlacesWindowsPathsByVolume(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("only Windows has rooted and drive-relative paths")
+	}
+	t.Chdir(t.TempDir())
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	vol, other := filepath.VolumeName(wd), "Q:"
+	if strings.EqualFold(vol, other) {
+		other = "R:"
+	}
+	elsewhere, err := filepath.Abs(other + "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ dir, want string }{
+		{`\x`, vol + `\x`},
+		{vol + "sub", filepath.Join(wd, "sub")},
+		{other + "x", elsewhere},
+		{`sub\..\x`, filepath.Join(wd, "x")},
+	} {
+		globals := []string{"-Zunstable-options", "-C", tc.dir}
+		if got := cargoChdir(globals); got != tc.want {
+			t.Errorf("cargo %v from %s: %s, want %s", globals, wd, got, tc.want)
+		}
+	}
+}
+
 // cargo 1.99.1 install fails on a --config or CARGO_HOME config that is a directory, so the forwarder reads it as setting no registry.default and the crate is still checked (OSS-2553).
 func TestCargoInstallChecksACrateWhoseConfigIsADirectory(t *testing.T) {
 	assertIrregularConfig(t, func(p string) error { return os.Mkdir(p, 0o755) })

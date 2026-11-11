@@ -180,7 +180,12 @@ Windows resolves it under `%LOCALAPPDATA%`.
      cargo runs. `-C` resolves as chdir(2), each link followed before the `..`
      after it (`cargoConfigDir`); a relative `CARGO_HOME` joins cargo's
      physical cwd with `..` cleaned and links kept (`catalog.CargoHome`, shared
-     with the catalogue).
+     with the catalogue). On Windows both are placed by volume
+     (`catalog.JoinIn`): a rooted path on the starting directory's volume, one
+     relative to its drive under it. One relative to another drive goes where
+     `filepath.Abs` puts it: exact for `-C`, which cargo takes once, from our
+     cwd and environment, and for `CARGO_HOME` unless `-C` left the drive it
+     names.
    - **Bounded, regular reads.** Configs go through `catalog.ReadRegular`, as
      the catalogue's lock reads do: regular by `os.Stat` before the open
      (opening a FIFO releases a blocked writer, opening a device can reset it)
