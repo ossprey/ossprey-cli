@@ -229,9 +229,8 @@ source = "registry+https://github.com/acme/crates.io-index"
 		"pkg:cargo/sparse-internal-crate@4.0.0?repository_url=https:%2F%2Fcrates.example.net%2F",
 		"pkg:cargo/lookalike-crate@1.0.0?repository_url=https:%2F%2Fgithub.com.evil.example%2F",
 		"pkg:cargo/fork-index-crate@1.0.0?repository_url=https:%2F%2Fgithub.com%2F",
-		// Cargo's IDNA step maps this host to github.com, so it also goes out bare.
+		// Cargo's IDNA step maps this host to github.com, so it goes out bare.
 		"pkg:cargo/wide-host-crate@1.0.0",
-		"pkg:cargo/wide-host-crate@1.0.0?repository_url=https:%2F%2F%25EF%25BD%2587%25EF%25BD%2589%25EF%25BD%2594%25EF%25BD%2588%25EF%25BD%2595%25EF%25BD%2582.com%2F",
 		// Spellings real Cargo resolves to crates.io once its URL parser and CanonicalUrl have folded them.
 		"pkg:cargo/upper-host-crate@1.0.0",
 		"pkg:cargo/port-host-crate@1.0.0",
@@ -668,8 +667,8 @@ source = "registry+https:\\\\crates.corp.example\\git\\index"
 	}
 }
 
-// Cargo's IDNA maps ｇithub.com and a soft hyphen to github.com but gİthub.com elsewhere, so a non-ASCII registry host goes out marked and bare.
-func TestRunSendsANonASCIIRegistryHostMarkedAndBare(t *testing.T) {
+// A non-ASCII registry host is mapped as cargo's IDNA maps it: ｇithub.com and a soft hyphen to github.com, gİthub.com elsewhere, and one Go's tables cannot map goes out marked and bare (OSS-2553).
+func TestRunReadsANonASCIIRegistryHostAsCargoMapsIt(t *testing.T) {
 	noCI(t)
 	asked := stubCratesIo(t)
 	dir := writeCargoProject(t, `[package]
@@ -719,6 +718,11 @@ source = "registry+https://github.com/rust-lang/crates.%C4%B0o-index"
 name = "dotted-sparse-crate"
 version = "1.0.0"
 source = "sparse+https://index.crates.İo/"
+
+[[package]]
+name = "unicode16-crate"
+version = "1.0.0"
+source = "registry+https://g\U0001ccdethub.com/rust-lang/crates.io-index"
 `)
 
 	sbom, err := Run(warn.NewContext(context.Background(), true), Options{Path: dir, NoExec: true})
@@ -728,13 +732,11 @@ source = "sparse+https://index.crates.İo/"
 
 	assertPurls(t, wirePurls(sbom), []string{
 		"pkg:cargo/wide-crate@1.0.0",
-		"pkg:cargo/wide-crate@1.0.0?repository_url=https:%2F%2F%25EF%25BD%2587ithub.com%2F",
 		"pkg:cargo/deep-crate@0.3.0",
-		"pkg:cargo/deep-crate@0.3.0?repository_url=https:%2F%2Fgit%25C2%25ADhub.com%2F",
-		"pkg:cargo/dotted-host-crate@1.0.0",
 		"pkg:cargo/dotted-host-crate@1.0.0?repository_url=https:%2F%2Fg%25C4%25B0thub.com%2F",
-		"pkg:cargo/escaped-dotted-host-crate@1.0.0",
 		"pkg:cargo/escaped-dotted-host-crate@1.0.0?repository_url=https:%2F%2Fg%25C4%25B0thub.com%2F",
+		"pkg:cargo/unicode16-crate@1.0.0",
+		"pkg:cargo/unicode16-crate@1.0.0?repository_url=https:%2F%2Fg%25F0%259C%25B3%259Ethub.com%2F",
 		"pkg:cargo/dotted-path-crate@1.0.0?repository_url=https:%2F%2Fgithub.com%2F",
 		"pkg:cargo/dotted-sparse-crate@1.0.0?repository_url=https:%2F%2Findex.crates.%25C4%25B0o%2F",
 	})
