@@ -332,7 +332,9 @@ func TestCargoChildHelperProcess(t *testing.T) {
 	case "fetch":
 		err = fetchCheckedLock(context.Background(), "cargo fetch", []string{"fetch"}, ws, []byte("version = 4\n"))
 	case "add":
-		err = cargoAddInHelper(os.Getenv("HELPER_PROJECT"))
+		err = cargoAddInHelper(os.Getenv("HELPER_PROJECT"), false)
+	case "add-metadata":
+		err = cargoAddInHelper(os.Getenv("HELPER_PROJECT"), true)
 	default:
 		_, err, _ = resolveCargoLock(context.Background(), []string{verb}, ws, cargoFile{path: ws.Lock})
 	}
@@ -343,12 +345,16 @@ func TestCargoChildHelperProcess(t *testing.T) {
 			os.Exit(0)
 		}
 	}
+	if code, ok := SignalledExit(err); ok {
+		fmt.Println("ossprey exits", code)
+		os.Exit(0)
+	}
 	fmt.Println("cargo returned", err)
 	os.Exit(0)
 }
 
-// cargoAddInHelper runs cargo add -p a in a mirror of the workspace at project, which the helper's working directory is, answering cargo's version and metadata itself.
-func cargoAddInHelper(project string) error {
+// cargoAddInHelper runs cargo add -p a in a mirror of the workspace at project, which the helper's working directory is, answering cargo's version itself and its metadata too unless metadata, which asks the cargo on PATH.
+func cargoAddInHelper(project string, metadata bool) error {
 	ws := cargoWorkspace{
 		Lock:      filepath.Join(project, "Cargo.lock"),
 		Manifests: []string{filepath.Join(project, "Cargo.toml"), filepath.Join(project, "a", "Cargo.toml")},
@@ -357,6 +363,9 @@ func cargoAddInHelper(project string) error {
 	cargoVersionFn = func(context.Context, string, []string) (string, error) { return cargo199, nil }
 	cargoMetadataFn = func(_ context.Context, dir string, _ []string, _ string) (cargoWorkspace, error) {
 		return mirroredWorkspace(dir, ws), nil
+	}
+	if metadata {
+		cargoMetadataFn = cargoMetadata
 	}
 	var before []cargoFile
 	for _, p := range append([]string{ws.Lock}, ws.Manifests...) {
@@ -373,7 +382,7 @@ func cargoAddInHelper(project string) error {
 	return err
 }
 
-// Interrupted while a cargo child runs, ossprey outlives it, removes its scratch copy of the lock or its mirror and reports cargo's death by the signal, passing on one sent to ossprey alone (OSS-2553).
+// Interrupted while a cargo child runs, ossprey outlives it, removes its scratch copy of the lock or its mirror and reports cargo's death by the signal, or the signal itself before cargo add runs, passing on one sent to ossprey alone (OSS-2553).
 func TestCargoChildInterrupted(t *testing.T) {
 	for _, tc := range []struct {
 		verb string
@@ -386,6 +395,8 @@ func TestCargoChildInterrupted(t *testing.T) {
 		{"update", true, syscall.SIGINT, "cargo died by interrupt"},
 		{"fetch", false, syscall.SIGTERM, "cargo died by terminated"},
 		{"add", true, syscall.SIGINT, "cargo died by interrupt"},
+		// Before cargo add runs, the signal is the exit, not an error in the mirror.
+		{"add-metadata", true, syscall.SIGINT, "ossprey exits 130"},
 	} {
 		t.Run(fmt.Sprintf("%s %v", tc.verb, tc.sig), func(t *testing.T) {
 			verb := tc.verb
@@ -398,7 +409,7 @@ func TestCargoChildInterrupted(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if verb == "add" {
+			if strings.HasPrefix(verb, "add") {
 				needSymlinks(t)
 				if err := os.Mkdir(filepath.Join(project, "a"), 0o755); err != nil {
 					t.Fatal(err)

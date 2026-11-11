@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"math/rand/v2"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"regexp"
@@ -515,6 +516,14 @@ func resolveCargoLock(ctx context.Context, args []string, ws cargoWorkspace, bef
 func resolveCargoAdd(ctx context.Context, args []string, ws cargoWorkspace, before []cargoFile, version string) (after []cargoFile, runErr, err error) {
 	ctx, release := holdCargoSignals(ctx)
 	defer release()
+	defer func() {
+		// A signal during the mirror, its version probe or its metadata ends the run as the signal, not as a fault in the workspace.
+		var s signalCause
+		var ee *exec.ExitError
+		if (err != nil || runErr != nil && !errors.As(runErr, &ee)) && errors.As(context.Cause(ctx), &s) {
+			after, runErr, err = nil, s, nil
+		}
+	}()
 	cwd := cargoCwd(nil)
 	mi, err := buildCargoMirror(ws, before, cwd, cargoCwd(args[:verbIndex("cargo", args)]))
 	if err != nil {
@@ -597,6 +606,16 @@ var cargoSignals = []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP}
 type signalCause struct{ os.Signal }
 
 func (s signalCause) Error() string { return "received " + s.String() }
+
+// SignalledExit is 128 plus the signal that stopped a cargo command before its child could die by it, as a shell reports one, and whether one did.
+func SignalledExit(err error) (int, bool) {
+	var s signalCause
+	if !errors.As(err, &s) {
+		return 0, false
+	}
+	n, ok := s.Signal.(syscall.Signal)
+	return 128 + int(n), ok
+}
 
 // holdCargoSignals catches cargoSignals until release, ending the context it returns with the first one.
 func holdCargoSignals(ctx context.Context) (context.Context, func()) {

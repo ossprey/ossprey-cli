@@ -268,7 +268,8 @@ Windows resolves it under `%LOCALAPPDATA%`.
      SIGINT, SIGTERM and SIGHUP (`holdCargoSignals`), passes one sent to it
      alone on to cargo, removes the scratch or the add mirror, and exits 128
      plus the signal cargo died by (`exitCodeOf`), since `ExitCode()` is -1
-     there. One already ignored, as SIGHUP under nohup, is left alone for
+     there, or plus the signal itself when it stops the add mirror's own steps
+     before cargo add runs (`SignalledExit`). One already ignored, as SIGHUP under nohup, is left alone for
      cargo to inherit.
      Git dependencies are still checked out under `CARGO_HOME/git` to resolve,
      as plain cargo does; nothing is built. Whether to refuse git sources too,

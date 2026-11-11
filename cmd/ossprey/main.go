@@ -583,6 +583,9 @@ func forwardResult(err error) error {
 		if errors.As(err, &ee) {
 			os.Exit(exitCodeOf(ee))
 		}
+		if code, ok := forward.SignalledExit(err); ok {
+			os.Exit(code)
+		}
 		if reportSkipped(err) {
 			return nil
 		}
