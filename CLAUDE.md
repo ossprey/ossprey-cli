@@ -232,14 +232,16 @@ Windows resolves it under `%LOCALAPPDATA%`.
      there is none, so it runs redirected and nothing is checked or landed.
      `add --dry-run` writes nothing and goes to cargo after the gate.
    - **Tripwire, check, land.** After cargo exits the snapshot must still
-     match, else each file is put back, what was found kept beside it as
-     `<name>.ossprey-found-<n>` (an editor may have saved it), and the run
-     fails (`cargoTripwire`). cargo's own failure returns its exit code. A
-     block, a check error or a lock the platform checked none of leave the
-     project as it was, errors exiting 2 since 1 means malware; trust comes
-     from the configs where cargo runs (`CargoConfigDir`). `landCargo` lands
-     nothing if a file changed during the check and skips unchanged bytes;
-     `landFile` writes as cargo writes `Cargo.toml` and syncs first.
+     match, else what was found is renamed aside unread, any size, to
+     `<name>.ossprey-found-<n>` (an editor may have saved it), the snapshot is
+     put back even when that rename fails, since an unchecked lock must not
+     stay, and the run fails (`cargoTripwire`). cargo's own failure returns
+     its exit code. A block, a check error or a lock the platform checked
+     none of leave the project as it was, errors exiting 2 since 1 means
+     malware; trust comes from the configs where cargo runs
+     (`CargoConfigDir`). `landCargo` lands nothing if a file changed during
+     the check and skips unchanged bytes; `landFile` writes as cargo writes
+     `Cargo.toml` and syncs first.
    - **cargo's stderr** goes through `cargoStderr`, which spells the scratch
      lock as the project's and never fails a write: cargo exits 101 without
      locking when its stderr closes. `CARGO_TERM_COLOR=always` is set only

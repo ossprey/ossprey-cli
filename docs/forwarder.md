@@ -155,9 +155,10 @@ a config ossprey cannot read (a piped `--config /dev/stdin`, say), one too
 large or too deeply nested to read, and one with an `include`. `cargo update
 --breaking` is refused too, since it edits `Cargo.toml`. So is a `cargo fetch`
 with an option or argument cargo fetch would reject. If `Cargo.lock` changes
-while cargo runs, whether cargo wrote it or another program did, ossprey puts
-back what was there before, keeps what it found beside it as
-`Cargo.lock.ossprey-found-<n>`, and exits `2`.
+while cargo runs, whether cargo wrote it or another program did, ossprey moves
+what it found aside to `Cargo.lock.ossprey-found-<n>`, puts back what was
+there before, and exits `2`. If the found file cannot be moved aside, the old
+lock is still put back and the message says the found one was not kept.
 
 `cargo install` compiles the crate and runs its build scripts straight away, so
 the crates it names are checked first, and a block means cargo never starts.

@@ -61,7 +61,7 @@ flowchart TD
     CVG -- "yes" --> CG{"a line cargo takes (no update<br/>--breaking), a workspace cargo<br/>metadata can read, no lock<br/>lockfile-path may move, no script,<br/>a credential (bar update --dry-run)?"}
     CG -- "no" --> CX
     CG -- "yes" --> CR["cargo resolves into a scratch<br/>Cargo.lock; the project<br/>is not touched"]
-    CR -- "a project file changed<br/>while cargo ran" --> CT["put it back, keep what<br/>was found beside it, exit 2"]
+    CR -- "a project file changed<br/>while cargo ran" --> CT["move what was found aside,<br/>put it back, exit 2"]
     CR -- "cargo fails" --> CF["cargo's exit code,<br/>nothing written"]
     CR -- "update --dry-run" --> CF
     CR -- "cargo succeeds" --> CC{"malware in the<br/>resolved lock?"}

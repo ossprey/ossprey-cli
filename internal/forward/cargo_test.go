@@ -1071,6 +1071,71 @@ func TestRunCargo_TripwirePutsBackAndFails(t *testing.T) {
 	}
 }
 
+// A found lock too large to read is still moved aside whole before the lock is put back, mode and all (OSS-2553).
+func TestRunCargo_TripwireKeepsAnOversizedLockAside(t *testing.T) {
+	big := strings.Repeat("#", catalog.CargoProofLimit+1)
+	for _, lockExisted := range []bool{false, true} {
+		t.Run(fmt.Sprintf("lock %v", lockExisted), func(t *testing.T) {
+			root, ws := cargoProject(t)
+			var mode fs.FileMode
+			if lockExisted {
+				writeFile(t, ws.Lock, "version = 4\n# before\n")
+				if err := os.Chmod(ws.Lock, 0o640); err != nil {
+					t.Fatal(err)
+				}
+				fi, err := os.Stat(ws.Lock)
+				if err != nil {
+					t.Fatal(err)
+				}
+				mode = fi.Mode()
+			}
+			before := projectState(t, root)
+			swapCargo(t, &fakeCargo{t: t, root: root, lock: big, ignore: true})
+			swap(t, nil, cleanSBOM)
+			_, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"update"}})
+			kept, _ := filepath.Glob(filepath.Join(root, "Cargo.lock.ossprey-found-*"))
+			if len(kept) != 1 || readFile(t, kept[0]) != big {
+				t.Fatalf("kept %v, want one file holding what was found, whole", kept)
+			}
+			if err == nil || !strings.HasSuffix(err.Error(), "so it was put back unchecked; what was found is kept in "+filepath.Base(kept[0])) {
+				t.Errorf("Run = %v, want it to name the kept file", err)
+			}
+			before[kept[0]] = big
+			if !reflect.DeepEqual(projectState(t, root), before) {
+				t.Error("the project was not put back")
+			}
+			if fi, err := os.Stat(ws.Lock); lockExisted && (err != nil || fi.Mode() != mode) {
+				t.Errorf("put back with %v (%v), want %v", fi.Mode(), err, mode)
+			}
+		})
+	}
+}
+
+// A found lock that cannot be moved aside is still replaced by what was there before, and the error says it was not kept (OSS-2553).
+func TestRunCargo_TripwirePutsBackWhenTheFoundLockCannotBeKept(t *testing.T) {
+	for _, lockExisted := range []bool{false, true} {
+		t.Run(fmt.Sprintf("lock %v", lockExisted), func(t *testing.T) {
+			root, ws := cargoProject(t)
+			if lockExisted {
+				writeFile(t, ws.Lock, "version = 4\n# before\n")
+			}
+			before := projectState(t, root)
+			old := cargoRenameFn
+			cargoRenameFn = func(string, string) error { return errors.New("denied") }
+			t.Cleanup(func() { cargoRenameFn = old })
+			swapCargo(t, &fakeCargo{t: t, root: root, lock: evilLock, ignore: true})
+			swap(t, nil, cleanSBOM)
+			out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"update"}})
+			if want := "Cargo.lock changed while `cargo update` ran, by a cargo ignoring the scratch copy ossprey gave it or by another program, so it was put back unchecked; what was found could not be kept: Cargo.lock (denied)"; err == nil || err.Error() != want || out != "" {
+				t.Errorf("Run = %v, output %q; want %q", err, out, want)
+			}
+			if !reflect.DeepEqual(projectState(t, root), before) {
+				t.Error("the project was not put back, or a reserved name was left behind")
+			}
+		})
+	}
+}
+
 // cargo's own failure is its exit code, and nothing is checked or written.
 func TestRunCargo_FailurePassesThrough(t *testing.T) {
 	root, ws := cargoProject(t)

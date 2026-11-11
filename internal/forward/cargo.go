@@ -677,27 +677,38 @@ func readCargoState(p string) (cargoFile, error) {
 	return cargoFile{path: p, existed: true, data: data, mode: fi.Mode().Perm()}, nil
 }
 
-// cargoTripwire puts back each project file that changed while cargo ran, keeping what it found beside it, and fails.
+// cargoTripwire puts back each project file that changed while cargo ran, first moving what it found aside unread, and fails.
 func cargoTripwire(command string, before []cargoFile) error {
-	var changed, kept []string
+	var changed, kept, lost []string
 	for _, f := range before {
 		now, err := readCargoState(f.path)
 		if err == nil && now.same(f) {
 			continue
 		}
 		changed = append(changed, displayPath(f.path))
-		if err == nil && now.existed {
-			// Another program may have written it, so its bytes are kept rather than lost.
-			if k, err := keepFound(f.path, now.data); err == nil {
-				kept = append(kept, displayPath(k))
-			} else {
-				fmt.Fprintf(errOut, "ossprey: warning: could not keep what was found in %s (%v)\n", displayPath(f.path), err)
-			}
+		// A lock that existed is put back where its link led, so the link survives.
+		at := f.path
+		if real, err := filepath.EvalSymlinks(f.path); err == nil && f.existed {
+			at = real
 		}
+		// Another program may have written it, so it is kept whatever its size or kind rather than lost.
+		k, err := moveFound(at)
+		switch {
+		case err == nil:
+			kept = append(kept, displayPath(k))
+		case !errors.Is(err, fs.ErrNotExist):
+			lost = append(lost, fmt.Sprintf("%s (%v)", displayPath(at), err))
+		}
+		// Put back even when the found file could not be kept, since an unchecked lock must not stay.
+		err = nil
 		if f.existed {
-			err = landFn(f.path, f.data)
-		} else {
-			err = os.Remove(f.path)
+			if err = landFn(at, f.data); err == nil {
+				err = os.Chmod(at, f.mode)
+			}
+		} else if k == "" {
+			if err = os.Remove(at); errors.Is(err, fs.ErrNotExist) {
+				err = nil
+			}
 		}
 		if err != nil {
 			fmt.Fprintf(errOut, "ossprey: warning: could not put back %s (%v)\n", displayPath(f.path), err)
@@ -710,20 +721,31 @@ func cargoTripwire(command string, before []cargoFile) error {
 	if len(kept) > 0 {
 		msg += "; what was found is kept in " + strings.Join(kept, ", ")
 	}
+	if len(lost) > 0 {
+		msg += "; what was found could not be kept: " + strings.Join(lost, ", ")
+	}
 	return errors.New(msg)
 }
 
-// keepFound writes data to a new file beside p and returns its name.
-func keepFound(p string, data []byte) (string, error) {
+// cargoRenameFn moves a file; a test seam.
+var cargoRenameFn = os.Rename
+
+// moveFound renames p to a new name beside it, reserved with O_EXCL, and returns that name; fs.ErrNotExist means nothing is there.
+func moveFound(p string) (string, error) {
+	if _, err := os.Lstat(p); err != nil {
+		return "", err
+	}
 	f, err := os.CreateTemp(filepath.Dir(p), filepath.Base(p)+".ossprey-found-*")
 	if err != nil {
 		return "", err
 	}
-	_, err = f.Write(data)
-	if cerr := f.Close(); err == nil {
-		err = cerr
+	name := f.Name()
+	f.Close()
+	if err := cargoRenameFn(p, name); err != nil {
+		os.Remove(name)
+		return "", err
 	}
-	return f.Name(), err
+	return name, nil
 }
 
 // landCargo writes each resolved file whose bytes changed over the project's, the lock first, so the project never names a crate its lock does not hold, once every file still holds what cargo started from.
