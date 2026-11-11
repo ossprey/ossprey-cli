@@ -3,9 +3,12 @@
 package forward
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -235,5 +238,208 @@ func TestRunCargoAdd_StagingFailureLandsNothing(t *testing.T) {
 	}
 	if now, err := os.Stat(ws.Lock); err != nil || !os.SameFile(lock, now) {
 		t.Errorf("the lock was replaced (%v)", err)
+	}
+}
+
+// A link planted at a Cargo.toml during the scan stops the landing before anything is staged through it, so nothing is written outside the project (OSS-2553).
+func TestRunCargoAdd_StagesNothingThroughALinkPlantedDuringTheScan(t *testing.T) {
+	needSymlinks(t)
+	if os.Geteuid() == 0 {
+		t.Skip("root writes to a directory without write permission")
+	}
+	root, ws := cargoProject(t)
+	writeFile(t, ws.Lock, "version = 4\n# before\n")
+	swapCargo(t, &fakeCargo{t: t, root: root, lock: evilLock})
+	swap(t, nil, cleanSBOM)
+	noLanding(t)
+	member := ws.Manifests[1]
+	outsideDir := t.TempDir()
+	outside := filepath.Join(outsideDir, "Cargo.toml")
+	writeFile(t, outside, readFile(t, member))
+	if err := os.Chmod(outsideDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(outsideDir, 0o755) })
+	swapScan(t, func(context.Context, scanRequest) (*ossbom.SBOM, error) {
+		if err := os.Remove(member); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, member); err != nil {
+			t.Fatal(err)
+		}
+		return cleanCrates(), nil
+	})
+	out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"add", "-p", "a", "evil"}})
+	if want := filepath.Join("a", "Cargo.toml") + " changed while ossprey checked it, so nothing was written; run the command again"; err == nil || err.Error() != want || out != "" {
+		t.Errorf("Run = %v, output %q; want %q alone", err, out, want)
+	}
+	if entries, _ := os.ReadDir(outsideDir); len(entries) != 1 || readFile(t, outside) != memberManifest {
+		t.Errorf("outside the project now holds %v, want its one file untouched", entries)
+	}
+}
+
+const cargoChildHelperEnv = "OSSPREY_TEST_CARGO_CHILD"
+
+// TestCargoChildHelperProcess is not a test: TestCargoChildInterrupted runs it in a process group of its own to signal a real cargo child.
+func TestCargoChildHelperProcess(t *testing.T) {
+	verb := os.Getenv(cargoChildHelperEnv)
+	if verb == "" {
+		return
+	}
+	ws := cargoWorkspace{Lock: filepath.Join(os.Getenv("HELPER_PROJECT"), "Cargo.lock")}
+	var err error
+	switch verb {
+	case "fetch":
+		err = fetchCheckedLock(context.Background(), "cargo fetch", []string{"fetch"}, ws, []byte("version = 4\n"))
+	case "add":
+		err = cargoAddInHelper(os.Getenv("HELPER_PROJECT"))
+	default:
+		_, err, _ = resolveCargoLock(context.Background(), []string{verb}, ws, cargoFile{path: ws.Lock})
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		if st, ok := ee.Sys().(syscall.WaitStatus); ok && st.Signaled() {
+			fmt.Println("cargo died by", st.Signal())
+			os.Exit(0)
+		}
+	}
+	fmt.Println("cargo returned", err)
+	os.Exit(0)
+}
+
+// cargoAddInHelper runs cargo add -p a in a mirror of the workspace at project, which the helper's working directory is, answering cargo's version and metadata itself.
+func cargoAddInHelper(project string) error {
+	ws := cargoWorkspace{
+		Lock:      filepath.Join(project, "Cargo.lock"),
+		Manifests: []string{filepath.Join(project, "Cargo.toml"), filepath.Join(project, "a", "Cargo.toml")},
+		ConfigDir: project,
+	}
+	cargoVersionFn = func(context.Context, string, []string) (string, error) { return cargo199, nil }
+	cargoMetadataFn = func(_ context.Context, dir string, _ []string, _ string) (cargoWorkspace, error) {
+		return mirroredWorkspace(dir, ws), nil
+	}
+	var before []cargoFile
+	for _, p := range append([]string{ws.Lock}, ws.Manifests...) {
+		f, err := readCargoState(p)
+		if err != nil {
+			return err
+		}
+		before = append(before, f)
+	}
+	_, runErr, err := resolveCargoAdd(context.Background(), []string{"add", "-p", "a", "evil"}, ws, before, cargo199)
+	if runErr != nil {
+		return runErr
+	}
+	return err
+}
+
+// Interrupted while a cargo child runs, ossprey outlives it, removes its scratch copy of the lock or its mirror and reports cargo's death by the signal, passing on one sent to ossprey alone (OSS-2553).
+func TestCargoChildInterrupted(t *testing.T) {
+	for _, tc := range []struct {
+		verb string
+		// group sends the signal to the process group, as a terminal's Ctrl-C does, else to ossprey alone.
+		group bool
+		sig   syscall.Signal
+		died  string
+	}{
+		{"fetch", true, syscall.SIGINT, "cargo died by interrupt"},
+		{"update", true, syscall.SIGINT, "cargo died by interrupt"},
+		{"fetch", false, syscall.SIGTERM, "cargo died by terminated"},
+		{"add", true, syscall.SIGINT, "cargo died by interrupt"},
+	} {
+		t.Run(fmt.Sprintf("%s %v", tc.verb, tc.sig), func(t *testing.T) {
+			verb := tc.verb
+			bin, tmp, cache := t.TempDir(), t.TempDir(), t.TempDir()
+			started := filepath.Join(bin, "started")
+			if err := os.WriteFile(filepath.Join(bin, "cargo"), []byte("#!/bin/sh\n: > '"+started+"'\nexec sleep 30\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			project, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if verb == "add" {
+				needSymlinks(t)
+				if err := os.Mkdir(filepath.Join(project, "a"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				writeFile(t, filepath.Join(project, "Cargo.toml"), "[workspace]\nmembers = [\"a\"]\n")
+				writeFile(t, filepath.Join(project, "a", "Cargo.toml"), memberManifest)
+			}
+			cmd := exec.Command(os.Args[0], "-test.run=^TestCargoChildHelperProcess$")
+			cmd.Dir = project
+			// The mirror goes in the user cache, which is XDG_CACHE_HOME on Linux and under HOME on macOS.
+			cmd.Env = append(os.Environ(), cargoChildHelperEnv+"="+verb, "HELPER_PROJECT="+project, "TMPDIR="+tmp,
+				"XDG_CACHE_HOME="+cache, "HOME="+cache, "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			// A cargo left running holds the output pipe, so a failure ends at the delay rather than with it.
+			cmd.WaitDelay = 5 * time.Second
+			var out bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &out, &out
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) })
+			for deadline := time.Now().Add(20 * time.Second); !exists(started); time.Sleep(10 * time.Millisecond) {
+				if time.Now().After(deadline) {
+					cmd.Process.Kill()
+					t.Fatalf("cargo never started\n%s", out.String())
+				}
+			}
+			pid := cmd.Process.Pid
+			if tc.group {
+				pid = -pid
+			}
+			if err := syscall.Kill(pid, tc.sig); err != nil {
+				t.Fatal(err)
+			}
+			if err := cmd.Wait(); err != nil || !strings.Contains(out.String(), tc.died) {
+				t.Errorf("ossprey ended with %v, output %q; want it to outlive cargo and print %q", err, out.String(), tc.died)
+			}
+			if left, _ := os.ReadDir(tmp); len(left) != 0 {
+				t.Errorf("left %v in TMPDIR, want the scratch removed", left)
+			}
+			var left []string
+			filepath.WalkDir(cache, func(p string, d fs.DirEntry, err error) error {
+				if err == nil && d.Name() == "Cargo.toml" {
+					left = append(left, p)
+				}
+				return nil
+			})
+			if len(left) != 0 {
+				t.Errorf("left %v in the user cache, want the mirror removed", left)
+			}
+		})
+	}
+}
+
+// Under nohup a hangup reaches neither ossprey nor cargo, which inherits the ignored SIGHUP and finishes (OSS-2553).
+func TestCargoChildKeepsAnIgnoredHangupIgnored(t *testing.T) {
+	bin, tmp := t.TempDir(), t.TempDir()
+	started := filepath.Join(bin, "started")
+	if err := os.WriteFile(filepath.Join(bin, "cargo"), []byte("#!/bin/sh\n: > '"+started+"'\nsleep 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sh", "-c", `trap "" HUP; exec "$0" -test.run='^TestCargoChildHelperProcess$'`, os.Args[0])
+	cmd.Env = append(os.Environ(), cargoChildHelperEnv+"=fetch", "HELPER_PROJECT="+t.TempDir(), "TMPDIR="+tmp,
+		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.WaitDelay = 5 * time.Second
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) })
+	for deadline := time.Now().Add(20 * time.Second); !exists(started); time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("cargo never started\n%s", out.String())
+		}
+	}
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGHUP); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Wait(); err != nil || !strings.Contains(out.String(), "cargo returned <nil>") {
+		t.Errorf("ended with %v, output %q; want cargo to finish through the hangup", err, out.String())
 	}
 }

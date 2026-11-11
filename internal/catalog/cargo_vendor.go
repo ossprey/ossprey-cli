@@ -512,22 +512,40 @@ func cratesIoReplacement(levels map[string][]cargoFile, dir, home string) string
 // CargoHome is the directory cargo run in cwd reads its user-level config from: CARGO_HOME, a relative one joined to cwd, with `..` cleaned and links left alone as cargo 1.99.1 does, else ~/.cargo, else "".
 func CargoHome(cwd string) string {
 	if home := os.Getenv("CARGO_HOME"); home != "" {
-		switch {
-		case filepath.IsAbs(home):
-		case filepath.VolumeName(home) != "" || os.IsPathSeparator(home[0]):
-			// A Windows home rooted without a drive, or relative to another drive, resolves on that drive as cargo's join leaves it.
+		p, ok := JoinIn(cwd, home, filepath.VolumeName)
+		if !ok {
+			// One relative to another drive takes that drive's current directory, as Abs reads it.
+			p = home
 			if abs, err := filepath.Abs(home); err == nil {
-				home = abs
+				p = abs
 			}
-		default:
-			home = filepath.Join(cwd, home)
 		}
-		return filepath.Clean(home)
+		return filepath.Clean(p)
 	}
 	if h, err := os.UserHomeDir(); err == nil {
 		return filepath.Join(h, ".cargo")
 	}
 	return ""
+}
+
+// JoinIn is p opened from the directory dir as Windows places it, uncleaned (rooted on dir's volume, relative to dir's drive under dir), or false for one relative to another drive; vol is filepath.VolumeName, a parameter so every OS can test it.
+func JoinIn(dir, p string, vol func(string) string) (string, bool) {
+	pv := vol(p)
+	rest := p[len(pv):]
+	rooted := rest != "" && os.IsPathSeparator(rest[0])
+	drive := len(pv) == 2 && pv[1] == ':'
+	switch {
+	case pv != "" && (rooted || !drive):
+		return p, true
+	case rooted:
+		return vol(dir) + p, true
+	case dir == "":
+		// No known directory leaves p relative, as filepath.Join does.
+		return rest, pv == ""
+	case pv == "" || strings.EqualFold(pv, vol(dir)):
+		return dir + string(filepath.Separator) + rest, true
+	}
+	return "", false
 }
 
 // cargoCwd is cargo's physical working directory: configDir for a copied lock, else this process's.

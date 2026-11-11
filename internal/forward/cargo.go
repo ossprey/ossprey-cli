@@ -10,12 +10,14 @@ import (
 	"io/fs"
 	"math/rand/v2"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"unicode/utf8"
 
 	"golang.org/x/term"
@@ -173,8 +175,8 @@ func cargoOptionalSkips(flag, next string) bool {
 // cargoSourceFlags install every crate named from somewhere other than crates.io.
 var cargoSourceFlags = flagSet("--git", "--path", "--index", "--registry")
 
-// parseCargoInstall classifies `cargo install`'s arguments: each positional is a crate, --version pins them all, and a source flag other than crates.io, or else a defaultRegistry, takes them off crates.io.
-func parseCargoInstall(args []string, defaultRegistry string) installArgs {
+// parseCargoInstall classifies `cargo install`'s arguments: each positional is a crate, --version pins them all, and a source flag other than crates.io, or else a defaultRegistry, takes them off crates.io; isCratesIo says whether a named registry is crates.io.
+func parseCargoInstall(args []string, defaultRegistry string, isCratesIo func(registry string) bool) installArgs {
 	args = cargoSplitShorts(args, valueFlags["cargo"])
 	var crates []string
 	version, source, cratesIo := "", "", false
@@ -199,7 +201,7 @@ func parseCargoInstall(args []string, defaultRegistry string) installArgs {
 		switch {
 		case flag == "--version" || flag == "--vers":
 			version = value
-		case flag == "--registry" && value == "crates-io" || flag == "--index" && catalog.IsCratesIoIndex(value):
+		case flag == "--registry" && isCratesIo(value) || flag == "--index" && catalog.IsCratesIoIndex(value):
 			source, cratesIo = "", true
 		case cargoSourceFlags[flag]:
 			source = flag + " " + value
@@ -225,14 +227,40 @@ func parseCargoInstall(args []string, defaultRegistry string) installArgs {
 	return out
 }
 
-// addCrate adds one crate to install; a range, which check refuses, resolves to the latest release as a PyPI range does.
+// addCrate adds one crate to install, never read as an archive, since a release such as 1.2.3-beta.zip is valid; a range, which check refuses, resolves to the latest release as a PyPI range does.
 func (p *installArgs) addCrate(token string) {
 	name, req, _ := strings.Cut(token, "@")
-	if _, err := check.ParseSpec("cargo", token); err != nil && req != "" && registry.IsCargoName(name) {
+	s, err := check.ParseSpec("cargo", token)
+	switch {
+	case err == nil:
+		p.addSpec(s, token)
+	case req != "" && registry.IsCargoName(name):
 		p.Specs = append(p.Specs, check.Spec{Ecosystem: "cargo", Name: name, Constraint: req})
-		return
+	default:
+		p.NonPackages = append(p.NonPackages, token)
 	}
-	p.addTarget("cargo", token)
+}
+
+// cargoReleaseFn finds the releases cargo install may take for a crate; a var so tests need no network.
+var cargoReleaseFn = registry.CargoInstallReleases
+
+// cargoReleases pins each crate to the release cargo install takes from crates.io's index, failing when one cannot be found there.
+func cargoReleases(ctx context.Context, specs []check.Spec) ([]check.Spec, error) {
+	var out []check.Spec
+	for _, s := range specs {
+		req := s.Constraint
+		if s.Version != "" {
+			req = "=" + s.Version
+		}
+		vs, err := cargoReleaseFn(ctx, s.Name, req)
+		if err != nil {
+			return nil, fmt.Errorf("could not tell which release of %s cargo would install (%w), so it was not checked", s.Name, err)
+		}
+		for _, v := range vs {
+			out = append(out, check.Spec{Ecosystem: "cargo", Name: s.Name, Version: v})
+		}
+	}
+	return out, nil
 }
 
 // checkCargoFirst resolves a cargo verb that only locks into a scratch Cargo.lock, checks that, and writes it to the project only when clean, so nothing unchecked reaches the project at any point.
@@ -337,10 +365,30 @@ func checkCargoFirst(ctx context.Context, m *Manager, opts Options) error {
 		fmt.Fprintf(errOut, "ossprey: %s\n", verdict)
 	}
 	if args[verb] == "fetch" {
-		// The project now holds the checked lock, and --locked downloads exactly that or nothing (verified with cargo 1.97.0 and 1.99.1).
-		return handoffFn(ctx, m.Bin, cargoFetchLocked(args))
+		return fetchCheckedLock(ctx, command, cargoFetchLocked(args), ws, after[0].data)
 	}
 	return nil
+}
+
+// cargoVerbOnly is the command and its verb in backticks, leaving out the rest of the line, where a --config value may hold a credential.
+func cargoVerbOnly(m *Manager, args []string) string {
+	return "`" + m.Bin + " " + args[verbIndex("cargo", args)] + "`"
+}
+
+// fetchCheckedLock runs the user's fetch with --locked and the lock redirected to a private copy of the checked bytes, so a lock swapped into the project after landing is never what cargo downloads (verified with cargo 1.99.1).
+func fetchCheckedLock(ctx context.Context, command string, args []string, ws cargoWorkspace, data []byte) error {
+	ctx, release := holdCargoSignals(ctx)
+	defer release()
+	scratch, at, err := cargoScratch(data, true)
+	if err != nil {
+		return fmt.Errorf("%s was checked and written, but `%s` could not run (%v)", displayPath(ws.Lock), command, err)
+	}
+	// A child rather than an exec, so the copy outlives cargo and is removed after.
+	defer os.RemoveAll(scratch)
+	stderr := newCargoStderr(cargoErrOut, at, ws.Lock)
+	err = cargoRunFn(ctx, "", cargoRedirectEnv(at), cargoRedirectArgs(args, at), stderr)
+	stderr.Flush()
+	return err
 }
 
 // postCargoLock runs a cargo verb that only locks, then posts the Cargo.lock it leaves without waiting for a verdict.
@@ -443,21 +491,14 @@ func cargoRedirects(line string) bool {
 
 // resolveCargoLock runs args with the lock redirected to a scratch copy of the project's, and returns what cargo locked there.
 func resolveCargoLock(ctx context.Context, args []string, ws cargoWorkspace, before cargoFile) (after []cargoFile, runErr, err error) {
-	scratch, err := os.MkdirTemp("", "ossprey-cargo-")
+	ctx, release := holdCargoSignals(ctx)
+	defer release()
+	// cargo resolves from nothing when the redirect names no lock, so the project's goes there first (verified).
+	scratch, at, err := cargoScratch(before.data, before.existed)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer os.RemoveAll(scratch)
-	if real, err := filepath.EvalSymlinks(scratch); err == nil {
-		scratch = real
-	}
-	at := filepath.Join(scratch, "Cargo.lock")
-	// cargo resolves from nothing when the redirect names no lock, so the project's goes there first (verified).
-	if before.existed {
-		if err := os.WriteFile(at, before.data, 0o600); err != nil {
-			return nil, nil, err
-		}
-	}
 	stderr := newCargoStderr(cargoErrOut, at, ws.Lock)
 	runErr = cargoRunFn(ctx, "", cargoRedirectEnv(at), cargoRedirectArgs(args, at), stderr)
 	stderr.Flush()
@@ -471,6 +512,8 @@ func resolveCargoLock(ctx context.Context, args []string, ws cargoWorkspace, bef
 
 // resolveCargoAdd runs cargo add in a mirror of the workspace, with the cargo whose version line the gate read, and returns the lock and manifests it left there, in before's order.
 func resolveCargoAdd(ctx context.Context, args []string, ws cargoWorkspace, before []cargoFile, version string) (after []cargoFile, runErr, err error) {
+	ctx, release := holdCargoSignals(ctx)
+	defer release()
 	cwd := cargoCwd(nil)
 	mi, err := buildCargoMirror(ws, before, cwd, cargoCwd(args[:verbIndex("cargo", args)]))
 	if err != nil {
@@ -528,7 +571,58 @@ func resolveCargoAdd(ctx context.Context, args []string, ws cargoWorkspace, befo
 // cargoAbsoluteHint says what leads cargo out of the mirror and how to stop it.
 const cargoAbsoluteHint = "a Cargo.toml names the workspace or a member by an absolute path, in package.workspace, workspace.members, default-members or exclude, or a path dependency; make it relative to its Cargo.toml"
 
-// runCargo runs the real cargo as a child, with ossprey's stdin and stdout.
+// cargoScratch makes a private directory and returns it with the path of its Cargo.lock, which holds data when existed.
+func cargoScratch(data []byte, existed bool) (dir, lock string, err error) {
+	if dir, err = os.MkdirTemp("", "ossprey-cargo-"); err != nil {
+		return "", "", err
+	}
+	if real, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = real
+	}
+	lock = filepath.Join(dir, "Cargo.lock")
+	if existed {
+		if err := os.WriteFile(lock, data, 0o600); err != nil {
+			os.RemoveAll(dir)
+			return "", "", err
+		}
+	}
+	return dir, lock, nil
+}
+
+// cargoSignals stop a cargo child rather than ossprey, which then removes the child's scratch and exits as cargo did.
+var cargoSignals = []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP}
+
+// signalCause is the signal that ended a cargo child's context.
+type signalCause struct{ os.Signal }
+
+func (s signalCause) Error() string { return "received " + s.String() }
+
+// holdCargoSignals catches cargoSignals until release, ending the context it returns with the first one.
+func holdCargoSignals(ctx context.Context) (context.Context, func()) {
+	ctx, cancel := context.WithCancelCause(ctx)
+	ch := make(chan os.Signal, 1)
+	for _, s := range cargoSignals {
+		// One ignored already, as SIGHUP under nohup, is left ignored, so cargo inherits it ignored too.
+		if !signal.Ignored(s) {
+			signal.Notify(ch, s)
+		}
+	}
+	done := make(chan struct{})
+	go func() {
+		select {
+		case s := <-ch:
+			cancel(signalCause{s})
+		case <-done:
+		}
+	}()
+	return ctx, func() {
+		signal.Stop(ch)
+		close(done)
+		cancel(nil)
+	}
+}
+
+// runCargo runs the real cargo as a child in dir ("" for ours), with ossprey's stdin and stdout, passing it the signal that ends ctx.
 func runCargo(ctx context.Context, dir string, env, args []string, stderr io.Writer) error {
 	cmd, err := realCommand(ctx, "cargo", args)
 	if err != nil {
@@ -537,6 +631,13 @@ func runCargo(ctx context.Context, dir string, env, args []string, stderr io.Wri
 	cmd.Dir = dir
 	cmd.Env = append(cmd.Env, env...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, stderr
+	cmd.Cancel = func() error {
+		var s signalCause
+		if errors.As(context.Cause(ctx), &s) && cmd.Process.Signal(s.Signal) == nil {
+			return nil
+		}
+		return cmd.Process.Kill()
+	}
 	return cmd.Run()
 }
 
@@ -693,17 +794,32 @@ func (c *cargoStderr) Flush() {
 	}
 }
 
-// cargoFile is a project file's bytes and mode, or that it did not exist.
+// cargoFile is a project file's bytes and mode, or that it did not exist, and the link it was reached through, if any.
 type cargoFile struct {
 	path    string
 	existed bool
 	data    []byte
 	mode    fs.FileMode
+	// link is what the path's own link says and real where it leads, both "" for a file.
+	link, real string
 }
 
 // same reports whether f and g hold the same bytes, or both did not exist.
 func (f cargoFile) same(g cargoFile) bool {
 	return f.existed == g.existed && bytes.Equal(f.data, g.data)
+}
+
+// placed reports whether f and g were reached the same way: the same link to the same place, or no link.
+func (f cargoFile) placed(g cargoFile) bool {
+	return f.link == g.link && f.real == g.real
+}
+
+// target is the file f's bytes were read from: where its link led, or its path.
+func (f cargoFile) target() string {
+	if f.link != "" {
+		return f.real
+	}
+	return f.path
 }
 
 // readCargoState reads p, failing when it is not a regular file, is over the bound, or is a link to nothing.
@@ -718,30 +834,62 @@ func readCargoState(p string) (cargoFile, error) {
 	if err != nil {
 		return cargoFile{}, err
 	}
-	return cargoFile{path: p, existed: true, data: data, mode: fi.Mode().Perm()}, nil
+	f := cargoFile{path: p, existed: true, data: data, mode: fi.Mode().Perm()}
+	f.link, f.real = cargoLinkOf(p)
+	return f, nil
 }
 
-// cargoTripwire puts back each project file that changed while cargo ran, keeping what it found beside it, and fails.
+// cargoLinkOf is what a link at p says and where it leads, both "" when p is no link.
+func cargoLinkOf(p string) (link, real string) {
+	link, err := os.Readlink(p)
+	if err != nil {
+		return "", ""
+	}
+	if real, err = filepath.EvalSymlinks(p); err != nil {
+		real = p
+	}
+	return link, real
+}
+
+// cargoTripwire puts back each project file that changed while cargo ran, first moving what it found aside unread, and fails.
 func cargoTripwire(command string, before []cargoFile) error {
-	var changed, kept []string
+	var changed, kept, lost []string
 	for _, f := range before {
 		now, err := readCargoState(f.path)
-		if err == nil && now.same(f) {
+		if err == nil && now.same(f) && now.placed(f) {
 			continue
 		}
 		changed = append(changed, displayPath(f.path))
-		if err == nil && now.existed {
-			// Another program may have written it, so its bytes are kept rather than lost.
-			if k, err := keepFound(f.path, now.data); err == nil {
-				kept = append(kept, displayPath(k))
-			} else {
-				fmt.Fprintf(errOut, "ossprey: warning: could not keep what was found in %s (%v)\n", displayPath(f.path), err)
-			}
+		// A lock reached through a link is put back where the link led, so it survives, but only a link that was there before cargo ran.
+		at := f.path
+		if link, real := cargoLinkOf(f.path); f.link != "" && link == f.link && real == f.real {
+			at = f.real
 		}
+		// Another program may have written it, so it is kept whatever its size or kind rather than lost.
+		k, err := moveFound(at)
+		switch {
+		case err == nil:
+			kept = append(kept, displayPath(k))
+		case !errors.Is(err, fs.ErrNotExist):
+			lost = append(lost, fmt.Sprintf("%s (%v)", displayPath(at), err))
+		}
+		// Put back even when the found file could not be kept, since an unchecked lock must not stay.
+		err = nil
 		if f.existed {
-			err = landFile(f.path, f.data)
-		} else {
-			err = os.Remove(f.path)
+			if link, _ := cargoLinkOf(at); at == f.path && link != "" {
+				// A link left at the path was not there before, so it is removed rather than written through.
+				err = os.Remove(at)
+			}
+			if err == nil {
+				err = landFile(at, f.data)
+			}
+			if err == nil {
+				err = os.Chmod(at, f.mode)
+			}
+		} else if k == "" {
+			if err = os.Remove(at); errors.Is(err, fs.ErrNotExist) {
+				err = nil
+			}
 		}
 		if err != nil {
 			fmt.Fprintf(errOut, "ossprey: warning: could not put back %s (%v)\n", displayPath(f.path), err)
@@ -754,20 +902,31 @@ func cargoTripwire(command string, before []cargoFile) error {
 	if len(kept) > 0 {
 		msg += "; what was found is kept in " + strings.Join(kept, ", ")
 	}
+	if len(lost) > 0 {
+		msg += "; what was found could not be kept: " + strings.Join(lost, ", ")
+	}
 	return errors.New(msg)
 }
 
-// keepFound writes data to a new file beside p and returns its name.
-func keepFound(p string, data []byte) (string, error) {
+// cargoRenameFn moves a file; a test seam.
+var cargoRenameFn = os.Rename
+
+// moveFound renames p to a new name beside it, reserved with O_EXCL, and returns that name; fs.ErrNotExist means nothing is there.
+func moveFound(p string) (string, error) {
+	if _, err := os.Lstat(p); err != nil {
+		return "", err
+	}
 	f, err := os.CreateTemp(filepath.Dir(p), filepath.Base(p)+".ossprey-found-*")
 	if err != nil {
 		return "", err
 	}
-	_, err = f.Write(data)
-	if cerr := f.Close(); err == nil {
-		err = cerr
+	name := f.Name()
+	f.Close()
+	if err := cargoRenameFn(p, name); err != nil {
+		os.Remove(name)
+		return "", err
 	}
-	return f.Name(), err
+	return name, nil
 }
 
 // staged is data written and synced to tmp beside target, the real file path names, to be renamed over it.
@@ -793,14 +952,15 @@ func landCargo(before, after []cargoFile) error {
 		}
 	}()
 	for _, i := range changed {
-		s, err := stageFile(after[i].path, after[i].data)
+		// Staged where the file was when cargo started, so a link planted since leads nothing out of the project.
+		s, err := stageFile(after[i].path, before[i].target(), after[i].data)
 		if err != nil {
 			return fmt.Errorf("could not write %s (%v); the project was not changed", displayPath(after[i].path), err)
 		}
 		files = append(files, s)
 	}
 	for _, f := range before {
-		if now, err := readCargoState(f.path); err != nil || !now.same(f) {
+		if now, err := readCargoState(f.path); err != nil || !now.same(f) || !now.placed(f) {
 			return fmt.Errorf("%s changed while ossprey checked it, so nothing was written; run the command again", displayPath(f.path))
 		}
 	}
@@ -822,7 +982,7 @@ func putBack(before []cargoFile, landed []int, failed string) error {
 		f := before[i]
 		var err error
 		if f.existed {
-			err = landFile(f.path, f.data)
+			err = landFile(f.target(), f.data)
 		} else {
 			err = os.Remove(f.path)
 		}
@@ -838,15 +998,8 @@ func putBack(before []cargoFile, landed []int, failed string) error {
 	return fmt.Errorf("%s and could not put back %s, so Cargo.lock may not match the manifests; run `ossprey cargo fetch` before you build", failed, strings.Join(lost, ", "))
 }
 
-// stageFile writes data to a new file beside p's real target, given the target's mode or a new lock's, and syncs it, as cargo writes Cargo.toml bar the sync (verified with cargo 1.99.1).
-func stageFile(p string, data []byte) (staged, error) {
-	target, err := filepath.EvalSymlinks(p)
-	if errors.Is(err, fs.ErrNotExist) {
-		target, err = p, nil
-	}
-	if err != nil {
-		return staged{}, err
-	}
+// stageFile writes data to a new file beside target, the file p stands for, given target's mode or a new lock's, and syncs it, as cargo writes Cargo.toml bar the sync (verified with cargo 1.99.1).
+func stageFile(p, target string, data []byte) (staged, error) {
 	fi, statErr := os.Stat(target)
 	// A new lock gets cargo's mode for one, 0666 less the umask.
 	perm := fs.FileMode(0o666)
@@ -856,6 +1009,7 @@ func stageFile(p string, data []byte) (staged, error) {
 	dir, base := filepath.Split(target)
 	var tmp *os.File
 	var name string
+	var err error
 	for range 100 {
 		name = filepath.Join(dir, "."+base+".ossprey-"+strconv.FormatUint(uint64(rand.Uint32()), 10))
 		if tmp, err = os.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, perm); !errors.Is(err, fs.ErrExist) {
@@ -884,7 +1038,14 @@ func stageFile(p string, data []byte) (staged, error) {
 
 // landFile replaces p with data as cargo writes Cargo.toml, a new file beside the real target given the target's mode and renamed over it (verified with cargo 1.99.1), and syncs it first, which cargo does not.
 func landFile(p string, data []byte) error {
-	s, err := stageFile(p, data)
+	target, err := filepath.EvalSymlinks(p)
+	if errors.Is(err, fs.ErrNotExist) {
+		target, err = p, nil
+	}
+	if err != nil {
+		return err
+	}
+	s, err := stageFile(p, target, data)
 	if err != nil {
 		return err
 	}
@@ -1115,11 +1276,16 @@ func cargoChdir(globals []string) string {
 		default:
 			continue
 		}
-		if !filepath.IsAbs(v) {
-			// Not cleaned yet: the kernel follows a link before the `..` after it, so `lnk/..` is the link target's parent (verified).
-			v = dir + string(filepath.Separator) + v
+		// Not cleaned yet: the kernel follows a link before the `..` after it, so `lnk/..` is the link target's parent (verified).
+		next, ok := catalog.JoinIn(dir, v, filepath.VolumeName)
+		if !ok {
+			// cargo takes one -C, from this process's directory and environment, so Abs places a path relative to another drive as Windows does for cargo.
+			next = v
+			if abs, err := filepath.Abs(v); err == nil {
+				next = abs
+			}
 		}
-		dir = v
+		dir = next
 	}
 	if runtime.GOOS == "windows" {
 		// Windows takes `..` off the path as written, before it opens anything.
@@ -1175,6 +1341,55 @@ func lockfileMoved(args []string, configDir string) bool {
 
 // cargoDefaultRegistry is the registry other than crates.io that `cargo install` takes a crate from when the line names none, or "".
 func cargoDefaultRegistry(args []string) string {
+	v, _ := cargoInstallConfig(args, "CARGO_REGISTRY_DEFAULT", "registry", "default")
+	if cargoRegistryIsCratesIo(args, v) {
+		return ""
+	}
+	return v
+}
+
+// cargoRegistryIsCratesIo reports whether cargo install reads a named registry as crates.io: by its name, or by an index that is crates.io's.
+func cargoRegistryIsCratesIo(args []string, name string) bool {
+	if name == "crates-io" {
+		return true
+	}
+	if name == "" || name == cargoUnreadConfig || name == cargoIncludedConfig {
+		return false
+	}
+	// cargo spells a key as an environment variable in capitals, with '-' as '_'.
+	env := "CARGO_REGISTRIES_" + strings.ToUpper(strings.ReplaceAll(name, "-", "_")) + "_INDEX"
+	index, _ := cargoInstallConfig(args, env, "registries", name, "index")
+	return catalog.IsCratesIoIndex(index)
+}
+
+// cargoTestIndexEnv is a test variable cargo 1.99.1 still honours, pointing crates.io at another index.
+const cargoTestIndexEnv = "__CARGO_TEST_CRATES_IO_URL_DO_NOT_USE_THIS"
+
+// cargoReplacement says what cargo install takes crates.io's crates from instead of crates.io, or "" when nothing replaces it.
+func cargoReplacement(args []string) string {
+	// cargo has no environment form for a [source] key (verified with cargo 1.99.1).
+	with, _ := cargoInstallConfig(args, "", "source", "crates-io", "replace-with")
+	switch {
+	case with == cargoUnreadConfig:
+		return "a cargo config ossprey could not read may replace crates.io, so cargo may install another source's copy, which was not checked"
+	case with == cargoIncludedConfig:
+		return "a cargo config includes another file, which may replace crates.io, so cargo may install another source's copy, which was not checked"
+	case with != "":
+		return fmt.Sprintf("crates.io is replaced by %q in your cargo config, so cargo installs that source's copy, which was not checked", with)
+	case os.Getenv(cargoTestIndexEnv) != "":
+		return "crates.io is replaced by " + cargoTestIndexEnv + " in your environment, so cargo installs that source's copy, which was not checked"
+	}
+	return ""
+}
+
+// Stand-ins for a value a config may set that cannot be read, which no registry name or index URL can equal.
+const (
+	cargoUnreadConfig   = "a config it cannot read"
+	cargoIncludedConfig = "an included config"
+)
+
+// cargoInstallConfig is the value `cargo install` reads for a config key, also read from env unless that is "", and whether one is set.
+func cargoInstallConfig(args []string, env string, key ...string) (string, bool) {
 	// The value set nearest the line wins; an include, or a regular file that cannot be read or that the bounded parser refuses, may set it too.
 	pick := func(data []byte, err error) (string, bool) {
 		if errors.Is(err, catalog.ErrNotRegular) {
@@ -1183,46 +1398,45 @@ func cargoDefaultRegistry(args []string) string {
 		}
 		doc, ok := cargoConfigDoc(data)
 		if err != nil || !ok {
-			return "a config it cannot read", true
+			return cargoUnreadConfig, true
 		}
-		if reg, _ := doc["registry"].(map[string]any); reg != nil {
-			if v, ok := reg["default"].(string); ok {
-				return v, true
-			}
+		var v any = doc
+		for _, k := range key {
+			t, _ := v.(map[string]any)
+			v = t[k]
+		}
+		if v, ok := v.(string); ok {
+			return v, true
 		}
 		if doc["include"] != nil {
-			return "an included config", true
+			return cargoIncludedConfig, true
 		}
 		return "", false
-	}
-	found := func(v string) string {
-		if v == "crates-io" {
-			return ""
-		}
-		return v
 	}
 	dir := cargoConfigDir(args[:max(verbIndex("cargo", args), 0)])
 	for _, c := range slices.Backward(cargoConfigArgs(args)) {
 		if v, ok := pick(cargoConfigArg(c, dir)); ok {
-			return found(v)
+			return v, true
 		}
 	}
-	if v := os.Getenv("CARGO_REGISTRY_DEFAULT"); v != "" {
-		return found(v)
+	if env != "" {
+		if v := os.Getenv(env); v != "" {
+			return v, true
+		}
 	}
 	home := catalog.CargoHome(dir)
 	if home == "" {
-		return ""
+		return "", false
 	}
 	// cargo install reads no project config, only those from CARGO_HOME up.
 	for _, f := range append(cargoConfigFiles(home), cargoConfigFile(home)) {
 		if data, there, err := readConfig(f); there {
 			if v, ok := pick(data, err); ok {
-				return found(v)
+				return v, true
 			}
 		}
 	}
-	return ""
+	return "", false
 }
 
 // cargoConfigArgs are the --config values on the line, in order, before any `--`.

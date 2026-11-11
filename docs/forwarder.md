@@ -132,7 +132,8 @@ found in N packages in Cargo.lock` after cargo's output for `cargo add`,
   update --workspace`, which writes the same lock `cargo fetch` would and
   downloads no crate. Every option you gave `cargo fetch` except `--target` is
   passed along. Once that lock is checked and written, your `cargo fetch` runs
-  with `--locked` added, so cargo downloads exactly the checked lock.
+  with `--locked` added against a private copy of the checked lock, so cargo
+  downloads exactly what was checked even if `Cargo.lock` changes meanwhile.
 
 If the lock holds malware you get the full malware report, a line saying the
 project was not changed, and exit code `1`. Nothing was written to the project
@@ -146,19 +147,23 @@ through a symlinked directory, and a member whose `Cargo.lock` sits at the
 workspace root.
 
 When cargo itself fails, its exit code is passed through and nothing is
-written. Its messages name your `Cargo.lock` and `Cargo.toml`, not the scratch
-copies. `cargo update --dry-run` runs against the scratch lock, so it writes
-nothing and nothing is checked; `cargo add --dry-run` writes nothing anywhere
-and goes to cargo as typed.
+written; one stopped by a signal, Ctrl-C included, exits 128 plus the signal,
+`130` for Ctrl-C, after ossprey removes its scratch copies. Its messages name
+your `Cargo.lock` and `Cargo.toml`, not the scratch copies. `cargo update
+--dry-run` runs against the scratch lock, so it writes nothing and nothing is
+checked; `cargo add --dry-run` writes nothing anywhere and goes to cargo as
+typed.
 
 Everything else fails closed: the project is left as it was, cargo's changes
 are dropped, and the command exits `2` with one line saying why. That happens
 when the API cannot be reached, when the platform checked none of the crates
-(Rust is checked on Teams and Enterprise plans), when there is no credential
-(before cargo runs), and, before cargo runs, for a workspace `cargo metadata`
-cannot read (cargo's own error is shown), a cargo script run with `-Zscript`,
-a `Cargo.lock` or `Cargo.toml` that is not a regular file or is over 32 MiB,
-and a `resolver.lockfile-path` that would put the lock elsewhere. That last
+(Rust is checked on Teams and Enterprise plans), when the scan quota is
+exhausted (a skipped scan exits `0` elsewhere, but here the command did
+nothing), when there is no credential (before cargo runs), and, before cargo
+runs, for a workspace `cargo metadata` cannot read (cargo's own error is
+shown), a cargo script run with `-Zscript`, a `Cargo.lock` or `Cargo.toml`
+that is not a regular file or is over 32 MiB, and a `resolver.lockfile-path`
+that would put the lock elsewhere. That last
 one may come from the environment, a `--config` or a cargo config, and is
 assumed for a config ossprey cannot read (a piped `--config /dev/stdin`, say),
 one too large or too deeply nested to read, and one with an `include`.
@@ -193,15 +198,22 @@ very deep project path can make the copy's path longer than Windows allows a
 working directory (260 characters), and `cargo add` then fails with exit `2`,
 the project unchanged. If
 `Cargo.lock` or a `Cargo.toml` changes while cargo runs, whether cargo wrote it
-or another program did, ossprey puts back what was there before, keeps what it
-found beside it as `Cargo.lock.ossprey-found-<n>` (or the `Cargo.toml`
-equivalent), and exits `2`.
+or another program did, ossprey moves what it found aside to
+`Cargo.lock.ossprey-found-<n>` (or the `Cargo.toml` equivalent), puts back what
+was there before, and exits `2`. A link at one of these files is followed only
+when it was there before cargo ran; one that appeared meanwhile is itself moved
+aside and the old file put back as a file. If the found file cannot be moved
+aside, the old file is still put back and the message says the found one was
+not kept.
 
 `cargo install` compiles the crate and runs its build scripts straight away, so
 the crates it names are checked first, and a block means cargo never starts.
-An exact version given to `--version` (or `--vers`), or `name@1.2.3`, pins a
-release; anything else, a range given to `--version` or `name@^1` included, is
-checked at the latest release on crates.io. A crate is checked under the name
+Each crate is checked at the release cargo would take, read from crates.io's
+index as cargo reads it: the newest release a range such as `name@^1` or
+`--version '<2'` allows, and a pin such as `name@1.2.3` as crates.io spells it,
+build metadata included. When the index cannot be read or holds no such
+release, ossprey refuses the install with exit code `2` before cargo runs.
+A crate is checked under the name
 typed, since `cargo install` takes no other spelling of it (`serde-json` does
 not find `serde_json`). Only the
 named crates are checked, not their dependencies, and one warning line says so.
@@ -215,8 +227,18 @@ cargo runs), or possibly set there by an `include` or by a config file too
 large or too deeply nested to read. A config that is not a regular file, such
 as a piped `--config /dev/stdin`, sets nothing here: `cargo install` reads its
 configuration a second time, when the pipe is already empty, and then installs
-from crates.io, so the crate is checked. `--registry crates-io` and crates.io's own index
-URL are checked like a plain install; an index URL with a non-ASCII host counts
+from crates.io, so the crate is checked. `--registry crates-io`, a registry
+whose index is crates.io's (named by `--registry` or `registry.default`), and
+crates.io's own index URL (`sparse+` in any case) are checked like a plain
+install. When the cargo configs `cargo install` reads replace crates.io
+(`[source.crates-io] replace-with`), the crate is still checked on crates.io,
+and one warning line says that cargo installs the replacement's copy, which
+was not checked; a config that includes another file or cannot be read may
+replace it, and gets the warning too. A `sparse+` URL
+is read as cargo reads it, once as given and again without `sparse+`, so a
+backslash before its host is userinfo and one after it a `/`. A host is read
+through IDNA as cargo reads it (`ｉｎｄｅｘ.crates.io` is crates.io), and a
+trailing dot changes nothing. An `ssh://` index URL holding a backslash counts
 as another registry.
 `cargo install --list` is not an install, and nothing is checked for a line
 that only prints help or the version: `-h` or `--help` after the subcommand,

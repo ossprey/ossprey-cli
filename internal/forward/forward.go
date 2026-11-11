@@ -562,7 +562,7 @@ func Run(ctx context.Context, opts Options) error {
 			return forwardTo()
 		}
 	} else if m.Ecosystem == "cargo" {
-		parsed = parseCargoInstall(opts.Args[start:], cargoDefaultRegistry(opts.Args))
+		parsed = parseCargoInstall(opts.Args[start:], cargoDefaultRegistry(opts.Args), func(r string) bool { return cargoRegistryIsCratesIo(opts.Args, r) })
 	} else {
 		parsed = parseInstallArgs(m, opts.Args[start:], m.reqFileArgs != nil && m.reqFileArgs(opts.Args))
 	}
@@ -593,6 +593,21 @@ func Run(ctx context.Context, opts Options) error {
 		note("ossprey: no crates.io crate named; forwarding `%s %s` unchecked\n",
 			m.Bin, strings.Join(opts.Args, " "))
 		return forwardTo()
+	}
+	if m.Ecosystem == "cargo" && !opts.Passive {
+		// The release cargo picks from crates.io's index is the one checked, and an install whose release cannot be found does not run.
+		stop := progress.Start(progressTo(), "ossprey: looking up crates.io's index")
+		specs, err := cargoReleases(ctx, parsed.Specs)
+		stop()
+		if err != nil {
+			flushWarnings(ctx)
+			return fmt.Errorf("did not run %s: %w", cargoVerbOnly(m, opts.Args), err)
+		}
+		parsed.Specs = specs
+		if line := cargoReplacement(opts.Args); line != "" {
+			// Printed even when quiet: the check covers crates.io's copy, not the one cargo installs.
+			fmt.Fprintf(errOut, "ossprey: warning: %s\n", line)
+		}
 	}
 
 	switch {
@@ -1299,6 +1314,11 @@ func (p *installArgs) addTarget(ecosystem, token string) {
 		p.NonPackages = append(p.NonPackages, token)
 		return
 	}
+	p.addSpec(s, token)
+}
+
+// addSpec adds a parsed package once, keeping each spelling of it.
+func (p *installArgs) addSpec(s check.Spec, token string) {
 	if p.Tokens == nil {
 		p.Tokens = map[check.Spec][]string{}
 	}

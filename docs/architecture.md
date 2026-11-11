@@ -48,7 +48,7 @@ install still works".
 
 ```mermaid
 flowchart TD
-    S["ossprey npm install ..."] --> CA{"cargo add, update,<br/>generate-lockfile or fetch,<br/>not only printing help?"}
+    S["ossprey &lt;manager&gt; ..."] --> CA{"cargo add, update,<br/>generate-lockfile or fetch,<br/>not only printing help?"}
     CA -- "yes" --> CV{"OSSPREY_SKIP_CI?"}
     CV -- "set" --> U
     CV -- "unset" --> CP{"passive mode?"}
@@ -60,7 +60,7 @@ flowchart TD
     CVG -- "yes" --> CG{"a line cargo takes (no update<br/>--breaking), a workspace cargo<br/>metadata can read, no lock<br/>lockfile-path may move, no script,<br/>a credential (bar update --dry-run)?"}
     CG -- "no" --> CX
     CG -- "yes" --> CR["cargo resolves into a scratch<br/>Cargo.lock (add: in a mirror of<br/>the workspace); the project<br/>is not touched"]
-    CR -- "a project file changed<br/>while cargo ran" --> CT["put it back, keep what<br/>was found beside it, exit 2"]
+    CR -- "a project file changed<br/>while cargo ran" --> CT["move what was found aside,<br/>put it back, exit 2"]
     CR -- "cargo fails" --> CF["cargo's exit code,<br/>nothing written"]
     CR -- "update --dry-run" --> CF
     CR -- "cargo succeeds" --> CC{"malware in the<br/>resolved lock?"}
@@ -68,7 +68,7 @@ flowchart TD
     CC -- "no verdict" --> CN["exit 2:<br/>the project is unchanged"]
     CC -- "no" --> CL{"project files as<br/>cargo started from?"}
     CL -- "no: changed during<br/>the check" --> CN
-    CL -- "yes" --> CE["write Cargo.lock, then any<br/>Cargo.toml add changed;<br/>fetch then runs with --locked"]
+    CL -- "yes" --> CE["write Cargo.lock, then any<br/>Cargo.toml add changed; fetch<br/>then runs --locked on a copy<br/>of the checked lock"]
     CA -- "no" --> T{"an install verb, or a<br/>tool run (npx, bunx, uvx)?"}
     T -- "no, e.g. npm run" --> U["exec the real manager"]
     T -- "yes" --> V{"OSSPREY_SKIP_CI?"}
@@ -115,9 +115,11 @@ lock there, `cargo add` runs in a mirror of the workspace since it edits
 `Cargo.toml` too, and only a clean result is written to the project
 (`internal/forward/cargo.go`, `cargo_mirror.go`). `cargo fetch` is resolved
 with `cargo update --workspace`, which downloads no crate (cargo still checks
-out git dependencies to resolve them), and runs with `--locked` once the lock
-is written. In passive mode cargo runs first and the
-lock is posted.
+out git dependencies to resolve them), and once the lock is written it runs
+with `--locked` against a scratch copy of the checked lock. In passive mode
+cargo runs first and the lock is posted. A gating `cargo install` checks each
+crate at the release crates.io's index says cargo takes, and is refused with
+exit 2 when the index cannot say.
 
 The passive branch is the one worth reading twice. It never gates, so it never
 sits in front of the install: where a lockfile will land, the install runs

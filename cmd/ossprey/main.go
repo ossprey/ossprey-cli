@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"runtime/debug"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -580,7 +581,7 @@ func forwardResult(err error) error {
 	default:
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
-			os.Exit(ee.ExitCode())
+			os.Exit(exitCodeOf(ee))
 		}
 		if reportSkipped(err) {
 			return nil
@@ -588,6 +589,14 @@ func forwardResult(err error) error {
 		return err
 	}
 	return nil
+}
+
+// exitCodeOf is a child's exit code, or 128 plus the signal that killed it, as a shell reports one.
+func exitCodeOf(ee *exec.ExitError) int {
+	if ws, ok := ee.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+		return 128 + int(ws.Signal())
+	}
+	return ee.ExitCode()
 }
 
 // noMalwareLine states how much was actually covered: an SBOM can carry
