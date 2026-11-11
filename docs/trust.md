@@ -76,9 +76,9 @@ happens when:
   regular file.
 
 The scan reads the configs in the project, in every directory above it and in
-`CARGO_HOME`. A relative `CARGO_HOME` counts from the scan's own working
-directory, with `..` taken off the path as written, as Cargo does. For registry
-trust, a symlinked config inside `CARGO_HOME`, or a
+`CARGO_HOME`. A relative `CARGO_HOME` counts from where Cargo runs: the scan's
+own working directory, or for a lock the forwarder checks, where it runs Cargo,
+with `..` taken off the path as written, as Cargo does. For registry trust, a symlinked config inside `CARGO_HOME`, or a
 symlinked `.cargo` directory or config above the project, counts as a config
 that cannot be read. `CARGO_HOME` itself may be a symlink and is followed,
 unless it is also the `.cargo` directory of a directory above the project, as
