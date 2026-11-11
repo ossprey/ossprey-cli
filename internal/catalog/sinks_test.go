@@ -466,6 +466,56 @@ func TestCatalogHidesNothingWhenAPathCannotBePlaced(t *testing.T) {
 	}
 }
 
+// The vendor filter reads a relative CARGO_HOME where cargo 1.99.1 does, so a crate its config builds by path stays visible (OSS-2553).
+func TestCatalogReadsARelativeCargoHomeForVendoring(t *testing.T) {
+	for name, c := range map[string]struct {
+		cwd, home, config, ref string
+		visible                bool
+	}{
+		"a relative home naming nothing":   {home: "h", config: "h"},
+		"a relative home in the scan root": {cwd: "proj", home: "h", config: "proj/h", ref: "vendor/serde", visible: true},
+		"lnk/../h":                         {home: "lnk/../h", config: "h", ref: "proj/vendor/serde", visible: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			base := t.TempDir()
+			if real, err := filepath.EvalSymlinks(base); err == nil {
+				base = real
+			}
+			proj := filepath.Join(base, "proj")
+			vendoredCrate(t, proj, "vendor/serde", "1.0.228", "cccc", "[dev-dependencies]\nserde_derive = \"=1.0.228\"\n")
+			vendoringRoot(t, proj, "", "", lockEntry("serde", "1.0.228", "cccc"))
+			config := "[net]\nretry = 2\n"
+			if c.ref != "" {
+				config = fmt.Sprintf("paths = [%q]\n", c.ref)
+			}
+			sinkFixture(t, base, c.config+"/config.toml", config)
+			sinkFixture(t, base, "other/deep/.keep", "")
+			if strings.Contains(c.home, "lnk") {
+				if runtime.GOOS == "windows" {
+					t.Skip("symlinks need privileges on Windows")
+				}
+				if err := os.Symlink(filepath.Join(base, "other", "deep"), filepath.Join(base, "lnk")); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+			}
+			t.Chdir(filepath.Join(base, c.cwd))
+			t.Setenv("CARGO_HOME", c.home)
+
+			pkgs, err := Catalog(context.Background(), proj, Options{SkipVersionLookup: true, NoExec: true})
+			if err != nil {
+				t.Fatalf("Catalog: %v", err)
+			}
+			visible := false
+			for _, p := range pkgs {
+				visible = visible || p.Name == "serde_derive"
+			}
+			if visible != c.visible {
+				t.Errorf("vendor/serde's dev-dependency visible = %v, want %v", visible, c.visible)
+			}
+		})
+	}
+}
+
 // TestCatalogReadsAVendoredCrateScannedDirectly: scanning a vendored crate asks for that crate.
 func TestCatalogReadsAVendoredCrateScannedDirectly(t *testing.T) {
 	proj := cargoVendorFixture(t)

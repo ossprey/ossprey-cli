@@ -2,6 +2,7 @@ package forward
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -235,6 +236,9 @@ func joinNames(specs []check.Spec) string {
 // project context; and everything after the command is the program's own
 // argv, so none of it is read as a flag for the resolver.
 func expandInstall(ctx context.Context, m *Manager, args []string, start int, parsed installArgs) ([]catalog.Resolved, error) {
+	if m.Ecosystem == "cargo" {
+		return nil, errCargoNotResolved
+	}
 	rest := args[start:]
 	tokens := specTokens(m, parsed)
 	switch m.Ecosystem {
@@ -395,6 +399,9 @@ func expandInstall(ctx context.Context, m *Manager, args []string, start int, pa
 	}
 	return nil, nil
 }
+
+// errCargoNotResolved is why a cargo install checks only the crates it names.
+var errCargoNotResolved = errors.New("not supported for cargo install")
 
 // uvGlobalPass are uv's global options (valid before the verb) that change
 // what a resolve finds: which configuration it reads, and whether it may go

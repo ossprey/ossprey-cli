@@ -86,6 +86,15 @@ func isCratesIo(source string) (is, maybe bool) {
 	return strings.ToLower(host) == want[0], false
 }
 
+// IsCratesIoIndex reports whether an `--index` URL is certainly crates.io's; one only IDNA could map there is not.
+func IsCratesIoIndex(index string) bool {
+	if !strings.HasPrefix(index, "sparse+") {
+		index = "registry+" + index
+	}
+	is, _ := isCratesIo(index)
+	return is
+}
+
 func nonASCII(r rune) bool { return r > unicode.MaxASCII }
 
 // gitCommit is the locked commit Cargo writes after '#' in a git source.
@@ -230,7 +239,7 @@ func cargoReplacement(ctx context.Context, r file.Resolver, root string) string 
 		return why
 	}
 	// A manifest above the root names no source, so only configs decide trust.
-	_, above, ok := cargoFilesAbove(root, false, true)
+	_, above, ok := cargoFilesAbove(root, CargoHome(cargoCwd()), false, true)
 	if !ok {
 		return configUnread
 	}

@@ -510,6 +510,59 @@ func TestCatalogTrustsNoCrateUnderASourceReplacement(t *testing.T) {
 	}
 }
 
+// cargo 1.99.1 joins a relative CARGO_HOME to where it runs and cleans `..` without following links (OSS-2553).
+func TestCatalogReadsARelativeCargoHomeAsCargoDoes(t *testing.T) {
+	mirror := "[source.crates-io]\nreplace-with = \"mirror\"\n\n[source.mirror]\nregistry = \"sparse+https://crates.elsewhere.example/\"\n"
+	lock := appLock(registrySerde, "[[package]]\nname = \"acme-sparse\"\nversion = \"1.0.0\"\nsource = \"sparse+https://crates.corp.example/internal/\"\nchecksum = \"aaaa\"\n")
+	for name, c := range map[string]struct {
+		// config is the directory holding the mirror.
+		home, config string
+		replaced     bool
+	}{
+		"a relative home in a scan":                 {home: "h", config: "h", replaced: true},
+		"lnk/../h in a scan":                        {home: "lnk/../h", config: "h", replaced: true},
+		"lnk/../h in a scan, not the link's parent": {home: "lnk/../h", config: "other/h"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			base := t.TempDir()
+			if real, err := filepath.EvalSymlinks(base); err == nil {
+				base = real
+			}
+			writeTree(t, base, map[string]string{
+				"proj/Cargo.toml":         "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
+				"proj/Cargo.lock":         lock,
+				"other/deep/.keep":        "",
+				"other/h/.keep":           "",
+				c.config + "/config.toml": mirror,
+			})
+			if strings.Contains(c.home, "lnk") {
+				if runtime.GOOS == "windows" {
+					t.Skip("symlinks need privileges on Windows")
+				}
+				if err := os.Symlink(filepath.Join(base, "other", "deep"), filepath.Join(base, "lnk")); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+			}
+			t.Chdir(base)
+			t.Setenv("CARGO_HOME", c.home)
+			root := filepath.Join(base, "proj")
+			ctx := warn.NewContext(context.Background(), false)
+			policy := testPolicy(t, []string{"https://crates.corp.example/internal/"}, nil)
+
+			pkgs, err := Catalog(ctx, root, Options{NoExec: true, SkipVersionLookup: true, Trust: policy, ReportCargoReplacement: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if trusted, _ := trustedNames(pkgs); (len(trusted) == 0) != c.replaced {
+				t.Errorf("trusted = %v, want trusted %v", trusted, !c.replaced)
+			}
+			if got := warn.Drain(ctx); strings.Contains(got, cargoReplacedEntry.One) != c.replaced {
+				t.Errorf("warnings = %q, want the crates.io replacement %v", got, c.replaced)
+			}
+		})
+	}
+}
+
 // A cancelled scan may close the walk before a link or config, so no crate is trusted by registry.
 func TestCatalogTrustsNoCrateWhenTheConfigWalkIsCancelled(t *testing.T) {
 	base := t.TempDir()

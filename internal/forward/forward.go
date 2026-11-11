@@ -1,5 +1,5 @@
 // Package forward implements the package-manager forwarder: it inspects an
-// install command (npm/yarn/bun/pip/poetry/uv), checks the packages it would
+// install command (npm/yarn/bun/pip/poetry/uv/cargo), checks the packages it would
 // install against the Ossprey API, blocks the install if any are malicious,
 // and otherwise execs the real package manager with the original arguments
 // untouched.
@@ -118,6 +118,8 @@ type Manager struct {
 	// parseRun classifies a tool run's arguments from start on. Unset means
 	// uv's syntax, parseToolRun.
 	parseRun func(args []string) installArgs
+	// resolveAt matches a command that only resolves and locks (`cargo add`), refused until its lock can be checked.
+	resolveAt func(args []string) (start int, ok bool)
 }
 
 // noLocalLockfileFlags name the options that stop an install from updating a
@@ -236,6 +238,8 @@ var managers = map[string]*Manager{
 	// uvx is `uv tool run` under its own name: every invocation fetches and runs.
 	"uvx": {Bin: "uvx", Ecosystem: "pypi", installAt: noInstall,
 		toolRunAt: func([]string) (int, bool) { return 0, true }},
+	// cargo: `install` is checked before it builds, and the verbs that only lock are refused until their lock can be checked (cargo.go).
+	"cargo": {Bin: "cargo", Ecosystem: "cargo", installAt: cargoInstallAt, resolveAt: cargoResolveAt},
 }
 
 func noInstall([]string) (int, bool) { return 0, false }
@@ -283,7 +287,11 @@ func verbAt(bin string, verbs ...string) func([]string) (int, bool) {
 // script run rather than becoming an install of a package called "add".
 func verbIndex(bin string, args []string) int {
 	global := globalValueFlags[bin]
-	for i := 0; i < len(args); i++ {
+	start := 0
+	if bin == "cargo" && len(args) > 0 && strings.HasPrefix(args[0], "+") {
+		start = 1 // rustup's toolchain override, read only as the first argument
+	}
+	for i := start; i < len(args); i++ {
 		a := args[i]
 		if a == "" {
 			continue
@@ -296,7 +304,11 @@ func verbIndex(bin string, args []string) int {
 			return -1
 		}
 		flag, _, hasInline := splitFlagValue(a)
-		if global[flag] && !hasInline {
+		owes := global[flag] && !hasInline
+		if bin == "cargo" && !strings.HasPrefix(a, "--") {
+			_, owes = cargoShorts(a, global) // clap's `-qC dir` owes C its value
+		}
+		if owes {
 			i++ // this flag's value is the next token, not the verb
 		}
 	}
@@ -405,6 +417,8 @@ var globalValueFlags = map[string]map[string]bool{
 	"poetry": flagSet("-C", "--directory", "--project", "-P"),
 	"uv": flagSet("--directory", "--project", "--cache-dir", "--python", "-p",
 		"--config-file", "--color", "--allow-insecure-host"),
+	// From `cargo --help` (cargo 1.99); TestCargoFlagTablesMatchCargo holds it there.
+	"cargo": flagSet("--explain", "--color", "-C", "--config", "-Z"),
 }
 
 // Options configures a forwarder Run.
@@ -486,6 +500,21 @@ func Run(ctx context.Context, opts Options) error {
 		}
 	}
 
+	if m.resolveAt != nil {
+		if _, ok := m.resolveAt(opts.Args); ok {
+			if opts.SkipCI {
+				note("ossprey: skip-ci set; forwarding `%s %s` without checking\n",
+					m.Bin, strings.Join(opts.Args, " "))
+				return forwardTo()
+			}
+			if opts.Passive {
+				note("ossprey: passive mode does not post `%s %s` yet; forwarding it unchecked\n", m.Bin, strings.Join(opts.Args, " "))
+				return forwardTo()
+			}
+			return checkCargoFirst(ctx, m, opts)
+		}
+	}
+
 	start, isInstall := m.installAt(opts.Args)
 	toolRun := false
 	if !isInstall && m.toolRunAt != nil {
@@ -533,6 +562,8 @@ func Run(ctx context.Context, opts Options) error {
 				parsed.LocalCommand, m.Bin, strings.Join(opts.Args, " "))
 			return forwardTo()
 		}
+	} else if m.Ecosystem == "cargo" {
+		parsed = parseCargoInstall(opts.Args[start:], cargoDefaultRegistry(opts.Args))
 	} else {
 		parsed = parseInstallArgs(m, opts.Args[start:], m.reqFileArgs != nil && m.reqFileArgs(opts.Args))
 	}
@@ -555,6 +586,12 @@ func Run(ctx context.Context, opts Options) error {
 		// `uvx --help`) has nothing to check, and it is not a manifest install:
 		// scanning the project here would check something it never runs.
 		note("ossprey: no registry package to check; forwarding `%s %s` unchecked\n",
+			m.Bin, strings.Join(opts.Args, " "))
+		return forwardTo()
+	}
+	if m.Ecosystem == "cargo" && len(parsed.Specs) == 0 {
+		// `cargo install` builds only what it names, never the project's manifest.
+		note("ossprey: no crates.io crate named; forwarding `%s %s` unchecked\n",
 			m.Bin, strings.Join(opts.Args, " "))
 		return forwardTo()
 	}
@@ -1565,6 +1602,11 @@ var valueFlags = map[string]map[string]bool{
 		"--config-setting", "--config-settings-package", "--no-build-isolation-package",
 		"--no-build-package", "--no-binary-package", "--refresh-package", "--color",
 		"--allow-insecure-host", "--directory", "--config-file"),
+	// `cargo install --help`'s (TestCargoFlagTablesMatchCargo), plus --version's hidden alias --vers.
+	"cargo": flagSet("--version", "--vers", "--index", "--registry", "--git", "--branch",
+		"--tag", "--rev", "--path", "--root", "--message-format", "--color", "--config", "-Z",
+		"--bin", "--example", "-F", "--features", "-j", "--jobs", "--profile", "--target",
+		"--target-dir"),
 }
 
 // packageValueFlags name the flags whose value is itself a package being
