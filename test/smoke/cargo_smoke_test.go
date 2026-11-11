@@ -1,10 +1,11 @@
 //go:build smoke
 
-// The cargo forwarder against the real cargo and a fake API: install is blocked before it builds, and the commands that only lock are refused.
+// The cargo forwarder against the real cargo and a fake API: update, generate-lockfile and fetch resolve into scratch and only a clean lock reaches the project, add is refused, and install is blocked before it builds.
 
 package smoke
 
 import (
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -37,21 +38,187 @@ func cargoEnv(t *testing.T, apiURL string) []string {
 	return append(env, "CARGO_HOME="+filepath.Join(home, ".cargo"), "RUSTUP_HOME="+rustup)
 }
 
+// cargoHome is the CARGO_HOME env sets.
+func cargoHome(env []string) string {
+	for _, kv := range env {
+		if v, ok := strings.CutPrefix(kv, "CARGO_HOME="); ok {
+			return v
+		}
+	}
+	return ""
+}
+
 const smokeManifest = "[package]\nname = \"ossprey-smoke\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n"
 
-// In gating mode add, update, generate-lockfile and fetch exit 2 before cargo runs or the API is asked, leaving the project as it was, and passive hands them to cargo.
-func TestCargoLockingCommandsAreRefused(t *testing.T) {
-	// The fake cargo is a shell script that records what reaches it, so only POSIX checks that cargo never ran.
-	posix := runtime.GOOS != "windows"
-	bin, path := t.TempDir(), os.Getenv("PATH")
-	if posix {
-		if err := os.WriteFile(filepath.Join(bin, "cargo"), []byte("#!/bin/sh\necho \"$@\" >> \"$(dirname \"$0\")/ran\"\n"), 0o755); err != nil {
+// cargoCrate is a binary crate with the dependency lines deps, locked first with none when locked.
+func cargoCrate(t *testing.T, env []string, deps string, locked bool) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, data := range map[string]string{"Cargo.toml": smokeManifest, filepath.Join("src", "main.rs"): "fn main() {}\n"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		path = bin + string(os.PathListSeparator) + path
+	}
+	if locked {
+		cargoRun(t, dir, env, "generate-lockfile", "--offline")
+	}
+	if deps != "" {
+		if err := os.WriteFile(filepath.Join(dir, "Cargo.toml"), []byte(smokeManifest+deps+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// cargoRun runs the real cargo in dir, failing the test when it fails.
+func cargoRun(t *testing.T, dir string, env []string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("cargo", args...)
+	cmd.Dir, cmd.Env = dir, env
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("cargo %v: %v\n%s", args, err, out)
+	}
+}
+
+// fileState is a file's bytes and the file itself, so a rewrite with the same bytes still shows.
+type fileState struct {
+	data []byte
+	info fs.FileInfo
+}
+
+func stateOf(t *testing.T, p string) fileState {
+	t.Helper()
+	info, err := os.Stat(p)
+	if os.IsNotExist(err) {
+		return fileState{}
+	}
+	data, rerr := os.ReadFile(p)
+	if err != nil || rerr != nil {
+		t.Fatalf("%s: %v %v", p, err, rerr)
+	}
+	return fileState{data, info}
+}
+
+// same reports whether a and b are the same file with the same bytes, or both missing.
+func (a fileState) same(b fileState) bool {
+	if a.info == nil || b.info == nil {
+		return a.info == nil && b.info == nil
+	}
+	return string(a.data) == string(b.data) && os.SameFile(a.info, b.info)
+}
+
+// downloaded are the .crate files cargo has put in CARGO_HOME's cache.
+func downloaded(t *testing.T, home string) []string {
+	t.Helper()
+	var got []string
+	_ = filepath.WalkDir(filepath.Join(home, "registry", "cache"), func(p string, d fs.DirEntry, err error) error {
+		if err == nil && strings.HasSuffix(p, ".crate") {
+			got = append(got, d.Name())
+		}
+		return nil
+	})
+	return got
+}
+
+// A blocked command leaves Cargo.toml and Cargo.lock as they were, the same files with the same bytes, writes nothing under target/, and downloads no crate (OSS-2553).
+func TestCargoBlockedLeavesTheProjectAsItWas(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		deps   string
+		locked bool
+		args   []string
+	}{
+		{"update", `itoa = "=1.0.15"`, true, []string{"update"}},
+		{"generate-lockfile", `itoa = "=1.0.15"`, false, []string{"generate-lockfile"}},
+		{"fetch", `itoa = "=1.0.15"`, false, []string{"fetch"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := newFakeAPI(t, "pkg:cargo/itoa@1.0.15")
+			env := cargoEnv(t, api.URL)
+			dir := cargoCrate(t, env, tc.deps, tc.locked)
+			manifest, lock := filepath.Join(dir, "Cargo.toml"), filepath.Join(dir, "Cargo.lock")
+			beforeManifest, beforeLock := stateOf(t, manifest), stateOf(t, lock)
+			target := emptyTarget(t, dir)
+
+			res := runForwardEnv(t, dir, env, binPath, append([]string{"cargo"}, tc.args...)...)
+			if res.exitCode != 1 || !strings.Contains(res.stderr, "ossprey: the project was not changed") {
+				t.Fatalf("exit %d, want 1 and the block\nstderr: %s", res.exitCode, res.stderr)
+			}
+			if entries, err := os.ReadDir(target); err != nil || len(entries) != 0 {
+				t.Errorf("target/ holds %v (%v), want nothing", entries, err)
+			}
+			if !stateOf(t, manifest).same(beforeManifest) || !stateOf(t, lock).same(beforeLock) {
+				t.Errorf("Cargo.toml or Cargo.lock changed\nstderr: %s", res.stderr)
+			}
+			if got := downloaded(t, cargoHome(env)); len(got) != 0 {
+				t.Errorf("downloaded %v, want nothing", got)
+			}
+			if _, purls := api.stats(); !slices.Contains(purls, "pkg:cargo/itoa@1.0.15") {
+				t.Errorf("submitted %v, want the crate cargo resolved", purls)
+			}
+		})
+	}
+}
+
+// emptyTarget makes dir's target/, where cargo writes .rustc_info.json unless CARGO_CACHE_RUSTC_INFO=0 (verified with cargo 1.99.1).
+func emptyTarget(t *testing.T, dir string) string {
+	t.Helper()
+	target := filepath.Join(dir, "target")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return target
+}
+
+// A clean fetch lands the lock it checked and downloads exactly that.
+func TestCargoFetchCleanDownloadsTheCheckedLock(t *testing.T) {
+	api := newFakeAPI(t, "")
+	env := cargoEnv(t, api.URL)
+	dir := cargoCrate(t, env, `itoa = "=1.0.15"`, false)
+
+	res := runForwardEnv(t, dir, env, binPath, "cargo", "fetch")
+	if res.exitCode != 0 {
+		t.Fatalf("exit %d\nstderr: %s", res.exitCode, res.stderr)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dir, "Cargo.lock")); !strings.Contains(string(got), "name = \"itoa\"\nversion = \"1.0.15\"") {
+		t.Errorf("Cargo.lock = %q, want itoa locked", got)
+	}
+	if got := downloaded(t, cargoHome(env)); !slices.Equal(got, []string{"itoa-1.0.15.crate"}) {
+		t.Errorf("downloaded %v, want the checked crate alone", got)
+	}
+}
+
+// cargo's error names the redirected lock, which the user reads as the project's (OSS-2553).
+func TestCargoLockedFailureNamesTheProjectLock(t *testing.T) {
+	api := newFakeAPI(t, "")
+	env := cargoEnv(t, api.URL)
+	dir := cargoCrate(t, env, `itoa = "=1.0.15"`, true)
+
+	res := runForwardEnv(t, dir, env, binPath, "cargo", "update", "--locked")
+	if res.exitCode != 101 {
+		t.Fatalf("exit %d, want cargo's 101\nstderr: %s", res.exitCode, res.stderr)
+	}
+	if !strings.Contains(res.stderr, filepath.Join(dir, "Cargo.lock")) || strings.Contains(res.stderr, "ossprey-cargo-") {
+		t.Errorf("stderr names the scratch lock, want the project's:\n%s", res.stderr)
+	}
+}
+
+// A cargo older than 1.97 ignores the redirect and writes the project's lock (verified with 1.96.0 and 1.80.0), so it never runs (OSS-2553).
+func TestCargoOlderThan197IsRefused(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake cargo is a shell script")
+	}
+	bin := t.TempDir()
+	// Only +old is 1.96.0, so a probe that dropped the toolchain would pass the gate and run it (verified with cargo 1.96.0).
+	fake := "#!/bin/sh\nfor a; do [ \"$a\" = -V ] && { [ \"$1\" = +old ] && echo 'cargo 1.96.0 (30a34c682 2026-05-25)' || echo 'cargo 1.99.1 (5f94df478 2026-08-27)'; exit 0; }; done\necho \"$@\" >> \"$(dirname \"$0\")/ran\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "cargo"), []byte(fake), 0o755); err != nil {
+		t.Fatal(err)
 	}
 	api := newFakeAPI(t, "")
-	env := forwardEnv(t.TempDir(), api.URL, path)
+	env := forwardEnv(t.TempDir(), api.URL, bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	dir := t.TempDir()
 	lock := "version = 4\n"
 	for name, data := range map[string]string{"Cargo.toml": smokeManifest, "Cargo.lock": lock} {
@@ -59,12 +226,14 @@ func TestCargoLockingCommandsAreRefused(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, args := range [][]string{{"add", "itoa"}, {"add", "--dry-run", "itoa"}, {"update"}, {"generate-lockfile"}, {"fetch"}} {
-		res := runForwardEnv(t, dir, env, binPath, append([]string{"cargo"}, args...)...)
-		want := "error: did not run `cargo " + strings.Join(args, " ") + "`: ossprey does not check `cargo " + args[0] + "` yet"
-		if res.exitCode != 2 || !strings.Contains(res.stderr, want) {
-			t.Errorf("cargo %v: exit %d, want 2 and %q\nstderr: %s", args, res.exitCode, want, res.stderr)
+	for _, args := range [][]string{{"add", "itoa"}, {"update"}, {"generate-lockfile"}, {"fetch"}, {"add", "--dry-run", "itoa"}} {
+		res := runForwardEnv(t, dir, env, binPath, append([]string{"cargo", "+old"}, args...)...)
+		if res.exitCode != 2 || !strings.Contains(res.stderr, "ossprey needs cargo 1.97 or later") || !strings.Contains(res.stderr, "cargo 1.96.0 (30a34c682 2026-05-25)") {
+			t.Errorf("cargo +old %v: exit %d, want 2 and the refusal\nstderr: %s", args, res.exitCode, res.stderr)
 		}
+	}
+	if ran, err := os.ReadFile(filepath.Join(bin, "ran")); err == nil {
+		t.Errorf("cargo ran: %s", ran)
 	}
 	for name, want := range map[string]string{"Cargo.toml": smokeManifest, "Cargo.lock": lock} {
 		if got, _ := os.ReadFile(filepath.Join(dir, name)); string(got) != want {
@@ -74,15 +243,136 @@ func TestCargoLockingCommandsAreRefused(t *testing.T) {
 	if n, _ := api.stats(); n != 0 {
 		t.Errorf("%d API requests, want none", n)
 	}
-	if !posix {
+}
+
+// In gating mode cargo add is refused after the version check, before cargo touches the project or the API is asked, and add --dry-run goes to cargo.
+func TestCargoAddIsRefused(t *testing.T) {
+	api := newFakeAPI(t, "")
+	env := cargoEnv(t, api.URL)
+	dir := cargoCrate(t, env, "", true)
+	manifest, lock := filepath.Join(dir, "Cargo.toml"), filepath.Join(dir, "Cargo.lock")
+	beforeManifest, beforeLock := stateOf(t, manifest), stateOf(t, lock)
+
+	res := runForwardEnv(t, dir, env, binPath, "cargo", "add", "itoa@=1.0.15")
+	if want := "error: did not run `cargo add itoa@=1.0.15`: ossprey does not check `cargo add` yet"; res.exitCode != 2 || !strings.Contains(res.stderr, want) {
+		t.Fatalf("exit %d, want 2 and %q\nstderr: %s", res.exitCode, want, res.stderr)
+	}
+	if !stateOf(t, manifest).same(beforeManifest) || !stateOf(t, lock).same(beforeLock) {
+		t.Errorf("Cargo.toml or Cargo.lock changed\nstderr: %s", res.stderr)
+	}
+	if n, _ := api.stats(); n != 0 {
+		t.Errorf("%d API requests, want none", n)
+	}
+
+	// The fake cargo is a shell script that records what reaches it, so only POSIX checks what ran.
+	if runtime.GOOS == "windows" {
 		return
 	}
-	if ran, err := os.ReadFile(filepath.Join(bin, "ran")); err == nil {
-		t.Errorf("cargo ran: %s", ran)
+	bin := t.TempDir()
+	fake := "#!/bin/sh\necho \"$@\" >> \"$(dirname \"$0\")/ran\"\n[ \"$1\" = -V ] && echo 'cargo 1.99.1 (5f94df478 2026-08-27)'\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(bin, "cargo"), []byte(fake), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	res := runForwardEnv(t, dir, append(env, "OSSPREY_PASSIVE=1"), binPath, "cargo", "update")
-	if ran, _ := os.ReadFile(filepath.Join(bin, "ran")); res.exitCode != 0 || string(ran) != "update\n" || strings.Contains(res.stderr, "ossprey:") {
-		t.Errorf("passive cargo update: exit %d, cargo ran %q, want 0 and update alone\nstderr: %s", res.exitCode, ran, res.stderr)
+	env = forwardEnv(t.TempDir(), api.URL, bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	ran := filepath.Join(bin, "ran")
+	for _, tc := range []struct {
+		args []string
+		exit int
+		ran  string
+	}{
+		{[]string{"add", "itoa"}, 2, "-V\n"},
+		{[]string{"add", "--dry-run", "itoa"}, 0, "-V\nadd --dry-run itoa\n"},
+	} {
+		os.Remove(ran)
+		res := runForwardEnv(t, dir, env, binPath, append([]string{"cargo"}, tc.args...)...)
+		if got, _ := os.ReadFile(ran); res.exitCode != tc.exit || string(got) != tc.ran {
+			t.Errorf("cargo %v: exit %d, cargo ran %q; want %d and %q\nstderr: %s", tc.args, res.exitCode, got, tc.exit, tc.ran, res.stderr)
+		}
+	}
+	if n, _ := api.stats(); n != 0 {
+		t.Errorf("%d API requests, want none", n)
+	}
+}
+
+// A resolver.lockfile-path puts the lock where ossprey does not land it, so the command is refused before cargo writes anything there.
+func TestCargoMovedLockIsRefused(t *testing.T) {
+	api := newFakeAPI(t, "")
+	env := cargoEnv(t, api.URL)
+	dir := cargoCrate(t, env, `itoa = "=1.0.15"`, false)
+	if err := os.MkdirAll(filepath.Join(dir, ".cargo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".cargo", "config.toml"), []byte("[resolver]\nlockfile-path = \"alt/Cargo.lock\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res := runForwardEnv(t, dir, env, binPath, "cargo", "fetch")
+	if res.exitCode != 2 || !strings.Contains(res.stderr, "error: did not run `cargo fetch`: its Cargo.lock cannot be checked (a resolver.lockfile-path may move it)") {
+		t.Fatalf("exit %d, want 2 and the refusal\nstderr: %s", res.exitCode, res.stderr)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "alt")); !os.IsNotExist(err) {
+		t.Errorf("cargo wrote the moved lock (%v)", err)
+	}
+	if got := downloaded(t, cargoHome(env)); len(got) != 0 {
+		t.Errorf("downloaded %v, want nothing", got)
+	}
+}
+
+// With no Cargo.toml, a gating update is refused on cargo's own error line, and passive leaves cargo's error alone.
+func TestCargoUpdateWithNoWorkspace(t *testing.T) {
+	api := newFakeAPI(t, "")
+	env := cargoEnv(t, api.URL)
+	dir := t.TempDir()
+	res := runForwardEnv(t, dir, env, binPath, "cargo", "update", "--offline")
+	if res.exitCode != 2 || !strings.Contains(res.stderr, "did not run `cargo update --offline`") || !strings.Contains(res.stderr, "could not find `Cargo.toml`") {
+		t.Errorf("gating: exit %d, want 2 and cargo's error in the refusal\nstderr: %s", res.exitCode, res.stderr)
+	}
+	res = runForwardEnv(t, dir, append(slices.Clone(env), "OSSPREY_PASSIVE=1"), binPath, "cargo", "update", "--offline")
+	if res.exitCode != 101 || !strings.Contains(res.stderr, "could not find `Cargo.toml`") || strings.Contains(res.stderr, "ossprey:") {
+		t.Errorf("passive: exit %d, want cargo's 101 and its error alone\nstderr: %s", res.exitCode, res.stderr)
+	}
+	if n, _ := api.stats(); n != 0 {
+		t.Errorf("%d API requests, want none", n)
+	}
+}
+
+// Passive runs cargo first and posts the lock it wrote, never blocking.
+func TestCargoAddPassivePostsTheLock(t *testing.T) {
+	api := newFakeAPI(t, "pkg:cargo/itoa@1.0.15")
+	env := append(cargoEnv(t, api.URL), "OSSPREY_PASSIVE=1")
+	dir := cargoCrate(t, env, "", false)
+
+	res := runForwardEnv(t, dir, env, binPath, "cargo", "add", "itoa@=1.0.15")
+	if res.exitCode != 0 {
+		t.Fatalf("exit %d, want 0\nstderr: %s", res.exitCode, res.stderr)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dir, "Cargo.toml")); !strings.Contains(string(got), "itoa") {
+		t.Errorf("Cargo.toml = %q, want cargo's edit kept", got)
+	}
+	if _, purls := api.stats(); !slices.Contains(purls, "pkg:cargo/itoa@1.0.15") {
+		t.Errorf("submitted %v, want the lock posted", purls)
+	}
+}
+
+// cargo 1.99.1 locks a -Zscript manifest under its build directory, where ossprey does not land it, so the command is refused before cargo runs (OSS-2553).
+func TestCargoScriptIsRefused(t *testing.T) {
+	api := newFakeAPI(t, "")
+	env := append(cargoEnv(t, api.URL), "RUSTC_BOOTSTRAP=1")
+	dir := cargoCrate(t, env, "", false)
+	if err := os.WriteFile(filepath.Join(dir, "Cargo.lock"), []byte("version = 4\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	script := "---\n[package]\nedition = \"2024\"\n[dependencies]\nitoa = \"=1.0.15\"\n---\nfn main() {}\n"
+	if err := os.WriteFile(filepath.Join(dir, "s.rs"), []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res := runForwardEnv(t, dir, env, binPath, "cargo", "-Zscript", "generate-lockfile", "--manifest-path", "s.rs")
+	if res.exitCode != 2 || !strings.Contains(res.stderr, "its Cargo.lock cannot be checked (a cargo script keeps it in the build directory)") {
+		t.Fatalf("exit %d, want 2 and the refusal\nstderr: %s", res.exitCode, res.stderr)
+	}
+	if _, err := os.Stat(filepath.Join(cargoHome(env), "build")); !os.IsNotExist(err) {
+		t.Errorf("cargo ran and wrote under its build directory (%v)", err)
 	}
 }
 
@@ -173,5 +463,39 @@ func TestCargoInstallReadsTheRegistryAboveARelativeHome(t *testing.T) {
 	}
 	if !strings.Contains(res.stderr, "corp.invalid") {
 		t.Errorf("cargo did not try the corp registry:\n%s", res.stderr)
+	}
+}
+
+// noCredentialEnv is cargoEnv with no API key and an empty config directory, so the forwarder finds no credential.
+func noCredentialEnv(t *testing.T, apiURL string) []string {
+	t.Helper()
+	var env []string
+	for _, kv := range cargoEnv(t, apiURL) {
+		if k, _, _ := strings.Cut(kv, "="); k != "OSSPREY_API_KEY" && k != "OSSPREY_CONFIG_DIR" {
+			env = append(env, kv)
+		}
+	}
+	return append(env, "OSSPREY_CONFIG_DIR="+t.TempDir())
+}
+
+// A gating update with no credential stops before cargo runs, so no lock is written.
+func TestCargoUpdateWithoutACredentialStopsBeforeCargo(t *testing.T) {
+	api := newFakeAPI(t, "")
+	env := noCredentialEnv(t, api.URL)
+	deps := `itoa = "=1.0.15"`
+	dir := cargoCrate(t, env, deps, false)
+
+	res := runForwardEnv(t, dir, env, binPath, "cargo", "update")
+	if res.exitCode != 2 || !strings.Contains(res.stderr, "error: no credentials") {
+		t.Fatalf("exit %d, want 2 on the credentials error\nstderr: %s", res.exitCode, res.stderr)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dir, "Cargo.toml")); string(got) != smokeManifest+deps+"\n" {
+		t.Errorf("Cargo.toml = %q, want it untouched", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "Cargo.lock")); !os.IsNotExist(err) {
+		t.Errorf("a Cargo.lock was written (%v), want cargo never run", err)
+	}
+	if n, _ := api.stats(); n != 0 {
+		t.Errorf("the API got %d requests, want none", n)
 	}
 }

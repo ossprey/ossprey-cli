@@ -51,12 +51,12 @@ yourself, `--dir` / `$OSSPREY_SHIM_DIR` to relocate them.
 
 **How it behaves**
 
-- **Only installs are checked.** `npm run build`, `poetry run pytest`, `pip
-  list` and friends are exec'd straight through. The allowlist is the same one
-  the forwarder uses, so there is only one place it can drift. With the cargo
-  shim, `cargo add`, `update`, `generate-lockfile` and `fetch` are refused
-  until ossprey can check the `Cargo.lock` they write; passive mode runs them
-  unchecked.
+- **Only installs are checked**, plus, with the cargo shim, `cargo update`,
+  `generate-lockfile` and `fetch`, whose `Cargo.lock` is checked before it
+  reaches the project; `cargo add` is refused in gating mode until it can be
+  checked the same way. `npm run build`, `poetry run pytest`, `pip list` and
+  friends are exec'd straight through. The allowlist is the same one the
+  forwarder uses, so there is only one place it can drift.
 - **It fails open.** If the ossprey binary goes missing the shim prints a
   warning and runs the real manager anyway. `OSSPREY_SHIM_BYPASS=1 npm install
   …` skips the check for one command, and `ossprey shim uninstall` removes them

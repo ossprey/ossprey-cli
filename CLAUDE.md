@@ -177,16 +177,77 @@ Windows resolves it under `%LOCALAPPDATA%`.
      after it (`cargoConfigDir`); a relative `CARGO_HOME` joins cargo's
      physical cwd with `..` cleaned and links kept (`catalog.CargoHome`, shared
      with the catalogue).
-   - **Bounded, regular reads.** Configs go through `catalog.ReadRegular`, as
-     the catalogue's lock reads do: regular by `os.Stat` before the open
-     (opening a FIFO releases a blocked writer, opening a device can reset it)
-     and on the handle opened `O_NONBLOCK`, read to the bound only, from
-     offset 0 (on macOS `/dev/fd/N` shares cargo's offset).
-   - **Not checked.** `add`, `update`, `generate-lockfile` and `fetch` are
-     refused in gating mode and forwarded unchecked in passive mode, since
-     nothing checks their lock before it lands yet. A `cargo build` with a
-     stale or missing lock resolves on the spot. `cargo install` checks the
-     named crates only.
+   - **Bounded, regular reads.** Locks and configs go through
+     `catalog.ReadRegular`: regular by `os.Stat` before the open (opening a
+     FIFO releases a blocked writer, opening a device can reset it) and on the
+     handle opened `O_NONBLOCK`, read to the bound only, from offset 0 (on
+     macOS `/dev/fd/N` shares cargo's offset).
+   - **Check first.** In gating mode `update`, `generate-lockfile` and
+     `fetch` never change the project before the check (`checkCargoFirst`):
+     no unchecked crate may sit where an IDE (rust-analyzer), a watcher
+     (cargo-watch, bacon) or CI could build it, so running cargo first and
+     undoing a block is out, since that is the window.
+   - **The version gate.** `resolver.lockfile-path` works from cargo 1.97.0;
+     1.96.0, 1.80.0 and `1.97.0-nightly` write the project lock and exit 0, so
+     nothing after the run can catch it. `cargoRedirects` reads `cargo -V` in
+     semver order, a pre-release below its release, probed bare plus a leading
+     `+toolchain` (`-C` makes stable cargo exit 101). `install` and passive
+     mode are not gated.
+   - **The redirect.** A user `--config` beats
+     `CARGO_RESOLVER_LOCKFILE_PATH`, which beats config files, and the last
+     `--config` wins, so ossprey sets both, its `--config` last before any `--`
+     (`cargoRedirectArgs`). The project lock is copied to scratch first, or
+     cargo resolves from nothing. `CARGO_CACHE_RUSTC_INFO=0` keeps
+     `target/.rustc_info.json` out of the project.
+   - **Refused before cargo runs.** `update --breaking`, which rewrites
+     `Cargo.toml` too, on any `-b` token, even one an option may have taken,
+     since a misread costs only a refusal. A `fetch` line `cargo fetch` rejects
+     (`cargoFetchUnknown`), since the resolve passes on only what `update`
+     takes and the lock would land first. A `resolver.lockfile-path` the run
+     may read (`lockfileMoved`: the variable, a `--config`, a config, an
+     `include`, or a config ossprey cannot read), since the user's lock would
+     be elsewhere and ossprey would check and land the wrong one; decided
+     before `cargo metadata` so it never drains a pipe, and only the decoded
+     key counts. A `-Zscript` manifest, which cargo locks under
+     `$CARGO_HOME/build`. And `add` (not `add --dry-run`), which writes
+     `Cargo.toml` before it resolves while only the lock is redirected.
+   - **Workspace and snapshot.** `cargo metadata --no-deps`
+     (`readCargoWorkspace`) names the workspace root as cargo spells it, run
+     as the command runs (`realCommand`) minus any `--config` naming a file
+     (`withoutConfigFiles`), which it would drain. Then the credential, then a
+     snapshot of the lock; one that is not a regular file, is over the bound
+     or links to nothing refuses.
+   - **fetch.** `cargo fetch` downloads before it returns, so `cargo update
+     --workspace` resolves instead, locking byte for byte what fetch would and
+     downloading no crate (`cargoFetchResolve`, every option but `--target`).
+     After landing, the user's fetch runs with `--locked` (`cargoFetchLocked`).
+     Git dependencies are still checked out under `CARGO_HOME/git` to resolve,
+     as plain cargo does; nothing is built. Whether to refuse git sources too,
+     whose checkout (`build.rs` included) lands before the check, is open.
+   - **Dry runs.** `update --dry-run` writes a whole lock to the redirect when
+     there is none, so it runs redirected and nothing is checked or landed.
+     `add --dry-run` writes nothing and goes to cargo after the gate.
+   - **Tripwire, check, land.** After cargo exits the snapshot must still
+     match, else each file is put back, what was found kept beside it as
+     `<name>.ossprey-found-<n>` (an editor may have saved it), and the run
+     fails (`cargoTripwire`). cargo's own failure returns its exit code. A
+     block, a check error or a lock the platform checked none of leave the
+     project as it was, errors exiting 2 since 1 means malware; trust comes
+     from the configs where cargo runs (`CargoConfigDir`). `landCargo` lands
+     nothing if a file changed during the check and skips unchanged bytes;
+     `landFile` writes as cargo writes `Cargo.toml` and syncs first.
+   - **cargo's stderr** goes through `cargoStderr`, which spells the scratch
+     lock as the project's and never fails a write: cargo exits 101 without
+     locking when its stderr closes. `CARGO_TERM_COLOR=always` is set only
+     where cargo's own auto mode would colour (`cargoColours`).
+   - **Passive** runs cargo first and posts the lock it leaves, even after a
+     failure (`postCargoLock`); a lock that may have moved, or a script's, is
+     not posted, with a warning, and a missing workspace leaves cargo's error
+     alone.
+   - **Not checked.** A `cargo build` with a stale or missing lock resolves on
+     the spot, as does an IDE after a hand edit of `Cargo.toml`. `cargo
+     install` checks the named crates only. Configs above a linked cwd are
+     missed on Windows, where cargo reads them as spelled.
 
    **Not covered, deliberately (for now):** `pnpm dlx`, `yarn dlx`, and initializers (`npm init <x>`, `npm create`, `bun create`, `yarn create`, which fetch `create-<x>`). Do **not** close `dlx` by adding it to a `verbAt` list (same argv problem: `pnpm dlx cowsay moo` would check `moo`); give it a `toolRunAt`/`parseRun` like npm's. `docs/forwarder.md`'s "What is not checked" section is the user-facing statement of this.
 
@@ -304,9 +365,10 @@ Every rule is a hole in the scan by design, so the rules are narrow:
   filter reads through them as before, since a dotfile manager links
   `~/.cargo/config.toml`. `CARGO_HOME` itself is followed, being the scanning
   user's environment, unless the walk above the root reaches it first as an
-  ancestor's `.cargo`. A relative one joins the scan's physical working
-  directory with `..` cleaned and links kept (`CargoHome`), as cargo does, for
-  trust, the replacement warning and the vendor filter alike.
+  ancestor's `.cargo`. A relative one joins where cargo runs (`CargoConfigDir`
+  for a copied lock, else the scan's physical working directory) with `..`
+  cleaned and links kept (`CargoHome`), as cargo does, for trust, the
+  replacement warning and the vendor filter alike.
   Not checked: a typed `--config`, environment such as `CARGO_HTTP_PROXY` and
   `CARGO_HTTP_CAINFO` (cargo has no environment form for `[source]` keys),
   `[http]` `proxy`/`cainfo`, a config only a build run from inside a sink would
@@ -569,7 +631,9 @@ config that redirects the vendored source without restating `replace-with`,
 and warned about a `CARGO_HOME` mirror that the project's own vendor config
 overrides everywhere in the project; judging a scan root holding neither file
 warned about that mirror in a monorepo whose Rust project, in a subdirectory,
-builds from a proven vendor tree. It runs only when a
+builds from a proven vendor tree. A lock copied out of its workspace
+(`CargoConfigDir`) is judged where cargo runs, from the configs there and
+above and `CARGO_HOME`'s. It runs only when a
 crate goes out unmarked, so a scan with no Rust never mentions cargo.
 
 #### Why the npm resolve skips workspace members (OSS-1353)

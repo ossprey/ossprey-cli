@@ -586,7 +586,7 @@ func TestCargoSourceReplacedLooksUpConfigsByName(t *testing.T) {
 		t.Fatalf("resolver: %v", err)
 	}
 	log := &globLog{Resolver: r}
-	if !cargoSourceReplaced(log, dir) {
+	if !cargoSourceReplaced(log, dir, "") {
 		t.Fatal("mirror in tools/.cargo not reported")
 	}
 	for _, g := range log.globs {
@@ -624,6 +624,30 @@ func TestCatalogReportsCargoReplacementOnlyForAScan(t *testing.T) {
 				if _, err := Catalog(ctx, dir, tc.opts); err != nil {
 					t.Fatalf("Catalog: %v", err)
 				}
+			}
+			if got := warn.Drain(ctx); got != tc.want {
+				t.Errorf("warnings = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// A lock copied out of its workspace is judged where cargo runs, so the project's replacement is reported (OSS-2553).
+func TestCatalogReportsCargoReplacementWhereCargoRuns(t *testing.T) {
+	t.Setenv("CARGO_HOME", filepath.Join(t.TempDir(), "user", ".cargo"))
+	project, copied := t.TempDir(), t.TempDir()
+	writeTree(t, project, map[string]string{".cargo/config.toml": mirrorConfig})
+	writeTree(t, copied, map[string]string{"Cargo.lock": appLock(registrySerde)})
+	for _, tc := range []struct {
+		name, configDir, want string
+	}{
+		{"the copy alone", "", ""},
+		{"where cargo runs", project, "ossprey: " + cargoReplacedEntry.One + "\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := warn.NewContext(context.Background(), false)
+			if _, err := Catalog(ctx, copied, Options{SkipVersionLookup: true, NoExec: true, ReportCargoReplacement: true, CargoConfigDir: tc.configDir}); err != nil {
+				t.Fatalf("Catalog: %v", err)
 			}
 			if got := warn.Drain(ctx); got != tc.want {
 				t.Errorf("warnings = %q, want %q", got, tc.want)

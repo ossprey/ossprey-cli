@@ -118,7 +118,7 @@ type Manager struct {
 	// parseRun classifies a tool run's arguments from start on. Unset means
 	// uv's syntax, parseToolRun.
 	parseRun func(args []string) installArgs
-	// resolveAt matches a command that only resolves and locks (`cargo add`), refused until its lock can be checked.
+	// resolveAt matches a command that only resolves and locks (`cargo update`), checked before its lock reaches the project.
 	resolveAt func(args []string) (start int, ok bool)
 }
 
@@ -238,7 +238,7 @@ var managers = map[string]*Manager{
 	// uvx is `uv tool run` under its own name: every invocation fetches and runs.
 	"uvx": {Bin: "uvx", Ecosystem: "pypi", installAt: noInstall,
 		toolRunAt: func([]string) (int, bool) { return 0, true }},
-	// cargo: `install` is checked before it builds, and the verbs that only lock are refused until their lock can be checked (cargo.go).
+	// cargo: `install` is checked before it builds, the verbs that only lock before their lock lands (cargo.go).
 	"cargo": {Bin: "cargo", Ecosystem: "cargo", installAt: cargoInstallAt, resolveAt: cargoResolveAt},
 }
 
@@ -508,8 +508,7 @@ func Run(ctx context.Context, opts Options) error {
 				return forwardTo()
 			}
 			if opts.Passive {
-				note("ossprey: passive mode does not post `%s %s` yet; forwarding it unchecked\n", m.Bin, strings.Join(opts.Args, " "))
-				return forwardTo()
+				return postCargoLock(ctx, m, opts)
 			}
 			return checkCargoFirst(ctx, m, opts)
 		}
@@ -781,14 +780,7 @@ func reportAndForward(ctx context.Context, m *Manager, opts Options, sbom *ossbo
 		note("ossprey: %s\n", msg)
 	}
 	if hasMalware {
-		// The full report even when quiet: a block is the one outcome worth
-		// more than a line.
-		profile := ansi.Detect(errOut)
-		fmt.Fprint(errOut, alert.Malware(summary.Alert(), "Installation blocked.", profile))
-		for _, msg := range summary.Failing {
-			fmt.Fprintln(errOut, profile.Red("Error: "+msg))
-		}
-		fmt.Fprintf(errOut, "ossprey: blocked `%s %s`\n", m.Bin, strings.Join(opts.Args, " "))
+		printBlock(m, opts, summary)
 		return ErrBlocked
 	}
 	// Both messages sit after the malware check, never in front of it: gating the
@@ -816,6 +808,16 @@ func reportAndForward(ctx context.Context, m *Manager, opts Options, sbom *ossbo
 	}
 	// Already drained at the top of this function, ahead of the verdict.
 	return handoffFn(ctx, m.Bin, opts.Args)
+}
+
+// printBlock prints the full malware report, even when quiet.
+func printBlock(m *Manager, opts Options, summary scan.MalwareSummary) {
+	profile := ansi.Detect(errOut)
+	fmt.Fprint(errOut, alert.Malware(summary.Alert(), "Installation blocked.", profile))
+	for _, msg := range summary.Failing {
+		fmt.Fprintln(errOut, profile.Red("Error: "+msg))
+	}
+	fmt.Fprintf(errOut, "ossprey: blocked `%s %s`\n", m.Bin, strings.Join(opts.Args, " "))
 }
 
 // CleanVerdict words a passed check without overstating it, for every
@@ -978,10 +980,13 @@ type scanRequest struct {
 	// Specs are packages named on the command line beside a requirements
 	// file. They are submitted with the scan, so one verdict covers both.
 	Specs []check.Spec
+	// CargoConfigDir is scan.Options.CargoConfigDir.
+	CargoConfigDir string
 }
 
 func scanProject(ctx context.Context, req scanRequest) (*ossbom.SBOM, error) {
-	sbom, err := scan.Run(ctx, scan.Options{Path: req.Dir, NoExec: req.Installed, Trust: req.Trust})
+	sbom, err := scan.Run(ctx, scan.Options{Path: req.Dir, NoExec: req.Installed, Trust: req.Trust,
+		CargoConfigDir: req.CargoConfigDir})
 	if err != nil {
 		return nil, err
 	}
@@ -990,7 +995,8 @@ func scanProject(ctx context.Context, req scanRequest) (*ossbom.SBOM, error) {
 		// a failed install). Fall back to the declaring scan rather than
 		// reporting a project with no dependencies: passive mode's whole job is
 		// to see this machine's installs.
-		if sbom, err = scan.Run(ctx, scan.Options{Path: req.Dir, Trust: req.Trust}); err != nil {
+		if sbom, err = scan.Run(ctx, scan.Options{Path: req.Dir, Trust: req.Trust,
+			CargoConfigDir: req.CargoConfigDir}); err != nil {
 			return nil, err
 		}
 	}
@@ -1644,16 +1650,25 @@ var requirementFileFlags = map[string]map[string]bool{
 // Exec runs the real package manager, inheriting stdio. The child's exit code
 // is propagated via the returned *exec.ExitError.
 func Exec(ctx context.Context, bin string, args []string) error {
-	path, err := shim.LookPathReal(bin)
+	cmd, err := realCommand(ctx, bin, args)
 	if err != nil {
 		return err
 	}
-	cmd := exec.CommandContext(ctx, path, args...)
-	cmd.Env = envWithoutMonitorID()
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+// realCommand runs the real bin with args, found past the shims as Exec finds it, without the monitor id.
+func realCommand(ctx context.Context, bin string, args []string) (*exec.Cmd, error) {
+	path, err := shim.LookPathReal(bin)
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.CommandContext(ctx, path, args...)
+	cmd.Env = envWithoutMonitorID()
+	return cmd, nil
 }
 
 // envWithoutMonitorID drops the monitor id before handing control to the real

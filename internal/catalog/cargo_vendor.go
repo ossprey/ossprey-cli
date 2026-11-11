@@ -98,7 +98,7 @@ func withoutCargoVendor(r file.Resolver, root string) file.Resolver {
 	if !ok {
 		return r
 	}
-	aboveManifests, aboveConfigs, ok := cargoFilesAbove(root, CargoHome(cargoCwd()), true, false)
+	aboveManifests, aboveConfigs, ok := cargoFilesAbove(root, CargoHome(cargoCwd("")), true, false)
 	if !ok {
 		return r
 	}
@@ -413,9 +413,16 @@ func cargoConfigLevels(configLocs []file.Location, configs map[string]cargoFile,
 	return levels
 }
 
-// cargoSourceReplaced reports whether cargo run beside a manifest or a config in the scan takes crates.io from anything but a vendor directory the filter proved.
-func cargoSourceReplaced(r file.Resolver, root string) bool {
-	home := CargoHome(cargoCwd())
+// cargoSourceReplaced reports whether cargo run beside a manifest or a config in the scan, or in configDir when set, takes crates.io from anything but a vendor directory the filter proved.
+func cargoSourceReplaced(r file.Resolver, root, configDir string) bool {
+	home := CargoHome(cargoCwd(configDir))
+	if configDir != "" {
+		// A lock copied out of its workspace is judged where cargo runs, from the configs there and above and CARGO_HOME's.
+		dir := resolvedRoot(configDir)
+		_, above, ok := cargoFilesAbove(filepath.Join(dir, "Cargo.lock"), home, false, false)
+		dirSlash := filepath.ToSlash(dir)
+		return ok && cratesIoReplacement(cargoConfigLevels(nil, nil, above, dirSlash), dirSlash, home) != ""
+	}
 	vendored, _ := r.(cargoVendored)
 	root = resolvedRoot(root)
 	rootSlash := filepath.ToSlash(root)
@@ -523,13 +530,16 @@ func CargoHome(cwd string) string {
 	return ""
 }
 
-// cargoCwd is cargo's physical working directory: this process's.
-func cargoCwd() string {
-	wd, err := os.Getwd()
-	if err != nil {
-		return ""
+// cargoCwd is cargo's physical working directory: configDir for a copied lock, else this process's.
+func cargoCwd(configDir string) string {
+	if configDir == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			return ""
+		}
+		configDir = wd
 	}
-	return resolvedRoot(wd)
+	return resolvedRoot(configDir)
 }
 
 func tomlLookup(v any, keys ...string) any {

@@ -49,9 +49,27 @@ install still works".
 ```mermaid
 flowchart TD
     S["ossprey npm install ..."] --> CA{"cargo add, update,<br/>generate-lockfile or fetch,<br/>not only printing help?"}
-    CA -- "yes" --> CV{"OSSPREY_SKIP_CI or<br/>passive mode?"}
-    CV -- "yes" --> U
-    CV -- "no: gating" --> CX["refuse, exit 2:<br/>cargo never runs"]
+    CA -- "yes" --> CV{"OSSPREY_SKIP_CI?"}
+    CV -- "set" --> U
+    CV -- "unset" --> CP{"passive mode?"}
+    CP -- "yes" --> CB["exec cargo first"]
+    CB --> AE
+    CP -- "no: gating" --> CVG{"cargo 1.97 or later?"}
+    CVG -- "no" --> CX["refuse, exit 2:<br/>cargo never runs"]
+    CVG -- "yes: add --dry-run" --> U
+    CVG -- "yes: add" --> CX
+    CVG -- "yes" --> CG{"a line cargo takes (no update<br/>--breaking), a workspace cargo<br/>metadata can read, no lock<br/>lockfile-path may move, no script,<br/>a credential (bar update --dry-run)?"}
+    CG -- "no" --> CX
+    CG -- "yes" --> CR["cargo resolves into a scratch<br/>Cargo.lock; the project<br/>is not touched"]
+    CR -- "a project file changed<br/>while cargo ran" --> CT["put it back, keep what<br/>was found beside it, exit 2"]
+    CR -- "cargo fails" --> CF["cargo's exit code,<br/>nothing written"]
+    CR -- "update --dry-run" --> CF
+    CR -- "cargo succeeds" --> CC{"malware in the<br/>resolved lock?"}
+    CC -- "yes" --> CD["block, exit 1:<br/>the project is unchanged"]
+    CC -- "no verdict" --> CN["exit 2:<br/>the project is unchanged"]
+    CC -- "no" --> CL{"project files as<br/>cargo started from?"}
+    CL -- "no: changed during<br/>the check" --> CN
+    CL -- "yes" --> CE["write Cargo.lock;<br/>fetch then runs with --locked"]
     CA -- "no" --> T{"an install verb, or a<br/>tool run (npx, bunx, uvx)?"}
     T -- "no, e.g. npm run" --> U["exec the real manager"]
     T -- "yes" --> V{"OSSPREY_SKIP_CI?"}
@@ -92,9 +110,15 @@ checked at once (`internal/catalog/install_resolve.go`, driven from
 packages are checked alone and one warning line says so; the install is never
 blocked for want of a prediction.
 
-`cargo add`, `update`, `generate-lockfile` and `fetch` are refused in gating
-mode, since nothing checks their `Cargo.lock` before it reaches the project yet,
-and run unchecked in passive mode (`internal/forward/cargo.go`).
+`cargo update`, `generate-lockfile` and `fetch` are checked by running cargo
+against a scratch copy of the lock: `resolver.lockfile-path` sends the lock
+there, and only a clean result is written to the project
+(`internal/forward/cargo.go`). `cargo fetch` is resolved with `cargo update
+--workspace`, which downloads no crate (cargo still checks out git
+dependencies to resolve them), and runs with `--locked` once the lock is
+written. `cargo add` edits `Cargo.toml` as well as the lock, so it is refused
+in gating mode until it can be checked the same way. In passive mode cargo
+runs first and the lock is posted.
 
 The passive branch is the one worth reading twice. It never gates, so it never
 sits in front of the install: where a lockfile will land, the install runs

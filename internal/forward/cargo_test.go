@@ -1,8 +1,16 @@
 package forward
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"maps"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,9 +24,10 @@ import (
 	"github.com/ossprey/ossprey-cli/internal/catalog"
 	"github.com/ossprey/ossprey-cli/internal/check"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
+	"github.com/ossprey/ossprey-cli/internal/trust"
 )
 
-// cargoMode is the path a cargo command takes: refused until its lock can be checked, checked before it runs, or passed straight through.
+// cargoMode is the path a cargo command takes: resolved into scratch and checked before its lock lands, checked before it runs, or passed straight through.
 func cargoMode(args []string) string {
 	m, _ := Lookup("cargo")
 	if _, ok := m.resolveAt(args); ok {
@@ -400,6 +409,52 @@ func TestCargoFlagTablesMatchCargo(t *testing.T) {
 			}
 		}
 	}
+	// cargoFetchUnknown lets through exactly what these two tables hold, so they must match what cargo fetch lists.
+	out, err := exec.Command(cargo, "fetch", "--help").Output()
+	if err != nil {
+		t.Skipf("cargo fetch --help: %v", err)
+	}
+	takes, _, switches := clapHelpFlags(string(out))
+	if !maps.Equal(takes, cargoFetchValues) || !maps.Equal(switches, cargoFetchSwitches) {
+		t.Errorf("cargo fetch lists values %v and switches %v, want %v and %v", takes, switches, cargoFetchValues, cargoFetchSwitches)
+	}
+}
+
+const memberManifest = "[package]\nname = \"a\"\nversion = \"0.1.0\"\n"
+
+const cargo199 = "cargo 1.99.1 (5f94df478 2026-08-27)"
+
+// cargoProject is a workspace with one member and no lock yet, the working directory, and what the forwarder finds for it; cargo is 1.99.1 and must not run unless the test says how.
+func cargoProject(t *testing.T) (string, cargoWorkspace) {
+	t.Helper()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "a"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(root, "Cargo.toml"), "[workspace]\nmembers = [\"a\"]\n")
+	writeFile(t, filepath.Join(root, "a", "Cargo.toml"), memberManifest)
+	t.Chdir(root)
+	// A gating check resolves its credential before cargo runs: an API key here, with no stored login to refresh.
+	t.Setenv("OSSPREY_CONFIG_DIR", t.TempDir())
+	t.Setenv("OSSPREY_API_KEY", "test-key")
+	unsetEnv(t, "API_KEY")
+	unsetEnv(t, "CARGO_RESOLVER_LOCKFILE_PATH")
+	ws := cargoWorkspace{Lock: filepath.Join(root, "Cargo.lock"), ConfigDir: root}
+	oldWS, oldVersion, oldRun, oldLand, oldErr := cargoWorkspaceFn, cargoVersionFn, cargoRunFn, landFn, cargoErrOut
+	cargoErrOut = &bytes.Buffer{}
+	cargoWorkspaceFn = func(context.Context, []string) (cargoWorkspace, error) { return ws, nil }
+	cargoVersionFn = func(context.Context, []string) (string, error) { return cargo199, nil }
+	cargoRunFn = func(_ context.Context, _, args []string, _ io.Writer) error {
+		t.Errorf("cargo %v ran", args)
+		return nil
+	}
+	t.Cleanup(func() {
+		cargoWorkspaceFn, cargoVersionFn, cargoRunFn, landFn, cargoErrOut = oldWS, oldVersion, oldRun, oldLand, oldErr
+	})
+	return root, ws
 }
 
 // unsetEnv removes a variable for the test, since cargo reads an empty one as set.
@@ -415,6 +470,899 @@ func writeFile(t *testing.T, path, data string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+const evilLock = "version = 4\n\n[[package]]\nname = \"evil\"\nversion = \"1.0.0\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n"
+
+const addedEvil = "\n[dependencies]\nevil = \"1\"\n"
+
+// fakeCargo is a cargo 1.97 that locks lock where the last --config resolver.lockfile-path, else CARGO_RESOLVER_LOCKFILE_PATH, else its root says.
+type fakeCargo struct {
+	t    *testing.T
+	root string
+	lock string
+	// ignore writes the lock at root whatever points it elsewhere, as cargo before 1.97 does.
+	ignore bool
+	err    error
+	runs   []fakeRun
+}
+
+type fakeRun struct {
+	env, args []string
+	// seen is what the lock cargo was pointed at held when it started.
+	seen string
+}
+
+func (f *fakeCargo) run(_ context.Context, env, args []string, stderr io.Writer) error {
+	at := redirectedLock(env, args)
+	seen, _ := os.ReadFile(at)
+	f.runs = append(f.runs, fakeRun{env, args, string(seen)})
+	if at == "" || f.ignore {
+		at = filepath.Join(f.root, "Cargo.lock")
+	}
+	if err := os.MkdirAll(filepath.Dir(at), 0o755); err != nil {
+		f.t.Fatal(err)
+	}
+	writeFile(f.t, at, f.lock)
+	fmt.Fprintf(stderr, "     Locking 1 package to %s\n", at)
+	return f.err
+}
+
+// swapCargo makes f the cargo the forwarder runs.
+func swapCargo(t *testing.T, f *fakeCargo) {
+	old := cargoRunFn
+	cargoRunFn = f.run
+	t.Cleanup(func() { cargoRunFn = old })
+}
+
+// redirectedLock is where cargo 1.97 writes the lock for env and args: the last --config's resolver.lockfile-path, else the variable, else "".
+func redirectedLock(env, args []string) string {
+	at := ""
+	for _, c := range cargoConfigArgs(args) {
+		doc, err := catalog.ParseCargoConfig([]byte(c))
+		if r, ok := doc["resolver"].(map[string]any); err == nil && ok {
+			if p, ok := r["lockfile-path"].(string); ok {
+				at = p
+			}
+		}
+	}
+	for _, kv := range env {
+		if v, ok := strings.CutPrefix(kv, "CARGO_RESOLVER_LOCKFILE_PATH="); ok && at == "" {
+			at = v
+		}
+	}
+	return at
+}
+
+// landings records each file landFn writes, in order, and writes it.
+func landings(t *testing.T) *[]string {
+	var got []string
+	old := landFn
+	landFn = func(p string, data []byte) error {
+		got = append(got, p)
+		return old(p, data)
+	}
+	t.Cleanup(func() { landFn = old })
+	return &got
+}
+
+// noLanding fails the test when anything is written to the project.
+func noLanding(t *testing.T) {
+	old := landFn
+	landFn = func(p string, _ []byte) error {
+		t.Errorf("wrote %s", p)
+		return nil
+	}
+	t.Cleanup(func() { landFn = old })
+}
+
+// needSymlinks skips a test that makes links where links cannot be made.
+func needSymlinks(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Symlink(dir, filepath.Join(dir, "link")); err != nil {
+		t.Skipf("cannot make links: %v", err)
+	}
+}
+
+// lockScan records the scan of the lock and answers with sbom.
+func lockScan(t *testing.T, got *scanRequest, lock *string, sbom func() *ossbom.SBOM) func(context.Context, scanRequest) (*ossbom.SBOM, error) {
+	return func(_ context.Context, req scanRequest) (*ossbom.SBOM, error) {
+		*got = req
+		entries, err := os.ReadDir(req.Dir)
+		if err != nil || len(entries) != 1 || entries[0].Name() != "Cargo.lock" {
+			t.Errorf("scanned %s holding %v (%v), want the lock alone", req.Dir, entries, err)
+		}
+		*lock = readFile(t, filepath.Join(req.Dir, "Cargo.lock"))
+		return sbom(), nil
+	}
+}
+
+func evilSBOM() *ossbom.SBOM {
+	s := ossbom.New(ossbom.Environment{})
+	s.AddComponent(ossbom.Component{Name: "evil", Version: "1.0.0", Type: "cargo"})
+	s.AddVulnerability(ossbom.NewMalwareVulnerability("V1", "pkg:cargo/evil@1.0.0", "bad"))
+	return s
+}
+
+func cleanCrates() *ossbom.SBOM {
+	s := ossbom.New(ossbom.Environment{})
+	s.AddComponent(ossbom.Component{Name: "serde", Version: "1.0.228", Type: "cargo"})
+	s.AddComponent(ossbom.Component{Name: "itoa", Version: "1.0.15", Type: "cargo"})
+	return s
+}
+
+// projectState is every file under root with its bytes, for a byte-for-byte comparison.
+func projectState(t *testing.T, root string) map[string]string {
+	t.Helper()
+	got := map[string]string{}
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			got[p] = readFile(t, p)
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
+// cargo before 1.97, and 1.97.0's pre-releases, ignore resolver.lockfile-path and write the project's lock (verified with 1.96.0, 1.80.0 and 1.97.0-nightly), so semver order decides, a pre-release below its release.
+func TestCargoRedirects(t *testing.T) {
+	for _, tc := range []struct {
+		line string
+		want bool
+	}{
+		{cargo199, true},
+		{"cargo 1.97.0 (c980f4866 2026-06-30)", true},
+		{"cargo 1.97.1", true},
+		{"cargo 1.98.0-nightly (eb94155a9 2026-06-09)", true},
+		{"cargo 1.100.0-beta.13 (3acc79c0c 2026-11-05)", true},
+		{"cargo 2.0.0", true},
+		{"cargo 1.97.0-beta.3 (31bcf52c8 2026-05-28)", false},
+		{"cargo 1.97.0-nightly (eb94155a9 2026-04-09)", false},
+		{"cargo 1.96.0 (30a34c682 2026-05-25)", false},
+		{"cargo 1.80.0 (376290515 2024-07-16)", false},
+		{"cargo 1.97", false},
+		{"cargo 1.970.0x", false},
+		{"rustc 1.99.1", false},
+		{"cargo-1.99.1", false},
+		{"", false},
+		{"cargo 1.99999999999999999999.0", false},
+	} {
+		if got := cargoRedirects(tc.line); got != tc.want {
+			t.Errorf("%q: %v, want %v", tc.line, got, tc.want)
+		}
+	}
+}
+
+// Every refusal comes before cargo runs and leaves the project byte for byte as it was (OSS-2553).
+func TestRunCargo_RefusesBeforeCargoRuns(t *testing.T) {
+	big := func(t *testing.T, p string) {
+		writeFile(t, p, "")
+		if err := os.Truncate(p, catalog.CargoProofLimit+1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name    string
+		args    string
+		prepare func(t *testing.T, root string, ws cargoWorkspace)
+		want    string
+	}{
+		{"cargo 1.96.0", "update", func(*testing.T, string, cargoWorkspace) {
+			cargoVersionFn = func(context.Context, []string) (string, error) {
+				return "cargo 1.96.0 (30a34c682 2026-05-25)", nil
+			}
+		}, "ossprey needs cargo 1.97 or later to check it before it changes the project, and found `cargo 1.96.0 (30a34c682 2026-05-25)`"},
+		{"cargo 1.80.0 on add --dry-run", "add --dry-run evil", func(*testing.T, string, cargoWorkspace) {
+			cargoVersionFn = func(context.Context, []string) (string, error) {
+				return "cargo 1.80.0 (376290515 2024-07-16)", nil
+			}
+		}, "ossprey needs cargo 1.97 or later"},
+		{"no version", "add evil", func(*testing.T, string, cargoWorkspace) {
+			cargoVersionFn = func(context.Context, []string) (string, error) { return "", errors.New("exit status 1") }
+		}, "could not read cargo's version (exit status 1)"},
+		{"a moved lock on update", "update", func(t *testing.T, _ string, _ cargoWorkspace) {
+			cargoWorkspaceFn = readCargoWorkspace
+			t.Setenv("CARGO_RESOLVER_LOCKFILE_PATH", "elsewhere/Cargo.lock")
+		}, "its Cargo.lock cannot be checked (a resolver.lockfile-path may move it)"},
+		{"a config that cannot be read", "update", func(t *testing.T, root string, _ cargoWorkspace) {
+			cargoWorkspaceFn = readCargoWorkspace
+			t.Setenv("CARGO_HOME", t.TempDir())
+			if err := os.MkdirAll(filepath.Join(root, ".cargo", "config.toml"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}, "its Cargo.lock cannot be checked (a resolver.lockfile-path may move it)"},
+		{"a cargo script", "-Zscript generate-lockfile --manifest-path s.rs", func(*testing.T, string, cargoWorkspace) {
+			cargoWorkspaceFn = func(context.Context, []string) (cargoWorkspace, error) { return cargoWorkspace{}, errScriptLock }
+		}, "its Cargo.lock cannot be checked (a cargo script keeps it in the build directory)"},
+		{"no workspace on update", "update", func(*testing.T, string, cargoWorkspace) {
+			cargoWorkspaceFn = func(context.Context, []string) (cargoWorkspace, error) {
+				return cargoWorkspace{}, errors.New("cargo metadata: error: could not find `Cargo.toml` in `/empty` or any parent directory")
+			}
+		}, "its Cargo.lock cannot be checked (cargo metadata: error: could not find `Cargo.toml`"},
+		{"a lock that is not a regular file", "update", func(t *testing.T, _ string, ws cargoWorkspace) {
+			if err := os.Remove(ws.Lock); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(ws.Lock, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}, "not a regular file"},
+		{"a lock over the bound", "fetch", func(t *testing.T, _ string, ws cargoWorkspace) { big(t, ws.Lock) }, "over the"},
+		// --breaking rewrites Cargo.toml as well as the lock, and only the lock is redirected (verified with cargo 1.99.1).
+		{"update --breaking", "update -Zunstable-options --breaking evil", nil, "--breaking edits Cargo.toml"},
+		{"update -b in a group", "update -Zunstable-options -qb evil", nil, "--breaking edits Cargo.toml"},
+		{"update --breaking --dry-run", "update -Zunstable-options --breaking -n", nil, "--breaking edits Cargo.toml"},
+		// An empty -p takes no option token, so the flag after it is cargo's (verified with cargo 1.99.1).
+		{"update --breaking after an empty -p", "update -Zunstable-options -p evil -p --breaking", nil, "--breaking edits Cargo.toml"},
+		{"update -b after an empty -p", "update -Zunstable-options -p evil -p -b", nil, "--breaking edits Cargo.toml"},
+		{"update -b where a value may be", "update -Zunstable-options -m -b", nil, "--breaking edits Cargo.toml"},
+		// The resolve step passes on only what update takes, so the lock landed before cargo fetch rejected the line.
+		{"fetch with an option it lacks", "fetch --tagret x86_64-unknown-linux-gnu", nil, "cargo fetch would reject `--tagret`"},
+		{"fetch with a positional", "fetch serde", nil, "cargo fetch would reject `serde`"},
+		{"fetch with a value missing", "fetch --color --locked", nil, "cargo fetch would reject `--color`"},
+		{"fetch with an argument after --", "fetch -- serde", nil, "cargo fetch would reject `serde`"},
+		{"cargo add", "add -p a evil", nil, "ossprey does not check `cargo add` yet"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, ws := cargoProject(t)
+			writeFile(t, ws.Lock, "version = 4\n# before\n")
+			if tc.prepare != nil {
+				tc.prepare(t, root, ws)
+			}
+			before := projectState(t, root)
+			swap(t, func(_ context.Context, _ string, args []string) error {
+				t.Errorf("cargo %v ran", args)
+				return nil
+			}, cleanSBOM)
+			out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: strings.Fields(tc.args)})
+			if err == nil || !strings.Contains(err.Error(), tc.want) || errors.Is(err, ErrBlocked) {
+				t.Errorf("Run = %v, want an error naming %q", err, tc.want)
+			}
+			if out != "" {
+				t.Errorf("printed %q, want only main's error line", out)
+			}
+			if after := projectState(t, root); !reflect.DeepEqual(after, before) {
+				t.Errorf("the project changed")
+			}
+		})
+	}
+	t.Run("no credential on update", func(t *testing.T) {
+		root, _ := cargoProject(t)
+		unsetEnv(t, "OSSPREY_API_KEY")
+		ex := &stubExec{}
+		swap(t, ex.fn, check.Run)
+		_, want := quietOutput(t, context.Background(), Options{Bin: "npm", Args: []string{"install", "left-pad@1.0.0"}})
+		if want == nil || ex.called {
+			t.Fatalf("npm install = %v, npm ran = %v; want a credentials error before npm", want, ex.called)
+		}
+		before := projectState(t, root)
+		out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"update"}})
+		if err == nil || err.Error() != want.Error() || out != "" {
+			t.Fatalf("Run = %v, output %q; want %v alone", err, out, want)
+		}
+		if !reflect.DeepEqual(projectState(t, root), before) {
+			t.Error("the project changed")
+		}
+	})
+}
+
+// ossprey's --config comes last before any `--`, since the last --config beats the variable and every earlier --config (verified with cargo 1.97.0 and 1.99.1).
+func TestCargoRedirectArgs(t *testing.T) {
+	lock := filepath.Join("scratch", `a"b\c`, "Cargo.lock")
+	cfg := "--config resolver.lockfile-path=" + tomlString(lock)
+	for _, tc := range []struct{ args, want string }{
+		{"update", "update " + cfg},
+		{"--config k=v update -p serde", "--config k=v update -p serde " + cfg},
+		{"update --config resolver.lockfile-path=\"Cargo.lock\"", "update --config resolver.lockfile-path=\"Cargo.lock\" " + cfg},
+		{"update -- --config x", "update " + cfg + " -- --config x"},
+	} {
+		got := cargoRedirectArgs(strings.Fields(tc.args), lock)
+		if strings.Join(got, " ") != tc.want {
+			t.Errorf("%q: %q, want %q", tc.args, got, tc.want)
+		}
+		if at := redirectedLock(nil, got); at != lock {
+			t.Errorf("%q: cargo would lock %q, want %q", tc.args, at, lock)
+		}
+	}
+}
+
+// A blocked command leaves every project file as it was, byte for byte and the same file, and writes nothing (OSS-2553).
+func TestRunCargo_BlockLeavesTheProjectAsItWas(t *testing.T) {
+	for _, tc := range []struct {
+		args string
+		lock bool
+	}{
+		{"update", false},
+		{"update", true},
+		{"generate-lockfile", false},
+		{"fetch", true},
+	} {
+		t.Run(fmt.Sprintf("%s, lock %v", tc.args, tc.lock), func(t *testing.T) {
+			root, ws := cargoProject(t)
+			if tc.lock {
+				writeFile(t, ws.Lock, "version = 4\n# before\n")
+			}
+			before := projectState(t, root)
+			infos := map[string]fs.FileInfo{}
+			for p := range before {
+				infos[p], _ = os.Stat(p)
+			}
+			f := &fakeCargo{t: t, root: root, lock: evilLock}
+			swapCargo(t, f)
+			swap(t, func(_ context.Context, _ string, args []string) error {
+				t.Errorf("cargo %v ran after a block", args)
+				return nil
+			}, cleanSBOM)
+			noLanding(t)
+			var req scanRequest
+			var scanned string
+			swapScan(t, lockScan(t, &req, &scanned, evilSBOM))
+
+			out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: strings.Fields(tc.args)})
+			if !errors.Is(err, ErrBlocked) {
+				t.Fatalf("Run = %v, want ErrBlocked", err)
+			}
+			if len(f.runs) != 1 || scanned != evilLock {
+				t.Errorf("cargo ran %d times, scanned %q; want one run and its lock checked", len(f.runs), scanned)
+			}
+			if !req.Installed || req.SubmitOnly || req.CargoConfigDir != root || filepath.Base(req.Dir) != filepath.Base(root) {
+				t.Errorf("scan request %+v", req)
+			}
+			if after := projectState(t, root); !reflect.DeepEqual(after, before) {
+				t.Errorf("project = %v, want %v", after, before)
+			}
+			for p, fi := range infos {
+				if now, err := os.Stat(p); err != nil || !os.SameFile(fi, now) {
+					t.Errorf("%s is another file now (%v)", p, err)
+				}
+			}
+			for _, line := range []string{"Installation blocked.", "Error: WARNING: evil:1.0.0 contains malware", "ossprey: blocked `cargo " + tc.args + "`\nossprey: the project was not changed\n"} {
+				if !strings.Contains(out, line) {
+					t.Errorf("output lacks %q:\n%s", line, out)
+				}
+			}
+		})
+	}
+}
+
+// A clean update resolves from the project's lock and writes the new one, keeping its mode, a linked lock through its link as cargo writes one, and prints the one verdict line (OSS-2553).
+func TestRunCargoUpdate_CleanLandsTheLock(t *testing.T) {
+	for _, lock := range []string{"none", "file", "link"} {
+		lockExisted := lock != "none"
+		t.Run("lock "+lock, func(t *testing.T) {
+			if lock == "link" {
+				needSymlinks(t)
+			}
+			root, ws := cargoProject(t)
+			target := ws.Lock
+			if lock == "link" {
+				target = filepath.Join(root, "shared.lock")
+				if err := os.Symlink("shared.lock", ws.Lock); err != nil {
+					t.Fatal(err)
+				}
+			}
+			old := ""
+			if lockExisted {
+				old = "version = 4\n# before\n"
+				writeFile(t, target, old)
+				if err := os.Chmod(target, 0o640); err != nil {
+					t.Fatal(err)
+				}
+			}
+			f := &fakeCargo{t: t, root: root, lock: evilLock}
+			swapCargo(t, f)
+			swap(t, nil, cleanSBOM)
+			landed := landings(t)
+			var req scanRequest
+			var scanned string
+			swapScan(t, lockScan(t, &req, &scanned, cleanCrates))
+
+			out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"update"}})
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if want := "ossprey: no malware found in 2 packages in Cargo.lock\n"; out != want {
+				t.Errorf("output = %q, want %q", out, want)
+			}
+			if f.runs[0].seen != old || scanned != evilLock {
+				t.Errorf("cargo started from %q and %q was scanned, want the project's lock and then cargo's", f.runs[0].seen, scanned)
+			}
+			if want := []string{ws.Lock}; !reflect.DeepEqual(*landed, want) {
+				t.Errorf("wrote %v, want %v", *landed, want)
+			}
+			if got := readFile(t, target); got != evilLock {
+				t.Errorf("lock = %q, want cargo's", got)
+			}
+			if fi, err := os.Lstat(ws.Lock); err != nil || (fi.Mode()&fs.ModeSymlink != 0) != (lock == "link") {
+				t.Errorf("Cargo.lock is a link: %v (%v), want %v", fi.Mode()&fs.ModeSymlink != 0, err, lock == "link")
+			}
+			if runtime.GOOS != "windows" {
+				want := map[bool]fs.FileMode{true: 0o640, false: 0o666 &^ umask(t)}[lockExisted]
+				if fi, err := os.Stat(ws.Lock); err != nil || fi.Mode().Perm() != want {
+					t.Errorf("lock mode %v (%v), want %v", fi.Mode().Perm(), err, want)
+				}
+			}
+			if got, want := cargoErrOut.(*bytes.Buffer).String(), "     Locking 1 package to "+ws.Lock+"\n"; got != want {
+				t.Errorf("cargo's stderr = %q, want %q naming the project's lock", got, want)
+			}
+		})
+	}
+}
+
+// umask is the process's file creation mask, read from a new file.
+func umask(t *testing.T) fs.FileMode {
+	p := filepath.Join(t.TempDir(), "f")
+	fh, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY, 0o777)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fh.Close()
+	fi, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return 0o777 &^ fi.Mode().Perm()
+}
+
+// A clean update that changed nothing rewrites nothing, as cargo never rewrites an unchanged lock (verified with cargo 1.99.1).
+func TestRunCargoUpdate_UnchangedBytesAreNotRewritten(t *testing.T) {
+	root, ws := cargoProject(t)
+	writeFile(t, ws.Lock, evilLock)
+	before, err := os.Stat(ws.Lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	swapCargo(t, &fakeCargo{t: t, root: root, lock: evilLock})
+	swap(t, nil, cleanSBOM)
+	noLanding(t)
+	swapScan(t, func(context.Context, scanRequest) (*ossbom.SBOM, error) { return cleanCrates(), nil })
+	out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"update"}})
+	if err != nil || out != "ossprey: no malware found in 2 packages in Cargo.lock\n" {
+		t.Errorf("Run = %v, output %q", err, out)
+	}
+	if now, err := os.Stat(ws.Lock); err != nil || !os.SameFile(before, now) || !now.ModTime().Equal(before.ModTime()) {
+		t.Errorf("the lock was rewritten (%v)", err)
+	}
+}
+
+// A lock changed while the check of an update ran is kept and nothing lands (OSS-2553).
+func TestRunCargoUpdate_ChangedDuringTheCheckLandsNothing(t *testing.T) {
+	root, ws := cargoProject(t)
+	writeFile(t, ws.Lock, "version = 4\n# before\n")
+	swapCargo(t, &fakeCargo{t: t, root: root, lock: evilLock})
+	swap(t, nil, cleanSBOM)
+	noLanding(t)
+	swapScan(t, func(context.Context, scanRequest) (*ossbom.SBOM, error) {
+		writeFile(t, ws.Lock, "# edited meanwhile\n")
+		return cleanCrates(), nil
+	})
+	before := projectState(t, root)
+	before[ws.Lock] = "# edited meanwhile\n"
+	out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"update"}})
+	if want := "Cargo.lock changed while ossprey checked it, so nothing was written; run the command again"; err == nil || err.Error() != want || out != "" {
+		t.Errorf("Run = %v, output %q; want %q alone", err, out, want)
+	}
+	if !reflect.DeepEqual(projectState(t, root), before) {
+		t.Error("the project changed beyond the edit")
+	}
+}
+
+// A check that cannot be made, or that the platform made for no crate, refuses with the project unchanged, as a gating npm install does (OSS-2553).
+func TestRunCargo_CheckErrorFailsClosed(t *testing.T) {
+	unchecked := func() *ossbom.SBOM {
+		s := cleanCrates()
+		for _, c := range []string{"pkg:cargo/serde@1.0.228", "pkg:cargo/itoa@1.0.15"} {
+			s.Findings = append(s.Findings, ossbom.Finding{Purl: c, Type: "UNSUPPORTED"})
+		}
+		return s
+	}
+	for _, tc := range []struct {
+		name string
+		scan func(context.Context, scanRequest) (*ossbom.SBOM, error)
+		want string
+	}{
+		{"api down", func(context.Context, scanRequest) (*ossbom.SBOM, error) { return nil, errors.New("api down") },
+			"Cargo.lock not checked (api down); the project was not changed"},
+		{"checked none", func(context.Context, scanRequest) (*ossbom.SBOM, error) { return unchecked(), nil },
+			"the platform checked none of the 2 packages in Cargo.lock (Rust is checked on Teams and Enterprise plans); the project was not changed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, ws := cargoProject(t)
+			writeFile(t, ws.Lock, "version = 4\n# before\n")
+			before := projectState(t, root)
+			swapCargo(t, &fakeCargo{t: t, root: root, lock: evilLock})
+			swap(t, nil, cleanSBOM)
+			noLanding(t)
+			swapScan(t, tc.scan)
+			out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"update"}})
+			if err == nil || err.Error() != tc.want || errors.Is(err, ErrBlocked) || out != "" {
+				t.Errorf("Run = %v, output %q; want %q alone", err, out, tc.want)
+			}
+			if !reflect.DeepEqual(projectState(t, root), before) {
+				t.Error("the project changed")
+			}
+		})
+	}
+}
+
+// A lock with no crates to check is still the clean result, so it lands, with a note under OSSPREY_VERBOSE (OSS-2553).
+func TestRunCargo_NoComponentsLands(t *testing.T) {
+	root, ws := cargoProject(t)
+	swapCargo(t, &fakeCargo{t: t, root: root, lock: "version = 4\n"})
+	swap(t, nil, cleanSBOM)
+	swapScan(t, func(context.Context, scanRequest) (*ossbom.SBOM, error) { return ossbom.New(ossbom.Environment{}), nil })
+	out, err := verboseOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"generate-lockfile"}})
+	if err != nil || !strings.Contains(out, "ossprey: found no dependencies to check in Cargo.lock\n") {
+		t.Errorf("Run = %v, output %q; want the note", err, out)
+	}
+	if got, err := os.ReadFile(ws.Lock); err != nil || string(got) != "version = 4\n" {
+		t.Errorf("lock = %q (%v), want cargo's", got, err)
+	}
+}
+
+// cargo colours a terminal under its own auto rules, which ossprey's pipe would hide, so ossprey asks for colour only where cargo would give it (verified with cargo 1.99.1).
+func TestCargoColours(t *testing.T) {
+	for _, tc := range []struct {
+		tty  bool
+		env  map[string]string
+		want bool
+	}{
+		{true, map[string]string{"TERM": "xterm"}, true},
+		{false, map[string]string{"TERM": "xterm"}, false},
+		{true, map[string]string{"TERM": "xterm", "NO_COLOR": "1"}, false},
+		{true, map[string]string{"TERM": "xterm", "NO_COLOR": ""}, true},
+		{true, map[string]string{"TERM": "xterm", "CLICOLOR": "0"}, false},
+		{true, map[string]string{"TERM": "dumb"}, runtime.GOOS == "windows"},
+		{true, map[string]string{"TERM": "dumb", "CI": "1"}, true},
+		{true, map[string]string{"TERM": "dumb", "CLICOLOR": "1"}, true},
+		{true, map[string]string{}, runtime.GOOS == "windows"},
+	} {
+		for _, k := range []string{"TERM", "NO_COLOR", "CLICOLOR", "CI"} {
+			unsetEnv(t, k)
+		}
+		for k, v := range tc.env {
+			t.Setenv(k, v)
+		}
+		if got := cargoColours(tc.tty); got != tc.want {
+			t.Errorf("tty %v, %v: %v, want %v", tc.tty, tc.env, got, tc.want)
+		}
+	}
+}
+
+// A cargo that writes the project's lock despite the redirect has it put back and the run fails, the lock unchecked (OSS-2553).
+func TestRunCargo_TripwirePutsBackAndFails(t *testing.T) {
+	for _, lockExisted := range []bool{false, true} {
+		t.Run(fmt.Sprintf("lock %v", lockExisted), func(t *testing.T) {
+			root, ws := cargoProject(t)
+			if lockExisted {
+				writeFile(t, ws.Lock, "version = 4\n# before\n")
+			}
+			before := projectState(t, root)
+			swapCargo(t, &fakeCargo{t: t, root: root, lock: evilLock, ignore: true})
+			swap(t, nil, cleanSBOM)
+			out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"update"}})
+			kept, _ := filepath.Glob(filepath.Join(root, "Cargo.lock.ossprey-found-*"))
+			if len(kept) != 1 || readFile(t, kept[0]) != evilLock {
+				t.Fatalf("kept %v, want one file holding what was found", kept)
+			}
+			// Another program may have written it, so what was found is kept beside it.
+			if want := "Cargo.lock changed while `cargo update` ran, by a cargo ignoring the scratch copy ossprey gave it or by another program, so it was put back unchecked; what was found is kept in " + filepath.Base(kept[0]); err == nil || err.Error() != want || out != "" {
+				t.Errorf("Run = %v, output %q; want %q", err, out, want)
+			}
+			before[kept[0]] = evilLock
+			if !reflect.DeepEqual(projectState(t, root), before) {
+				t.Error("the project was not put back")
+			}
+		})
+	}
+}
+
+// cargo's own failure is its exit code, and nothing is checked or written.
+func TestRunCargo_FailurePassesThrough(t *testing.T) {
+	root, ws := cargoProject(t)
+	writeFile(t, ws.Lock, "version = 4\n# before\n")
+	before := projectState(t, root)
+	exit101 := errors.New("exit status 101")
+	swapCargo(t, &fakeCargo{t: t, root: root, lock: evilLock, err: exit101})
+	swap(t, nil, cleanSBOM)
+	noLanding(t)
+	out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"update"}})
+	if !errors.Is(err, exit101) || out != "" {
+		t.Errorf("Run = %v, output %q; want cargo's own error alone", err, out)
+	}
+	if got, want := cargoErrOut.(*bytes.Buffer).String(), "     Locking 1 package to "+ws.Lock+"\n"; got != want {
+		t.Errorf("cargo's stderr = %q, want %q naming the project's lock", got, want)
+	}
+	if !reflect.DeepEqual(projectState(t, root), before) {
+		t.Error("the project changed")
+	}
+}
+
+// A generate-lockfile that locks nothing lands nothing and says nothing was checked.
+func TestRunCargoGenerateLockfile_NoLockLandsNothing(t *testing.T) {
+	root, _ := cargoProject(t)
+	before := projectState(t, root)
+	cargoRunFn = func(context.Context, []string, []string, io.Writer) error { return nil }
+	swap(t, nil, cleanSBOM)
+	noLanding(t)
+	out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"generate-lockfile"}})
+	if want := "`cargo generate-lockfile` left no Cargo.lock, so nothing was checked and the project was not changed"; err == nil || err.Error() != want || out != "" {
+		t.Errorf("Run = %v, output %q; want %q", err, out, want)
+	}
+	if !reflect.DeepEqual(projectState(t, root), before) {
+		t.Error("the project changed")
+	}
+}
+
+// fetch locks with update --workspace, which downloads no crate, from the project's lock and with every fetch option but --target, then fetches the checked lock with --locked (OSS-2553).
+func TestRunCargoFetch_ResolvesThenFetchesLocked(t *testing.T) {
+	for _, tc := range []struct{ args, resolve, fetch string }{
+		{"fetch", "update --workspace", "fetch --locked"},
+		{"fetch --offline --target x86_64-unknown-linux-gnu", "update --workspace --offline", "fetch --offline --target x86_64-unknown-linux-gnu --locked"},
+		{"-q fetch -m a/Cargo.toml --frozen", "-q update --workspace -m a/Cargo.toml --frozen", "-q fetch -m a/Cargo.toml --frozen"},
+		{"--locked fetch --config k=v", "--locked update --workspace --config k=v", "--locked fetch --config k=v"},
+		{"fetch -Zgc --locked", "update --workspace -Z gc --locked", "fetch -Zgc --locked"},
+		{"fetch -qv --color never --target=x --manifest-path=a/Cargo.toml", "update --workspace -q -v --color never --manifest-path=a/Cargo.toml", "fetch -qv --color never --target=x --manifest-path=a/Cargo.toml --locked"},
+		{"fetch --target -vv --quiet", "update --workspace -v -v --quiet", "fetch --target -vv --quiet --locked"},
+	} {
+		t.Run(tc.args, func(t *testing.T) {
+			root, ws := cargoProject(t)
+			writeFile(t, ws.Lock, "version = 4\n# before\n")
+			var order []string
+			f := &fakeCargo{t: t, root: root, lock: evilLock}
+			swapCargo(t, f)
+			ex := &stubExec{}
+			swap(t, func(ctx context.Context, bin string, args []string) error {
+				order = append(order, "fetch")
+				if readFile(t, ws.Lock) != evilLock {
+					t.Error("fetch ran before the checked lock landed")
+				}
+				return ex.fn(ctx, bin, args)
+			}, cleanSBOM)
+			swapScan(t, func(context.Context, scanRequest) (*ossbom.SBOM, error) {
+				order = append(order, "scan")
+				return cleanCrates(), nil
+			})
+			if _, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: strings.Fields(tc.args)}); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if len(f.runs) != 1 {
+				t.Fatalf("cargo ran %d times before the fetch", len(f.runs))
+			}
+			at := redirectedLock(f.runs[0].env, f.runs[0].args)
+			if want := strings.Fields(tc.resolve + " --config resolver.lockfile-path=" + tomlString(at)); !slices.Equal(f.runs[0].args, want) {
+				t.Errorf("resolved with %q, want %q", f.runs[0].args, want)
+			}
+			// cargo resolves from nothing when the redirect names no lock, so the project's goes there first (verified).
+			if f.runs[0].seen != "version = 4\n# before\n" {
+				t.Errorf("the scratch lock held %q when cargo ran, want the project's", f.runs[0].seen)
+			}
+			if !slices.Equal(ex.args, strings.Fields(tc.fetch)) || !slices.Equal(order, []string{"scan", "fetch"}) {
+				t.Errorf("fetched with %q after %v, want %q after the scan", ex.args, order, tc.fetch)
+			}
+		})
+	}
+}
+
+// update --dry-run with no lock writes a whole one to the redirect (verified with cargo 1.99.1), so nothing is ever checked or written, and no credential is needed.
+func TestRunCargoUpdate_DryRunNeverLands(t *testing.T) {
+	for _, args := range []string{"update --dry-run", "update -qn", "update -p evil -p --dry-run"} {
+		root, ws := cargoProject(t)
+		unsetEnv(t, "OSSPREY_API_KEY")
+		f := &fakeCargo{t: t, root: root, lock: evilLock}
+		swapCargo(t, f)
+		swap(t, nil, cleanSBOM)
+		noLanding(t)
+		if out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: strings.Fields(args)}); err != nil || out != "" || len(f.runs) != 1 {
+			t.Errorf("%s: Run = %v, output %q, %d runs; want cargo run once and nothing else", args, err, out, len(f.runs))
+		}
+		if _, err := os.Stat(ws.Lock); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("%s: wrote a lock (%v)", args, err)
+		}
+	}
+}
+
+// cargo add --dry-run writes nothing anywhere (verified with cargo 1.97.0 and 1.99.1), so it is handed to cargo as typed.
+func TestRunCargoAdd_DryRunIsForwardedAsIs(t *testing.T) {
+	for _, args := range [][]string{{"add", "--dry-run", "evil"}, {"+stable", "add", "-qn", "evil"}} {
+		cargoProject(t)
+		cargoWorkspaceFn = func(context.Context, []string) (cargoWorkspace, error) {
+			t.Error("a dry run reads no workspace")
+			return cargoWorkspace{}, nil
+		}
+		ex := &stubExec{}
+		swap(t, ex.fn, cleanSBOM)
+		if out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: args}); err != nil || out != "" || !slices.Equal(ex.args, args) {
+			t.Errorf("Run = %v, output %q, handed %q; want %q as typed", err, out, ex.args, args)
+		}
+	}
+}
+
+// cargo's messages name the user's files, not ossprey's scratch paths, even split across writes (OSS-2553).
+func TestCargoStderrSpellsTheProjectPaths(t *testing.T) {
+	var out strings.Builder
+	w := newCargoStderr(&out, "/s/x/Cargo.lock", "/p/Cargo.lock", "/m", "")
+	for _, chunk := range []string{"error: cannot update the lock file /s/x/Car", "go.lock because --locked was passed\n", "  Updating /m/p/a\r  Done /m/p/a/Cargo.toml", "\nlast /s/x/Cargo.lock"} {
+		if n, err := w.Write([]byte(chunk)); n != len(chunk) || err != nil {
+			t.Fatalf("Write = %d, %v", n, err)
+		}
+	}
+	w.Flush()
+	if want := "error: cannot update the lock file /p/Cargo.lock because --locked was passed\n  Updating /p/a\r  Done /p/a/Cargo.toml\nlast /p/Cargo.lock"; out.String() != want {
+		t.Errorf("got %q, want %q", out.String(), want)
+	}
+}
+
+// cargo names what it means on the lines after an error ending in a colon, such as the workspace a member believes it is in (OSS-2553).
+func TestFirstErrorLineKeepsWhatAColonIntroduces(t *testing.T) {
+	stderr := "error: current package believes it's in a workspace when it's not:\ncurrent:   /p/Cargo.toml\nworkspace: /c2/Cargo.toml\n\nthis may be fixable by adding\n"
+	if got, want := firstErrorLine(stderr, nil), "error: current package believes it's in a workspace when it's not: current:   /p/Cargo.toml workspace: /c2/Cargo.toml"; got != want {
+		t.Errorf("firstErrorLine = %q, want %q", got, want)
+	}
+	if got, want := firstErrorLine("error: no such command\n\nhelp: x\n", nil), "error: no such command"; got != want {
+		t.Errorf("firstErrorLine = %q, want %q", got, want)
+	}
+}
+
+// Passive puts nothing in front of cargo: it runs, then the lock is posted without polling.
+func TestRunCargoAdd_Passive(t *testing.T) {
+	root, ws := cargoProject(t)
+	var order []string
+	inner := cargoWorkspaceFn
+	cargoWorkspaceFn = func(ctx context.Context, args []string) (cargoWorkspace, error) {
+		order = append(order, "workspace")
+		return inner(ctx, args)
+	}
+	cargoVersionFn = func(context.Context, []string) (string, error) {
+		t.Error("passive asks no version")
+		return "", nil
+	}
+	swap(t, func(ctx context.Context, bin string, args []string) error {
+		order = append(order, "cargo")
+		writeFile(t, filepath.Join(root, "a", "Cargo.toml"), memberManifest+addedEvil)
+		writeFile(t, ws.Lock, evilLock)
+		return nil
+	}, cleanSBOM)
+	var req scanRequest
+	var scanned string
+	scan := lockScan(t, &req, &scanned, evilSBOM)
+	swapScan(t, func(ctx context.Context, r scanRequest) (*ossbom.SBOM, error) {
+		order = append(order, "scan")
+		return scan(ctx, r)
+	})
+
+	if err := Run(context.Background(), Options{Bin: "cargo", Args: []string{"add", "-p", "a", "evil"}, Passive: true}); err != nil {
+		t.Fatalf("Run = %v, want nil: passive never blocks", err)
+	}
+	if want := []string{"cargo", "workspace", "scan"}; !reflect.DeepEqual(order, want) {
+		t.Errorf("order = %v, want %v", order, want)
+	}
+	if !req.SubmitOnly || !req.Installed || scanned != evilLock {
+		t.Errorf("scan request %+v of %q, want the new lock posted without polling", req, scanned)
+	}
+	if got := readFile(t, filepath.Join(root, "a", "Cargo.toml")); got == memberManifest {
+		t.Error("passive restores nothing")
+	}
+}
+
+// Passive posts the lock a failed command left, and still returns cargo's error.
+func TestRunCargoFetch_PassiveFailurePostsTheLock(t *testing.T) {
+	_, ws := cargoProject(t)
+	exit101 := errors.New("exit status 101")
+	swap(t, func(context.Context, string, []string) error {
+		writeFile(t, ws.Lock, evilLock)
+		return exit101
+	}, cleanSBOM)
+	var req scanRequest
+	var scanned string
+	swapScan(t, lockScan(t, &req, &scanned, evilSBOM))
+	if err := Run(context.Background(), Options{Bin: "cargo", Args: []string{"fetch"}, Passive: true}); !errors.Is(err, exit101) {
+		t.Fatalf("Run = %v, want cargo's own error", err)
+	}
+	if !req.SubmitOnly || scanned != evilLock {
+		t.Errorf("scan request %+v of %q, want the lock posted", req, scanned)
+	}
+}
+
+// Passive warns about a lock it cannot post, a moved or script one even after a failure, while a failure for want of a workspace leaves cargo's error alone.
+func TestRunCargo_PassiveWorkspaceErrors(t *testing.T) {
+	exit101 := errors.New("exit status 101")
+	noWorkspace := errors.New("cargo metadata: error: could not find `Cargo.toml` in `/empty` or any parent directory")
+	for _, tc := range []struct {
+		wsErr, runErr error
+		want          string
+	}{
+		{errLockfileMoved, exit101, "ossprey: warning: could not post scan (a resolver.lockfile-path may move it); the install was not blocked (passive)\n"},
+		{errScriptLock, exit101, "ossprey: warning: could not post scan (a cargo script keeps it in the build directory); the install was not blocked (passive)\n"},
+		{noWorkspace, exit101, ""},
+		{noWorkspace, nil, "ossprey: warning: could not post scan (" + noWorkspace.Error() + "); the install was not blocked (passive)\n"},
+	} {
+		cargoProject(t)
+		cargoWorkspaceFn = func(context.Context, []string) (cargoWorkspace, error) { return cargoWorkspace{}, tc.wsErr }
+		swap(t, func(context.Context, string, []string) error { return tc.runErr }, cleanSBOM)
+		out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"fetch", "--offline"}, Passive: true})
+		if !errors.Is(err, tc.runErr) || out != tc.want {
+			t.Errorf("%v, cargo %v: Run = %v, output %q; want %q", tc.wsErr, tc.runErr, err, out, tc.want)
+		}
+	}
+}
+
+// cargo add --dry-run with no lock writes nothing, so passive posts nothing and says so only when verbose.
+func TestRunCargoAdd_PassiveDryRunWithNoLockSaysNothing(t *testing.T) {
+	cargoProject(t)
+	args := []string{"add", "--dry-run", "serde"}
+	ex := &stubExec{}
+	swap(t, ex.fn, cleanSBOM)
+	out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: args, Passive: true})
+	if err != nil || !ex.called || out != "" {
+		t.Errorf("Run = %v, cargo ran = %v, output %q; want cargo run and nothing printed", err, ex.called, out)
+	}
+	out, _ = verboseOutput(t, context.Background(), Options{Bin: "cargo", Args: args, Passive: true})
+	if !strings.Contains(out, "ossprey: `cargo add --dry-run serde` left no Cargo.lock; nothing posted") {
+		t.Errorf("verbose output lacks the reason:\n%s", out)
+	}
+}
+
+// The credential is resolved from the forwarder's own API settings, before cargo, and a run that checks nothing never asks for one.
+func TestRunCargoAdd_AsksForACredentialOnlyToCheck(t *testing.T) {
+	for _, tc := range []struct {
+		name                   string
+		args                   []string
+		passive, skip, unknown bool
+		want                   []string
+	}{
+		{"gating", []string{"update"}, false, false, false, []string{"credential for https://api.test with k"}},
+		{"passive", []string{"update"}, true, false, false, []string{"cargo"}},
+		{"skip-ci", []string{"update"}, false, true, false, []string{"cargo"}},
+		{"unreadable workspace", []string{"update"}, false, false, true, nil},
+		{"dry run", []string{"update", "--dry-run"}, false, false, false, []string{"cargo"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, _ := cargoProject(t)
+			if tc.unknown {
+				cargoWorkspaceFn = func(context.Context, []string) (cargoWorkspace, error) { return cargoWorkspace{}, errLockfileMoved }
+			}
+			var order []string
+			old := cargoCredentialFn
+			cargoCredentialFn = func(_ context.Context, apiURL, apiKey string) error {
+				order = append(order, "credential for "+apiURL+" with "+apiKey)
+				return errors.New("no credentials")
+			}
+			t.Cleanup(func() { cargoCredentialFn = old })
+			f := &fakeCargo{t: t, root: root, lock: evilLock}
+			cargoRunFn = func(ctx context.Context, env, args []string, stderr io.Writer) error {
+				order = append(order, "cargo")
+				return f.run(ctx, env, args, stderr)
+			}
+			swap(t, func(context.Context, string, []string) error {
+				order = append(order, "cargo")
+				return nil
+			}, cleanSBOM)
+			swapScan(t, func(context.Context, scanRequest) (*ossbom.SBOM, error) { return cleanCrates(), nil })
+
+			opts := Options{Bin: "cargo", Args: tc.args, APIURL: "https://api.test", APIKey: "k", Passive: tc.passive, SkipCI: tc.skip}
+			_, err := quietOutput(t, context.Background(), opts)
+			if refused := !tc.passive && !tc.skip && tc.name != "dry run"; (err != nil) != refused {
+				t.Errorf("Run = %v, want an error only when the run is refused", err)
+			}
+			if !reflect.DeepEqual(order, tc.want) {
+				t.Errorf("order = %v, want %v", order, tc.want)
+			}
+		})
 	}
 }
 
@@ -556,6 +1504,12 @@ func TestRunCargoInstall_Passive(t *testing.T) {
 
 // Every other cargo command reaches cargo untouched, with no lookup at all.
 func TestRunCargoPassesEverythingElseThrough(t *testing.T) {
+	old := cargoWorkspaceFn
+	cargoWorkspaceFn = func(context.Context, []string) (cargoWorkspace, error) {
+		t.Error("a pass-through must not look up the workspace")
+		return cargoWorkspace{}, nil
+	}
+	t.Cleanup(func() { cargoWorkspaceFn = old })
 	for _, args := range [][]string{{"build"}, {"+nightly", "test"}, {"run", "--", "add"}, {"install", "--list"}, {"add", "--help"}, {"remove", "serde"}} {
 		ex := &stubExec{}
 		swap(t, ex.fn, func(context.Context, check.Options) (*ossbom.SBOM, error) {
@@ -571,33 +1525,24 @@ func TestRunCargoPassesEverythingElseThrough(t *testing.T) {
 	}
 }
 
-// In gating mode the verbs that only lock are refused before cargo runs or anything is checked, and passive and skip-ci hand them to cargo as typed.
-func TestRunCargo_LockingCommandsAreRefused(t *testing.T) {
-	for _, tc := range []struct{ line, verb string }{
-		{"add serde", "add"},
-		{"add --dry-run serde", "add"},
-		{"+nightly update", "update"},
-		{"update --dry-run", "update"},
-		{"-q generate-lockfile", "generate-lockfile"},
-		{"fetch --locked", "fetch"},
+func TestCargoWorkspaceFlags(t *testing.T) {
+	for _, tc := range []struct{ rest, want string }{
+		{"-p a serde", ""},
+		{"--manifest-path a/Cargo.toml serde", "--manifest-path a/Cargo.toml"},
+		{"--manifest-path=a/Cargo.toml serde", "--manifest-path a/Cargo.toml"},
+		{"-m a/Cargo.toml serde", "--manifest-path a/Cargo.toml"},
+		{"-ma/Cargo.toml serde", "--manifest-path a/Cargo.toml"},
+		{"--config k=v -Zunstable-options serde", "--config k=v -Z unstable-options"},
+		{"-qm other/Cargo.toml serde", "--manifest-path other/Cargo.toml"},
+		{"-qmother/Cargo.toml serde", "--manifest-path other/Cargo.toml"},
+		{"-vm=other/Cargo.toml serde", "--manifest-path other/Cargo.toml"},
+		{"-qZ unstable-options serde", "-Z unstable-options"},
+		{"-pm serde", ""},
+		{"-Fm serde", ""},
+		{"serde -- -m x", ""},
 	} {
-		args := strings.Fields(tc.line)
-		ex := &stubExec{}
-		swap(t, ex.fn, func(context.Context, check.Options) (*ossbom.SBOM, error) {
-			t.Errorf("cargo %s was checked", tc.line)
-			return nil, nil
-		})
-		want := "did not run `cargo " + tc.line + "`: ossprey does not check `cargo " + tc.verb + "` yet"
-		out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: args})
-		if err == nil || err.Error() != want || errors.Is(err, ErrBlocked) || out != "" || ex.called {
-			t.Errorf("cargo %s: Run = %v, output %q, cargo ran %v; want %q alone", tc.line, err, out, ex.called, want)
-		}
-		for _, opts := range []Options{{Bin: "cargo", Args: args, Passive: true}, {Bin: "cargo", Args: args, SkipCI: true}} {
-			ex := &stubExec{}
-			swap(t, ex.fn, nil)
-			if out, err := quietOutput(t, context.Background(), opts); err != nil || out != "" || !ex.called || !reflect.DeepEqual(ex.args, args) {
-				t.Errorf("cargo %s (passive %v): Run = %v, output %q, forwarded %v (called %v)", tc.line, opts.Passive, err, out, ex.args, ex.called)
-			}
+		if got := strings.Join(cargoWorkspaceFlags(strings.Fields(tc.rest)), " "); got != tc.want {
+			t.Errorf("%q: %q, want %q", tc.rest, got, tc.want)
 		}
 	}
 }
@@ -620,30 +1565,150 @@ func TestCargoConfigDirReadsGroupedShorts(t *testing.T) {
 	}
 }
 
-// cargo 1.99.1 install fails on a --config or CARGO_HOME config that is a directory, so the forwarder reads it as setting no registry.default and the crate is still checked (OSS-2553).
-func TestCargoInstallChecksACrateWhoseConfigIsADirectory(t *testing.T) {
+func TestLockfileMoved(t *testing.T) {
+	home, project := t.TempDir(), t.TempDir()
+	t.Setenv("CARGO_HOME", home)
+	unsetEnv(t, "CARGO_RESOLVER_LOCKFILE_PATH")
+	sub := filepath.Join(project, "sub")
+	if err := os.MkdirAll(filepath.Join(project, ".cargo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if lockfileMoved([]string{"add", "serde"}, sub) {
+		t.Fatal("nothing sets resolver.lockfile-path yet")
+	}
+	if !lockfileMoved([]string{"--config", `resolver.lockfile-path="x/Cargo.lock"`, "add", "serde"}, sub) {
+		t.Error("missed --config on the command line")
+	}
+	file := filepath.Join(project, "extra.toml")
+	writeFile(t, file, "[resolver]\nlockfile-path = \"x/Cargo.lock\"\n")
+	if !lockfileMoved([]string{"add", "--config=" + file, "serde"}, sub) {
+		t.Error("missed a --config file")
+	}
+	writeFile(t, filepath.Join(project, ".cargo", "config.toml"), "[resolver]\nlockfile-path = \"x/Cargo.lock\"\n")
+	if !lockfileMoved([]string{"add", "serde"}, sub) {
+		t.Error("missed an ancestor's .cargo/config.toml")
+	}
+	if err := os.Remove(filepath.Join(project, ".cargo", "config.toml")); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(home, "config.toml"), "resolver.lockfile-path = \"x/Cargo.lock\"\n")
+	if !lockfileMoved([]string{"add", "serde"}, sub) {
+		t.Error("missed CARGO_HOME's config.toml")
+	}
+	if err := os.Remove(filepath.Join(home, "config.toml")); err != nil {
+		t.Fatal(err)
+	}
+	// cargo merges an included file, which may set lockfile-path, so any include counts.
+	include := "include = [\"lock.toml\"]\n"
+	writeFile(t, filepath.Join(project, ".cargo", "config.toml"), include)
+	if !lockfileMoved([]string{"add", "serde"}, sub) {
+		t.Error("missed an include in an ancestor's .cargo/config.toml")
+	}
+	if err := os.Remove(filepath.Join(project, ".cargo", "config.toml")); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(home, "config.toml"), include)
+	if !lockfileMoved([]string{"add", "serde"}, sub) {
+		t.Error("missed an include in CARGO_HOME's config.toml")
+	}
+	if err := os.Remove(filepath.Join(home, "config.toml")); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, file, include)
+	if !lockfileMoved([]string{"--config", file, "add", "serde"}, sub) {
+		t.Error("missed an include in a --config file")
+	}
+	if !lockfileMoved([]string{"--config", `include=["lock.toml"]`, "add", "serde"}, sub) {
+		t.Error("missed an include on the command line")
+	}
+	writeFile(t, filepath.Join(project, ".cargo", "config.toml"), "[build]\njobs = 4\n# include nothing\n")
+	if lockfileMoved([]string{"add", "serde"}, sub) {
+		t.Error("a config with no include or lockfile-path moves nothing")
+	}
+	// TOML decodes escapes in a quoted key, and cargo 1.99.1 moved the lock for each of these.
+	for _, escaped := range []string{
+		"[resolver]\n\"lockfile\\u002dpath\" = \"x/Cargo.lock\"\n",
+		"[\"resolv\\u0065r\"]\n\"lockfile\\u002dpath\" = \"x/Cargo.lock\"\n",
+		"resolver.\"lockfile\\u002dpath\" = \"x/Cargo.lock\"\n",
+	} {
+		writeFile(t, filepath.Join(project, ".cargo", "config.toml"), escaped)
+		if !lockfileMoved([]string{"add", "serde"}, sub) {
+			t.Errorf("missed an escaped key: %q", escaped)
+		}
+	}
+	if !lockfileMoved([]string{"--config", `resolver."lockfile\u002dpath"="x/Cargo.lock"`, "add", "serde"}, sub) {
+		t.Error("missed an escaped key on the command line")
+	}
+	// cargo 1.99.1 reads only the legacy config when both are at one level.
+	writeFile(t, filepath.Join(project, ".cargo", "config.toml"), "[resolver]\nlockfile-path = \"x/Cargo.lock\"\n")
+	writeFile(t, filepath.Join(project, ".cargo", "config"), "[build]\njobs = 4\n")
+	if lockfileMoved([]string{"add", "serde"}, sub) {
+		t.Error("a config.toml beside config is not read, so it moves nothing")
+	}
+	writeFile(t, filepath.Join(project, ".cargo", "config"), "[resolver]\nlockfile-path = \"x/Cargo.lock\"\n")
+	writeFile(t, filepath.Join(project, ".cargo", "config.toml"), "[build]\njobs = 4\n")
+	if !lockfileMoved([]string{"add", "serde"}, sub) {
+		t.Error("missed the legacy config beside config.toml")
+	}
+	if err := os.Remove(filepath.Join(project, ".cargo", "config")); err != nil {
+		t.Fatal(err)
+	}
+	// A config the bounded parser refuses may set it.
+	for name, refused := range map[string]string{
+		"too deep":  "x = " + strings.Repeat("[", 17) + strings.Repeat("]", 17) + "\n",
+		"too long":  "x = \"" + strings.Repeat("a", 5000) + "\"\n",
+		"too large": "# " + strings.Repeat("x", catalog.CargoManifestLimit) + "\n",
+	} {
+		writeFile(t, filepath.Join(project, ".cargo", "config.toml"), refused)
+		if !lockfileMoved([]string{"add", "serde"}, sub) {
+			t.Errorf("a config %s to read may move it", name)
+		}
+		writeFile(t, file, refused)
+		if !lockfileMoved([]string{"add", "--config", file, "serde"}, sub) {
+			t.Errorf("a --config file %s to read may move it", name)
+		}
+	}
+	writeFile(t, filepath.Join(project, ".cargo", "config.toml"), "[build]\njobs = 4\n")
+	if lockfileMoved([]string{"add", "serde"}, sub) {
+		t.Error("a readable config with no lockfile-path moves nothing")
+	}
+	t.Setenv("CARGO_RESOLVER_LOCKFILE_PATH", "x/Cargo.lock")
+	if !lockfileMoved([]string{"add", "serde"}, sub) {
+		t.Error("missed CARGO_RESOLVER_LOCKFILE_PATH")
+	}
+}
+
+// cargo 1.99.1 reads a --config or level config that is a directory as an error, so it counts as one that may move the lock, while cargo install fails on it with the crate still checked (OSS-2553).
+func TestCargoConfigThatIsADirectoryMayMoveTheLock(t *testing.T) {
 	assertIrregularConfig(t, func(p string) error { return os.Mkdir(p, 0o755) })
 }
 
-// assertIrregularConfig makes each config cargo install reads with mk, which is not a regular file, and wants it not to set registry.default.
+// assertIrregularConfig makes each config cargo reads with mk, which is not a regular file, and wants it to count as one that may move the lock but not to set registry.default.
 func assertIrregularConfig(t *testing.T, mk func(string) error) {
 	t.Helper()
 	base := t.TempDir()
 	home, project := filepath.Join(base, "home"), filepath.Join(base, "project")
-	for _, d := range []string{home, project} {
+	for _, d := range []string{home, filepath.Join(project, ".cargo")} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
 	t.Setenv("CARGO_HOME", home)
+	unsetEnv(t, "CARGO_RESOLVER_LOCKFILE_PATH")
 	unsetEnv(t, "CARGO_REGISTRY_DEFAULT")
 	t.Chdir(project)
-	if cargoDefaultRegistry([]string{"install", "x"}) != "" {
-		t.Fatal("nothing sets registry.default yet")
+	if lockfileMoved([]string{"generate-lockfile"}, project) || cargoDefaultRegistry([]string{"install", "x"}) != "" {
+		t.Fatal("nothing sets either key yet")
 	}
 	arg := filepath.Join(base, "arg.toml")
 	if err := mk(arg); err != nil {
 		t.Fatal(err)
+	}
+	if !lockfileMoved([]string{"--config", arg, "generate-lockfile"}, project) {
+		t.Error("a --config file that is not a regular file may move the lock")
 	}
 	if got := cargoDefaultRegistry([]string{"install", "--config", arg, "x"}); got != "" {
 		t.Errorf("a --config file that is not a regular file: %q, want the crates.io crate checked", got)
@@ -651,11 +1716,256 @@ func assertIrregularConfig(t *testing.T, mk func(string) error) {
 	if got := cargoDefaultRegistry([]string{"--config", `registry.default="corp"`, "install", "--config", arg, "x"}); got != "corp" {
 		t.Errorf("a --config file that is not a regular file after one that sets corp: %q, want corp", got)
 	}
+	if err := mk(filepath.Join(project, ".cargo", "config.toml")); err != nil {
+		t.Fatal(err)
+	}
+	if !lockfileMoved([]string{"generate-lockfile"}, project) {
+		t.Error("a level config that is not a regular file may move the lock")
+	}
 	if err := mk(filepath.Join(home, "config.toml")); err != nil {
 		t.Fatal(err)
 	}
 	if got := cargoDefaultRegistry([]string{"install", "x"}); got != "" {
 		t.Errorf("CARGO_HOME's config that is not a regular file: %q, want the crates.io crate checked", got)
+	}
+}
+
+// Only the setting moves the lock: cargo 1.99.1 reads none of these as one, so naming the words must not skip the check (OSS-2553).
+func TestLockfileMovedReadsOnlyTheSetting(t *testing.T) {
+	home, project := t.TempDir(), t.TempDir()
+	t.Setenv("CARGO_HOME", home)
+	unsetEnv(t, "CARGO_RESOLVER_LOCKFILE_PATH")
+	t.Chdir(project)
+	if err := os.Mkdir(filepath.Join(project, ".cargo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(project, "lockfile-path.toml"), "[net]\nretry = 2\n")
+	set := `resolver.lockfile-path="alt/Cargo.lock"`
+	for _, args := range [][]string{
+		{"add", "lockfile-path-helper"},
+		{"add", "-p", "lockfile-path", "itoa"},
+		{"generate-lockfile", "--manifest-path", "lockfile-path/Cargo.toml"},
+		{"generate-lockfile", "--manifest-path=lockfile-path/Cargo.toml"},
+		{"generate-lockfile", "--config", "lockfile-path.toml"},
+		{"generate-lockfile", "--config", `alias.lp="lockfile-path"`},
+		{"generate-lockfile", "--config", "resolver.lockfile_path=\"alt/Cargo.lock\""},
+		{"-Zlockfile-path", "generate-lockfile"},
+		{"update", "--", "--config", set},
+		{"add", "--", "--config=" + set},
+	} {
+		if lockfileMoved(args, project) {
+			t.Errorf("cargo %v moves no lock", args)
+		}
+	}
+	for _, config := range []string{
+		"# lockfile-path = \"alt/Cargo.lock\"\n[resolver]\n# lockfile-path = \"alt/Cargo.lock\"\n",
+		"[alias]\nlp = \"lockfile-path\"\n\n[env]\nX = \"resolver.lockfile-path = alt\"\n",
+	} {
+		writeFile(t, filepath.Join(project, ".cargo", "config.toml"), config)
+		if lockfileMoved([]string{"generate-lockfile"}, project) {
+			t.Errorf("config %q moves no lock", config)
+		}
+		writeFile(t, filepath.Join(home, "config.toml"), config)
+		if lockfileMoved([]string{"generate-lockfile", "--config", filepath.Join(home, "config.toml")}, project) {
+			t.Errorf("--config file %q moves no lock", config)
+		}
+	}
+	// Each spelling cargo 1.99.1 moved the lock for, before the verb and after it.
+	for _, args := range [][]string{
+		{"--config", set, "generate-lockfile"},
+		{"generate-lockfile", "--config", set},
+		{"generate-lockfile", "--config=" + set},
+		{"add", "itoa", "--config", `resolver."lockfile-path"="alt/Cargo.lock"`},
+		{"-q", "--config", set, "update", "-p", "itoa"},
+	} {
+		if !lockfileMoved(args, project) {
+			t.Errorf("missed cargo %v", args)
+		}
+	}
+	for _, config := range []string{
+		"[resolver]\nlockfile-path = \"alt/Cargo.lock\"\n",
+		"resolver = { lockfile-path = \"alt/Cargo.lock\" }\n",
+		"resolver.lockfile-path = \"alt/Cargo.lock\"\n",
+	} {
+		writeFile(t, filepath.Join(project, ".cargo", "config.toml"), config)
+		if !lockfileMoved([]string{"generate-lockfile"}, project) {
+			t.Errorf("missed config %q", config)
+		}
+	}
+}
+
+// A relative CARGO_HOME is joined to where cargo runs, -C's directory included, as cargo 1.99.1 joins it.
+func TestLockfileMovedReadsARelativeHomeWhereCargoRuns(t *testing.T) {
+	project := t.TempDir()
+	sub := filepath.Join(project, "sub")
+	if err := os.MkdirAll(filepath.Join(sub, "h"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(sub, "h", "config.toml"), "[resolver]\nlockfile-path = \"x/Cargo.lock\"\n")
+	t.Setenv("CARGO_HOME", "h")
+	unsetEnv(t, "CARGO_RESOLVER_LOCKFILE_PATH")
+	t.Chdir(project)
+	if !lockfileMoved([]string{"-Z", "unstable-options", "-C", "sub", "fetch"}, sub) {
+		t.Error("missed the lockfile-path in the relative CARGO_HOME under -C's directory")
+	}
+	if lockfileMoved([]string{"fetch"}, project) {
+		t.Error("read a relative CARGO_HOME from a directory cargo does not run in")
+	}
+}
+
+// The real cargo names the root's lock and where it reads configs, a member outside the root's directory included.
+func TestReadCargoWorkspaceWithCargo(t *testing.T) {
+	if _, err := exec.LookPath("cargo"); err != nil {
+		t.Skip("cargo not installed")
+	}
+	unsetEnv(t, "CARGO_RESOLVER_LOCKFILE_PATH")
+	t.Setenv("CARGO_HOME", t.TempDir())
+	dir := t.TempDir()
+	if real, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = real
+	}
+	root, member := filepath.Join(dir, "root"), filepath.Join(dir, "outside", "m")
+	for _, d := range []string{filepath.Join(root, "src"), filepath.Join(member, "src")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFile(t, filepath.Join(root, "Cargo.toml"), "[package]\nname = \"rootpkg\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\nmembers = [\"../outside/m\"]\n")
+	writeFile(t, filepath.Join(root, "src", "main.rs"), "fn main() {}\n")
+	writeFile(t, filepath.Join(member, "Cargo.toml"), "[package]\nname = \"m\"\nversion = \"0.1.0\"\nedition = \"2021\"\nworkspace = \"../../root\"\n")
+	writeFile(t, filepath.Join(member, "src", "lib.rs"), "")
+	t.Chdir(member)
+
+	ws, err := readCargoWorkspace(context.Background(), []string{"add", "itoa"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Compared as files, since cargo and Go may spell one path differently on Windows.
+	same := func(a, b string) bool {
+		fa, errA := os.Stat(a)
+		fb, errB := os.Stat(b)
+		return errA == nil && errB == nil && os.SameFile(fa, fb)
+	}
+	if filepath.Base(ws.Lock) != "Cargo.lock" || !same(filepath.Dir(ws.Lock), root) {
+		t.Errorf("lock = %s, want the root's", ws.Lock)
+	}
+	if !same(ws.ConfigDir, member) {
+		t.Errorf("config dir = %s, want %s", ws.ConfigDir, member)
+	}
+	if _, err := os.Stat(ws.Lock); !errors.Is(err, os.ErrNotExist) {
+		t.Error("cargo metadata --no-deps must not write a lock")
+	}
+
+	// --manifest-path after the verb names another workspace than the one cargo runs in.
+	other := filepath.Join(dir, "other")
+	if err := os.MkdirAll(filepath.Join(other, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(other, "Cargo.toml"), "[package]\nname = \"other\"\nversion = \"0.1.0\"\nedition = \"2021\"\n")
+	writeFile(t, filepath.Join(other, "src", "lib.rs"), "")
+	if ws, err = readCargoWorkspace(context.Background(), []string{"add", "--manifest-path", filepath.Join(other, "Cargo.toml"), "itoa"}); err != nil {
+		t.Fatal(err)
+	}
+	if !same(filepath.Dir(ws.Lock), other) {
+		t.Errorf("--manifest-path: lock %s; want the other workspace's", ws.Lock)
+	}
+
+	// A lock cargo would write elsewhere is not checked.
+	if err := os.MkdirAll(filepath.Join(member, ".cargo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(member, ".cargo", "config.toml"), "include = [\"lock.toml\"]\n")
+	writeFile(t, filepath.Join(member, ".cargo", "lock.toml"), "[resolver]\nlockfile-path = \"locks/Cargo.lock\"\n")
+	if _, err := readCargoWorkspace(context.Background(), []string{"add", "itoa"}); !errors.Is(err, errLockfileMoved) {
+		t.Errorf("a config include: err = %v, want errLockfileMoved", err)
+	}
+	if err := os.Remove(filepath.Join(member, ".cargo", "config.toml")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CARGO_RESOLVER_LOCKFILE_PATH", filepath.Join(dir, "elsewhere", "Cargo.lock"))
+	if _, err := readCargoWorkspace(context.Background(), []string{"add", "itoa"}); !errors.Is(err, errLockfileMoved) {
+		t.Errorf("CARGO_RESOLVER_LOCKFILE_PATH: err = %v, want errLockfileMoved", err)
+	}
+}
+
+// cargo 1.99.1 locks a -Zscript manifest under its build directory, not beside the script, so a project lock there is not the one to check (OSS-2553).
+func TestReadCargoWorkspaceRefusesACargoScript(t *testing.T) {
+	if _, err := exec.LookPath("cargo"); err != nil {
+		t.Skip("cargo not installed")
+	}
+	unsetEnv(t, "CARGO_RESOLVER_LOCKFILE_PATH")
+	t.Setenv("CARGO_HOME", t.TempDir())
+	t.Setenv("RUSTC_BOOTSTRAP", "1")
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, "Cargo.toml"), "[package]\nname = \"p\"\nversion = \"0.1.0\"\nedition = \"2021\"\n")
+	writeFile(t, filepath.Join(dir, "src", "lib.rs"), "")
+	writeFile(t, filepath.Join(dir, "Cargo.lock"), "version = 4\n")
+	writeFile(t, filepath.Join(dir, "s.rs"), "---\n[package]\nedition = \"2024\"\n---\nfn main() {}\n")
+	t.Chdir(dir)
+	for _, args := range [][]string{
+		{"-Zscript", "generate-lockfile", "--manifest-path", "s.rs"},
+		{"update", "-Zscript", "-ms.rs"},
+	} {
+		if ws, err := readCargoWorkspace(context.Background(), args); !errors.Is(err, errScriptLock) {
+			t.Errorf("cargo %v: lock %s (%v), want errScriptLock", args, ws.Lock, err)
+		}
+	}
+	if _, err := readCargoWorkspace(context.Background(), []string{"-Zscript", "generate-lockfile"}); err != nil {
+		t.Errorf("the project beside the script: %v", err)
+	}
+}
+
+// Registry trust for the copied lock reads the configs where cargo runs, through scan and catalog, not those around the copy.
+func TestRunCargoAdd_TrustReadsTheConfigsWhereCargoRuns(t *testing.T) {
+	// itoa keeps the first scan from coming back empty, which would rescan through scanProject's fallback.
+	corpLock := "version = 4\n\n[[package]]\nname = \"acme-sparse\"\nversion = \"1.0.0\"\nsource = \"sparse+https://crates.corp.example/internal/\"\nchecksum = \"aaaa\"\n\n" +
+		"[[package]]\nname = \"itoa\"\nversion = \"1.0.15\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"bbbb\"\n"
+	replace := "[source.corp]\nregistry = \"sparse+https://crates.corp.example/internal/\"\nreplace-with = \"elsewhere\"\n"
+	policy, err := trust.Parse([]string{"https://crates.corp.example/internal/"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, replaced := range []bool{false, true} {
+		t.Run(map[bool]string{false: "no replacement", true: "a replacement"}[replaced], func(t *testing.T) {
+			t.Setenv("CARGO_HOME", t.TempDir())
+			root, _ := cargoProject(t)
+			if replaced {
+				if err := os.Mkdir(filepath.Join(root, ".cargo"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				writeFile(t, filepath.Join(root, ".cargo", "config.toml"), replace)
+			}
+			var sent []string
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body struct {
+					SBOM struct {
+						Components []struct {
+							Purl string `json:"purl"`
+						} `json:"components"`
+					} `json:"sbom"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&body)
+				for _, c := range body.SBOM.Components {
+					sent = append(sent, c.Purl)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"components": [], "vulnerabilities": []}`))
+			}))
+			t.Cleanup(api.Close)
+			swapCargo(t, &fakeCargo{t: t, root: root, lock: corpLock})
+			swap(t, nil, cleanSBOM)
+			swapScan(t, scanProject)
+
+			if _, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"update"}, APIURL: api.URL, APIKey: "k", Trust: policy}); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if checked := slices.ContainsFunc(sent, func(p string) bool { return strings.Contains(p, "acme-sparse") }); checked != replaced {
+				t.Errorf("sent %v; want acme-sparse checked %v", sent, replaced)
+			}
+		})
 	}
 }
 
@@ -668,6 +1978,9 @@ func TestCargoConfigFileIsReadWhereCargoRuns(t *testing.T) {
 	unsetEnv(t, "CARGO_RESOLVER_LOCKFILE_PATH")
 	unsetEnv(t, "CARGO_REGISTRY_DEFAULT")
 	t.Chdir(start)
+	if !lockfileMoved([]string{"-Zunstable-options", "-C", dir, "--config", "c.toml", "generate-lockfile"}, dir) {
+		t.Error("lockfile-path in the -C directory's c.toml not seen")
+	}
 	if got := cargoDefaultRegistry([]string{"-Zunstable-options", "-C", dir, "--config", "c.toml", "install", "x"}); got != "corp" {
 		t.Errorf("registry.default from the -C directory's c.toml = %q, want corp", got)
 	}
