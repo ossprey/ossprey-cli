@@ -74,7 +74,13 @@ func cargoShorts(a string, takes map[string]bool) (split []string, owes bool) {
 			if i == len(a) {
 				return split, true
 			}
-			return append(split, strings.TrimPrefix(a[i:], "=")), false
+			v := strings.TrimPrefix(a[i:], "=")
+			if cargoOptionalSkips(short, v) {
+				// clap reads `-p-h` as -p's value, so it stays one token, `-p=-h`, that no reader takes for an option.
+				split[len(split)-1] = short + "=" + v
+				return split, false
+			}
+			return append(split, v), false
 		}
 	}
 	return split, false
@@ -118,9 +124,12 @@ func cargoHas(args []string, flags ...string) bool {
 // cargoOptionalValues are install's options whose value is optional (TestCargoFlagTablesMatchCargo).
 var cargoOptionalValues = flagSet("--bin", "--example", "--target")
 
+// cargoResolveOptional are the cargoResolveShorts whose value is optional: add's -p, and update's, which `cargo update --help` hides (TestCargoFlagTablesMatchCargo).
+var cargoResolveOptional = flagSet("-p")
+
 // cargoOptionalSkips reports whether clap leaves next alone for flag: an optional value is never an option token, so `--bin -F pcre2` gives pcre2 to -F.
 func cargoOptionalSkips(flag, next string) bool {
-	return cargoOptionalValues[flag] && len(next) > 1 && next[0] == '-'
+	return (cargoOptionalValues[flag] || cargoResolveOptional[flag]) && len(next) > 1 && next[0] == '-'
 }
 
 // cargoSourceFlags install every crate named from somewhere other than crates.io.

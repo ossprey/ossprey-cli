@@ -151,8 +151,11 @@ Windows resolves it under `%LOCALAPPDATA%`.
      taking a value, which takes the rest less one `=`, else the next token
      (`-qjF 2` is `-j F`), so `cargoSplitShorts` splits groups. `--bin`,
      `--example` and `--target` take an optional value clap never fills with
-     an option (`cargoOptionalValues`). `cargoPrintsOnly` passes through help
-     and version lines, and `verbIndex` skips a `+toolchain` only first.
+     an option (`cargoOptionalValues`), as does `-p` for `add` and `update`,
+     which `cargo update --help` hides (`cargoResolveOptional`). An attached
+     value is the option's whatever it looks like, so `-p-h` stays one token.
+     `cargoPrintsOnly` passes through help and version lines, and `verbIndex`
+     skips a `+toolchain` only first.
    - **`install`** builds and runs build scripts at once, so the named crates
      are checked in front, and only those (`errCargoNotResolved`), under the
      name typed, since `cargo install` folds no spelling. A crate from anywhere

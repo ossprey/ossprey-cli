@@ -79,11 +79,18 @@ func TestCargoDetection(t *testing.T) {
 		{"install -F-h ripgrep", "before"},
 		{"-Zunstable-options -C-h add serde", "resolve"},
 		{"add -p-h serde", "resolve"},
+		{"update -p-h", "resolve"},
+		{"update -qp-h", "resolve"},
+		{"update -p=-h", "resolve"},
 		// An optional value never takes an option token, so the help after it is help (cargo 1.99.1).
 		{"install --bin --help ripgrep", "through"},
 		{"install --example -h ripgrep", "through"},
 		{"install --target -qh ripgrep", "through"},
 		{"install --bin rg ripgrep", "before"},
+		{"add -p -h", "through"},
+		{"update -p --help", "through"},
+		{"update -qp -h", "through"},
+		{"update -p serde -p -h", "through"},
 		{"build", "through"},
 		{"+nightly build", "through"},
 		{"check", "through"},
@@ -358,6 +365,7 @@ func TestCargoFlagTablesMatchCargo(t *testing.T) {
 		{install, cargoOptionalValues, nil, func(_ string, optional bool) bool { return optional }},
 		// One table serves the four verbs, so no short may be a switch in one and take a value in another.
 		{resolve, cargoResolveShorts, nil, func(name string, _ bool) bool { return !strings.HasPrefix(name, "--") }},
+		{resolve, cargoResolveOptional, nil, func(name string, optional bool) bool { return optional && !strings.HasPrefix(name, "--") }},
 	} {
 		var help strings.Builder
 		for _, args := range tc.helps {
