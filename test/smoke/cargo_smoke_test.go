@@ -191,6 +191,59 @@ func TestCargoFetchCleanDownloadsTheCheckedLock(t *testing.T) {
 	}
 }
 
+// A lock another program swaps into the project after the checked one lands is not what the fetch downloads, though --locked alone would take it (OSS-2553).
+func TestCargoFetchIgnoresALockSwappedInAfterTheCheck(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the cargo in front of the real one is a shell script")
+	}
+	api := newFakeAPI(t, "")
+	env := cargoEnv(t, api.URL)
+	dir := cargoCrate(t, env, `itoa = "1"`, false)
+	lock := filepath.Join(dir, "Cargo.lock")
+	cargoRun(t, dir, env, "generate-lockfile")
+	cargoRun(t, dir, env, "update", "-p", "itoa", "--precise", "1.0.14")
+	swapped := filepath.Join(t.TempDir(), "Cargo.lock")
+	if err := os.Rename(lock, swapped); err != nil {
+		t.Fatal(err)
+	}
+	cargoRun(t, dir, env, "update", "-p", "itoa", "--precise", "1.0.15")
+
+	// The swap lands after ossprey writes the checked lock and before cargo reads one.
+	real, err := exec.LookPath("cargo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	front := t.TempDir()
+	script := "#!/bin/sh\nfor a; do [ \"$a\" = fetch ] && cp '" + swapped + "' '" + lock + "'; done\nexec '" + real + "' \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(front, "cargo"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var fronted []string
+	for _, kv := range env {
+		if v, ok := strings.CutPrefix(kv, "PATH="); ok {
+			kv = "PATH=" + front + string(os.PathListSeparator) + v
+		}
+		fronted = append(fronted, kv)
+	}
+
+	res := runForwardEnv(t, dir, fronted, binPath, "cargo", "fetch")
+	if res.exitCode != 0 {
+		t.Fatalf("exit %d\nstderr: %s", res.exitCode, res.stderr)
+	}
+	if got, want := stateOf(t, lock), stateOf(t, swapped); string(got.data) != string(want.data) {
+		t.Fatalf("Cargo.lock = %q, want the swapped lock, or the test proves nothing", got.data)
+	}
+	if got := downloaded(t, cargoHome(env)); !slices.Equal(got, []string{"itoa-1.0.15.crate"}) {
+		t.Errorf("downloaded %v, want the checked itoa 1.0.15 alone\nstderr: %s", got, res.stderr)
+	}
+	if verdict, fetched := strings.Index(res.stderr, "ossprey: no malware found"), strings.Index(res.stderr, "Downloaded itoa"); verdict < 0 || fetched < verdict {
+		t.Errorf("want the verdict line before cargo's download lines\nstderr: %s", res.stderr)
+	}
+	if strings.Contains(res.stderr, "ossprey-cargo-") {
+		t.Errorf("stderr names a scratch path:\n%s", res.stderr)
+	}
+}
+
 // cargo's error names the redirected lock, which the user reads as the project's (OSS-2553).
 func TestCargoLockedFailureNamesTheProjectLock(t *testing.T) {
 	api := newFakeAPI(t, "")

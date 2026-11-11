@@ -69,7 +69,7 @@ flowchart TD
     CC -- "no verdict" --> CN["exit 2:<br/>the project is unchanged"]
     CC -- "no" --> CL{"project files as<br/>cargo started from?"}
     CL -- "no: changed during<br/>the check" --> CN
-    CL -- "yes" --> CE["write Cargo.lock;<br/>fetch then runs with --locked"]
+    CL -- "yes" --> CE["write Cargo.lock; fetch then<br/>runs --locked on a copy<br/>of the checked lock"]
     CA -- "no" --> T{"an install verb, or a<br/>tool run (npx, bunx, uvx)?"}
     T -- "no, e.g. npm run" --> U["exec the real manager"]
     T -- "yes" --> V{"OSSPREY_SKIP_CI?"}
@@ -115,10 +115,11 @@ against a scratch copy of the lock: `resolver.lockfile-path` sends the lock
 there, and only a clean result is written to the project
 (`internal/forward/cargo.go`). `cargo fetch` is resolved with `cargo update
 --workspace`, which downloads no crate (cargo still checks out git
-dependencies to resolve them), and runs with `--locked` once the lock is
-written. `cargo add` edits `Cargo.toml` as well as the lock, so it is refused
-in gating mode until it can be checked the same way. In passive mode cargo
-runs first and the lock is posted.
+dependencies to resolve them), and once the lock is written it runs with
+`--locked` against a scratch copy of the checked lock. `cargo add` edits
+`Cargo.toml` as well as the lock, so it is refused in gating mode until it can
+be checked the same way. In passive mode cargo runs first and the lock is
+posted.
 
 The passive branch is the one worth reading twice. It never gates, so it never
 sits in front of the install: where a lockfile will land, the install runs

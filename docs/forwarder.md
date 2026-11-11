@@ -126,7 +126,8 @@ code `2` before cargo runs, until it can be checked the same way. `cargo add
   update --workspace`, which writes the same lock `cargo fetch` would and
   downloads no crate. Every option you gave `cargo fetch` except `--target` is
   passed along. Once that lock is checked and written, your `cargo fetch` runs
-  with `--locked` added, so cargo downloads exactly the checked lock.
+  with `--locked` added against a private copy of the checked lock, so cargo
+  downloads exactly what was checked even if `Cargo.lock` changes meanwhile.
 
 If the lock holds malware you get the full malware report, a line saying the
 project was not changed, and exit code `1`. Nothing was written to the project

@@ -1108,7 +1108,7 @@ func TestRunCargoGenerateLockfile_NoLockLandsNothing(t *testing.T) {
 	}
 }
 
-// fetch locks with update --workspace, which downloads no crate, from the project's lock and with every fetch option but --target, then fetches the checked lock with --locked (OSS-2553).
+// fetch locks with update --workspace, which downloads no crate, from the project's lock and with every fetch option but --target, then fetches with --locked from a private copy of the checked lock (OSS-2553).
 func TestRunCargoFetch_ResolvesThenFetchesLocked(t *testing.T) {
 	for _, tc := range []struct{ args, resolve, fetch string }{
 		{"fetch", "update --workspace", "fetch --locked"},
@@ -1124,24 +1124,35 @@ func TestRunCargoFetch_ResolvesThenFetchesLocked(t *testing.T) {
 			writeFile(t, ws.Lock, "version = 4\n# before\n")
 			var order []string
 			f := &fakeCargo{t: t, root: root, lock: evilLock}
-			swapCargo(t, f)
-			ex := &stubExec{}
-			swap(t, func(ctx context.Context, bin string, args []string) error {
-				order = append(order, "fetch")
-				if readFile(t, ws.Lock) != evilLock {
-					t.Error("fetch ran before the checked lock landed")
+			cargoRunFn = func(ctx context.Context, env, args []string, stderr io.Writer) error {
+				if len(f.runs) == 1 {
+					order = append(order, "fetch")
+					if !strings.Contains(errOut.(*bytes.Buffer).String(), "ossprey: no malware found") {
+						t.Error("fetch ran before the verdict line")
+					}
 				}
-				return ex.fn(ctx, bin, args)
+				return f.run(ctx, env, args, stderr)
+			}
+			swap(t, func(context.Context, string, []string) error {
+				t.Error("the fetch was handed off, which reads the project's lock")
+				return nil
 			}, cleanSBOM)
 			swapScan(t, func(context.Context, scanRequest) (*ossbom.SBOM, error) {
 				order = append(order, "scan")
 				return cleanCrates(), nil
 			})
+			// Another program swaps the project's lock once the checked one lands.
+			old := landFn
+			landFn = func(p string, data []byte) error {
+				err := old(p, data)
+				writeFile(t, p, "version = 4\n# swapped\n")
+				return err
+			}
 			if _, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: strings.Fields(tc.args)}); err != nil {
 				t.Fatalf("Run: %v", err)
 			}
-			if len(f.runs) != 1 {
-				t.Fatalf("cargo ran %d times before the fetch", len(f.runs))
+			if len(f.runs) != 2 {
+				t.Fatalf("cargo ran %d times, want a resolve and a fetch", len(f.runs))
 			}
 			at := redirectedLock(f.runs[0].env, f.runs[0].args)
 			if want := strings.Fields(tc.resolve + " --config resolver.lockfile-path=" + tomlString(at)); !slices.Equal(f.runs[0].args, want) {
@@ -1151,10 +1162,38 @@ func TestRunCargoFetch_ResolvesThenFetchesLocked(t *testing.T) {
 			if f.runs[0].seen != "version = 4\n# before\n" {
 				t.Errorf("the scratch lock held %q when cargo ran, want the project's", f.runs[0].seen)
 			}
-			if !slices.Equal(ex.args, strings.Fields(tc.fetch)) || !slices.Equal(order, []string{"scan", "fetch"}) {
-				t.Errorf("fetched with %q after %v, want %q after the scan", ex.args, order, tc.fetch)
+			fetchAt := redirectedLock(f.runs[1].env, f.runs[1].args)
+			if want := strings.Fields(tc.fetch + " --config resolver.lockfile-path=" + tomlString(fetchAt)); !slices.Equal(f.runs[1].args, want) || !slices.Contains(f.runs[1].env, "CARGO_RESOLVER_LOCKFILE_PATH="+fetchAt) {
+				t.Errorf("fetched with %q and %q, want %q redirected both ways", f.runs[1].args, f.runs[1].env, want)
+			}
+			if fetchAt == ws.Lock || f.runs[1].seen != evilLock || !slices.Equal(order, []string{"scan", "fetch"}) {
+				t.Errorf("fetched %s holding %q after %v, want a copy of the checked lock after the scan", fetchAt, f.runs[1].seen, order)
+			}
+			if _, err := os.Stat(filepath.Dir(fetchAt)); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("the fetch's scratch copy is still there (%v)", err)
 			}
 		})
+	}
+}
+
+// The fetch is cargo's own exit, and its messages name the project's lock (OSS-2553).
+func TestRunCargoFetch_FetchFailurePassesThrough(t *testing.T) {
+	root, ws := cargoProject(t)
+	exit101 := errors.New("exit status 101")
+	f := &fakeCargo{t: t, root: root, lock: evilLock}
+	cargoRunFn = func(ctx context.Context, env, args []string, stderr io.Writer) error {
+		if err := f.run(ctx, env, args, stderr); err != nil || len(f.runs) == 1 {
+			return err
+		}
+		return exit101
+	}
+	swap(t, nil, cleanSBOM)
+	swapScan(t, func(context.Context, scanRequest) (*ossbom.SBOM, error) { return cleanCrates(), nil })
+	if _, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"fetch"}}); !errors.Is(err, exit101) {
+		t.Errorf("Run = %v, want the fetch's own error", err)
+	}
+	if got, want := cargoErrOut.(*bytes.Buffer).String(), strings.Repeat("     Locking 1 package to "+ws.Lock+"\n", 2); got != want {
+		t.Errorf("cargo's stderr = %q, want %q naming the project's lock", got, want)
 	}
 }
 

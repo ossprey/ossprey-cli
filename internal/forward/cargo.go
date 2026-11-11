@@ -332,10 +332,23 @@ func checkCargoFirst(ctx context.Context, m *Manager, opts Options) error {
 		fmt.Fprintf(errOut, "ossprey: %s\n", verdict)
 	}
 	if args[verb] == "fetch" {
-		// The project now holds the checked lock, and --locked downloads exactly that or nothing (verified with cargo 1.97.0 and 1.99.1).
-		return handoffFn(ctx, m.Bin, cargoFetchLocked(args))
+		return fetchCheckedLock(ctx, command, cargoFetchLocked(args), ws, after[0].data)
 	}
 	return nil
+}
+
+// fetchCheckedLock runs the user's fetch with --locked and the lock redirected to a private copy of the checked bytes, so a lock swapped into the project after landing is never what cargo downloads (verified with cargo 1.99.1).
+func fetchCheckedLock(ctx context.Context, command string, args []string, ws cargoWorkspace, data []byte) error {
+	scratch, at, err := cargoScratch(data, true)
+	if err != nil {
+		return fmt.Errorf("%s was checked and written, but `%s` could not run (%v)", displayPath(ws.Lock), command, err)
+	}
+	// A child rather than an exec, so the copy outlives cargo and is removed after.
+	defer os.RemoveAll(scratch)
+	stderr := newCargoStderr(cargoErrOut, at, ws.Lock)
+	err = cargoRunFn(ctx, cargoRedirectEnv(at), cargoRedirectArgs(args, at), stderr)
+	stderr.Flush()
+	return err
 }
 
 // postCargoLock runs a cargo verb that only locks, then posts the Cargo.lock it leaves without waiting for a verdict.
@@ -437,21 +450,12 @@ func cargoRedirects(line string) bool {
 
 // resolveCargoLock runs args with the lock redirected to a scratch copy of the project's, and returns what cargo locked there.
 func resolveCargoLock(ctx context.Context, args []string, ws cargoWorkspace, before cargoFile) (after []cargoFile, runErr, err error) {
-	scratch, err := os.MkdirTemp("", "ossprey-cargo-")
+	// cargo resolves from nothing when the redirect names no lock, so the project's goes there first (verified).
+	scratch, at, err := cargoScratch(before.data, before.existed)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer os.RemoveAll(scratch)
-	if real, err := filepath.EvalSymlinks(scratch); err == nil {
-		scratch = real
-	}
-	at := filepath.Join(scratch, "Cargo.lock")
-	// cargo resolves from nothing when the redirect names no lock, so the project's goes there first (verified).
-	if before.existed {
-		if err := os.WriteFile(at, before.data, 0o600); err != nil {
-			return nil, nil, err
-		}
-	}
 	stderr := newCargoStderr(cargoErrOut, at, ws.Lock)
 	runErr = cargoRunFn(ctx, cargoRedirectEnv(at), cargoRedirectArgs(args, at), stderr)
 	stderr.Flush()
@@ -461,6 +465,24 @@ func resolveCargoLock(ctx context.Context, args []string, ws cargoWorkspace, bef
 	}
 	locked.path = before.path
 	return []cargoFile{locked}, runErr, nil
+}
+
+// cargoScratch makes a private directory and returns it with the path of its Cargo.lock, which holds data when existed.
+func cargoScratch(data []byte, existed bool) (dir, lock string, err error) {
+	if dir, err = os.MkdirTemp("", "ossprey-cargo-"); err != nil {
+		return "", "", err
+	}
+	if real, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = real
+	}
+	lock = filepath.Join(dir, "Cargo.lock")
+	if existed {
+		if err := os.WriteFile(lock, data, 0o600); err != nil {
+			os.RemoveAll(dir)
+			return "", "", err
+		}
+	}
+	return dir, lock, nil
 }
 
 // runCargo runs the real cargo as a child, with ossprey's stdin and stdout.

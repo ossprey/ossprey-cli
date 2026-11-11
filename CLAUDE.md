@@ -220,7 +220,11 @@ Windows resolves it under `%LOCALAPPDATA%`.
    - **fetch.** `cargo fetch` downloads before it returns, so `cargo update
      --workspace` resolves instead, locking byte for byte what fetch would and
      downloading no crate (`cargoFetchResolve`, every option but `--target`).
-     After landing, the user's fetch runs with `--locked` (`cargoFetchLocked`).
+     After landing, the user's fetch runs with `--locked` (`cargoFetchLocked`)
+     and the redirect at a scratch copy of the checked bytes
+     (`fetchCheckedLock`), since `--locked` alone downloads a lock swapped
+     into the project after landing (verified); as a child, so the copy
+     outlives cargo and is removed.
      Git dependencies are still checked out under `CARGO_HOME/git` to resolve,
      as plain cargo does; nothing is built. Whether to refuse git sources too,
      whose checkout (`build.rs` included) lands before the check, is open.
