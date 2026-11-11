@@ -250,7 +250,9 @@ Windows resolves it under `%LOCALAPPDATA%`.
      outlives cargo and is removed. While a cargo child runs ossprey holds
      SIGINT, SIGTERM and SIGHUP (`holdCargoSignals`), passes one sent to it
      alone on to cargo, removes the scratch, and exits 128 plus the signal
-     cargo died by (`exitCodeOf`), since `ExitCode()` is -1 there.
+     cargo died by (`exitCodeOf`), since `ExitCode()` is -1 there. One
+     already ignored, as SIGHUP under nohup, is left alone for cargo to
+     inherit.
      Git dependencies are still checked out under `CARGO_HOME/git` to resolve,
      as plain cargo does; nothing is built. Whether to refuse git sources too,
      whose checkout (`build.rs` included) lands before the check, is open.

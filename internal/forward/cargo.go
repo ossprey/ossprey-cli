@@ -529,7 +529,12 @@ func (s signalCause) Error() string { return "received " + s.String() }
 func holdCargoSignals(ctx context.Context) (context.Context, func()) {
 	ctx, cancel := context.WithCancelCause(ctx)
 	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, cargoSignals...)
+	for _, s := range cargoSignals {
+		// One ignored already, as SIGHUP under nohup, is left ignored, so cargo inherits it ignored too.
+		if !signal.Ignored(s) {
+			signal.Notify(ch, s)
+		}
+	}
 	done := make(chan struct{})
 	go func() {
 		select {

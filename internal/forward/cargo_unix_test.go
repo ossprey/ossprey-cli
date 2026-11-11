@@ -269,3 +269,34 @@ func TestCargoChildInterrupted(t *testing.T) {
 		})
 	}
 }
+
+// Under nohup a hangup reaches neither ossprey nor cargo, which inherits the ignored SIGHUP and finishes (OSS-2553).
+func TestCargoChildKeepsAnIgnoredHangupIgnored(t *testing.T) {
+	bin, tmp := t.TempDir(), t.TempDir()
+	started := filepath.Join(bin, "started")
+	if err := os.WriteFile(filepath.Join(bin, "cargo"), []byte("#!/bin/sh\n: > '"+started+"'\nsleep 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sh", "-c", `trap "" HUP; exec "$0" -test.run='^TestCargoChildHelperProcess$'`, os.Args[0])
+	cmd.Env = append(os.Environ(), cargoChildHelperEnv+"=fetch", "HELPER_PROJECT="+t.TempDir(), "TMPDIR="+tmp,
+		"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.WaitDelay = 5 * time.Second
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) })
+	for deadline := time.Now().Add(20 * time.Second); !exists(started); time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("cargo never started\n%s", out.String())
+		}
+	}
+	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGHUP); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Wait(); err != nil || !strings.Contains(out.String(), "cargo returned <nil>") {
+		t.Errorf("ended with %v, output %q; want cargo to finish through the hangup", err, out.String())
+	}
+}
