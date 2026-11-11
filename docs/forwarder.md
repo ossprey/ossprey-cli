@@ -159,8 +159,10 @@ large or too deeply nested to read, and one with an `include`. `cargo update
 with an option or argument cargo fetch would reject. If `Cargo.lock` changes
 while cargo runs, whether cargo wrote it or another program did, ossprey moves
 what it found aside to `Cargo.lock.ossprey-found-<n>`, puts back what was
-there before, and exits `2`. If the found file cannot be moved aside, the old
-lock is still put back and the message says the found one was not kept.
+there before, and exits `2`. A link at `Cargo.lock` is followed only when it
+was there before cargo ran; one that appeared meanwhile is itself moved aside
+and the old lock put back as a file. If the found file cannot be moved aside,
+the old lock is still put back and the message says the found one was not kept.
 
 `cargo install` compiles the crate and runs its build scripts straight away, so
 the crates it names are checked first, and a block means cargo never starts.

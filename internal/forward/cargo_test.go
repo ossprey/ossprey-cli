@@ -1173,6 +1173,145 @@ func TestRunCargo_TripwirePutsBackWhenTheFoundLockCannotBeKept(t *testing.T) {
 	}
 }
 
+// The tripwire follows a link at Cargo.lock only when it was there before cargo ran, so a link planted meanwhile is moved aside itself and nothing outside the project is written (OSS-2553).
+func TestRunCargo_TripwireFollowsOnlyTheLinkThatWasThere(t *testing.T) {
+	needSymlinks(t)
+	const old = "version = 4\n# before\n"
+	for _, tc := range []struct {
+		name string
+		// linked makes Cargo.lock a link to shared.lock before cargo runs.
+		linked, readOnly, renameFails bool
+	}{
+		{"a file replaced by a link", false, false, false},
+		{"a file replaced by a link into a read-only directory", false, true, false},
+		{"a link pointed elsewhere", true, false, false},
+		{"a planted link that cannot be moved aside", false, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.readOnly && (runtime.GOOS == "windows" || os.Geteuid() == 0) {
+				t.Skip("needs a directory this user cannot write")
+			}
+			root, ws := cargoProject(t)
+			if tc.linked {
+				writeFile(t, filepath.Join(root, "shared.lock"), old)
+				if err := os.Symlink("shared.lock", ws.Lock); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				writeFile(t, ws.Lock, old)
+			}
+			before := projectState(t, root)
+			outsideDir := t.TempDir()
+			outside := filepath.Join(outsideDir, "Cargo.lock")
+			writeFile(t, outside, evilLock)
+			if tc.readOnly {
+				if err := os.Chmod(outsideDir, 0o555); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { os.Chmod(outsideDir, 0o755) })
+			}
+			cargoRunFn = func(context.Context, []string, []string, io.Writer) error {
+				if err := os.Remove(ws.Lock); err != nil {
+					t.Fatal(err)
+				}
+				return os.Symlink(outside, ws.Lock)
+			}
+			if tc.renameFails {
+				old := cargoRenameFn
+				cargoRenameFn = func(string, string) error { return errors.New("denied") }
+				t.Cleanup(func() { cargoRenameFn = old })
+			}
+			swap(t, nil, cleanSBOM)
+			_, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"update"}})
+			kept, _ := filepath.Glob(filepath.Join(root, "Cargo.lock.ossprey-found-*"))
+			want := "so it was put back unchecked; what was found could not be kept: Cargo.lock (denied)"
+			if !tc.renameFails {
+				if len(kept) != 1 {
+					t.Fatalf("kept %v, want the planted link moved aside in the project", kept)
+				}
+				if l, lerr := os.Readlink(kept[0]); lerr != nil || l != outside {
+					t.Errorf("kept %s as %q (%v), want the link itself", kept[0], l, lerr)
+				}
+				want = "so it was put back unchecked; what was found is kept in " + filepath.Base(kept[0])
+			} else if len(kept) != 0 {
+				t.Errorf("kept %v, want nothing when the rename fails", kept)
+			}
+			if err == nil || !strings.HasSuffix(err.Error(), want) {
+				t.Errorf("Run = %v, want it to end %q", err, want)
+			}
+			if fi, lerr := os.Lstat(ws.Lock); lerr != nil || !fi.Mode().IsRegular() || readFile(t, ws.Lock) != old {
+				link, _ := os.Readlink(ws.Lock)
+				t.Errorf("Cargo.lock links to %q (%v), want a file holding what was there before", link, lerr)
+			}
+			if entries, _ := os.ReadDir(outsideDir); len(entries) != 1 || readFile(t, outside) != evilLock {
+				t.Errorf("outside the project now holds %v, want its one file untouched", entries)
+			}
+			delete(before, ws.Lock)
+			now := projectState(t, root)
+			delete(now, ws.Lock)
+			for _, k := range kept {
+				delete(now, k)
+			}
+			if !reflect.DeepEqual(now, before) {
+				t.Errorf("the rest of the project changed: %v, want %v", now, before)
+			}
+		})
+	}
+}
+
+// A link planted at Cargo.lock while the lock is scanned stops the landing, even over the same bytes, so nothing is written through it (OSS-2553).
+func TestRunCargoUpdate_DoesNotLandThroughALinkPlantedDuringTheScan(t *testing.T) {
+	needSymlinks(t)
+	const old = "version = 4\n# before\n"
+	root, ws := cargoProject(t)
+	writeFile(t, ws.Lock, old)
+	outside := filepath.Join(t.TempDir(), "Cargo.lock")
+	writeFile(t, outside, old)
+	swapCargo(t, &fakeCargo{t: t, root: root, lock: evilLock})
+	swap(t, nil, cleanSBOM)
+	var req scanRequest
+	var scanned string
+	scan := lockScan(t, &req, &scanned, cleanCrates)
+	swapScan(t, func(ctx context.Context, r scanRequest) (*ossbom.SBOM, error) {
+		if err := os.Remove(ws.Lock); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, ws.Lock); err != nil {
+			t.Fatal(err)
+		}
+		return scan(ctx, r)
+	})
+	_, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"update"}})
+	if want := "Cargo.lock changed while ossprey checked it, so nothing was written; run the command again"; err == nil || err.Error() != want {
+		t.Errorf("Run = %v, want %q", err, want)
+	}
+	if got := readFile(t, outside); got != old {
+		t.Errorf("the file outside the project holds %q, want it untouched", got)
+	}
+}
+
+// A lock linked before cargo ran is put back through its link, which survives (OSS-2553).
+func TestRunCargo_TripwireKeepsALinkThatWasThere(t *testing.T) {
+	needSymlinks(t)
+	const old = "version = 4\n# before\n"
+	root, ws := cargoProject(t)
+	shared := filepath.Join(root, "shared.lock")
+	writeFile(t, shared, old)
+	if err := os.Symlink("shared.lock", ws.Lock); err != nil {
+		t.Fatal(err)
+	}
+	swapCargo(t, &fakeCargo{t: t, root: root, lock: evilLock, ignore: true})
+	swap(t, nil, cleanSBOM)
+	_, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"update"}})
+	kept, _ := filepath.Glob(filepath.Join(root, "shared.lock.ossprey-found-*"))
+	if len(kept) != 1 || readFile(t, kept[0]) != evilLock || err == nil {
+		t.Fatalf("kept %v, Run = %v; want what cargo wrote through the link kept and an error", kept, err)
+	}
+	if l, lerr := os.Readlink(ws.Lock); lerr != nil || l != "shared.lock" || readFile(t, shared) != old {
+		t.Errorf("Cargo.lock links to %q (%v), want shared.lock holding what was there before", l, lerr)
+	}
+}
+
 // cargo's own failure is its exit code, and nothing is checked or written.
 func TestRunCargo_FailurePassesThrough(t *testing.T) {
 	root, ws := cargoProject(t)

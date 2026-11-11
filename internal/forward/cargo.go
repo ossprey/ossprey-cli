@@ -653,17 +653,24 @@ func (c *cargoStderr) Flush() {
 	}
 }
 
-// cargoFile is a project file's bytes and mode, or that it did not exist.
+// cargoFile is a project file's bytes and mode, or that it did not exist, and the link it was reached through, if any.
 type cargoFile struct {
 	path    string
 	existed bool
 	data    []byte
 	mode    fs.FileMode
+	// link is what the path's own link says and real where it leads, both "" for a file.
+	link, real string
 }
 
 // same reports whether f and g hold the same bytes, or both did not exist.
 func (f cargoFile) same(g cargoFile) bool {
 	return f.existed == g.existed && bytes.Equal(f.data, g.data)
+}
+
+// placed reports whether f and g were reached the same way: the same link to the same place, or no link.
+func (f cargoFile) placed(g cargoFile) bool {
+	return f.link == g.link && f.real == g.real
 }
 
 // readCargoState reads p, failing when it is not a regular file, is over the bound, or is a link to nothing.
@@ -678,7 +685,21 @@ func readCargoState(p string) (cargoFile, error) {
 	if err != nil {
 		return cargoFile{}, err
 	}
-	return cargoFile{path: p, existed: true, data: data, mode: fi.Mode().Perm()}, nil
+	f := cargoFile{path: p, existed: true, data: data, mode: fi.Mode().Perm()}
+	f.link, f.real = cargoLinkOf(p)
+	return f, nil
+}
+
+// cargoLinkOf is what a link at p says and where it leads, both "" when p is no link.
+func cargoLinkOf(p string) (link, real string) {
+	link, err := os.Readlink(p)
+	if err != nil {
+		return "", ""
+	}
+	if real, err = filepath.EvalSymlinks(p); err != nil {
+		real = p
+	}
+	return link, real
 }
 
 // cargoTripwire puts back each project file that changed while cargo ran, first moving what it found aside unread, and fails.
@@ -686,14 +707,14 @@ func cargoTripwire(command string, before []cargoFile) error {
 	var changed, kept, lost []string
 	for _, f := range before {
 		now, err := readCargoState(f.path)
-		if err == nil && now.same(f) {
+		if err == nil && now.same(f) && now.placed(f) {
 			continue
 		}
 		changed = append(changed, displayPath(f.path))
-		// A lock that existed is put back where its link led, so the link survives.
+		// A lock reached through a link is put back where the link led, so it survives, but only a link that was there before cargo ran.
 		at := f.path
-		if real, err := filepath.EvalSymlinks(f.path); err == nil && f.existed {
-			at = real
+		if link, real := cargoLinkOf(f.path); f.link != "" && link == f.link && real == f.real {
+			at = f.real
 		}
 		// Another program may have written it, so it is kept whatever its size or kind rather than lost.
 		k, err := moveFound(at)
@@ -706,7 +727,14 @@ func cargoTripwire(command string, before []cargoFile) error {
 		// Put back even when the found file could not be kept, since an unchecked lock must not stay.
 		err = nil
 		if f.existed {
-			if err = landFn(at, f.data); err == nil {
+			if link, _ := cargoLinkOf(at); at == f.path && link != "" {
+				// A link left at the path was not there before, so it is removed rather than written through.
+				err = os.Remove(at)
+			}
+			if err == nil {
+				err = landFn(at, f.data)
+			}
+			if err == nil {
 				err = os.Chmod(at, f.mode)
 			}
 		} else if k == "" {
@@ -755,7 +783,7 @@ func moveFound(p string) (string, error) {
 // landCargo writes each resolved file whose bytes changed over the project's, the lock first, so the project never names a crate its lock does not hold, once every file still holds what cargo started from.
 func landCargo(before, after []cargoFile) error {
 	for _, f := range before {
-		if now, err := readCargoState(f.path); err != nil || !now.same(f) {
+		if now, err := readCargoState(f.path); err != nil || !now.same(f) || !now.placed(f) {
 			return fmt.Errorf("%s changed while ossprey checked it, so nothing was written; run the command again", displayPath(f.path))
 		}
 	}
