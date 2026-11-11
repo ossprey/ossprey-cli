@@ -538,6 +538,10 @@ func TestRunCargoInstall_RegistryDecidesTheCheck(t *testing.T) {
 		// cargo 1.99.1 reads sparse+ in any case, and keeps a backslash in a sparse+ URL, so this host is mirror.example (OSS-2553).
 		{"crates.io's sparse index in capitals", "", "", []string{"install", "--index", "SPARSE+https://index.crates.io/", "itoa"}, true},
 		{"a mirror behind a backslash", "", "", []string{"install", "--index", `sparse+https://index.crates.io\@mirror.example/../`, "itoa"}, false},
+		// cargo parses a sparse+ URL again as https, where each of these is crates.io's index.
+		{"crates.io past a backslash and ..", "", "", []string{"install", "--index", `sparse+https://index.crates.io/\../`, "itoa"}, true},
+		{"crates.io past a slash and a backslash", "", "", []string{"install", "--index", `sparse+https:/\index.crates.io/`, "itoa"}, true},
+		{"crates.io behind backslashed userinfo", "", "", []string{"install", "--index", `sparse+https://mirror.example\@index.crates.io/`, "itoa"}, true},
 		{"corp by default in CARGO_HOME", corp + "[registry]\ndefault = \"corp\"\n", "", []string{"install", "itoa"}, false},
 		{"corp by default, crates.io by name", corp + "[registry]\ndefault = \"corp\"\n", "", []string{"install", "--registry", "crates-io", "itoa"}, true},
 		{"corp by CARGO_REGISTRY_DEFAULT", corp, "corp", []string{"install", "itoa"}, false},

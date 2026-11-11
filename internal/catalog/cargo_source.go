@@ -89,19 +89,78 @@ func isCratesIo(source string) (is, maybe bool) {
 // IsCratesIoIndex reports whether an `--index` URL is certainly crates.io's, read as cargo 1.99.1 reads it; one only IDNA could map there is not.
 func IsCratesIoIndex(index string) bool {
 	// Cargo's parser trims the URL and drops tabs and newlines before it reads the scheme, whose case it folds.
-	clean := crateURLCleaner.Replace(trimC0(index))
-	scheme, _, _ := strings.Cut(clean, ":")
-	scheme = strings.ToLower(scheme)
-	kind := "registry"
-	if strings.HasPrefix(scheme, "sparse+") {
-		kind, clean = "sparse", clean[len("sparse+"):]
-	}
-	// Only a special scheme such as https reads '\' as '/'; sparse+ and the rest keep it, so `index.crates.io\@host` fetches from host.
-	if _, special := defaultPort[scheme]; strings.Contains(index, `\`) && !special {
+	clean := strings.NewReplacer("\t", "", "\n", "", "\r", "").Replace(trimC0(index))
+	scheme, rest, ok := strings.Cut(clean, ":")
+	if !ok {
 		return false
 	}
-	is, _ := isCratesIo(kind + "+" + clean)
+	scheme = strings.ToLower(scheme)
+	inner, sparse := strings.CutPrefix(scheme, "sparse+")
+	kind := "registry"
+	if sparse {
+		// Cargo parses a sparse+ URL as a non-special one, then fetches from it parsed again without sparse+.
+		kind = "sparse"
+		if rest, ok = sparseFirstParse(rest); !ok {
+			return false
+		}
+	}
+	// Only a special scheme such as https reads '\' as '/'; ssh and the rest keep it, so `github.com\@host` fetches from host.
+	if _, special := defaultPort[inner]; !special && strings.Contains(rest, `\`) {
+		return false
+	}
+	is, _ := isCratesIo(kind + "+" + inner + ":" + rest)
 	return is
+}
+
+// sparseFirstParse is what follows the scheme of a sparse+ URL as cargo's first parse writes it back, false where that parse fails.
+func sparseFirstParse(rest string) (string, bool) {
+	end := strings.IndexAny(rest, "?#")
+	if end < 0 {
+		end = len(rest)
+	}
+	p, tail, auth := rest[:end], rest[end:], ""
+	if a, ok := strings.CutPrefix(p, "//"); ok {
+		// The authority ends at '/' alone, so a '\' before it is userinfo text, or a host cargo refuses.
+		i := strings.Index(a, "/")
+		if i < 0 {
+			i = len(a)
+		}
+		auth, p = a[:i], a[i:]
+		at := strings.LastIndex(auth, "@")
+		if strings.Contains(auth[at+1:], `\`) {
+			return "", false
+		}
+		auth = "//" + strings.ReplaceAll(auth[:at+1], `\`, "%5C") + auth[at+1:]
+	}
+	if strings.HasPrefix(p, "/") {
+		p = dotSegments(p)
+	}
+	return auth + p + tail, true
+}
+
+// dotSegments resolves . and .. in a path split at '/' alone, as the WHATWG parser does for a non-special URL.
+func dotSegments(p string) string {
+	segs := strings.Split(p[1:], "/")
+	out := make([]string, 0, len(segs))
+	for i, s := range segs {
+		last := i == len(segs)-1
+		switch strings.ToLower(s) {
+		case "..", ".%2e", "%2e.", "%2e%2e":
+			if len(out) > 0 {
+				out = out[:len(out)-1]
+			}
+			if last {
+				out = append(out, "")
+			}
+		case ".", "%2e":
+			if last {
+				out = append(out, "")
+			}
+		default:
+			out = append(out, s)
+		}
+	}
+	return "/" + strings.Join(out, "/")
 }
 
 func nonASCII(r rune) bool { return r > unicode.MaxASCII }

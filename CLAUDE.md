@@ -165,8 +165,9 @@ Windows resolves it under `%LOCALAPPDATA%`.
      block an internal tool on a squat, or clear one never installed. Only a
      definite crates.io index counts (`catalog.IsCratesIoIndex`), read as
      cargo reads it: trimmed, `sparse+` in any case, and `\` a separator only
-     under a special scheme such as `https`, so in
-     `sparse+https://index.crates.io\@host/` it is userinfo and `host` serves.
+     under a special scheme such as `https`. A `sparse+` URL is parsed twice,
+     first as non-special (`sparseFirstParse`: `\` in userinfo is text, so
+     `index.crates.io\@host/` is `host`), then without `sparse+` as `https`.
    - **`registry.default` for `install`.** `cargo install` reloads its config
      from `CARGO_HOME` up, never the project's, and the nearest setting wins:
      the last `--config`, `CARGO_REGISTRY_DEFAULT`, then those configs. An
