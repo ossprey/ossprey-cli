@@ -1533,6 +1533,24 @@ func TestBuildCargoMirror(t *testing.T) {
 	}
 }
 
+// A lock that appears after the snapshot under another case of its name is never linked on any OS, since a user cache that folds case makes the link the redirect's path (OSS-2553).
+func TestBuildCargoMirrorLinksNoLockUnderAnotherCase(t *testing.T) {
+	needSymlinks(t)
+	root, ws := cargoProject(t)
+	other := filepath.Join(root, "cargo.lock")
+	writeFile(t, other, "version = 4\n")
+	mi, err := buildCargoMirror(ws, []cargoFile{{path: ws.Lock}}, root, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mi.remove()
+	for _, p := range []string{ws.Lock, other} {
+		if _, err := os.Lstat(mi.at(p)); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("the mirror holds %s (%v), want nothing there", mi.at(p), err)
+		}
+	}
+}
+
 // cargo must find the project's root and members in the mirror, all as their copies there, or cargo add could write a manifest it reaches through a link (OSS-2553).
 func TestCargoMirrorSameWorkspace(t *testing.T) {
 	root := filepath.Join(filepath.VolumeName(os.TempDir())+string(filepath.Separator), "p")

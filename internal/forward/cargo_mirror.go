@@ -79,9 +79,14 @@ func (mi *cargoMirror) build(ws cargoWorkspace, files []cargoFile, cwd string) e
 	}
 	// The lock and each manifest are a copy or nothing, never a link, since cargo writes a lock in place and a manifest beside a link's target (verified).
 	copies := map[string]cargoFile{}
+	// A file that had no copy matches in any case on every OS, since a user cache that folds case would make a link of another case the path cargo writes.
+	absent := map[string]bool{}
 	for _, f := range files {
 		mi.addReal(filepath.Dir(f.path))
 		copies[fileKey(f.path)] = f
+		if !f.existed {
+			absent[strings.ToLower(fileKey(f.path))] = true
+		}
 	}
 	for _, m := range ws.Manifests {
 		mi.manifestDirs[filepath.Dir(m)] = true
@@ -116,7 +121,7 @@ func (mi *cargoMirror) build(ws cargoWorkspace, files []cargoFile, cwd string) e
 		for _, e := range entries {
 			full := filepath.Join(d, e.Name())
 			at := mirrorPath(mi.s, full)
-			if _, err := os.Lstat(at); err == nil || copies[fileKey(full)].path != "" {
+			if _, err := os.Lstat(at); err == nil || copies[fileKey(full)].path != "" || absent[strings.ToLower(fileKey(full))] {
 				// A real directory, a copy, or the name of a file that had none, which may have appeared since, in any spelling.
 				continue
 			}

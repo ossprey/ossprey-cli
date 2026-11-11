@@ -3,8 +3,6 @@
 package forward
 
 import (
-	"errors"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,21 +45,6 @@ func TestMirrorDependencyRefusesAPathCargoPlacesFromTheMirror(t *testing.T) {
 		if got, err := mi.dependency(v); err != nil || got != want {
 			t.Errorf("%s: %s (%v), want %s", v, got, err, want)
 		}
-	}
-}
-
-// A lock that appears after the snapshot under another case of its name is never linked, since NTFS makes the link the redirect's path (OSS-2553).
-func TestBuildCargoMirrorLinksNoLockUnderAnotherCase(t *testing.T) {
-	needSymlinks(t)
-	root, ws := cargoProject(t)
-	writeFile(t, filepath.Join(root, "cargo.lock"), "version = 4\n")
-	mi, err := buildCargoMirror(ws, []cargoFile{{path: ws.Lock}}, root, root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer mi.remove()
-	if _, err := os.Lstat(mi.at(ws.Lock)); !errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("the mirror holds %s (%v), want nothing there", mi.at(ws.Lock), err)
 	}
 }
 

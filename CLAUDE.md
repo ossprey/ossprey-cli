@@ -257,7 +257,8 @@ Windows resolves it under `%LOCALAPPDATA%`.
      through a linked dir through that link. Copies are never links, since
      cargo writes through one (`fileKey` folds case only on Windows and
      macOS, so a Linux `cargo.toml` beside `Cargo.toml` is linked, and takes
-     NTFS short names). `-C`, every `--manifest-path` (a relative one through a linked
+     NTFS short names; a missing lock matches in any case on every OS, as the
+     user cache may fold it). `-C`, every `--manifest-path` (a relative one through a linked
      dir reaches the project) and an absolute `--path` are rewritten into the
      mirror, the last so cargo records the path it would in the project.
    - **Leaving the mirror.** An absolute path in a manifest leads cargo out
