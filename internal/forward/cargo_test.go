@@ -1809,7 +1809,7 @@ func TestLockfileMovedReadsARelativeHomeWhereCargoRuns(t *testing.T) {
 	}
 }
 
-// The real cargo names the lock and every manifest a command may rewrite, a member outside the root's directory included.
+// The real cargo names the root's lock and where it reads configs, a member outside the root's directory included.
 func TestReadCargoWorkspaceWithCargo(t *testing.T) {
 	if _, err := exec.LookPath("cargo"); err != nil {
 		t.Skip("cargo not installed")
