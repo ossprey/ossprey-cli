@@ -459,7 +459,7 @@ func cargoVersion(ctx context.Context, args []string) (string, error) {
 // cargoVersionLine is `cargo X.Y.Z[-pre] (hash date)` as every cargo -V prints it.
 var cargoVersionLine = regexp.MustCompile(`^cargo (\d+)\.(\d+)\.(\d+)(-[0-9A-Za-z.-]+)?(\s|$)`)
 
-// cargoRedirects reports whether the cargo printing line is 1.97.0 or later in semver order, the first to honour resolver.lockfile-path: 1.97.0-nightly ignored it, so a pre-release ranks below its release (verified).
+// cargoRedirects reports whether the cargo printing line is 1.97.0 or later in semver order, a pre-release below its release, since 1.97.0 first honours resolver.lockfile-path.
 func cargoRedirects(line string) bool {
 	m := cargoVersionLine.FindStringSubmatch(line)
 	if m == nil {
@@ -819,7 +819,7 @@ func cargoTripwire(command string, before []cargoFile) error {
 	if len(changed) == 0 {
 		return nil
 	}
-	msg := fmt.Sprintf("%s changed while `%s` ran, by a cargo ignoring the scratch copy ossprey gave it or by another program, so it was put back unchecked", strings.Join(changed, ", "), command)
+	msg := fmt.Sprintf("%s changed while `%s` ran, so it was put back unchecked", strings.Join(changed, ", "), command)
 	if len(kept) > 0 {
 		msg += "; what was found is kept in " + strings.Join(kept, ", ")
 	}

@@ -493,12 +493,12 @@ const evilLock = "version = 4\n\n[[package]]\nname = \"evil\"\nversion = \"1.0.0
 
 const addedEvil = "\n[dependencies]\nevil = \"1\"\n"
 
-// fakeCargo is a cargo 1.97 that locks lock where the last --config resolver.lockfile-path, else CARGO_RESOLVER_LOCKFILE_PATH, else its root says.
+// fakeCargo is a cargo that locks lock where the last --config resolver.lockfile-path, else CARGO_RESOLVER_LOCKFILE_PATH, else its root says.
 type fakeCargo struct {
 	t    *testing.T
 	root string
 	lock string
-	// ignore writes the lock at root whatever points it elsewhere, as cargo before 1.97 does.
+	// ignore writes the lock at root whatever points it elsewhere, as another program might.
 	ignore bool
 	err    error
 	runs   []fakeRun
@@ -532,7 +532,7 @@ func swapCargo(t *testing.T, f *fakeCargo) {
 	t.Cleanup(func() { cargoRunFn = old })
 }
 
-// redirectedLock is where cargo 1.97 writes the lock for env and args: the last --config's resolver.lockfile-path, else the variable, else "".
+// redirectedLock is where cargo writes the lock for env and args: the last --config's resolver.lockfile-path, else the variable, else "".
 func redirectedLock(env, args []string) string {
 	at := ""
 	for _, c := range cargoConfigArgs(args) {
@@ -625,7 +625,7 @@ func projectState(t *testing.T, root string) map[string]string {
 	return got
 }
 
-// cargo before 1.97, and 1.97.0's pre-releases, ignore resolver.lockfile-path and write the project's lock (verified with 1.96.0, 1.80.0 and 1.97.0-nightly), so semver order decides, a pre-release below its release.
+// ossprey's floor is cargo 1.97.0 in semver order, a pre-release below its release.
 func TestCargoRedirects(t *testing.T) {
 	for _, tc := range []struct {
 		line string
@@ -640,7 +640,6 @@ func TestCargoRedirects(t *testing.T) {
 		{"cargo 1.97.0-beta.3 (31bcf52c8 2026-05-28)", false},
 		{"cargo 1.97.0-nightly (eb94155a9 2026-04-09)", false},
 		{"cargo 1.96.0 (30a34c682 2026-05-25)", false},
-		{"cargo 1.80.0 (376290515 2024-07-16)", false},
 		{"cargo 1.97", false},
 		{"cargo 1.970.0x", false},
 		{"rustc 1.99.1", false},
@@ -1104,7 +1103,7 @@ func TestRunCargo_TripwirePutsBackAndFails(t *testing.T) {
 				t.Fatalf("kept %v, want one file holding what was found", kept)
 			}
 			// Another program may have written it, so what was found is kept beside it.
-			if want := "Cargo.lock changed while `cargo update` ran, by a cargo ignoring the scratch copy ossprey gave it or by another program, so it was put back unchecked; what was found is kept in " + filepath.Base(kept[0]); err == nil || err.Error() != want || out != "" {
+			if want := "Cargo.lock changed while `cargo update` ran, so it was put back unchecked; what was found is kept in " + filepath.Base(kept[0]); err == nil || err.Error() != want || out != "" {
 				t.Errorf("Run = %v, output %q; want %q", err, out, want)
 			}
 			before[kept[0]] = evilLock
@@ -1170,7 +1169,7 @@ func TestRunCargo_TripwirePutsBackWhenTheFoundLockCannotBeKept(t *testing.T) {
 			swapCargo(t, &fakeCargo{t: t, root: root, lock: evilLock, ignore: true})
 			swap(t, nil, cleanSBOM)
 			out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"update"}})
-			if want := "Cargo.lock changed while `cargo update` ran, by a cargo ignoring the scratch copy ossprey gave it or by another program, so it was put back unchecked; what was found could not be kept: Cargo.lock (denied)"; err == nil || err.Error() != want || out != "" {
+			if want := "Cargo.lock changed while `cargo update` ran, so it was put back unchecked; what was found could not be kept: Cargo.lock (denied)"; err == nil || err.Error() != want || out != "" {
 				t.Errorf("Run = %v, output %q; want %q", err, out, want)
 			}
 			if !reflect.DeepEqual(projectState(t, root), before) {

@@ -57,7 +57,7 @@ func CargoInstallReleases(ctx context.Context, name, req string) ([]string, erro
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("crates.io's index returned status %d", resp.StatusCode)
 	}
-	// Cargo skips an entry newer than it reads, and an older cargo reads fewer, so the best of both is checked.
+	// Cargo 1.99.1 skips an entry newer than cargoIndexV that a later cargo may read, so the best of both is checked.
 	var best, bestOld string
 	var bestV, bestOldV semver
 	lines := bufio.NewScanner(io.LimitReader(resp.Body, maxCrateIndex))
