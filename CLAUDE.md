@@ -233,10 +233,12 @@ Windows resolves it under `%LOCALAPPDATA%`.
      fails (`cargoTripwire`). cargo's own failure returns its exit code. A
      block, a check error or a lock the platform checked none of leave the
      project as it was, errors exiting 2 since 1 means malware; trust comes
-     from the configs where cargo runs (`CargoConfigDir`). `landCargo` lands
-     nothing if a file changed during the check, skips unchanged bytes and
-     writes the lock first, so a manifest never names a crate the lock lacks;
-     `landFile` writes as cargo writes `Cargo.toml` and syncs first.
+     from the configs where cargo runs (`CargoConfigDir`). `landCargo` skips
+     unchanged bytes, stages every other file beside its target and syncs it
+     (`stageFile`, as cargo writes `Cargo.toml`), lands nothing if one cannot
+     be staged or a file changed during the check, then renames them back to
+     back, the lock first, so a manifest never names a crate the lock lacks,
+     and puts back what it renamed if a later rename fails (`putBack`).
    - **cargo's stderr** goes through `cargoStderr`, which spells scratch and
      mirror paths as the project's and never fails a write: cargo exits 101
      without locking when its stderr closes. `CARGO_TERM_COLOR=always` is set
@@ -281,7 +283,11 @@ Windows resolves it under `%LOCALAPPDATA%`.
      install` checks the named crates only. Configs above a linked cwd are
      missed on Windows, where cargo reads them as spelled. A linked or
      non-member `Cargo.toml` edited between the mirror's first metadata check
-     and the add is not under the tripwire.
+     and the add is not under the tripwire. A cargo already running as `add`
+     lands can pair the old manifest with the new lock, or write the lock it
+     resolved from the old pair over the new one, since cargo reads both
+     before taking any lock and holding its package cache lock does not help
+     (verified with cargo 1.99.1, `docs/forwarder.md`).
 
    **Not covered, deliberately (for now):** `pnpm dlx`, `yarn dlx`, and initializers (`npm init <x>`, `npm create`, `bun create`, `yarn create`, which fetch `create-<x>`). Do **not** close `dlx` by adding it to a `verbAt` list (same argv problem: `pnpm dlx cowsay moo` would check `moo`); give it a `toolRunAt`/`parseRun` like npm's. `docs/forwarder.md`'s "What is not checked" section is the user-facing statement of this.
 

@@ -48,8 +48,8 @@ var cargoMetadataFn = cargoMetadata
 // cargoRunFn runs cargo as a child in dir ("" for ours) with env added and its stderr to stderr; a test seam.
 var cargoRunFn = runCargo
 
-// landFn writes a resolved file over the project's; a test seam.
-var landFn = landFile
+// commitFn renames a staged file over its target; a test seam.
+var commitFn = func(s staged) error { return os.Rename(s.tmp, s.target) }
 
 // cargoErrOut is where cargo's own stderr goes once its paths are spelled as the project's; a test seam.
 var cargoErrOut io.Writer = os.Stderr
@@ -739,7 +739,7 @@ func cargoTripwire(command string, before []cargoFile) error {
 			}
 		}
 		if f.existed {
-			err = landFn(f.path, f.data)
+			err = landFile(f.path, f.data)
 		} else {
 			err = os.Remove(f.path)
 		}
@@ -770,35 +770,82 @@ func keepFound(p string, data []byte) (string, error) {
 	return f.Name(), err
 }
 
-// landCargo writes each resolved file whose bytes changed over the project's, the lock first, so the project never names a crate its lock does not hold, once every file still holds what cargo started from.
+// staged is data written and synced to tmp beside target, the real file path names, to be renamed over it.
+type staged struct{ path, target, tmp string }
+
+// landCargo stages each file cargo changed beside its target, checks every project file still holds what cargo started from, then renames them back to back, the lock first so a manifest never names a crate the lock lacks, and puts back what it renamed if a later rename fails.
 func landCargo(before, after []cargoFile) error {
-	for _, f := range before {
-		if now, err := readCargoState(f.path); err != nil || !now.same(f) {
-			return fmt.Errorf("%s changed while ossprey checked it, so nothing was written; run the command again", displayPath(f.path))
-		}
-	}
+	var changed []int
 	for i, f := range after {
 		if f.same(before[i]) {
 			continue
 		}
 		if !f.existed {
-			return fmt.Errorf("cargo removed %s, so nothing more was written", displayPath(f.path))
+			return fmt.Errorf("cargo removed %s, so nothing was written", displayPath(f.path))
 		}
-		if err := landFn(f.path, f.data); err != nil {
-			return fmt.Errorf("could not write %s (%v)", displayPath(f.path), err)
+		changed = append(changed, i)
+	}
+	var files []staged
+	done := 0
+	defer func() {
+		for _, s := range files[done:] {
+			os.Remove(s.tmp)
+		}
+	}()
+	for _, i := range changed {
+		s, err := stageFile(after[i].path, after[i].data)
+		if err != nil {
+			return fmt.Errorf("could not write %s (%v); the project was not changed", displayPath(after[i].path), err)
+		}
+		files = append(files, s)
+	}
+	for _, f := range before {
+		if now, err := readCargoState(f.path); err != nil || !now.same(f) {
+			return fmt.Errorf("%s changed while ossprey checked it, so nothing was written; run the command again", displayPath(f.path))
+		}
+	}
+	for ; done < len(files); done++ {
+		if err := commitFn(files[done]); err != nil {
+			return putBack(before, changed[:done], fmt.Sprintf("could not write %s (%v)", displayPath(files[done].path), err))
 		}
 	}
 	return nil
 }
 
-// landFile replaces p with data as cargo writes Cargo.toml, a new file beside the real target given the target's mode and renamed over it (verified with cargo 1.99.1), and syncs it first, which cargo does not.
-func landFile(p string, data []byte) error {
+// putBack restores the project files at landed to their bytes in before, after a later file failed to land, and says what was restored or could not be.
+func putBack(before []cargoFile, landed []int, failed string) error {
+	if len(landed) == 0 {
+		return errors.New(failed + "; the project was not changed")
+	}
+	var back, lost []string
+	for _, i := range slices.Backward(landed) {
+		f := before[i]
+		var err error
+		if f.existed {
+			err = landFile(f.path, f.data)
+		} else {
+			err = os.Remove(f.path)
+		}
+		if err != nil {
+			lost = append(lost, fmt.Sprintf("%s (%v)", displayPath(f.path), err))
+		} else {
+			back = append(back, displayPath(f.path))
+		}
+	}
+	if len(lost) == 0 {
+		return fmt.Errorf("%s, so ossprey put back %s and the project is as it was", failed, strings.Join(back, ", "))
+	}
+	return fmt.Errorf("%s and could not put back %s, so Cargo.lock may not match the manifests; run `ossprey cargo fetch` before you build", failed, strings.Join(lost, ", "))
+}
+
+// stageFile writes data to a new file beside p's real target, given the target's mode or a new lock's, and syncs it, as cargo writes Cargo.toml bar the sync (verified with cargo 1.99.1).
+func stageFile(p string, data []byte) (staged, error) {
 	target, err := filepath.EvalSymlinks(p)
 	if errors.Is(err, fs.ErrNotExist) {
 		target, err = p, nil
 	}
 	if err != nil {
-		return err
+		return staged{}, err
 	}
 	fi, statErr := os.Stat(target)
 	// A new lock gets cargo's mode for one, 0666 less the umask.
@@ -816,7 +863,7 @@ func landFile(p string, data []byte) error {
 		}
 	}
 	if err != nil {
-		return err
+		return staged{}, err
 	}
 	_, err = tmp.Write(data)
 	if err == nil && statErr == nil {
@@ -828,13 +875,24 @@ func landFile(p string, data []byte) error {
 	if cerr := tmp.Close(); err == nil {
 		err = cerr
 	}
-	if err == nil {
-		err = os.Rename(name, target)
-	}
 	if err != nil {
 		os.Remove(name)
+		return staged{}, err
 	}
-	return err
+	return staged{path: p, target: target, tmp: name}, nil
+}
+
+// landFile replaces p with data as cargo writes Cargo.toml, a new file beside the real target given the target's mode and renamed over it (verified with cargo 1.99.1), and syncs it first, which cargo does not.
+func landFile(p string, data []byte) error {
+	s, err := stageFile(p, data)
+	if err != nil {
+		return err
+	}
+	if err := commitFn(s); err != nil {
+		os.Remove(s.tmp)
+		return err
+	}
+	return nil
 }
 
 // scanCargoLock scans a copy of a workspace's Cargo.lock bytes alone, so nothing else in the tree is checked with it.

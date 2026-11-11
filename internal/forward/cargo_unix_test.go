@@ -9,12 +9,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/ossprey/ossprey-cli/internal/ossbom"
 )
 
 // A Cargo.lock that is a FIFO or a link to a device is never read, so a passive run whose cargo failed at once neither blocks nor reads without end (OSS-2553).
@@ -199,5 +202,38 @@ func TestCargoMirrorBaseMustBePrivate(t *testing.T) {
 	}
 	if _, err := cargoMirrorBase(); err == nil || !strings.Contains(err.Error(), "is not a directory only you can write to") {
 		t.Errorf("a base others may write to: %v", err)
+	}
+}
+
+// A manifest that cannot be staged beside itself lands nothing, not the lock staged before it either, and leaves no staged file behind (OSS-2553).
+func TestRunCargoAdd_StagingFailureLandsNothing(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root writes to a directory without write permission")
+	}
+	root, ws := cargoProject(t)
+	writeFile(t, ws.Lock, "version = 4\n# before\n")
+	swapCargo(t, &fakeCargo{t: t, root: root, lock: evilLock})
+	swap(t, nil, cleanSBOM)
+	swapScan(t, func(context.Context, scanRequest) (*ossbom.SBOM, error) { return cleanCrates(), nil })
+	noLanding(t)
+	member := filepath.Dir(ws.Manifests[1])
+	if err := os.Chmod(member, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(member, 0o755) })
+	before := projectState(t, root)
+	lock, err := os.Stat(ws.Lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"add", "-p", "a", "evil"}})
+	if err == nil || !strings.HasPrefix(err.Error(), "could not write "+filepath.Join("a", "Cargo.toml")+" (") || !strings.HasSuffix(err.Error(), "permission denied); the project was not changed") || out != "" {
+		t.Errorf("Run = %v, output %q; want the manifest's staging error alone", err, out)
+	}
+	if !reflect.DeepEqual(projectState(t, root), before) {
+		t.Error("the project changed")
+	}
+	if now, err := os.Stat(ws.Lock); err != nil || !os.SameFile(lock, now) {
+		t.Errorf("the lock was replaced (%v)", err)
 	}
 }

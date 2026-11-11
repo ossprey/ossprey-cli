@@ -112,14 +112,18 @@ found in N packages in Cargo.lock` after cargo's output for `cargo add`,
 `update` and `generate-lockfile`, and before cargo's download lines for
 `cargo fetch`.
 
-- `Cargo.lock` is written first and then any `Cargo.toml` that `cargo add`
-  changed, so your manifests never name a crate the lock does not hold. Each
-  file is written the way cargo writes `Cargo.toml`: a new file beside the
-  real one (through a symlink, if it is one), given the old file's
-  permissions, and renamed over it. Ossprey also syncs the new file to disk
-  before the rename, which cargo does not. A new `Cargo.lock` gets the
+- `Cargo.lock` and any `Cargo.toml` that `cargo add` changed are each written
+  the way cargo writes `Cargo.toml`: a new file beside the real one (through a
+  symlink, if it is one), given the old file's permissions, and renamed over
+  it. Ossprey also syncs each new file to disk, which cargo does not, and
+  renames none until every new file is written and synced. The renames then
+  run one straight after the other, `Cargo.lock` first, so your manifests
+  never name a crate the lock does not hold. A new `Cargo.lock` gets the
   permissions cargo would give it. A file whose bytes did not change is not
-  touched.
+  touched. If a new file cannot be written, nothing is renamed; if a rename
+  fails, the files already renamed are put back. Either way the command exits
+  `2` and says so. One case is not covered: a cargo already running while
+  `cargo add` lands ([below](#what-is-not-checked)).
 - `cargo add` edits `Cargo.toml` before it resolves, so it runs in a private
   mirror of your workspace under your user cache directory: copies of the
   manifests and the lock, and links to everything else. Its edits are copied
@@ -253,6 +257,21 @@ still put code on your machine:
   latest release). `cargo install` checks only the crates it names, not their
   dependencies. A cargo `[alias]` and an external subcommand (such as `cargo
   upgrade`) are not recognised, so a lock they change is not checked.
+- **A cargo already running while `cargo add` lands.** The new `Cargo.lock`
+  and `Cargo.toml` are renamed into place one straight after the other, not
+  in one step. Cargo reads the manifests under no lock, then `Cargo.lock`,
+  and only then takes its package cache lock, and at the end it writes
+  `Cargo.lock` from what it read (verified with cargo 1.99.1). So a cargo
+  that read your `Cargo.toml` before the last rename and reads or writes
+  `Cargo.lock` after the first, such as one an editor or a watcher started a
+  moment before, can resolve the old requirement against the new lock, which
+  can lock crates nobody checked, or write a lock resolved from the old files
+  over the new one, which leaves the added crate for the next build to
+  resolve unchecked. A cargo waiting for the package cache, while another
+  downloads, keeps that window open for as long as it waits. Holding cargo's
+  package cache lock while landing does not help, since by then cargo has
+  read both files. Stop your editor's and watchers' cargo runs while you run
+  `ossprey cargo add`.
 - **A named install whose dependencies could not be resolved.** The
   dependencies of a named install are worked out with a dry run of the
   manager's own kind of resolver (below). When that is not possible — no

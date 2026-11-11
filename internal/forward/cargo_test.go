@@ -450,7 +450,7 @@ func cargoProject(t *testing.T) (string, cargoWorkspace) {
 		Manifests: []string{filepath.Join(root, "Cargo.toml"), filepath.Join(root, "a", "Cargo.toml")},
 		ConfigDir: root,
 	}
-	oldWS, oldVersion, oldMeta, oldRun, oldLand, oldErr := cargoWorkspaceFn, cargoVersionFn, cargoMetadataFn, cargoRunFn, landFn, cargoErrOut
+	oldWS, oldVersion, oldMeta, oldRun, oldCommit, oldErr := cargoWorkspaceFn, cargoVersionFn, cargoMetadataFn, cargoRunFn, commitFn, cargoErrOut
 	cargoErrOut = &bytes.Buffer{}
 	cargoWorkspaceFn = func(context.Context, []string) (cargoWorkspace, error) { return ws, nil }
 	cargoVersionFn = func(context.Context, string, []string) (string, error) { return cargo199, nil }
@@ -464,7 +464,7 @@ func cargoProject(t *testing.T) (string, cargoWorkspace) {
 		return nil
 	}
 	t.Cleanup(func() {
-		cargoWorkspaceFn, cargoVersionFn, cargoMetadataFn, cargoRunFn, landFn, cargoErrOut = oldWS, oldVersion, oldMeta, oldRun, oldLand, oldErr
+		cargoWorkspaceFn, cargoVersionFn, cargoMetadataFn, cargoRunFn, commitFn, cargoErrOut = oldWS, oldVersion, oldMeta, oldRun, oldCommit, oldErr
 	})
 	return root, ws
 }
@@ -571,26 +571,26 @@ func redirectedLock(env, args []string) string {
 	return at
 }
 
-// landings records each file landFn writes, in order, and writes it.
+// landings records each project file renamed into place, in order, and renames it.
 func landings(t *testing.T) *[]string {
 	var got []string
-	old := landFn
-	landFn = func(p string, data []byte) error {
-		got = append(got, p)
-		return old(p, data)
+	old := commitFn
+	commitFn = func(s staged) error {
+		got = append(got, s.path)
+		return old(s)
 	}
-	t.Cleanup(func() { landFn = old })
+	t.Cleanup(func() { commitFn = old })
 	return &got
 }
 
-// noLanding fails the test when anything is written to the project.
+// noLanding fails the test when anything is renamed into the project.
 func noLanding(t *testing.T) {
-	old := landFn
-	landFn = func(p string, _ []byte) error {
-		t.Errorf("wrote %s", p)
-		return nil
+	old := commitFn
+	commitFn = func(s staged) error {
+		t.Errorf("wrote %s", s.path)
+		return errors.New("no landing")
 	}
-	t.Cleanup(func() { landFn = old })
+	t.Cleanup(func() { commitFn = old })
 }
 
 // needSymlinks skips a test that makes links where links cannot be made.
@@ -1109,6 +1109,41 @@ func TestRunCargoAdd_ChangedDuringTheCheckLandsNothing(t *testing.T) {
 			}
 			if !reflect.DeepEqual(projectState(t, root), before) {
 				t.Error("the project changed beyond the edit")
+			}
+		})
+	}
+}
+
+// A manifest rename that fails after the lock's puts the lock back, or removes a new one, so the project never keeps a lock its manifests do not match (OSS-2553).
+func TestRunCargoAdd_FailedRenamePutsTheLockBack(t *testing.T) {
+	needSymlinks(t)
+	for _, lockExisted := range []bool{false, true} {
+		t.Run(fmt.Sprintf("lock %v", lockExisted), func(t *testing.T) {
+			root, ws := cargoProject(t)
+			if lockExisted {
+				writeFile(t, ws.Lock, "version = 4\n# before\n")
+			}
+			swapCargo(t, &fakeCargo{t: t, root: root, lock: evilLock})
+			swap(t, nil, cleanSBOM)
+			swapScan(t, func(context.Context, scanRequest) (*ossbom.SBOM, error) { return cleanCrates(), nil })
+			before := projectState(t, root)
+			landed := landings(t)
+			rename := commitFn
+			commitFn = func(s staged) error {
+				if s.path == ws.Manifests[1] {
+					return errors.New("injected")
+				}
+				return rename(s)
+			}
+			out, err := quietOutput(t, context.Background(), Options{Bin: "cargo", Args: []string{"add", "-p", "a", "evil"}})
+			if want := "could not write " + filepath.Join("a", "Cargo.toml") + " (injected), so ossprey put back Cargo.lock and the project is as it was"; err == nil || err.Error() != want || out != "" {
+				t.Errorf("Run = %v, output %q; want %q alone", err, out, want)
+			}
+			if want := map[bool][]string{false: {ws.Lock}, true: {ws.Lock, ws.Lock}}[lockExisted]; !reflect.DeepEqual(*landed, want) {
+				t.Errorf("renamed %v, want %v", *landed, want)
+			}
+			if !reflect.DeepEqual(projectState(t, root), before) {
+				t.Error("the project was not put back")
 			}
 		})
 	}
