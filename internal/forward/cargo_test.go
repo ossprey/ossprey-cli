@@ -845,7 +845,7 @@ func TestRunCargo_BlockLeavesTheProjectAsItWas(t *testing.T) {
 					t.Errorf("%s is another file now (%v)", p, err)
 				}
 			}
-			for _, line := range []string{"Installation blocked.", "Error: WARNING: evil:1.0.0 contains malware", "ossprey: blocked `cargo " + strings.Fields(tc.args)[len(strings.Fields(tc.args))-1] + "`\nossprey: the project was not changed\n"} {
+			for _, line := range []string{"Installation blocked.", "Error: WARNING: evil:1.0.0 contains malware", "ossprey: blocked `cargo " + blockedVerb(tc.args) + "`\nossprey: the project was not changed\n"} {
 				if !strings.Contains(out, line) {
 					t.Errorf("output lacks %q:\n%s", line, out)
 				}
@@ -855,6 +855,16 @@ func TestRunCargo_BlockLeavesTheProjectAsItWas(t *testing.T) {
 			}
 		})
 	}
+}
+
+// blockedVerb is the first word of args that is neither an option nor an option's value.
+func blockedVerb(args string) string {
+	for _, f := range strings.Fields(args) {
+		if !strings.HasPrefix(f, "-") && !strings.Contains(f, "=") {
+			return f
+		}
+	}
+	return ""
 }
 
 // A clean update resolves from the project's lock and writes the new one, keeping its mode, a linked lock through its link as cargo writes one, and prints the one verdict line (OSS-2553).
