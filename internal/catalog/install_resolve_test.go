@@ -749,6 +749,35 @@ func TestUVToolRunConfig(t *testing.T) {
 	}
 }
 
+// A uv config that exists but cannot be read or parsed fails the tool-run resolve: skipped, `uv pip compile` would apply its [pip] table.
+func TestUVToolRunConfigFailsOnAConfigItCannotRead(t *testing.T) {
+	scratch := t.TempDir()
+	t.Setenv("UV_CONFIG_FILE", "")
+	t.Setenv("XDG_CONFIG_DIRS", t.TempDir())
+	usr := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", usr)
+	if err := os.MkdirAll(filepath.Join(usr, "uv"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	discovered, named := filepath.Join(usr, "uv", "uv.toml"), filepath.Join(t.TempDir(), "custom.toml")
+	pip := "\n[pip]\nindex-url = \"https://pip.example/simple\"\n"
+	for name, body := range map[string]string{
+		"nested too deep": deepTOMLKey(maxTOMLDepth+1) + pip,
+		"over the cap":    "# " + strings.Repeat("x", maxManifestBytes) + "\n" + pip,
+		"unparseable":     "index-url =\n" + pip,
+	} {
+		for path, flags := range map[string][]string{discovered: {"--offline"}, named: {"--offline", "--config-file", named}} {
+			if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if got, err := uvToolRunConfig(flags, scratch); err == nil || !strings.Contains(err.Error(), path) {
+				t.Errorf("%s %s: uvToolRunConfig() = %v, %v, want an error naming the file", name, path, got, err)
+			}
+			os.Remove(path)
+		}
+	}
+}
+
 // Configuration that changes what resolves, from the environment or a file
 // uv reads, is reported; configuration that does not is not.
 func TestUVConfigShapesResolution(t *testing.T) {
@@ -818,6 +847,10 @@ func TestUVConfigShapesResolution(t *testing.T) {
 	write(filepath.Join(proj, "pyproject.toml"), "[project]\nname = \"x\"\n\n[tool.uv]\ndev-dependencies = []\n")
 	if UVConfigShapesResolution(nil, proj) {
 		t.Error("project [tool.uv] without resolution keys: shapes")
+	}
+	write(filepath.Join(proj, "pyproject.toml"), "[tool.uv]\n"+deepTOMLKey(maxTOMLDepth))
+	if !UVConfigShapesResolution(nil, proj) {
+		t.Error("project pyproject.toml nested too deep to parse: does not shape")
 	}
 	write(filepath.Join(proj, "uv.toml"), "resolution = \"lowest\"\n")
 	if !UVConfigShapesResolution(nil, proj) {

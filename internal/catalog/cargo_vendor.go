@@ -14,7 +14,6 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/BurntSushi/toml"
 	"github.com/anchore/syft/syft/file"
 	"github.com/ossprey/ossprey-cli/internal/registry"
 	"golang.org/x/text/unicode/norm"
@@ -23,7 +22,7 @@ import (
 // cargoVendorMarker sits at the root of every crate `cargo vendor` writes, whatever the vendor directory is called.
 const cargoVendorMarker = ".cargo-checksum.json"
 
-// maxCargoProofBytes bounds a lockfile or marker read; real ones are a few MB at most.
+// maxCargoProofBytes bounds a marker read; real ones are a few MB at most.
 const maxCargoProofBytes = 32 << 20
 
 // CargoProofLimit bounds a lock or marker and CargoManifestLimit a manifest or cargo config, as the parsers here refuse them.
@@ -204,7 +203,7 @@ func readCargoFiles(r file.Resolver, locs []file.Location, rootSlash string, up 
 		real := rootRel(l.RealPath, rootSlash+"/")
 		f, ok := out[real]
 		if !ok {
-			if _, err := decodeTOML(r, l, maxManifestBytes, &f.doc); err != nil {
+			if err := decodeTOMLAt(r, l, maxManifestBytes, &f.doc); err != nil {
 				return nil, false
 			}
 		}
@@ -316,12 +315,12 @@ func cargoDirEntries(dir string, exact ...string) ([]fs.DirEntry, error) {
 
 // readCargoFileAt parses the regular file at p on disk, resolving its paths against base.
 func readCargoFileAt(p, base string) (cargoFile, bool) {
-	data, ok := readRegularFile(p, maxManifestBytes)
-	if !ok {
+	data, err := readTOML(p)
+	if err != nil {
 		return cargoFile{}, false
 	}
 	f := cargoFile{bases: []string{filepath.ToSlash(base)}}
-	_, err := toml.Decode(string(data), &f.doc)
+	_, err = decodeTOML(data, &f.doc)
 	return f, err == nil
 }
 
@@ -754,7 +753,8 @@ func projectLocks(r file.Resolver, locks []file.Location, manifests map[string]c
 		if _, ok := manifests[path.Join(dir, "Cargo.toml")]; !ok {
 			continue
 		}
-		data, err := readLocation(r, l, maxCargoProofBytes)
+		// The lockfile caps, as for syft's own parse: this one runs before withBoundedLocks hides anything.
+		data, err := readLock(r, l)
 		if err != nil {
 			continue
 		}
@@ -787,7 +787,7 @@ func ParseCargoLock(data []byte) (CargoLock, error) {
 			Checksum string `toml:"checksum"`
 		} `toml:"package"`
 	}
-	if _, err := toml.Decode(string(data), &lock); err != nil {
+	if _, err := decodeTOML(data, &lock); err != nil {
 		return CargoLock{}, err
 	}
 	set := CargoLock{sums: map[string]map[string]bool{}, versions: map[string][]string{}}
@@ -913,7 +913,7 @@ func CargoPackageID(data []byte) (name, version string) {
 	if len(data) > maxManifestBytes || proofTOMLError(data) != nil {
 		return "", ""
 	}
-	if _, err := toml.Decode(string(data), &doc); err != nil {
+	if _, err := decodeTOML(data, &doc); err != nil {
 		return "", ""
 	}
 	name, _ = tomlLookup(doc, "package", "name").(string)
@@ -930,7 +930,7 @@ func ParseCargoConfig(data []byte) (map[string]any, error) {
 		return nil, fmt.Errorf("cargo config %w", err)
 	}
 	doc := map[string]any{}
-	_, err := toml.Decode(string(data), &doc)
+	_, err := decodeTOML(data, &doc)
 	return doc, err
 }
 
@@ -976,12 +976,13 @@ func CargoVendorSource(dir string, configAt func(dir string) (doc map[string]any
 	return path.Join(base, directory)
 }
 
-func decodeTOML(r file.Resolver, loc file.Location, limit int64, v any) (toml.MetaData, error) {
+func decodeTOMLAt(r file.Resolver, loc file.Location, limit int64, v any) error {
 	data, err := readLocation(r, loc, limit)
 	if err != nil {
-		return toml.MetaData{}, err
+		return err
 	}
-	return toml.Decode(string(data), v)
+	_, err = decodeTOML(data, v)
+	return err
 }
 
 // readLocation refuses a file over limit, since a truncated one could drop a reference.
@@ -996,7 +997,7 @@ func readLocation(r file.Resolver, loc file.Location, limit int64) ([]byte, erro
 		return nil, err
 	}
 	if int64(len(data)) > limit {
-		return nil, fmt.Errorf("%s is over %d bytes", loc.RealPath, limit)
+		return nil, &fs.PathError{Op: "read", Path: loc.RealPath, Err: fmt.Errorf("over the %d byte limit", limit)}
 	}
 	return data, nil
 }
