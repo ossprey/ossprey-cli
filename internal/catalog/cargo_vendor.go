@@ -97,7 +97,7 @@ func withoutCargoVendor(r file.Resolver, root string) file.Resolver {
 	if !ok {
 		return r
 	}
-	aboveManifests, aboveConfigs, ok := cargoFilesAbove(root, true, false)
+	aboveManifests, aboveConfigs, ok := cargoFilesAbove(root, CargoHome(cargoCwd("")), true, false)
 	if !ok {
 		return r
 	}
@@ -218,8 +218,8 @@ func readCargoFiles(r file.Resolver, locs []file.Location, rootSlash string, up 
 	return out, true
 }
 
-// cargoFilesAbove reads the configs, and with withManifests the manifests, cargo run inside root also sees: every ancestor's, and CARGO_HOME's; noLinks fails on a symlinked .cargo or config and skips CARGO_HOME only as an ancestor's .cargo by its exact path.
-func cargoFilesAbove(root string, withManifests, noLinks bool) (manifests, configs []cargoFile, ok bool) {
+// cargoFilesAbove reads the configs, and with withManifests the manifests, cargo run inside root also sees: every ancestor's, and home's; noLinks fails on a symlinked .cargo or config and skips home only as an ancestor's .cargo by its exact path.
+func cargoFilesAbove(root, home string, withManifests, noLinks bool) (manifests, configs []cargoFile, ok bool) {
 	exact := []string{".cargo"}
 	if withManifests {
 		exact = append(exact, "Cargo.toml")
@@ -262,7 +262,7 @@ func cargoFilesAbove(root string, withManifests, noLinks bool) (manifests, confi
 			break
 		}
 	}
-	if home := cargoHome(); home != "" && !seen[key(filepath.ToSlash(home))] {
+	if home != "" && !seen[key(filepath.ToSlash(home))] {
 		cs, ok := cargoConfigsIn(home, filepath.Dir(home), false, noLinks)
 		if !ok {
 			return nil, nil, false
@@ -326,20 +326,39 @@ func readCargoFileAt(p, base string) (cargoFile, bool) {
 
 // readRegularFile reads the file at p on disk, or false when it is not a regular file or holds more than limit bytes.
 func readRegularFile(p string, limit int64) ([]byte, bool) {
-	// A device or FIFO may never end, so only a regular file is opened, and read no further than the limit.
-	if info, err := os.Stat(p); err != nil || !info.Mode().IsRegular() {
-		return nil, false
-	}
-	fh, err := os.Open(p)
-	if err != nil {
-		return nil, false
-	}
-	defer fh.Close()
-	data, err := io.ReadAll(io.LimitReader(fh, limit+1))
+	data, _, err := ReadRegular(p, limit)
 	if err != nil || int64(len(data)) > limit {
 		return nil, false
 	}
 	return data, true
+}
+
+// ErrNotRegular refuses a FIFO, device or directory, which may never end.
+var ErrNotRegular = errors.New("not a regular file")
+
+// ReadRegular reads up to limit+1 bytes of p from its start, refused unless it is a regular file both before it is opened and once opened without waiting on a FIFO.
+func ReadRegular(p string, limit int64) ([]byte, fs.FileInfo, error) {
+	// Opening a FIFO releases a writer blocked on it, and opening a device can reset it, so neither is opened.
+	if fi, err := os.Stat(p); err != nil {
+		return nil, nil, err
+	} else if !fi.Mode().IsRegular() {
+		return nil, nil, &fs.PathError{Op: "read", Path: p, Err: ErrNotRegular}
+	}
+	f, err := os.OpenFile(p, os.O_RDONLY|oNonblock, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err == nil && !fi.Mode().IsRegular() {
+		err = &fs.PathError{Op: "read", Path: p, Err: ErrNotRegular}
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	// Read at offsets from 0, since on macOS /dev/stdin or /dev/fd/N dups a descriptor and shares its offset with cargo.
+	data, err := io.ReadAll(io.NewSectionReader(f, 0, limit+1))
+	return data, fi, err
 }
 
 // vendorDir is the folded directory cargo run in dir takes crates.io crates from, or "" when unreplaced or unclear.
@@ -393,8 +412,16 @@ func cargoConfigLevels(configLocs []file.Location, configs map[string]cargoFile,
 	return levels
 }
 
-// cargoSourceReplaced reports whether cargo run beside a manifest or a config in the scan takes crates.io from anything but a vendor directory the filter proved.
-func cargoSourceReplaced(r file.Resolver, root string) bool {
+// cargoSourceReplaced reports whether cargo run beside a manifest or a config in the scan, or in configDir when set, takes crates.io from anything but a vendor directory the filter proved.
+func cargoSourceReplaced(r file.Resolver, root, configDir string) bool {
+	home := CargoHome(cargoCwd(configDir))
+	if configDir != "" {
+		// A lock copied out of its workspace is judged where cargo runs, from the configs there and above and CARGO_HOME's.
+		dir := resolvedRoot(configDir)
+		_, above, ok := cargoFilesAbove(filepath.Join(dir, "Cargo.lock"), home, false, false)
+		dirSlash := filepath.ToSlash(dir)
+		return ok && cratesIoReplacement(cargoConfigLevels(nil, nil, above, dirSlash), dirSlash, home) != ""
+	}
 	vendored, _ := r.(cargoVendored)
 	root = resolvedRoot(root)
 	rootSlash := filepath.ToSlash(root)
@@ -404,7 +431,7 @@ func cargoSourceReplaced(r file.Resolver, root string) bool {
 	}
 	levels := vendored.levels
 	if levels == nil {
-		if levels, err = cargoReplacementLevels(r, root); err != nil {
+		if levels, err = cargoReplacementLevels(r, root, home); err != nil {
 			return false
 		}
 	}
@@ -423,7 +450,7 @@ func cargoSourceReplaced(r file.Resolver, root string) bool {
 		}
 	}
 	for d := range dirs {
-		if cratesIoReplacement(levels, d) != "" && !vendored.vendors[vendorDir(levels, d)] {
+		if cratesIoReplacement(levels, d, home) != "" && !vendored.vendors[vendorDir(levels, d)] {
 			return true
 		}
 	}
@@ -433,8 +460,8 @@ func cargoSourceReplaced(r file.Resolver, root string) bool {
 // cargoConfigGlobs find configs by name, then in any case inside a .cargo directory, as cargo opens them on a case-insensitive filesystem; syft answers each from its index of names, where the vendor filter's "**/.*/*" walks every file.
 var cargoConfigGlobs = []string{"**/config", "**/config.toml", "**/.cargo/*"}
 
-// cargoReplacementLevels files every config cargo may read in or above the scan, read one at a time so a file that cannot be read does not hide another's replacement.
-func cargoReplacementLevels(r file.Resolver, root string) (map[string][]cargoFile, error) {
+// cargoReplacementLevels files every config cargo may read in or above the scan and in home, read one at a time so a file that cannot be read does not hide another's replacement.
+func cargoReplacementLevels(r file.Resolver, root, home string) (map[string][]cargoFile, error) {
 	rootSlash := filepath.ToSlash(root)
 	// One glob per call, since syft drops a file a call has already returned, and that may be the one reached through a linked .cargo.
 	var configLocs []file.Location
@@ -452,16 +479,23 @@ func cargoReplacementLevels(r file.Resolver, root string) (map[string][]cargoFil
 		}
 	}
 	// A manifest above the scan names no source, so only configs are read there; one that cannot be read stops cargo too.
-	_, aboveConfigs, _ := cargoFilesAbove(root, false, false)
+	_, aboveConfigs, _ := cargoFilesAbove(root, home, false, false)
 	return cargoConfigLevels(configLocs, configs, aboveConfigs, rootSlash), nil
 }
 
-// cratesIoReplacement is the replace-with for crates.io in effect for cargo run in dir: the nearest level that sets one, else CARGO_HOME's.
-func cratesIoReplacement(levels map[string][]cargoFile, dir string) string {
+// cratesIoReplacement is the replace-with for crates.io in effect for cargo run in dir, the nearest level that sets one, else home's, or else the key of a location set on crates.io's own table, which cargo 1.99.1 takes crates.io's crates from too.
+func cratesIoReplacement(levels map[string][]cargoFile, dir, home string) string {
 	at := func(d string) string {
 		for _, c := range levels[foldPath(d)] {
 			if with, _ := tomlLookup(c.doc, "source", "crates-io", "replace-with").(string); with != "" {
 				return with
+			}
+		}
+		for _, c := range levels[foldPath(d)] {
+			for _, k := range []string{"registry", "local-registry", "directory", "git"} {
+				if tomlLookup(c.doc, "source", "crates-io", k) != nil {
+					return k
+				}
 			}
 		}
 		return ""
@@ -474,22 +508,62 @@ func cratesIoReplacement(levels map[string][]cargoFile, dir string) string {
 			break
 		}
 	}
-	// cargoFilesAbove files CARGO_HOME's configs at its parent, which need not be above dir.
-	if home := cargoHome(); home != "" {
+	// cargoFilesAbove files home's configs at its parent, which need not be above dir.
+	if home != "" {
 		return at(filepath.ToSlash(filepath.Dir(home)))
 	}
 	return ""
 }
 
-// cargoHome is the directory cargo reads its user-level config from.
-func cargoHome() string {
+// CargoHome is the directory cargo run in cwd reads its user-level config from: CARGO_HOME, a relative one joined to cwd, with `..` cleaned and links left alone as cargo 1.99.1 does, else ~/.cargo, else "".
+func CargoHome(cwd string) string {
 	if home := os.Getenv("CARGO_HOME"); home != "" {
-		return home
+		p, ok := JoinIn(cwd, home, filepath.VolumeName)
+		if !ok {
+			// One relative to another drive takes that drive's current directory, as Abs reads it.
+			p = home
+			if abs, err := filepath.Abs(home); err == nil {
+				p = abs
+			}
+		}
+		return filepath.Clean(p)
 	}
 	if h, err := os.UserHomeDir(); err == nil {
 		return filepath.Join(h, ".cargo")
 	}
 	return ""
+}
+
+// JoinIn is p opened from the directory dir as Windows places it, uncleaned (rooted on dir's volume, relative to dir's drive under dir), or false for one relative to another drive; vol is filepath.VolumeName, a parameter so every OS can test it.
+func JoinIn(dir, p string, vol func(string) string) (string, bool) {
+	pv := vol(p)
+	rest := p[len(pv):]
+	rooted := rest != "" && os.IsPathSeparator(rest[0])
+	drive := len(pv) == 2 && pv[1] == ':'
+	switch {
+	case pv != "" && (rooted || !drive):
+		return p, true
+	case rooted:
+		return vol(dir) + p, true
+	case dir == "":
+		// No known directory leaves p relative, as filepath.Join does.
+		return rest, pv == ""
+	case pv == "" || strings.EqualFold(pv, vol(dir)):
+		return dir + string(filepath.Separator) + rest, true
+	}
+	return "", false
+}
+
+// cargoCwd is cargo's physical working directory: configDir for a copied lock, else this process's.
+func cargoCwd(configDir string) string {
+	if configDir == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			return ""
+		}
+		configDir = wd
+	}
+	return resolvedRoot(configDir)
 }
 
 func tomlLookup(v any, keys ...string) any {

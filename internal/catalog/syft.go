@@ -75,6 +75,9 @@ type Options struct {
 	// value trusts nothing.
 	Trust trust.Policy
 
+	// CargoConfigDir, for a Cargo.lock copied out of its workspace, is where cargo runs; its configs then decide registry trust.
+	CargoConfigDir string
+
 	// ReportCargoReplacement warns when a cargo config replaces crates.io; scan.Run sets it, and the pre-commit hook (precommit.catalogFn) leaves it off, since its temp trees hold no repository config.
 	ReportCargoReplacement bool
 }
@@ -341,13 +344,13 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 		}
 	}
 
-	if opts.ReportCargoReplacement && slices.ContainsFunc(out, isCratesIoCrate) && cargoSourceReplaced(resolver, absRoot) {
+	if opts.ReportCargoReplacement && slices.ContainsFunc(out, isCratesIoCrate) && cargoSourceReplaced(resolver, absRoot, opts.CargoConfigDir) {
 		warn.Add(ctx, cargoReplacedEntry)
 	}
 	// The fold runs first because cargoLocks indexes out; mergeVersionless leaves crates alone.
 	merged := mergeVersionless(foldCargoRanges(out, cargoRanges, cargoLocks))
 	markLocalPackages(merged, findLocalPackageNames(resolver, absRoot))
-	clearReplacedCrateRegistries(ctx, merged, opts.Trust, resolver, absRoot)
+	clearReplacedCrateRegistries(ctx, merged, opts.Trust, resolver, absRoot, opts.CargoConfigDir)
 	markTrustedPackages(merged, opts.Trust)
 	resolveVersionless(ctx, merged, opts)
 	return merged, nil
@@ -470,12 +473,12 @@ func markTrustedPackages(pkgs []Package, policy trust.Policy) {
 }
 
 // clearReplacedCrateRegistries drops every crate's registries when a cargo config may fetch crates from a source other than their lock's.
-func clearReplacedCrateRegistries(ctx context.Context, pkgs []Package, policy trust.Policy, r file.Resolver, root string) {
+func clearReplacedCrateRegistries(ctx context.Context, pkgs []Package, policy trust.Policy, r file.Resolver, root, configDir string) {
 	// Configs are read only when a crate would otherwise be trusted by registry.
 	if !slices.ContainsFunc(pkgs, func(p Package) bool { return p.Type == "cargo" && policy.Trusts(p.Type, p.Name, p.Registries) }) {
 		return
 	}
-	why := cargoReplacement(ctx, r, root)
+	why := cargoReplacement(ctx, r, root, configDir)
 	if why == "" {
 		return
 	}

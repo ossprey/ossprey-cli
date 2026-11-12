@@ -167,6 +167,17 @@ func readLock(r file.Resolver, l file.Location) ([]byte, error) {
 	return data, nil
 }
 
+// CheckLockCaps refuses a lockfile withBoundedLocks would hide, so a caller cataloguing it can tell that from one with nothing to check.
+func CheckLockCaps(data []byte) error {
+	if len(data) > maxLockBytes {
+		return fmt.Errorf("over the %d MiB lockfile limit", maxLockBytes>>20)
+	}
+	if tomlDepthOver(data, maxLockDepth) {
+		return errLockTooDeep
+	}
+	return nil
+}
+
 func (r boundedLocks) keep(locs []file.Location, err error) ([]file.Location, error) {
 	if err != nil {
 		return nil, err

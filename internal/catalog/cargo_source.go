@@ -86,6 +86,83 @@ func isCratesIo(source string) (is, maybe bool) {
 	return strings.ToLower(host) == want[0], false
 }
 
+// IsCratesIoIndex reports whether an `--index` URL is certainly crates.io's, read as cargo 1.99.1 reads it; one only IDNA could map there is not.
+func IsCratesIoIndex(index string) bool {
+	// Cargo's parser trims the URL and drops tabs and newlines before it reads the scheme, whose case it folds.
+	clean := strings.NewReplacer("\t", "", "\n", "", "\r", "").Replace(trimC0(index))
+	scheme, rest, ok := strings.Cut(clean, ":")
+	if !ok {
+		return false
+	}
+	scheme = strings.ToLower(scheme)
+	inner, sparse := strings.CutPrefix(scheme, "sparse+")
+	kind := "registry"
+	if sparse {
+		// Cargo parses a sparse+ URL as a non-special one, then fetches from it parsed again without sparse+.
+		kind = "sparse"
+		if rest, ok = sparseFirstParse(rest); !ok {
+			return false
+		}
+	}
+	// Only a special scheme such as https reads '\' as '/'; ssh and the rest keep it, so `github.com\@host` fetches from host.
+	if _, special := defaultPort[inner]; !special && strings.Contains(rest, `\`) {
+		return false
+	}
+	is, _ := isCratesIo(kind + "+" + inner + ":" + rest)
+	return is
+}
+
+// sparseFirstParse is what follows the scheme of a sparse+ URL as cargo's first parse writes it back, false where that parse fails.
+func sparseFirstParse(rest string) (string, bool) {
+	end := strings.IndexAny(rest, "?#")
+	if end < 0 {
+		end = len(rest)
+	}
+	p, tail, auth := rest[:end], rest[end:], ""
+	if a, ok := strings.CutPrefix(p, "//"); ok {
+		// The authority ends at '/' alone, so a '\' before it is userinfo text, or a host cargo refuses.
+		i := strings.Index(a, "/")
+		if i < 0 {
+			i = len(a)
+		}
+		auth, p = a[:i], a[i:]
+		at := strings.LastIndex(auth, "@")
+		if strings.Contains(auth[at+1:], `\`) {
+			return "", false
+		}
+		auth = "//" + strings.ReplaceAll(auth[:at+1], `\`, "%5C") + auth[at+1:]
+	}
+	if strings.HasPrefix(p, "/") {
+		p = dotSegments(p)
+	}
+	return auth + p + tail, true
+}
+
+// dotSegments resolves . and .. in a path split at '/' alone, as the WHATWG parser does for a non-special URL.
+func dotSegments(p string) string {
+	segs := strings.Split(p[1:], "/")
+	out := make([]string, 0, len(segs))
+	for i, s := range segs {
+		last := i == len(segs)-1
+		switch strings.ToLower(s) {
+		case "..", ".%2e", "%2e.", "%2e%2e":
+			if len(out) > 0 {
+				out = out[:len(out)-1]
+			}
+			if last {
+				out = append(out, "")
+			}
+		case ".", "%2e":
+			if last {
+				out = append(out, "")
+			}
+		default:
+			out = append(out, s)
+		}
+	}
+	return "/" + strings.Join(out, "/")
+}
+
 func nonASCII(r rune) bool { return r > unicode.MaxASCII }
 
 // gitCommit is the locked commit Cargo writes after '#' in a git source.
@@ -222,15 +299,21 @@ const (
 	configLinked   = "a symlink in the scan could point cargo at another config"
 )
 
-// cargoReplacement says why no crate is trusted by registry: a symlink in the scan, or a cargo config cargo may read for root that replaces a source, includes a file, has an alias passing --config or cannot be read.
-func cargoReplacement(ctx context.Context, r file.Resolver, root string) string {
-	root = resolvedRoot(root)
-	inScan, why := cargoConfigsInScan(ctx, r, root)
-	if why != "" {
-		return why
+// cargoReplacement says why no crate is trusted by registry: a symlink in the scan, or a cargo config cargo may read for root (or from configDir, when set) that replaces a source, includes a file, has an alias passing --config or cannot be read.
+func cargoReplacement(ctx context.Context, r file.Resolver, root, configDir string) string {
+	var inScan []cargoFile
+	if configDir != "" {
+		// cargoFilesAbove starts at its argument's parent, so this reads configDir's own .cargo first.
+		root = filepath.Join(configDir, "Cargo.lock")
+	} else {
+		root = resolvedRoot(root)
+		var why string
+		if inScan, why = cargoConfigsInScan(ctx, r, root); why != "" {
+			return why
+		}
 	}
 	// A manifest above the root names no source, so only configs decide trust.
-	_, above, ok := cargoFilesAbove(root, false, true)
+	_, above, ok := cargoFilesAbove(root, CargoHome(cargoCwd(configDir)), false, true)
 	if !ok {
 		return configUnread
 	}

@@ -103,8 +103,8 @@ ossprey npm install left-pad        # checks first, then runs npm
 ```
 
 If the package is flagged, the install is blocked and `npm` never starts. Works
-with `npm`, `npx`, `pnpm`, `yarn`, `bun`, `bunx`, `pip`, `pip3`, `poetry`, `uv` and
-`uvx`.
+with `npm`, `npx`, `pnpm`, `yarn`, `bun`, `bunx`, `pip`, `pip3`, `poetry`, `uv`,
+`uvx` and `cargo`. Rust (crates.io) is available on Teams and Enterprise plans.
 
 Tired of typing `ossprey` first?
 

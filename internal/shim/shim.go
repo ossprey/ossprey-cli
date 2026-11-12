@@ -42,10 +42,8 @@ const (
 
 var defaultManagers = []string{"npm", "npx", "pnpm", "yarn", "bun", "bunx", "pip", "pip3", "poetry", "uv", "uvx"}
 
-// optInManagers are shimmed only when asked for by name (or --git): shimming
-// git by default would put a network lookup in front of every pull, and brew
-// one in front of every install.
-var optInManagers = []string{"git", "brew"}
+// optInManagers are shimmed only when asked for by name or by their own flag (CLAUDE.md says why).
+var optInManagers = []string{"git", "brew", "cargo"}
 
 func DefaultManagers() []string {
 	return slices.Clone(defaultManagers)

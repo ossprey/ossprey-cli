@@ -225,7 +225,7 @@ func TestValidateManagers(t *testing.T) {
 	if len(got) != 2 || got[0] != "npm" || got[1] != "pip" {
 		t.Fatalf("ValidateManagers = %v, want [npm pip] deduped and trimmed", got)
 	}
-	if _, err := ValidateManagers([]string{"cargo"}); err == nil {
+	if _, err := ValidateManagers([]string{"gem"}); err == nil {
 		t.Fatal("expected an error for an unsupported manager")
 	}
 	if _, err := ValidateManagers(nil); err == nil {

@@ -510,6 +510,102 @@ func TestCatalogTrustsNoCrateUnderASourceReplacement(t *testing.T) {
 	}
 }
 
+// A lock copied out of its workspace is trusted by the configs cargo reads where it runs, not by those around the copy.
+func TestCatalogReadsCargoConfigsFromWhereCargoRuns(t *testing.T) {
+	replace := "[source.corp]\nregistry = \"sparse+https://crates.corp.example/internal/\"\nreplace-with = \"elsewhere\"\n"
+	lock := "version = 4\n\n[[package]]\nname = \"acme-sparse\"\nversion = \"1.0.0\"\nsource = \"sparse+https://crates.corp.example/internal/\"\nchecksum = \"aaaa\"\n"
+	for name, c := range map[string]struct {
+		files   map[string]string
+		trusted bool
+	}{
+		"a clean workspace":                      {trusted: true},
+		"a replacement where cargo runs":         {files: map[string]string{"ws/member/.cargo/config.toml": replace}},
+		"a replacement above where cargo runs":   {files: map[string]string{"ws/.cargo/config.toml": replace}},
+		"a replacement above both":               {files: map[string]string{".cargo/config.toml": replace}},
+		"a replacement in the copy, not read":    {files: map[string]string{"copy/lock/.cargo/config.toml": replace}, trusted: true},
+		"a replacement above the copy, not read": {files: map[string]string{"copy/.cargo/config.toml": replace}, trusted: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			base := t.TempDir()
+			t.Setenv("CARGO_HOME", filepath.Join(base, "home"))
+			writeTree(t, base, map[string]string{"home/.keep": "", "ws/member/.keep": "", "copy/lock/Cargo.lock": lock})
+			writeTree(t, base, c.files)
+			ctx := warn.NewContext(context.Background(), false)
+			policy := testPolicy(t, []string{"https://crates.corp.example/internal/"}, nil)
+
+			pkgs, err := Catalog(ctx, filepath.Join(base, "copy", "lock"), Options{NoExec: true, SkipVersionLookup: true, Trust: policy,
+				CargoConfigDir: filepath.Join(base, "ws", "member")})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if trusted, _ := trustedNames(pkgs); (len(trusted) == 1) != c.trusted {
+				t.Errorf("trusted = %v, want trusted %v", trusted, c.trusted)
+			}
+		})
+	}
+}
+
+// cargo 1.99.1 joins a relative CARGO_HOME to where it runs, -C's directory for a copied lock, and cleans `..` without following links (OSS-2553).
+func TestCatalogReadsARelativeCargoHomeAsCargoDoes(t *testing.T) {
+	mirror := "[source.crates-io]\nreplace-with = \"mirror\"\n\n[source.mirror]\nregistry = \"sparse+https://crates.elsewhere.example/\"\n"
+	lock := appLock(registrySerde, "[[package]]\nname = \"acme-sparse\"\nversion = \"1.0.0\"\nsource = \"sparse+https://crates.corp.example/internal/\"\nchecksum = \"aaaa\"\n")
+	for name, c := range map[string]struct {
+		// cwd is the process's, configDir where cargo runs for a copied lock, and config the directory holding the mirror.
+		cwd, home, configDir, config string
+		replaced                     bool
+	}{
+		"a relative home in a scan":                      {home: "h", config: "h", replaced: true},
+		"lnk/../h in a scan":                             {home: "lnk/../h", config: "h", replaced: true},
+		"lnk/../h in a scan, not the link's parent":      {home: "lnk/../h", config: "other/h"},
+		"a relative home for a copied lock":              {home: "h", configDir: "ws/member", config: "ws/member/h", replaced: true},
+		"a relative home for a copied lock, not the cwd": {home: "h", configDir: "ws/member", config: "h"},
+		"lnk/../h for a copied lock":                     {cwd: "ws/member", home: "lnk/../h", configDir: "ws/member", config: "ws/member/h", replaced: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			base := t.TempDir()
+			if real, err := filepath.EvalSymlinks(base); err == nil {
+				base = real
+			}
+			writeTree(t, base, map[string]string{
+				"proj/Cargo.toml":         "[package]\nname = \"app\"\nversion = \"0.1.0\"\n",
+				"proj/Cargo.lock":         lock,
+				"copy/lock/Cargo.lock":    lock,
+				"ws/member/.keep":         "",
+				"other/deep/.keep":        "",
+				"other/h/.keep":           "",
+				c.config + "/config.toml": mirror,
+			})
+			if strings.Contains(c.home, "lnk") {
+				if runtime.GOOS == "windows" {
+					t.Skip("symlinks need privileges on Windows")
+				}
+				if err := os.Symlink(filepath.Join(base, "other", "deep"), filepath.Join(base, c.cwd, "lnk")); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+			}
+			t.Chdir(filepath.Join(base, c.cwd))
+			t.Setenv("CARGO_HOME", c.home)
+			root, configDir := filepath.Join(base, "proj"), ""
+			if c.configDir != "" {
+				root, configDir = filepath.Join(base, "copy", "lock"), filepath.Join(base, c.configDir)
+			}
+			ctx := warn.NewContext(context.Background(), false)
+			policy := testPolicy(t, []string{"https://crates.corp.example/internal/"}, nil)
+
+			pkgs, err := Catalog(ctx, root, Options{NoExec: true, SkipVersionLookup: true, Trust: policy, ReportCargoReplacement: true, CargoConfigDir: configDir})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if trusted, _ := trustedNames(pkgs); (len(trusted) == 0) != c.replaced {
+				t.Errorf("trusted = %v, want trusted %v", trusted, !c.replaced)
+			}
+			if got := warn.Drain(ctx); strings.Contains(got, cargoReplacedEntry.One) != c.replaced {
+				t.Errorf("warnings = %q, want the crates.io replacement %v", got, c.replaced)
+			}
+		})
+	}
+}
+
 // A cancelled scan may close the walk before a link or config, so no crate is trusted by registry.
 func TestCatalogTrustsNoCrateWhenTheConfigWalkIsCancelled(t *testing.T) {
 	base := t.TempDir()
@@ -539,7 +635,7 @@ func TestCatalogTrustsNoCrateWhenTheConfigWalkIsCancelled(t *testing.T) {
 				cancel()
 			}
 			pkgs := []Package{{Name: "acme-sparse", Version: "1.0.0", Type: "cargo", Registries: []string{index}}}
-			clearReplacedCrateRegistries(ctx, pkgs, policy, r, root)
+			clearReplacedCrateRegistries(ctx, pkgs, policy, r, root, "")
 			markTrustedPackages(pkgs, policy)
 			if pkgs[0].Trusted == cancelled {
 				t.Errorf("trusted = %v, want %v", pkgs[0].Trusted, !cancelled)

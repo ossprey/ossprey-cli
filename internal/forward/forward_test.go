@@ -22,13 +22,13 @@ import (
 )
 
 func TestLookup(t *testing.T) {
-	for _, bin := range []string{"npm", "npx", "pnpm", "yarn", "bun", "bunx", "pip", "pip3", "poetry", "uv", "uvx"} {
+	for _, bin := range []string{"npm", "npx", "pnpm", "yarn", "bun", "bunx", "pip", "pip3", "poetry", "uv", "uvx", "cargo"} {
 		if _, ok := Lookup(bin); !ok {
 			t.Errorf("Lookup(%q): not found", bin)
 		}
 	}
-	if _, ok := Lookup("cargo"); ok {
-		t.Error("Lookup(cargo): expected not found")
+	if _, ok := Lookup("gem"); ok {
+		t.Error("Lookup(gem): expected not found")
 	}
 }
 
@@ -262,6 +262,7 @@ func swap(t *testing.T, exec func(context.Context, string, []string) error, chk 
 	origCheck := checkFn
 	origScanProject := scanProjectFn
 	origExpand := expandFn
+	origCargoRelease, origCargoVersion := cargoReleaseFn, cargoVersionFn
 	execFn = exec
 	handoffFn = exec
 	checkFn = chk
@@ -272,13 +273,29 @@ func swap(t *testing.T, exec func(context.Context, string, []string) error, chk 
 	expandFn = func(context.Context, *Manager, []string, int, installArgs) ([]catalog.Resolved, error) {
 		return nil, nil
 	}
+	cargoReleaseFn = stubCargoReleases("")
+	cargoVersionFn = func(context.Context, []string) (string, error) { return cargo199, nil }
 	t.Cleanup(func() {
 		execFn = origExec
 		handoffFn = origHandoff
 		checkFn = origCheck
 		scanProjectFn = origScanProject
 		expandFn = origExpand
+		cargoReleaseFn, cargoVersionFn = origCargoRelease, origCargoVersion
 	})
+}
+
+// stubCargoReleases answers a pin with its release and anything else with latest, or an error when latest is "".
+func stubCargoReleases(latest string) func(context.Context, string, string) ([]string, error) {
+	return func(_ context.Context, name, req string) ([]string, error) {
+		if v, ok := strings.CutPrefix(req, "="); ok {
+			return []string{v}, nil
+		}
+		if latest == "" {
+			return nil, fmt.Errorf("no release of %s stubbed for %q", name, req)
+		}
+		return []string{latest}, nil
+	}
 }
 
 // swapExpand replaces the dependency-expansion seam.

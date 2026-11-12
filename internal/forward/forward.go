@@ -1,5 +1,5 @@
 // Package forward implements the package-manager forwarder: it inspects an
-// install command (npm/yarn/bun/pip/poetry/uv), checks the packages it would
+// install command (npm/yarn/bun/pip/poetry/uv/cargo), checks the packages it would
 // install against the Ossprey API, blocks the install if any are malicious,
 // and otherwise execs the real package manager with the original arguments
 // untouched.
@@ -118,6 +118,8 @@ type Manager struct {
 	// parseRun classifies a tool run's arguments from start on. Unset means
 	// uv's syntax, parseToolRun.
 	parseRun func(args []string) installArgs
+	// resolveAt matches a command that only resolves and locks (`cargo update`), checked before its lock reaches the project.
+	resolveAt func(args []string) (start int, ok bool)
 }
 
 // noLocalLockfileFlags name the options that stop an install from updating a
@@ -236,6 +238,8 @@ var managers = map[string]*Manager{
 	// uvx is `uv tool run` under its own name: every invocation fetches and runs.
 	"uvx": {Bin: "uvx", Ecosystem: "pypi", installAt: noInstall,
 		toolRunAt: func([]string) (int, bool) { return 0, true }},
+	// cargo: `install` is checked before it builds, the verbs that only lock before their lock lands (cargo.go).
+	"cargo": {Bin: "cargo", Ecosystem: "cargo", installAt: cargoInstallAt, resolveAt: cargoResolveAt},
 }
 
 func noInstall([]string) (int, bool) { return 0, false }
@@ -283,7 +287,11 @@ func verbAt(bin string, verbs ...string) func([]string) (int, bool) {
 // script run rather than becoming an install of a package called "add".
 func verbIndex(bin string, args []string) int {
 	global := globalValueFlags[bin]
-	for i := 0; i < len(args); i++ {
+	start := 0
+	if bin == "cargo" && len(args) > 0 && strings.HasPrefix(args[0], "+") {
+		start = 1 // rustup's toolchain override, read only as the first argument
+	}
+	for i := start; i < len(args); i++ {
 		a := args[i]
 		if a == "" {
 			continue
@@ -296,7 +304,11 @@ func verbIndex(bin string, args []string) int {
 			return -1
 		}
 		flag, _, hasInline := splitFlagValue(a)
-		if global[flag] && !hasInline {
+		owes := global[flag] && !hasInline
+		if bin == "cargo" && !strings.HasPrefix(a, "--") {
+			_, owes = cargoShorts(a, global) // clap's `-qC dir` owes C its value
+		}
+		if owes {
 			i++ // this flag's value is the next token, not the verb
 		}
 	}
@@ -405,6 +417,8 @@ var globalValueFlags = map[string]map[string]bool{
 	"poetry": flagSet("-C", "--directory", "--project", "-P"),
 	"uv": flagSet("--directory", "--project", "--cache-dir", "--python", "-p",
 		"--config-file", "--color", "--allow-insecure-host"),
+	// From `cargo --help` (cargo 1.99); TestCargoFlagTablesMatchCargo holds it there.
+	"cargo": flagSet("--explain", "--color", "-C", "--config", "-Z"),
 }
 
 // Options configures a forwarder Run.
@@ -486,6 +500,31 @@ func Run(ctx context.Context, opts Options) error {
 		}
 	}
 
+	if m.resolveAt != nil {
+		_, resolves := m.resolveAt(opts.Args)
+		if _, installs := m.installAt(opts.Args); (resolves || installs) && !opts.SkipCI {
+			// One floor for every cargo command ossprey checks or posts.
+			if why := cargoBelowFloor(ctx, opts.Args); why != "" && opts.Passive {
+				note("ossprey: forwarding %s unchecked: %s\n", cargoVerbOnly(m, opts.Args), why)
+				return forwardTo()
+			} else if why != "" {
+				flushWarnings(ctx)
+				return fmt.Errorf("did not run %s: %s", cargoVerbOnly(m, opts.Args), why)
+			}
+		}
+		if resolves {
+			if opts.SkipCI {
+				note("ossprey: skip-ci set; forwarding `%s %s` without checking\n",
+					m.Bin, strings.Join(opts.Args, " "))
+				return forwardTo()
+			}
+			if opts.Passive {
+				return postCargoLock(ctx, m, opts)
+			}
+			return checkCargoFirst(ctx, m, opts)
+		}
+	}
+
 	start, isInstall := m.installAt(opts.Args)
 	toolRun := false
 	if !isInstall && m.toolRunAt != nil {
@@ -533,6 +572,15 @@ func Run(ctx context.Context, opts Options) error {
 				parsed.LocalCommand, m.Bin, strings.Join(opts.Args, " "))
 			return forwardTo()
 		}
+	} else if m.Ecosystem == "cargo" {
+		isCratesIo := func(r string) bool { return cargoRegistryIsCratesIo(opts.Args, r) }
+		def := cargoDefaultRegistry(opts.Args)
+		parsed = parseCargoInstall(opts.Args[start:], def, isCratesIo)
+		// Crates the unreadable default took off crates.io may still come from there, so gating refuses rather than forward them unseen.
+		if why := cargoUnknownDefault(def); why != "" && !opts.Passive && len(parsed.Specs) == 0 && len(parseCargoInstall(opts.Args[start:], "", isCratesIo).Specs) > 0 {
+			flushWarnings(ctx)
+			return fmt.Errorf("did not run %s: %s, so nothing was checked; name the registry with --registry", cargoVerbOnly(m, opts.Args), why)
+		}
 	} else {
 		parsed = parseInstallArgs(m, opts.Args[start:], m.reqFileArgs != nil && m.reqFileArgs(opts.Args))
 	}
@@ -557,6 +605,27 @@ func Run(ctx context.Context, opts Options) error {
 		note("ossprey: no registry package to check; forwarding `%s %s` unchecked\n",
 			m.Bin, strings.Join(opts.Args, " "))
 		return forwardTo()
+	}
+	if m.Ecosystem == "cargo" && len(parsed.Specs) == 0 {
+		// `cargo install` builds only what it names, never the project's manifest.
+		note("ossprey: no crates.io crate named; forwarding `%s %s` unchecked\n",
+			m.Bin, strings.Join(opts.Args, " "))
+		return forwardTo()
+	}
+	if m.Ecosystem == "cargo" && !opts.Passive {
+		// The release cargo picks from crates.io's index is the one checked, and an install whose release cannot be found does not run.
+		stop := progress.Start(progressTo(), "ossprey: looking up crates.io's index")
+		specs, err := cargoReleases(ctx, parsed.Specs)
+		stop()
+		if err != nil {
+			flushWarnings(ctx)
+			return fmt.Errorf("did not run %s: %w", cargoVerbOnly(m, opts.Args), err)
+		}
+		parsed.Specs = specs
+		if line := cargoReplacement(opts.Args); line != "" {
+			// Printed even when quiet: the check covers crates.io's copy, not the one cargo installs.
+			fmt.Fprintf(errOut, "ossprey: warning: %s\n", line)
+		}
 	}
 
 	switch {
@@ -744,14 +813,7 @@ func reportAndForward(ctx context.Context, m *Manager, opts Options, sbom *ossbo
 		note("ossprey: %s\n", msg)
 	}
 	if hasMalware {
-		// The full report even when quiet: a block is the one outcome worth
-		// more than a line.
-		profile := ansi.Detect(errOut)
-		fmt.Fprint(errOut, alert.Malware(summary.Alert(), "Installation blocked.", profile))
-		for _, msg := range summary.Failing {
-			fmt.Fprintln(errOut, profile.Red("Error: "+msg))
-		}
-		fmt.Fprintf(errOut, "ossprey: blocked `%s %s`\n", m.Bin, strings.Join(opts.Args, " "))
+		printBlock(m, opts, summary)
 		return ErrBlocked
 	}
 	// Both messages sit after the malware check, never in front of it: gating the
@@ -779,6 +841,21 @@ func reportAndForward(ctx context.Context, m *Manager, opts Options, sbom *ossbo
 	}
 	// Already drained at the top of this function, ahead of the verdict.
 	return handoffFn(ctx, m.Bin, opts.Args)
+}
+
+// printBlock prints the full malware report, even when quiet.
+func printBlock(m *Manager, opts Options, summary scan.MalwareSummary) {
+	profile := ansi.Detect(errOut)
+	fmt.Fprint(errOut, alert.Malware(summary.Alert(), "Installation blocked.", profile))
+	for _, msg := range summary.Failing {
+		fmt.Fprintln(errOut, profile.Red("Error: "+msg))
+	}
+	cmd := "`" + m.Bin + " " + strings.Join(opts.Args, " ") + "`"
+	if m.Bin == "cargo" {
+		// A --config value may hold a credential, as in the cargo refusals.
+		cmd = cargoVerbOnly(m, opts.Args)
+	}
+	fmt.Fprintf(errOut, "ossprey: blocked %s\n", cmd)
 }
 
 // CleanVerdict words a passed check without overstating it, for every
@@ -941,10 +1018,13 @@ type scanRequest struct {
 	// Specs are packages named on the command line beside a requirements
 	// file. They are submitted with the scan, so one verdict covers both.
 	Specs []check.Spec
+	// CargoConfigDir is scan.Options.CargoConfigDir.
+	CargoConfigDir string
 }
 
 func scanProject(ctx context.Context, req scanRequest) (*ossbom.SBOM, error) {
-	sbom, err := scan.Run(ctx, scan.Options{Path: req.Dir, NoExec: req.Installed, Trust: req.Trust})
+	sbom, err := scan.Run(ctx, scan.Options{Path: req.Dir, NoExec: req.Installed, Trust: req.Trust,
+		CargoConfigDir: req.CargoConfigDir})
 	if err != nil {
 		return nil, err
 	}
@@ -953,7 +1033,8 @@ func scanProject(ctx context.Context, req scanRequest) (*ossbom.SBOM, error) {
 		// a failed install). Fall back to the declaring scan rather than
 		// reporting a project with no dependencies: passive mode's whole job is
 		// to see this machine's installs.
-		if sbom, err = scan.Run(ctx, scan.Options{Path: req.Dir, Trust: req.Trust}); err != nil {
+		if sbom, err = scan.Run(ctx, scan.Options{Path: req.Dir, Trust: req.Trust,
+			CargoConfigDir: req.CargoConfigDir}); err != nil {
 			return nil, err
 		}
 	}
@@ -1256,6 +1337,11 @@ func (p *installArgs) addTarget(ecosystem, token string) {
 		p.NonPackages = append(p.NonPackages, token)
 		return
 	}
+	p.addSpec(s, token)
+}
+
+// addSpec adds a parsed package once, keeping each spelling of it.
+func (p *installArgs) addSpec(s check.Spec, token string) {
 	if p.Tokens == nil {
 		p.Tokens = map[check.Spec][]string{}
 	}
@@ -1565,6 +1651,11 @@ var valueFlags = map[string]map[string]bool{
 		"--config-setting", "--config-settings-package", "--no-build-isolation-package",
 		"--no-build-package", "--no-binary-package", "--refresh-package", "--color",
 		"--allow-insecure-host", "--directory", "--config-file"),
+	// `cargo install --help`'s (TestCargoFlagTablesMatchCargo), plus --version's hidden alias --vers.
+	"cargo": flagSet("--version", "--vers", "--index", "--registry", "--git", "--branch",
+		"--tag", "--rev", "--path", "--root", "--message-format", "--color", "--config", "-Z",
+		"--bin", "--example", "-F", "--features", "-j", "--jobs", "--profile", "--target",
+		"--target-dir"),
 }
 
 // packageValueFlags name the flags whose value is itself a package being
@@ -1602,16 +1693,25 @@ var requirementFileFlags = map[string]map[string]bool{
 // Exec runs the real package manager, inheriting stdio. The child's exit code
 // is propagated via the returned *exec.ExitError.
 func Exec(ctx context.Context, bin string, args []string) error {
-	path, err := shim.LookPathReal(bin)
+	cmd, err := realCommand(ctx, bin, args)
 	if err != nil {
 		return err
 	}
-	cmd := exec.CommandContext(ctx, path, args...)
-	cmd.Env = envWithoutMonitorID()
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+// realCommand runs the real bin with args, found past the shims as Exec finds it, without the monitor id.
+func realCommand(ctx context.Context, bin string, args []string) (*exec.Cmd, error) {
+	path, err := shim.LookPathReal(bin)
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.CommandContext(ctx, path, args...)
+	cmd.Env = envWithoutMonitorID()
+	return cmd, nil
 }
 
 // envWithoutMonitorID drops the monitor id before handing control to the real

@@ -533,6 +533,11 @@ func TestCatalogWarnsWhenCargoReplacesCratesIo(t *testing.T) {
 		}, files: map[string]string{"web/package.json": `{"name":"web","dependencies":{"left-pad":"^1.3.0"}}`}, home: mirrorConfig, want: 0},
 		{name: "CARGO_HOME mirror over a subdirectory", files: map[string]string{"rust/Cargo.toml": project, "web/package.json": `{"name":"web"}`}, home: mirrorConfig, want: 1},
 		{name: "mirror at a root holding no manifest", files: map[string]string{"rust/Cargo.toml": project, ".cargo/config.toml": mirrorConfig}, want: 1},
+		// cargo 1.99.1 takes crates.io's crates from a location set on its own table, with no replace-with.
+		{name: "a local registry set on crates.io", files: map[string]string{"Cargo.toml": project, ".cargo/config.toml": "[source.crates-io]\nlocal-registry = \"lreg\"\n"}, want: 1},
+		{name: "a directory set on crates.io in CARGO_HOME", files: map[string]string{"Cargo.toml": project}, home: "[source.crates-io]\ndirectory = \"/srv/vendor\"\n", want: 1},
+		{name: "a git repository set on crates.io", files: map[string]string{"Cargo.toml": project, ".cargo/config": "[source.crates-io]\ngit = \"https://git.example.com/acme/crates\"\n"}, want: 1},
+		{name: "a registry set on crates.io", files: map[string]string{"Cargo.toml": project, ".cargo/config.toml": "[source.crates-io]\nregistry = \"sparse+https://crates.corp.example/index/\"\n"}, want: 1},
 		{name: "not replaced", files: map[string]string{"Cargo.toml": project, ".cargo/config.toml": "[net]\ngit-fetch-with-cli = true\n"}, want: 0},
 		{name: "no crates", files: map[string]string{"package.json": `{"name":"web","dependencies":{"left-pad":"^1.3.0"}}`, ".cargo/config.toml": mirrorConfig}, want: 0},
 	} {
@@ -593,7 +598,7 @@ func TestCargoSourceReplacedLooksUpConfigsByName(t *testing.T) {
 		t.Fatalf("resolver: %v", err)
 	}
 	log := &globLog{Resolver: r}
-	if !cargoSourceReplaced(log, dir) {
+	if !cargoSourceReplaced(log, dir, "") {
 		t.Fatal("mirror in tools/.cargo not reported")
 	}
 	for _, g := range log.globs {
@@ -636,5 +641,129 @@ func TestCatalogReportsCargoReplacementOnlyForAScan(t *testing.T) {
 				t.Errorf("warnings = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// A lock copied out of its workspace is judged where cargo runs, so the project's replacement is reported (OSS-2553).
+func TestCatalogReportsCargoReplacementWhereCargoRuns(t *testing.T) {
+	t.Setenv("CARGO_HOME", filepath.Join(t.TempDir(), "user", ".cargo"))
+	project, copied := t.TempDir(), t.TempDir()
+	writeTree(t, project, map[string]string{".cargo/config.toml": mirrorConfig})
+	writeTree(t, copied, map[string]string{"Cargo.lock": appLock(registrySerde)})
+	for _, tc := range []struct {
+		name, configDir, want string
+	}{
+		{"the copy alone", "", ""},
+		{"where cargo runs", project, "ossprey: " + cargoReplacedEntry.One + "\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := warn.NewContext(context.Background(), false)
+			if _, err := Catalog(ctx, copied, Options{SkipVersionLookup: true, NoExec: true, ReportCargoReplacement: true, CargoConfigDir: tc.configDir}); err != nil {
+				t.Fatalf("Catalog: %v", err)
+			}
+			if got := warn.Drain(ctx); got != tc.want {
+				t.Errorf("warnings = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// Windows places a path by volume: rooted on the directory's, relative to the directory's drive under it, and relative to another drive by that drive's own directory, which JoinIn leaves to the caller (OSS-2553).
+func TestJoinInPlacesPathsAsWindowsDoes(t *testing.T) {
+	// Windows' volumes, spelled with '/', which every OS reads as a separator.
+	vol := func(p string) string {
+		if len(p) >= 2 && p[1] == ':' {
+			return p[:2]
+		}
+		if rest, ok := strings.CutPrefix(p, "//"); ok {
+			if parts := strings.SplitN(rest, "/", 3); len(parts) >= 2 {
+				return "//" + parts[0] + "/" + parts[1]
+			}
+		}
+		return ""
+	}
+	for _, tc := range []struct {
+		dir, p, want string
+		ok           bool
+	}{
+		{"D:/work", "cargo", "D:/work/cargo", true},
+		{"D:/work", "../cargo", "D:/work/../cargo", true},
+		{"D:/work", "D:cargo", "D:/work/cargo", true},
+		{"D:/work", "d:cargo", "D:/work/cargo", true},
+		{"D:/work", "D:", "D:/work/", true},
+		{"D:/work", "/cargo", "D:/cargo", true},
+		{"//srv/share/work", "/cargo", "//srv/share/cargo", true},
+		{"D:/work", "C:/cargo", "C:/cargo", true},
+		{"D:/work", "//srv/share", "//srv/share", true},
+		{"D:/work", "C:cargo", "", false},
+		{"//srv/share/work", "D:cargo", "", false},
+		{"", "cargo", "cargo", true},
+		{"", "/cargo", "/cargo", true},
+	} {
+		got, ok := JoinIn(tc.dir, tc.p, vol)
+		if ok != tc.ok || ok && filepath.ToSlash(got) != tc.want {
+			t.Errorf("JoinIn(%q, %q) = %q, %v; want %q, %v", tc.dir, tc.p, got, ok, tc.want, tc.ok)
+		}
+	}
+}
+
+// Windows places CARGO_HOME from the directory cargo runs in, not this process's: rooted on its volume, relative to its drive under it, and relative to another drive as Abs does (OSS-2553).
+func TestCargoHomeOnWindowsFollowsTheDirectoryCargoRunsIn(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("only Windows has rooted and drive-relative paths")
+	}
+	other, err := filepath.Abs(`R:cargo`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ cwd, home, want string }{
+		{`Q:\work`, `\cargo`, `Q:\cargo`},
+		{`Q:\work`, `Q:cargo`, `Q:\work\cargo`},
+		{`Q:\work`, `q:..\cargo`, `Q:\cargo`},
+		{`\\srv\share\work`, `\cargo`, `\\srv\share\cargo`},
+		{`Q:\work`, `R:cargo`, other},
+		{`Q:\work`, `\\srv\share\cargo`, `\\srv\share\cargo`},
+	} {
+		t.Setenv("CARGO_HOME", tc.home)
+		if got := CargoHome(tc.cwd); got != tc.want {
+			t.Errorf("CARGO_HOME=%s in %s: %s, want %s", tc.home, tc.cwd, got, tc.want)
+		}
+	}
+}
+
+// IsCratesIoIndex reads an --index URL as cargo 1.99.1 does: sparse+ in any case after trimming, and a backslash as a separator only in a special scheme such as https (OSS-2553).
+func TestIsCratesIoIndexReadsTheURLAsCargoDoes(t *testing.T) {
+	for _, tc := range []struct {
+		index string
+		want  bool
+	}{
+		{"sparse+https://index.crates.io/", true},
+		{"https://github.com/rust-lang/crates.io-index", true},
+		// cargo downloads crates.io's itoa from each of these.
+		{`https://github.com\rust-lang\crates.io-index`, true},
+		{`https://github.com\@mirror.example/../rust-lang/crates.io-index`, true},
+		{"SPARSE+https://index.crates.io/", true},
+		{" sparse+https://index.crates.io/", true},
+		{"Sparse+HTTPS://index.crates.io/", true},
+		{"spa\trse+https://index.crates.io/", true},
+		// cargo fetches these from mirror.example, the backslash being userinfo.
+		{`sparse+https://index.crates.io\@mirror.example/../`, false},
+		{`ssh://git@github.com\@mirror.example/../rust-lang/crates.io-index`, false},
+		// cargo parses a sparse+ URL twice, the second time as https, and downloads crates.io's itoa from each of these.
+		{`sparse+https://index.crates.io/\../`, true},
+		{`sparse+https:/\index.crates.io/`, true},
+		{`sparse+https://mirror.example\@index.crates.io/`, true},
+		{`sparse+https://index.crates.io/x\y/../`, true},
+		{`sparse+HTTPS://index.crates.io/x\y/%2E%2e/`, true},
+		{`sparse+https://index.crates.io/a\%2e%2e/`, true},
+		// A backslash in the host makes cargo fail, so nothing is installed.
+		{`sparse+https://index.crates.io\/`, false},
+		// Checked though cargo finds no crate under this path, which is harmless.
+		{`sparse+https://index.crates.io/\/`, true},
+		{"sparse+https://crates.corp.example/", false},
+	} {
+		if got := IsCratesIoIndex(tc.index); got != tc.want {
+			t.Errorf("IsCratesIoIndex(%q) = %v, want %v", tc.index, got, tc.want)
+		}
 	}
 }

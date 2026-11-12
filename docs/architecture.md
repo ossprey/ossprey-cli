@@ -48,7 +48,31 @@ install still works".
 
 ```mermaid
 flowchart TD
-    S["ossprey npm install ..."] --> T{"an install verb, or a<br/>tool run (npx, bunx, uvx)?"}
+    S["ossprey &lt;manager&gt; ..."] --> CA{"cargo install, add, update,<br/>generate-lockfile or fetch,<br/>not only printing help?"}
+    CA -- "yes" --> CV{"OSSPREY_SKIP_CI?"}
+    CV -- "set" --> U
+    CV -- "unset" --> CVG{"cargo 1.97 or later?"}
+    CVG -- "no: passive" --> U
+    CVG -- "no: gating" --> CX["refuse, exit 2:<br/>cargo never runs"]
+    CVG -- "yes" --> CP{"passive mode?"}
+    CVG -- "yes: install" --> W
+    CP -- "yes" --> CB["exec cargo first"]
+    CB --> AE
+    CP -- "no: add --dry-run" --> U
+    CP -- "no: add" --> CX
+    CP -- "no" --> CG{"a line cargo takes (no update<br/>--breaking), a workspace cargo<br/>metadata can read, no lock<br/>lockfile-path may move, no script,<br/>a credential (bar update --dry-run)?"}
+    CG -- "no" --> CX
+    CG -- "yes" --> CR["cargo resolves into a scratch<br/>Cargo.lock; the project<br/>is not touched"]
+    CR -- "a project file changed<br/>while cargo ran" --> CT["move what was found aside,<br/>put it back, exit 2"]
+    CR -- "cargo fails" --> CF["cargo's exit code,<br/>nothing written"]
+    CR -- "update --dry-run" --> CF
+    CR -- "cargo succeeds" --> CC{"malware in the<br/>resolved lock?"}
+    CC -- "yes" --> CD["block, exit 1:<br/>the project is unchanged"]
+    CC -- "no verdict" --> CN["exit 2:<br/>the project is unchanged"]
+    CC -- "no" --> CL{"project files as<br/>cargo started from?"}
+    CL -- "no: changed during<br/>the check" --> CN
+    CL -- "yes" --> CE["write Cargo.lock; fetch then<br/>runs --locked on a copy<br/>of the checked lock"]
+    CA -- "no" --> T{"an install verb, or a<br/>tool run (npx, bunx, uvx)?"}
     T -- "no, e.g. npm run" --> U["exec the real manager"]
     T -- "yes" --> V{"OSSPREY_SKIP_CI?"}
     V -- "set" --> U
@@ -88,6 +112,20 @@ checked at once (`internal/catalog/install_resolve.go`, driven from
 packages are checked alone and one warning line says so; the install is never
 blocked for want of a prediction.
 
+`cargo update`, `generate-lockfile` and `fetch` are checked by running cargo
+against a scratch copy of the lock: `resolver.lockfile-path` sends the lock
+there, and only a clean result is written to the project
+(`internal/forward/cargo.go`). `cargo fetch` is resolved with `cargo update
+--workspace`, which downloads no crate (cargo still checks out git
+dependencies to resolve them), and once the lock is written it runs with
+`--locked` against a scratch copy of the checked lock. `cargo add` edits
+`Cargo.toml` as well as the lock, so it is refused in gating mode until it can
+be checked the same way. In passive mode cargo runs first and the lock is
+posted. A gating `cargo install` checks each crate at the release crates.io's
+index says cargo takes, and is refused with exit 2 when the index cannot say,
+or when a config ossprey cannot read may set the registry and the line names
+none.
+
 The passive branch is the one worth reading twice. It never gates, so it never
 sits in front of the install: where a lockfile will land, the install runs
 first and Ossprey reads what it wrote, which is both faster and more accurate
@@ -95,7 +133,8 @@ than predicting the tree beforehand. Where one will not — pip, `uv pip
 install`, `uv tool install`, bun (whose `bun.lock` is not read yet), a tool
 run, a global or redirected install — there would be nothing to read, so
 the named packages are submitted beside the install instead (`writesLocalLockfile`
-in `internal/forward/forward.go` is the one place that decides).
+in `internal/forward/forward.go` is the one place that decides, for every
+command but the cargo ones above).
 
 ```mermaid
 sequenceDiagram
