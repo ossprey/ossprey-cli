@@ -281,8 +281,9 @@ Windows resolves it under `%LOCALAPPDATA%`.
      aside or stops the landing, as does a directory relinked since, so
      nothing is written outside the project (the directory is checked just
      before the write, not with it). cargo's own failure returns
-     its exit code. A block, a check error or a lock the platform checked
-     none of leave the project as it was, errors exiting 2 since 1 means
+     its exit code. A block, a check error, a lock past the catalogue's caps
+     (`catalog.CheckLockCaps`, since it would hide it as empty) or a lock the
+     platform checked none of leave the project as it was, errors exiting 2 since 1 means
      malware; trust comes from the configs where cargo runs
      (`CargoConfigDir`). `landCargo` lands nothing if a file changed during
      the check and skips unchanged bytes; `landFile` writes as cargo writes

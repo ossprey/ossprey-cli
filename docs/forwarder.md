@@ -150,7 +150,9 @@ are dropped, and the command exits `2` with one line saying why. That happens
 when the API cannot be reached, when the platform checked none of the crates
 (Rust is checked on Teams and Enterprise plans), when the scan quota is
 exhausted (a skipped scan exits `0` elsewhere, but here the command did
-nothing), when there is no credential (before cargo runs), and, before cargo
+nothing), when the resolved `Cargo.lock` is over 2 MiB or nested more than 16
+levels deep, which the scan does not read, when there is no credential (before
+cargo runs), and, before cargo
 runs, for a workspace `cargo metadata` cannot read (cargo's own error is
 shown), a cargo script run with `-Zscript`, a `Cargo.lock` that is not a
 regular file or is over 32 MiB, and a `resolver.lockfile-path` that would put

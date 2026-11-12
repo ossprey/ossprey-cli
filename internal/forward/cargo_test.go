@@ -1002,17 +1002,25 @@ func TestRunCargo_CheckErrorFailsClosed(t *testing.T) {
 		name string
 		scan func(context.Context, scanRequest) (*ossbom.SBOM, error)
 		want string
+		lock string
 	}{
 		{"api down", func(context.Context, scanRequest) (*ossbom.SBOM, error) { return nil, errors.New("api down") },
-			"Cargo.lock not checked (api down); the project was not changed"},
+			"Cargo.lock not checked (api down); the project was not changed", ""},
 		{"checked none", func(context.Context, scanRequest) (*ossbom.SBOM, error) { return unchecked(), nil },
-			"the platform checked none of the 2 packages in Cargo.lock (Rust is checked on Teams and Enterprise plans); the project was not changed"},
+			"the platform checked none of the 2 packages in Cargo.lock (Rust is checked on Teams and Enterprise plans); the project was not changed", ""},
+		// The catalogue would hide this lock and report nothing to check.
+		{"over the lockfile caps", func(context.Context, scanRequest) (*ossbom.SBOM, error) { return ossbom.New(ossbom.Environment{}), nil },
+			"Cargo.lock not checked (over the 2 MiB lockfile limit); the project was not changed", evilLock + "# " + strings.Repeat("x", 2<<20) + "\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root, ws := cargoProject(t)
 			writeFile(t, ws.Lock, "version = 4\n# before\n")
 			before := projectState(t, root)
-			swapCargo(t, &fakeCargo{t: t, root: root, lock: evilLock})
+			lock := evilLock
+			if tc.lock != "" {
+				lock = tc.lock
+			}
+			swapCargo(t, &fakeCargo{t: t, root: root, lock: lock})
 			swap(t, nil, cleanSBOM)
 			noLanding(t)
 			swapScan(t, tc.scan)

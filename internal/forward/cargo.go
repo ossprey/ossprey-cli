@@ -329,6 +329,10 @@ func checkCargoFirst(ctx context.Context, m *Manager, opts Options) error {
 	if !after[0].existed {
 		return fmt.Errorf("`%s` left no Cargo.lock, so nothing was checked and the project was not changed", command)
 	}
+	// The catalogue hides a lock past its caps, which would read as one with nothing to check.
+	if err := catalog.CheckLockCaps(after[0].data); err != nil {
+		return fmt.Errorf("%s not checked (%v); the project was not changed", lock, err)
+	}
 
 	stop := progress.Start(progressTo(), "ossprey: scan in progress")
 	sbom, err := scanCargoLock(ctx, opts, ws, after[0].data, false)
