@@ -83,7 +83,7 @@ type cargoPackage struct {
 // decodeCargoManifest decodes a Cargo.toml, reading a [project] table as [package] when there is no [package].
 func decodeCargoManifest(data []byte) (cargoManifest, toml.MetaData, error) {
 	var m cargoManifest
-	md, err := toml.Decode(string(data), &m)
+	md, err := decodeTOML(data, &m)
 	if err == nil && !md.IsDefined("package") {
 		m.Package = m.Project
 	}
@@ -91,7 +91,7 @@ func decodeCargoManifest(data []byte) (cargoManifest, toml.MetaData, error) {
 }
 
 func parseCargoTomlFile(ctx context.Context, path string, loc file.Location, scanRoot string, cache *manifestCache) ([]pkg.Package, error) {
-	data, err := readManifest(path)
+	data, err := readTOML(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
@@ -100,7 +100,7 @@ func parseCargoTomlFile(ctx context.Context, path string, loc file.Location, sca
 	}
 	m, md, err := decodeCargoManifest(data)
 	if err != nil {
-		return nil, err
+		return nil, &fs.PathError{Op: "parse", Path: path, Err: err}
 	}
 
 	pool, rootDir, rootOK := workspacePool(m, md.IsDefined("workspace"), path, scanRoot, cache)
@@ -163,22 +163,6 @@ func parseCargoTomlFile(ctx context.Context, path string, loc file.Location, sca
 		}
 	}
 	return out, nil
-}
-
-// maxManifestBytes is a sanity bound, not a fix for deeply nested TOML, which
-// allocates quadratically in every toml cataloguer here (OSS-2098).
-const maxManifestBytes = 1 << 20
-
-// readManifest reads a Cargo.toml, refusing one too large to be genuine.
-func readManifest(path string) ([]byte, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, err
-	}
-	if info.Size() > maxManifestBytes {
-		return nil, fmt.Errorf("Cargo.toml is %d bytes, over the %d limit", info.Size(), maxManifestBytes)
-	}
-	return os.ReadFile(path)
 }
 
 // manifestCache decodes each Cargo.toml a root search reads once per catalogue, since every member of a workspace climbs to the same root.
@@ -244,7 +228,7 @@ func DeclaresCargoWorkspace(data []byte) bool {
 		return false
 	}
 	var m cargoManifest
-	md, err := toml.Decode(string(data), &m)
+	md, err := decodeTOML(data, &m)
 	return err == nil && md.IsDefined("workspace")
 }
 
@@ -254,7 +238,7 @@ func CargoWorkspacePins(data []byte) []Package {
 		return nil
 	}
 	var m cargoManifest
-	if _, err := toml.Decode(string(data), &m); err != nil {
+	if _, err := decodeTOML(data, &m); err != nil {
 		return nil
 	}
 	var out []Package
@@ -321,7 +305,7 @@ func respell(base, p string) string {
 
 // readCargoManifest reads and decodes a Cargo.toml, and reports whether it declares [workspace].
 func readCargoManifest(path string) (m cargoManifest, isRoot bool, err error) {
-	data, err := readManifest(path)
+	data, err := readTOML(path)
 	if err != nil {
 		return m, false, err
 	}
