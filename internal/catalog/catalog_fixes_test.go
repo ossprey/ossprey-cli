@@ -295,6 +295,33 @@ func TestCatalog_NpmLockLocalVersionIsNotAComponent(t *testing.T) {
 	}
 }
 
+// Syft reads a pnpm v6 key that starts with "@" as a package with no name.
+func TestCatalog_NamelessPnpmEntryIsNotAComponent(t *testing.T) {
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{"package.json": `{"version":"1.0.0"}`, "pnpm-lock.yaml": "lockfileVersion: '6.0'\n\npackages:\n\n" +
+		"  /left-pad@1.3.0:\n    resolution: {integrity: sha512-x==}\n    dev: false\n\n" +
+		"  '@codeload.github.com/fx/tarball-pkg/tar.gz/abc123':\n    resolution: {tarball: https://codeload.github.com/fx/tarball-pkg/tar.gz/abc123}\n    name: tarball-pkg\n    version: 0.1.0\n    dev: false\n"})
+	ctx := warn.NewContext(context.Background(), false)
+	pkgs, err := Catalog(ctx, dir, Options{NoExec: true, SkipVersionLookup: true})
+	if err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	found := false
+	for _, p := range pkgs {
+		if p.Name == "" {
+			t.Errorf("nameless component emitted: %+v", p)
+		}
+		found = found || (p.Name == "left-pad" && p.Version == "1.3.0")
+	}
+	if !found {
+		t.Errorf("registry dep missing: %+v", pkgs)
+	}
+	// The nameless root project is dropped as a root, so only the pnpm entry is warned about.
+	if out := warn.Drain(ctx); !strings.Contains(out, `skipped "codeload.github.com/fx/tarball-pkg/tar.gz/abc123", which has no package name`) {
+		t.Errorf("nameless entry not warned about alone:\n%s", out)
+	}
+}
+
 // A package.json local/workspace dependency must not become a (versionless)
 // component that then resolves the local name against the public registry.
 func TestCatalog_PackageJsonLocalDepIsNotAComponent(t *testing.T) {

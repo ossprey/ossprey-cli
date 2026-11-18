@@ -272,6 +272,11 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 			if t == "npm" && isLocalNpmVersion(p.Version) {
 				continue
 			}
+			// Syft reads a pnpm v6 key that starts with "@" as an empty name, which no purl can carry.
+			if p.Name == "" {
+				warn.Add(ctx, namelessEntry(t, p.Version))
+				continue
+			}
 			// Syft truncates PEP 440 versions it reads out of a requirements
 			// file; re-derive the pinned one from the file itself (OSS-1869).
 			version := p.Version
@@ -360,6 +365,15 @@ func isCratesIoCrate(p Package) bool { return p.Type == "cargo" && len(p.Qualifi
 var cargoReplacedEntry = warn.Entry{
 	Class: "cargo:source-replaced",
 	One:   "a cargo config replaces crates.io with another source, so crates are checked as their crates.io releases",
+}
+
+func namelessEntry(t, version string) warn.Entry {
+	return warn.Entry{
+		Class: t + ":nameless",
+		One:   fmt.Sprintf("%s: skipped %q, which has no package name", t, version),
+		Many:  t + ": skipped %d entries with no package name",
+		Item:  version,
+	}
 }
 
 // resolveLatestFn resolves the latest published version of a package from its

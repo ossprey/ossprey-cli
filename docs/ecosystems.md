@@ -37,6 +37,10 @@ more than 16 levels deep. When a skipped `pyproject.toml` declares a path or
 workspace source in the part that can be read, the same line says so: such a
 package is then looked up on PyPI rather than treated as the project's own.
 
+A lockfile entry that comes out with no package name, such as a `pnpm-lock.yaml`
+tarball dependency keyed by its URL, is skipped with a warning, since no
+registry can be asked about it.
+
 Directories that hold installed or built packages rather than your project's
 own manifests are not read at all: `node_modules`, `bower_components`,
 `.pnpm-store`, `.yarn`, `.venv`, `venv`, `site-packages`, `dist-packages`,
