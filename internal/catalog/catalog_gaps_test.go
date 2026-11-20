@@ -652,7 +652,7 @@ func TestDirectorySourceSkipsPackageSinksUnderSymlinkedRoot(t *testing.T) {
 		t.Skipf("symlink: %v", err)
 	}
 
-	src, err := newDirectorySource(link)
+	src, err := newDirectorySource(link, 0)
 	if err != nil {
 		t.Fatalf("newDirectorySource: %v", err)
 	}

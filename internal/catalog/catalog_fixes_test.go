@@ -228,7 +228,7 @@ func TestHasPythonManifestSeesRequirementsVariants(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "requirements-dev.txt"), []byte("pytest\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	src, err := newDirectorySource(dir)
+	src, err := newDirectorySource(dir, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

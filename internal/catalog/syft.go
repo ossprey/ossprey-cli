@@ -75,6 +75,11 @@ type Options struct {
 	// value trusts nothing.
 	Trust trust.Policy
 
+	// MaxDepth limits how deep below the root the scan reads: 1 reads only the
+	// root's own files, 2 also its immediate subdirectories, and so on. Zero
+	// (the default) reads the whole tree. See depthExclude.
+	MaxDepth int
+
 	// ReportCargoReplacement warns when a cargo config replaces crates.io; scan.Run sets it, and the pre-commit hook (precommit.catalogFn) leaves it off, since its temp trees hold no repository config.
 	ReportCargoReplacement bool
 }
@@ -124,6 +129,22 @@ func packageSinkExcludes() []string {
 	return out
 }
 
+// depthExclude is the syft exclusion glob that stops the index at maxDepth
+// levels: for 1, "./*/*" matches everything inside a top-level directory, so
+// syft indexes the directory itself but skips its contents (SkipDir) without
+// walking them. "*" never crosses a "/", so the glob names exactly one depth.
+// "" when maxDepth is zero or negative (no limit).
+//
+// It is applied to the index rather than to catalogue output because the walk
+// is the cost being cut: every cataloger, and every resolver run a nested
+// manifest would trigger, reads through that index.
+func depthExclude(maxDepth int) string {
+	if maxDepth <= 0 {
+		return ""
+	}
+	return "./" + strings.Repeat("*/", maxDepth) + "*"
+}
+
 // newDirectorySource is the syft source every cataloger reads through, with
 // the package sinks left out of its index.
 //
@@ -131,14 +152,18 @@ func packageSinkExcludes() []string {
 // exclusions to the path as given, so under a symlinked root (macOS /var, /tmp)
 // no exclusion would ever match. Resolver paths are root-relative, so nothing
 // downstream sees the difference.
-func newDirectorySource(absRoot string) (source.Source, error) {
+func newDirectorySource(absRoot string, maxDepth int) (source.Source, error) {
 	root := absRoot
 	if resolved, err := filepath.EvalSymlinks(absRoot); err == nil {
 		root = resolved
 	}
+	excludes := packageSinkExcludes()
+	if d := depthExclude(maxDepth); d != "" {
+		excludes = append(excludes, d)
+	}
 	return directorysource.New(directorysource.Config{
 		Path:    root,
-		Exclude: source.ExcludeConfig{Paths: packageSinkExcludes()},
+		Exclude: source.ExcludeConfig{Paths: excludes},
 	})
 }
 
@@ -157,7 +182,7 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 	if err != nil {
 		return nil, fmt.Errorf("resolve path: %w", err)
 	}
-	src, err := newDirectorySource(absRoot)
+	src, err := newDirectorySource(absRoot, opts.MaxDepth)
 	if err != nil {
 		return nil, fmt.Errorf("syft source: %w", err)
 	}

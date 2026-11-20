@@ -25,6 +25,7 @@ import (
 
 	"github.com/ossprey/ossprey-cli/internal/alert"
 	"github.com/ossprey/ossprey-cli/internal/ansi"
+	"github.com/ossprey/ossprey-cli/internal/catalog"
 	"github.com/ossprey/ossprey-cli/internal/check"
 	"github.com/ossprey/ossprey-cli/internal/env"
 	"github.com/ossprey/ossprey-cli/internal/monitor"
@@ -944,7 +945,8 @@ type scanRequest struct {
 }
 
 func scanProject(ctx context.Context, req scanRequest) (*ossbom.SBOM, error) {
-	sbom, err := scan.Run(ctx, scan.Options{Path: req.Dir, NoExec: req.Installed, Trust: req.Trust})
+	depth := projectScanDepth(ctx, req.Dir)
+	sbom, err := scan.Run(ctx, scan.Options{Path: req.Dir, NoExec: req.Installed, Trust: req.Trust, MaxDepth: depth})
 	if err != nil {
 		return nil, err
 	}
@@ -953,7 +955,7 @@ func scanProject(ctx context.Context, req scanRequest) (*ossbom.SBOM, error) {
 		// a failed install). Fall back to the declaring scan rather than
 		// reporting a project with no dependencies: passive mode's whole job is
 		// to see this machine's installs.
-		if sbom, err = scan.Run(ctx, scan.Options{Path: req.Dir, Trust: req.Trust}); err != nil {
+		if sbom, err = scan.Run(ctx, scan.Options{Path: req.Dir, Trust: req.Trust, MaxDepth: depth}); err != nil {
 			return nil, err
 		}
 	}
@@ -974,6 +976,34 @@ func scanProject(ctx context.Context, req scanRequest) (*ossbom.SBOM, error) {
 		return nil, err
 	}
 	return sbom, nil
+}
+
+// projectScanDepth is how deep a forwarded install's project scan reads.
+//
+// A package manager installs from the manifest and lockfile in the project
+// directory, not from manifests in its subdirectories, so the forwarder reads
+// only dir's own files (depth 1): a nested fixture, example or unrelated
+// project is neither installed nor worth the walk, and on a large tree the
+// walk was most of the wait. Two exceptions read the whole tree:
+//
+//   - A workspace root (catalog.IsWorkspaceRoot). A bare install there
+//     installs every member, and with no lockfile at the root the members'
+//     dependencies are recorded only in their own manifests, below dir.
+//   - A requirements-file install, whose dir is the temp copy reqFilesDir
+//     wrote, with each file one level down.
+//
+// OSSPREY_SCAN_DEPTH overrides both, 0 meaning the whole tree; a value that
+// does not parse is a warning and the default.
+func projectScanDepth(ctx context.Context, dir string) int {
+	if d, set, err := env.ScanDepth(); err != nil {
+		warn.Add(ctx, warn.Entry{Class: "scan-depth", One: err.Error() + "; using the default"})
+	} else if set {
+		return d
+	}
+	if dir != "." || catalog.IsWorkspaceRoot(dir) {
+		return 0
+	}
+	return 1
 }
 
 // errNothingToCheck reports a passive submission that had nothing to send —

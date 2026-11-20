@@ -149,7 +149,7 @@ func TestReadTOMLBoundsTheReadNotJustTheSize(t *testing.T) {
 // dirResolver is the resolver Catalog reads dir through.
 func dirResolver(t *testing.T, dir string) file.Resolver {
 	t.Helper()
-	src, err := newDirectorySource(dir)
+	src, err := newDirectorySource(dir, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
