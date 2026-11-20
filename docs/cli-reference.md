@@ -56,6 +56,7 @@ a `verdict`, only when the scan actually reached one.
 | `OSSPREY_PASSIVE=1` | `--passive` | Observe-only: submit, never block or fail. |
 | `OSSPREY_MONITOR_ID` | `--monitor` | Submit through a monitor id. Implies passive. |
 | `OSSPREY_SCAN_TIMEOUT` | `--timeout` | Cap the whole catalogue; emit what resolved. |
+| `OSSPREY_SCAN_DEPTH` | `--depth` | How many directory levels a project scan reads; `0` is the whole tree. Also the only way to change a [forwarder's](forwarder.md#what-is-checked) depth, which defaults to `1` outside a workspace root. |
 | `OSSPREY_RESOLVE_TIMEOUT` | — | Cap one uv/npm resolver invocation (default `2m`). |
 | `OSSPREY_VERDICT_TIMEOUT` | — | How long to wait for the API's verdict after submitting (default `15m`). On expiry the scan keeps running server-side; the error names the scan id and its result appears in the dashboard. |
 | `OSSPREY_SCAN_CONCURRENCY` | — | How many catalogers run at once (default `8`). |
@@ -82,6 +83,7 @@ ossprey scan [path] [flags]
 | `-v, --verbose` | List every warned package and manifest, and the full output of any resolver that failed. Also settable as `OSSPREY_VERBOSE=1`, which works on the forwarders and shims too. |
 | `--local` | Catalogue only. Dump the OSSBOM to stdout and exit — no API submission, no malware verdict. |
 | `--no-version-lookup` | Don't query the registry to resolve unpinned dependencies; leave them versionless. |
+| `--depth <n>` | Read only `<n>` directory levels: `1` is the scanned directory's own files, `2` adds its immediate subdirectories. `0` (the default) reads the whole tree. Also settable as `OSSPREY_SCAN_DEPTH`; a typed `--depth 0` overrides it. |
 | `--timeout <dur>` | Give up cataloguing after this long and emit whatever resolved (or `OSSPREY_SCAN_TIMEOUT`). Off by default. |
 | `--url <url>` | Override the Ossprey API URL (default `https://api.ossprey.com`). |
 | `--api-key <key>` | Provide the API key on the command line instead of an env var. |

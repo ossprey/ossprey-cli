@@ -35,7 +35,7 @@ func TestDirectorySourceSkipsPackageSinks(t *testing.T) {
 		sinkFixture(t, proj, rel, `{"name":"x","version":"1.0.0"}`)
 	}
 
-	src, err := newDirectorySource(proj)
+	src, err := newDirectorySource(proj, 0)
 	if err != nil {
 		t.Fatalf("newDirectorySource: %v", err)
 	}

@@ -207,6 +207,18 @@ always checked). A bare install applies both rules, from the lockfile.
   install scans the files it names, whatever they are called; the others scan
   the current directory.
 
+  That scan reads only the current directory's own files, not its
+  subdirectories: the manager installs from the manifest and lockfile there,
+  so a nested example, fixture or unrelated project is neither installed nor
+  checked, and on a large tree skipping the walk is most of the speed-up. A
+  **workspace root** is scanned in full instead, since a bare install there
+  installs every member: a `package.json` with `workspaces` (npm, yarn, bun),
+  a `pnpm-workspace.yaml` with `packages`, or a `pyproject.toml` with
+  `[tool.uv.workspace]`. A manifest that cannot be read counts as a
+  workspace. Set `OSSPREY_SCAN_DEPTH` to override both (`0` scans the whole
+  tree, as before); the same limit applies to the scan a
+  [passive](passive-monitoring.md) install posts afterwards.
+
 Global options before the subcommand are understood, so the workspace forms are
 checked like any other install:
 

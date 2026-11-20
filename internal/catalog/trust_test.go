@@ -520,7 +520,7 @@ func TestCatalogTrustsNoCrateWhenTheConfigWalkIsCancelled(t *testing.T) {
 		"proj/src/main.rs": "fn main() {}\n",
 	})
 	root := filepath.Join(base, "proj")
-	src, err := newDirectorySource(root)
+	src, err := newDirectorySource(root, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -47,6 +47,26 @@ func scanTimeout(flag time.Duration) time.Duration {
 	return 0
 }
 
+// scanDepth resolves the directory depth limit from --depth when typed, else
+// OSSPREY_SCAN_DEPTH, else 0 (the whole tree). A typed --depth 0 turns off a
+// limit the environment sets. A bad typed value is an error; a bad variable is
+// a warning and the whole tree, since it may be set in a pipeline the user
+// does not control and reading more only checks more.
+func scanDepth(flag int, typed bool) (int, error) {
+	if typed {
+		if flag < 0 {
+			return 0, fmt.Errorf("--depth must be 0 (no limit) or more, got %d", flag)
+		}
+		return flag, nil
+	}
+	d, _, err := env.ScanDepth()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ossprey: warning: %v; scanning the whole tree\n", err)
+		return 0, nil
+	}
+	return d, nil
+}
+
 func main() {
 	ansi.Enable(os.Stdout)
 	ansi.Enable(os.Stderr)
@@ -153,6 +173,7 @@ func newScanCmd() *cobra.Command {
 		cacheScanOnly   bool
 		monitorID       string
 		timeout         time.Duration
+		depth           int
 	)
 
 	cmd := &cobra.Command{
@@ -225,6 +246,10 @@ func newScanCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			maxDepth, err := scanDepth(depth, cmd.Flags().Changed("depth"))
+			if err != nil {
+				return err
+			}
 
 			// Cataloguing is the other long silent stretch of a scan, and on a
 			// project whose ranges have to be resolved through uv or npm it is
@@ -241,6 +266,7 @@ func newScanCmd() *cobra.Command {
 				Verbose:           verbose,
 				SkipVersionLookup: noVersionLookup,
 				Timeout:           scanTimeout(timeout),
+				MaxDepth:          maxDepth,
 				Trust:             loadTrust(os.Stderr),
 			})
 			catalogued()
@@ -340,6 +366,7 @@ func newScanCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&dryRunSafe, "dry-run-safe", false, "skip API submission; emit empty vulnerability list")
 	cmd.Flags().BoolVar(&dryRunMalicious, "dry-run-malicious", false, "skip API submission; inject test vulnerability against first component")
 	cmd.Flags().BoolVar(&noVersionLookup, "no-version-lookup", false, "don't query the registry to resolve unpinned dependencies; leave them versionless")
+	cmd.Flags().IntVar(&depth, "depth", 0, "read only this many directory levels: 1 is the scanned directory's own files (or OSSPREY_SCAN_DEPTH; 0 disables)")
 	cmd.Flags().DurationVar(&timeout, "timeout", 0, "give up cataloging after this long and emit what resolved (or OSSPREY_SCAN_TIMEOUT; 0 disables)")
 	cmd.Flags().StringVar(&apiURL, "url", defaultAPIURL, "Ossprey API URL")
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "Ossprey API key (or OSSPREY_API_KEY / API_KEY env var; optional after `ossprey login`)")

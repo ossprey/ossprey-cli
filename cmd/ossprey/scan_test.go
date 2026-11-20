@@ -357,3 +357,39 @@ func TestDryRunFlagsAreMutuallyExclusive(t *testing.T) {
 		})
 	}
 }
+
+func TestScanDepth(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		flag    int
+		typed   bool
+		env     string
+		want    int
+		wantErr bool
+	}{
+		{name: "default is the whole tree", want: 0},
+		{name: "typed flag", flag: 1, typed: true, want: 1},
+		{name: "env when untyped", env: "2", want: 2},
+		{name: "typed zero overrides env", flag: 0, typed: true, env: "1", want: 0},
+		{name: "negative flag", flag: -1, typed: true, wantErr: true},
+		{name: "bad env is the whole tree", env: "-3", want: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("OSSPREY_SCAN_DEPTH", tc.env)
+			got, err := scanDepth(tc.flag, tc.typed)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("scanDepth = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestScanRejectsNegativeDepth(t *testing.T) {
+	err := runScan(t, t.TempDir(), "--depth", "-1", "--local")
+	if err == nil || !strings.Contains(err.Error(), "--depth") {
+		t.Fatalf("scan --depth -1: err = %v, want a --depth error", err)
+	}
+}

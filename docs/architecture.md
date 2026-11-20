@@ -62,7 +62,7 @@ flowchart TD
     E -- "failed: warn, fall back<br/>to the names alone" --> R
     R -- "no" --> Y["check those packages"]
     R -- "yes: pip install -r f pkg" --> RZ["scan the project manifest<br/>plus the named packages"]
-    X -- "no: bare install" --> Z["scan the project manifest"]
+    X -- "no: bare install" --> Z["scan the project manifest<br/>(this directory only, unless<br/>it is a workspace root)"]
     Y --> AA{"malware?"}
     RZ --> AA
     Z --> AA
