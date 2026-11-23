@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
-	"os"
 	"path/filepath"
 
 	"github.com/goccy/go-yaml"
@@ -19,22 +18,37 @@ import (
 //
 // It errs toward true: a manifest that exists but cannot be read or parsed
 // gives up the shallow scan rather than risk an unchecked member.
+//
+// Every format is probed, whichever manager is running. pnpm ignores
+// package.json `workspaces` beside its own YAML, but npm, yarn, bun and uv
+// ignore that YAML, and pnpm 10 keeps plain settings in one with no packages
+// key, so a YAML that claims no members says nothing about the others.
 func IsWorkspaceRoot(dir string) bool {
-	// pnpm-workspace.yaml wins over package.json, as in workspaceGlobs. One
-	// with no packages key claims no members (pnpm 10 reports the root alone).
-	if data, err := os.ReadFile(filepath.Join(dir, "pnpm-workspace.yaml")); err == nil {
-		return len(parsePnpmWorkspace(data)) > 0 || !validPnpmWorkspace(data)
-	} else if !errors.Is(err, fs.ErrNotExist) {
+	if data, found, err := readRootManifest(dir, "pnpm-workspace.yaml"); err != nil {
+		return true
+	} else if found && (len(parsePnpmWorkspace(data)) > 0 || !validPnpmWorkspace(data)) {
+		// One with no packages key claims no members (pnpm 10 reports the root alone).
 		return true
 	}
-	if data, err := os.ReadFile(filepath.Join(dir, "package.json")); err == nil {
-		if !json.Valid(data) || len(parsePackageJSONWorkspaces(data)) > 0 {
-			return true
-		}
-	} else if !errors.Is(err, fs.ErrNotExist) {
+	if data, found, err := readRootManifest(dir, "package.json"); err != nil {
+		return true
+	} else if found && (!json.Valid(data) || len(parsePackageJSONWorkspaces(data)) > 0) {
 		return true
 	}
 	return uvWorkspaceRoot(filepath.Join(dir, "pyproject.toml"))
+}
+
+// readRootManifest reads dir/name for the probes that pick a forwarder's scan
+// depth. found is false for a missing file. err is non-nil for one that exists
+// and cannot be read as a manifest: anything but a regular file (a FIFO would
+// block the open, and these probes run before the install is forwarded) or one
+// over the manifest size limit. Callers take an error as "scan everything".
+func readRootManifest(dir, name string) (data []byte, found bool, err error) {
+	data, err = readTOML(filepath.Join(dir, name))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, false, nil
+	}
+	return data, err == nil, err
 }
 
 // validPnpmWorkspace reports whether data parses as YAML at all, so that a
@@ -49,12 +63,12 @@ func validPnpmWorkspace(data []byte) bool {
 // workspace. A missing file is no workspace; one that cannot be read or
 // decoded counts as one.
 func uvWorkspaceRoot(path string) bool {
-	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
-		return false
-	}
-	data, err := readTOML(path)
+	data, found, err := readRootManifest(filepath.Dir(path), filepath.Base(path))
 	if err != nil {
 		return true
+	}
+	if !found {
+		return false
 	}
 	var doc struct {
 		Tool struct {

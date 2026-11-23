@@ -210,13 +210,28 @@ always checked). A bare install applies both rules, from the lockfile.
   That scan reads only the current directory's own files, not its
   subdirectories: the manager installs from the manifest and lockfile there,
   so a nested example, fixture or unrelated project is neither installed nor
-  checked, and on a large tree skipping the walk is most of the speed-up. A
-  **workspace root** is scanned in full instead, since a bare install there
-  installs every member: a `package.json` with `workspaces` (npm, yarn, bun),
-  a `pnpm-workspace.yaml` with `packages`, or a `pyproject.toml` with
-  `[tool.uv.workspace]`. A manifest that cannot be read counts as a
-  workspace. Set `OSSPREY_SCAN_DEPTH` to override both (`0` scans the whole
-  tree, as before); the same limit applies to the scan a
+  checked, and on a large tree skipping the walk is most of the speed-up.
+  Where the install reaches below the current directory, the whole tree is
+  scanned instead:
+
+  - A **workspace root**, since a bare install there installs every member: a
+    `package.json` with `workspaces` (npm, yarn, bun), a `pnpm-workspace.yaml`
+    with `packages`, or a `pyproject.toml` with `[tool.uv.workspace]`. Each is
+    looked for whichever manager is running.
+  - A manifest that names a **dependency by local path**, since the install
+    brings in that directory's own dependencies: `file:`, `link:`, `portal:`
+    or a bare path in `package.json` (its `overrides` and `resolutions`
+    included), and in `pyproject.toml` a `[tool.uv.sources]` entry with `path`
+    or `workspace`, a poetry dependency with `path`, a `name @ file:...`
+    requirement, or setuptools dynamic dependencies read from files.
+  - A manifest that cannot be read (not a regular file, too large, or not
+    valid JSON, YAML or TOML), which counts as both.
+
+  Set `OSSPREY_SCAN_DEPTH` to override this for a project scan (`0` scans the
+  whole tree, as before; `1` keeps to the current directory even in a
+  workspace root, where members' dependencies not in the root lockfile then go
+  unchecked). It does not apply to a requirements-file install, which always
+  scans every file it names. The same limit applies to the scan a
   [passive](passive-monitoring.md) install posts afterwards.
 
 Global options before the subcommand are understood, so the workspace forms are

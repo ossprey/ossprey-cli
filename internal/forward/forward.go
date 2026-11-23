@@ -984,23 +984,34 @@ func scanProject(ctx context.Context, req scanRequest) (*ossbom.SBOM, error) {
 // directory, not from manifests in its subdirectories, so the forwarder reads
 // only dir's own files (depth 1): a nested fixture, example or unrelated
 // project is neither installed nor worth the walk, and on a large tree the
-// walk was most of the wait. Two exceptions read the whole tree:
+// walk was most of the wait. Depth 1 is for the install that provably reaches
+// nowhere below dir; three cases read the whole tree, as every scan did
+// before the limit:
 //
 //   - A workspace root (catalog.IsWorkspaceRoot). A bare install there
 //     installs every member, and with no lockfile at the root the members'
 //     dependencies are recorded only in their own manifests, below dir.
+//   - A manifest naming a dependency by local path (catalog.HasLocalDeps):
+//     the install brings in that directory's dependencies, which its own
+//     manifest declares.
 //   - A requirements-file install, whose dir is the temp copy reqFilesDir
 //     wrote, with each file one level down.
 //
-// OSSPREY_SCAN_DEPTH overrides both, 0 meaning the whole tree; a value that
-// does not parse is a warning and the default.
+// OSSPREY_SCAN_DEPTH overrides the first two, 0 meaning the whole tree; a
+// value that does not parse is a warning and the default. It never applies to
+// the requirements copy: that tree holds only the files the install names, so
+// there is no walk to save, and a limit of 1 would hide every one of them and
+// forward the install as clean.
 func projectScanDepth(ctx context.Context, dir string) int {
+	if dir != "." {
+		return 0
+	}
 	if d, set, err := env.ScanDepth(); err != nil {
 		warn.Add(ctx, warn.Entry{Class: "scan-depth", One: err.Error() + "; using the default"})
 	} else if set {
 		return d
 	}
-	if dir != "." || catalog.IsWorkspaceRoot(dir) {
+	if catalog.IsWorkspaceRoot(dir) || catalog.HasLocalDeps(dir) {
 		return 0
 	}
 	return 1

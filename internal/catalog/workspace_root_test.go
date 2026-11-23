@@ -17,9 +17,19 @@ func TestIsWorkspaceRoot(t *testing.T) {
 		{"pnpm workspace", map[string]string{"pnpm-workspace.yaml": "packages:\n  - 'packages/*'\n"}, true},
 		// pnpm 10 reports the root project alone for a file with no packages key.
 		{"pnpm workspace without packages", map[string]string{"pnpm-workspace.yaml": "catalog:\n  x: 1.0.0\n"}, false},
-		{"pnpm yaml wins over package.json", map[string]string{
+		// npm, yarn, bun and uv ignore pnpm's YAML, and pnpm 10 keeps settings
+		// in one with no packages key, so it must not end the probe.
+		{"settings-only pnpm yaml beside npm workspaces", map[string]string{
 			"pnpm-workspace.yaml": "catalog:\n  x: 1.0.0\n",
 			"package.json":        `{"workspaces":["packages/*"]}`,
+		}, true},
+		{"settings-only pnpm yaml beside a uv workspace", map[string]string{
+			"pnpm-workspace.yaml": "catalog:\n  x: 1.0.0\n",
+			"pyproject.toml":      "[tool.uv.workspace]\nmembers = [\"p/*\"]\n",
+		}, true},
+		{"settings-only pnpm yaml beside a plain package.json", map[string]string{
+			"pnpm-workspace.yaml": "catalog:\n  x: 1.0.0\n",
+			"package.json":        `{"dependencies":{"x":"1"}}`,
 		}, false},
 		{"unparseable pnpm workspace", map[string]string{"pnpm-workspace.yaml": "packages: [\n"}, true},
 		{"uv workspace", map[string]string{"pyproject.toml": "[project]\nname = \"a\"\n\n[tool.uv.workspace]\nmembers = [\"packages/*\"]\n"}, true},

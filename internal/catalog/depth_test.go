@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -107,5 +108,88 @@ func TestCatalogMaxDepthOneReadsOnlyTheRoot(t *testing.T) {
 	}
 	if got := names(0); !slices.Contains(got, "left-pad") || !slices.Contains(got, "is-odd") {
 		t.Errorf("depth 0 catalogued %v, want both", got)
+	}
+}
+
+// TestDepthOneCataloguesWhatTheWholeTreeDoes is the guard against the depth
+// limit dropping detection: for every fixture project a forwarder would scan
+// at depth 1, that scan must catalogue exactly what the whole-tree scan does.
+// A fixture where the two differ has dependencies declared below its root, so
+// it must be one the forwarder scans in full (a workspace root, or a manifest
+// naming a local path); otherwise the limit has cost a real component. A new
+// ecosystem's fixture is held to the same rule by being in the directory.
+func TestDepthOneCataloguesWhatTheWholeTreeDoes(t *testing.T) {
+	root := filepath.Join("..", "..", "test", "test_packages")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("read fixtures: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("no fixtures found")
+	}
+	components := func(t *testing.T, proj string, depth int) []string {
+		t.Helper()
+		pkgs, err := Catalog(context.Background(), proj, Options{SkipVersionLookup: true, NoExec: true, MaxDepth: depth})
+		if err != nil {
+			t.Fatalf("Catalog at depth %d: %v", depth, err)
+		}
+		var out []string
+		for _, p := range pkgs {
+			out = append(out, p.Type+"/"+p.Name+"@"+p.Version)
+		}
+		slices.Sort(out)
+		return slices.Compact(out)
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		t.Run(e.Name(), func(t *testing.T) {
+			proj := filepath.Join(root, e.Name())
+			whole, shallow := components(t, proj, 0), components(t, proj, 1)
+			if len(whole) == 0 {
+				t.Fatal("the whole-tree scan catalogued nothing, so the comparison proves nothing")
+			}
+			if slices.Equal(whole, shallow) {
+				return
+			}
+			if IsWorkspaceRoot(proj) || HasLocalDeps(proj) {
+				return // the forwarder scans this one in full
+			}
+			var missing []string
+			for _, c := range whole {
+				if !slices.Contains(shallow, c) {
+					missing = append(missing, c)
+				}
+			}
+			t.Errorf("depth 1 catalogued %d components, the whole tree %d; a forwarder would scan at depth 1 and miss %v",
+				len(shallow), len(whole), missing)
+		})
+	}
+}
+
+// TestLocalDependencyNeedsTheWholeTree is why HasLocalDeps exists: the
+// dependencies of a `file:` dependency are declared in its own manifest,
+// which depth 1 never reads, so the forwarder must not pick depth 1 here.
+func TestLocalDependencyNeedsTheWholeTree(t *testing.T) {
+	proj := t.TempDir()
+	writeFixture(t, proj, "package.json", `{"name":"app","version":"1.0.0","dependencies":{"local":"file:./local"}}`)
+	sinkFixture(t, proj, "local/package.json", `{"name":"local","version":"1.0.0","dependencies":{"is-odd":"3.0.1"}}`)
+
+	has := func(depth int) bool {
+		pkgs, err := Catalog(context.Background(), proj, Options{SkipVersionLookup: true, NoExec: true, MaxDepth: depth})
+		if err != nil {
+			t.Fatalf("Catalog: %v", err)
+		}
+		return slices.ContainsFunc(pkgs, func(p Package) bool { return p.Name == "is-odd" })
+	}
+	if has(1) {
+		t.Fatal("depth 1 read the local dependency's manifest; this test no longer shows the gap")
+	}
+	if !has(0) {
+		t.Error("the whole-tree scan did not catalogue the local dependency's is-odd")
+	}
+	if !HasLocalDeps(proj) {
+		t.Error("HasLocalDeps = false, so a forwarder would scan at depth 1 and miss is-odd")
 	}
 }
