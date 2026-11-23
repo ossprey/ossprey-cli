@@ -658,6 +658,7 @@ func Run(ctx context.Context, opts Options) error {
 				return scanProjectFn(ctx, scanRequest{
 					Dir: dir, APIURL: opts.APIURL, APIKey: opts.APIKey,
 					MonitorID: opts.MonitorID, SubmitOnly: true, Trust: opts.Trust,
+					Redirected: redirectsProject(opts.Args),
 				})
 			}, nil)
 		}
@@ -670,7 +671,7 @@ func Run(ctx context.Context, opts Options) error {
 		defer cleanup()
 		sbom, err := scanProjectFn(ctx, scanRequest{
 			Dir: dir, APIURL: opts.APIURL, APIKey: opts.APIKey, MonitorID: opts.MonitorID,
-			Trust: opts.Trust,
+			Trust: opts.Trust, Redirected: redirectsProject(opts.Args),
 		})
 		cleanup()
 		stop()
@@ -937,6 +938,10 @@ type scanRequest struct {
 	// the lockfile already names the whole resolved tree, so re-resolving it
 	// would only repeat, slower, work the manager has just finished.
 	Installed bool
+	// Redirected marks an install pointed at another directory (--prefix,
+	// --dir, --cwd, --directory, ...). The scan is still of ".", so it reads
+	// the whole tree, which is how the project the flag names gets read.
+	Redirected bool
 	// Trust is passed to the scan; trusted packages are not sent.
 	Trust trust.Policy
 	// Specs are packages named on the command line beside a requirements
@@ -945,7 +950,7 @@ type scanRequest struct {
 }
 
 func scanProject(ctx context.Context, req scanRequest) (*ossbom.SBOM, error) {
-	depth := projectScanDepth(ctx, req.Dir)
+	depth := projectScanDepth(ctx, req)
 	sbom, err := scan.Run(ctx, scan.Options{Path: req.Dir, NoExec: req.Installed, Trust: req.Trust, MaxDepth: depth})
 	if err != nil {
 		return nil, err
@@ -985,7 +990,7 @@ func scanProject(ctx context.Context, req scanRequest) (*ossbom.SBOM, error) {
 // only dir's own files (depth 1): a nested fixture, example or unrelated
 // project is neither installed nor worth the walk, and on a large tree the
 // walk was most of the wait. Depth 1 is for the install that provably reaches
-// nowhere below dir; three cases read the whole tree, as every scan did
+// nowhere below dir; four cases read the whole tree, as every scan did
 // before the limit:
 //
 //   - A workspace root (catalog.IsWorkspaceRoot). A bare install there
@@ -996,14 +1001,16 @@ func scanProject(ctx context.Context, req scanRequest) (*ossbom.SBOM, error) {
 //     manifest declares.
 //   - A requirements-file install, whose dir is the temp copy reqFilesDir
 //     wrote, with each file one level down.
+//   - An install redirected at another directory (redirectsProject), which
+//     is usually below this one and was read by the whole-tree scan.
 //
-// OSSPREY_SCAN_DEPTH overrides the first two, 0 meaning the whole tree; a
-// value that does not parse is a warning and the default. It never applies to
-// the requirements copy: that tree holds only the files the install names, so
-// there is no walk to save, and a limit of 1 would hide every one of them and
-// forward the install as clean.
-func projectScanDepth(ctx context.Context, dir string) int {
-	if dir != "." {
+// OSSPREY_SCAN_DEPTH overrides all but the requirements copy, 0 meaning the
+// whole tree; a value that does not parse is a warning and the default. It
+// never applies to the requirements copy: that tree holds only the files the
+// install names, so there is no walk to save, and a limit of 1 would hide
+// every one of them and forward the install as clean.
+func projectScanDepth(ctx context.Context, req scanRequest) int {
+	if req.Dir != "." {
 		return 0
 	}
 	if d, set, err := env.ScanDepth(); err != nil {
@@ -1011,10 +1018,34 @@ func projectScanDepth(ctx context.Context, dir string) int {
 	} else if set {
 		return d
 	}
-	if catalog.IsWorkspaceRoot(dir) || catalog.HasLocalDeps(dir) {
+	if req.Redirected || catalog.IsWorkspaceRoot(req.Dir) || catalog.HasLocalDeps(req.Dir) {
 		return 0
 	}
 	return 1
+}
+
+// redirectsProject reports whether args point the manager at a directory
+// other than the current one (`npm --prefix ./app install`, `pnpm --dir`,
+// `yarn --cwd`, `bun --cwd`, `uv --directory`, `poetry -C`). It reads the
+// flag wherever it sits and for every manager alike: a flag that means
+// something else to one of them only costs that install the shallow scan.
+func redirectsProject(args []string) bool {
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--" {
+			break
+		}
+		flag, value, hasInline := splitFlagValue(args[i])
+		if !isDirFlag(flag) {
+			continue
+		}
+		if !hasInline && i+1 < len(args) {
+			value = args[i+1]
+		}
+		if !hereValues[value] {
+			return true
+		}
+	}
+	return false
 }
 
 // errNothingToCheck reports a passive submission that had nothing to send —

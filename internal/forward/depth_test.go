@@ -26,6 +26,7 @@ func TestProjectScanDepth(t *testing.T) {
 		files map[string]string
 		env   string
 		dir   string
+		args  []string
 		want  int
 	}{
 		{name: "plain project", files: map[string]string{"package.json": `{"dependencies":{"x":"1"}}`}, want: 1},
@@ -43,6 +44,19 @@ func TestProjectScanDepth(t *testing.T) {
 			"pnpm-workspace.yaml": "catalog:\n  x: 1.0.0\n",
 			"package.json":        `{"workspaces":["p/*"]}`,
 		}, want: 0},
+		{name: "pnpm override to a local path", files: map[string]string{
+			"pnpm-workspace.yaml": "overrides:\n  b: file:./patched-b\n",
+			"package.json":        `{"dependencies":{"b":"1"}}`,
+		}, want: 0},
+		// The scan is of ".", so the project the flag names is read only by
+		// the whole-tree scan.
+		{name: "npm --prefix", files: map[string]string{"package.json": `{}`}, args: []string{"--prefix", "./app", "install"}, want: 0},
+		{name: "pnpm --dir=", args: []string{"--dir=app", "install"}, want: 0},
+		{name: "yarn --cwd", args: []string{"--cwd", "app", "install"}, want: 0},
+		{name: "uv --directory", args: []string{"--directory", "svc", "sync"}, want: 0},
+		{name: "poetry -C", args: []string{"-C", "svc", "install"}, want: 0},
+		{name: "a redirect that points here", args: []string{"--prefix", ".", "install"}, want: 1},
+		{name: "env narrows a redirect", args: []string{"--prefix", "./app", "install"}, env: "1", want: 1},
 		{name: "requirements copy", dir: "TEMP", want: 0},
 		// The copy holds each file one level down: a limit of 1 would hide
 		// every one and forward the install as clean.
@@ -61,7 +75,8 @@ func TestProjectScanDepth(t *testing.T) {
 			if tc.dir == "TEMP" {
 				dir = filepath.Join(t.TempDir(), "reqs")
 			}
-			if got := projectScanDepth(context.Background(), dir); got != tc.want {
+			req := scanRequest{Dir: dir, Redirected: redirectsProject(tc.args)}
+			if got := projectScanDepth(context.Background(), req); got != tc.want {
 				t.Errorf("projectScanDepth = %d, want %d", got, tc.want)
 			}
 		})

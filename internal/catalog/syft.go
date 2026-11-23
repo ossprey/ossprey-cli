@@ -187,6 +187,9 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 		return nil, fmt.Errorf("syft source: %w", err)
 	}
 	defer src.Close()
+	if hasGlobMeta(resolvedRoot(absRoot)) {
+		warn.Add(ctx, globRootEntry)
+	}
 
 	resolver, err := src.FileResolver(source.SquashedScope)
 	if err != nil {
@@ -372,7 +375,11 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 	// The fold runs first because cargoLocks indexes out; mergeVersionless leaves crates alone.
 	merged := mergeVersionless(foldCargoRanges(out, cargoRanges, cargoLocks))
 	markLocalPackages(merged, findLocalPackageNames(resolver, absRoot))
-	clearReplacedCrateRegistries(ctx, merged, opts.Trust, resolver, absRoot)
+	if opts.MaxDepth > 0 {
+		clearDepthLimitedCrateRegistries(ctx, merged, opts.Trust)
+	} else {
+		clearReplacedCrateRegistries(ctx, merged, opts.Trust, resolver, absRoot)
+	}
 	markTrustedPackages(merged, opts.Trust)
 	resolveVersionless(ctx, merged, opts)
 	return merged, nil
@@ -515,6 +522,45 @@ func clearReplacedCrateRegistries(ctx context.Context, pkgs []Package, policy tr
 		Many:  "cargo: registry trust was not applied to crates in %d scans because " + why,
 	})
 }
+
+// clearDepthLimitedCrateRegistries drops every crate's registries in a scan
+// that reads only part of the tree. Registry trust for a crate rests on
+// clearReplacedCrateRegistries having seen every cargo config and symlink in
+// the scan, and a depth limit leaves those below it out of the index, so a
+// replacement there could not veto the trust. The crates are checked instead.
+func clearDepthLimitedCrateRegistries(ctx context.Context, pkgs []Package, policy trust.Policy) {
+	trusted := false
+	for i := range pkgs {
+		if pkgs[i].Type != "cargo" {
+			continue
+		}
+		trusted = trusted || policy.Trusts(pkgs[i].Type, pkgs[i].Name, pkgs[i].Registries)
+		pkgs[i].Registries = nil
+	}
+	if !trusted {
+		return
+	}
+	const why = "the scan reads only part of the tree, so a cargo config below it could not be ruled out"
+	warn.Add(ctx, warn.Entry{
+		Class: "cargo:untrusted:" + why,
+		One:   "cargo: registry trust was not applied to crates because " + why,
+		Many:  "cargo: registry trust was not applied to crates in %d scans because " + why,
+	})
+}
+
+// globRootEntry says that syft's exclusions do not apply to this scan. syft
+// prefixes each exclusion glob with the scan root, unescaped, so a root whose
+// path holds a bracket or brace reads as a pattern that never matches the
+// real directory: node_modules and the other package sinks are walked, and a
+// depth limit is ignored. Nothing goes unchecked; the scan is only slower.
+var globRootEntry = warn.Entry{
+	Class: "scan:glob-root",
+	One:   "the scanned path contains one of [ ] { }, so installed-package directories and any depth limit are not skipped; the scan is complete but may be slow",
+}
+
+// hasGlobMeta reports whether root would misread as a glob when syft
+// prefixes an exclusion with it. `*` and `?` still match themselves.
+func hasGlobMeta(root string) bool { return strings.ContainsAny(root, "[]{}") }
 
 // registrySource is the metadata our own catalogers attach when the resolver
 // reported where a package came from and syft has no type for it.

@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/anchore/syft/syft/source"
+
+	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
 // indexedManifests lists the package.json files the source for proj indexes
@@ -191,5 +193,55 @@ func TestLocalDependencyNeedsTheWholeTree(t *testing.T) {
 	}
 	if !HasLocalDeps(proj) {
 		t.Error("HasLocalDeps = false, so a forwarder would scan at depth 1 and miss is-odd")
+	}
+}
+
+// TestDepthLimitedScanTrustsNoCrateByRegistry: registry trust for a crate
+// rests on having read every cargo config in the scan, and a depth limit
+// hides the ones below it. A nested config replacing the trusted registry
+// vetoes the trust in a full scan, so the limited scan must not grant it.
+func TestDepthLimitedScanTrustsNoCrateByRegistry(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("CARGO_HOME", filepath.Join(base, "home"))
+	const index = "https://crates.corp.example/internal/"
+	writeTree(t, base, map[string]string{
+		"home/.keep":                    "",
+		"proj/Cargo.lock":               "version = 4\n\n[[package]]\nname = \"acme-sparse\"\nversion = \"1.0.0\"\nsource = \"sparse+" + index + "\"\nchecksum = \"aaaa\"\n",
+		"proj/tools/.cargo/config.toml": "[source.internal]\nregistry = \"sparse+" + index + "\"\nreplace-with = \"mirror\"\n\n[source.mirror]\nregistry = \"sparse+https://mirror.example/\"\n",
+	})
+	policy := testPolicy(t, []string{index}, nil)
+	for _, depth := range []int{0, 1} {
+		ctx := warn.NewContext(context.Background(), false)
+		pkgs, err := Catalog(ctx, filepath.Join(base, "proj"), Options{SkipVersionLookup: true, NoExec: true, MaxDepth: depth, Trust: policy})
+		if err != nil {
+			t.Fatalf("Catalog at depth %d: %v", depth, err)
+		}
+		i := slices.IndexFunc(pkgs, func(p Package) bool { return p.Name == "acme-sparse" })
+		if i < 0 {
+			t.Fatalf("depth %d: acme-sparse not catalogued: %v", depth, pkgs)
+		}
+		if pkgs[i].Trusted {
+			t.Errorf("depth %d: acme-sparse is trusted, so it would be left out of the check", depth)
+		}
+		if got := warn.Drain(ctx); strings.Count(got, "registry trust was not applied") != 1 {
+			t.Errorf("depth %d: warnings = %q, want one line saying trust was not applied", depth, got)
+		}
+	}
+}
+
+// TestCatalogWarnsWhenTheRootReadsAsAGlob pins the one sign a user gets that
+// syft's exclusions are off: under a root with a bracket in its path neither
+// node_modules nor a depth limit is skipped, which only shows as a slow scan.
+func TestCatalogWarnsWhenTheRootReadsAsAGlob(t *testing.T) {
+	for name, want := range map[string]bool{"plain": false, "app(1)": false, "proj[1]": true, "a{b}": true} {
+		proj := filepath.Join(t.TempDir(), name)
+		sinkFixture(t, proj, "package.json", `{"name":"app","version":"1.0.0"}`)
+		ctx := warn.NewContext(context.Background(), false)
+		if _, err := Catalog(ctx, proj, Options{SkipVersionLookup: true, NoExec: true}); err != nil {
+			t.Fatalf("%s: Catalog: %v", name, err)
+		}
+		if got := strings.Contains(warn.Drain(ctx), "[ ] { }"); got != want {
+			t.Errorf("%s: glob-root warning = %v, want %v", name, got, want)
+		}
 	}
 }

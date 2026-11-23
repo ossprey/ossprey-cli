@@ -73,7 +73,11 @@ happens when:
 - a Cargo config that Cargo may read for the project sets `replace-with` for
   any source, has an `include`, defines an alias that passes `--config` or
   holds a quote, a backslash or a leading `!`, or cannot be read or is not a
-  regular file.
+  regular file;
+- the scan reads only part of the tree: `scan --depth`, `OSSPREY_SCAN_DEPTH`,
+  or a [forwarded install](forwarder.md#what-is-checked) that scans one
+  directory level. A config below the limit is not read, so it cannot be ruled
+  out.
 
 The scan reads the configs in the project, in every directory above it and in
 `CARGO_HOME`. For registry trust, a symlinked config inside `CARGO_HOME`, or a

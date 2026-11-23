@@ -3,6 +3,8 @@ package catalog
 import (
 	"encoding/json"
 	"regexp"
+
+	"github.com/goccy/go-yaml"
 )
 
 // HasLocalDeps reports whether a manifest in dir names a dependency by local
@@ -22,6 +24,11 @@ func HasLocalDeps(dir string) bool {
 	} else if found && packageJSONHasLocalDeps(data) {
 		return true
 	}
+	if data, found, err := readRootManifest(dir, "pnpm-workspace.yaml"); err != nil {
+		return true
+	} else if found && pnpmWorkspaceHasLocalDeps(data) {
+		return true
+	}
 	if data, found, err := readRootManifest(dir, "pyproject.toml"); err != nil {
 		return true
 	} else if found && pyprojectHasLocalDeps(data) {
@@ -30,12 +37,30 @@ func HasLocalDeps(dir string) bool {
 	return false
 }
 
+// pnpmWorkspaceHasLocalDeps reads the pnpm-workspace.yaml settings that hold
+// dependency specs. pnpm 10 keeps `overrides` there, and a `catalog:`
+// reference in package.json takes its spec from `catalog` or `catalogs`, so
+// a local path in any of them is one the install follows.
+func pnpmWorkspaceHasLocalDeps(data []byte) bool {
+	var doc map[string]any
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		return true
+	}
+	for _, k := range []string{"overrides", "catalog", "catalogs"} {
+		if anyString(doc[k], isLocalNpmSpec) {
+			return true
+		}
+	}
+	return false
+}
+
 // npmDependencyKeys are the package.json fields whose values are dependency
 // specs. overrides, resolutions and pnpm.overrides can redirect a registry
-// dependency to a local directory, so they are read too; their values nest.
+// dependency to a local directory, and a `catalog:` reference takes its spec
+// from bun's catalog and catalogs, so they are read too; their values nest.
 var npmDependencyKeys = []string{
 	"dependencies", "devDependencies", "optionalDependencies", "peerDependencies",
-	"overrides", "resolutions",
+	"overrides", "resolutions", "catalog", "catalogs",
 }
 
 func packageJSONHasLocalDeps(data []byte) bool {
