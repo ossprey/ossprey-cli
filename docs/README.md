@@ -28,3 +28,4 @@ detail behind it.
 ## Under the hood
 
 - [How it works — diagrams](architecture.md) — the scan pipeline, the forwarder's decisions, and passive timing
+- [Internals](internals/README.md) — why the code is the way it is: design decisions and invariants, for contributors

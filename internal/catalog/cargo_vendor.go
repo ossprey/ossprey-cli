@@ -56,7 +56,7 @@ type CargoLock struct {
 	versions map[string][]string
 }
 
-// withoutCargoVendor hides the Cargo files of crates the project above them vendored (see CLAUDE.md, OSS-2561).
+// withoutCargoVendor hides the Cargo files of crates the project above them vendored (see docs/internals/cargo.md, OSS-2561).
 func withoutCargoVendor(r file.Resolver, root string) file.Resolver {
 	marks, err := r.FilesByGlob("**/" + cargoVendorMarker)
 	if err != nil || len(marks) == 0 {
