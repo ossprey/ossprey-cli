@@ -116,10 +116,12 @@ reasoning and the test that pins it.
   at every floor; an unreadable *floor* falls back to `Info`. `--fail-on`
   overrides the account's floor in either direction.
   ([conventions](docs/internals/conventions.md))
-- **stdout is for machine output.** `--local` owns it for the OSSBOM and
-  `init --key-stdout` for the key; progress, warnings and narration go to stderr.
-  `--report` writes a file, before the `os.Exit(1)`. Rendering a report (Markdown,
-  PR comments) belongs in the consumer, not here.
+- **`--local` and `init --key-stdout` own stdout.** In those modes stdout carries
+  only the OSSBOM or the key, so every human-facing line goes to stderr.
+  Otherwise scan, check and init print their verdict and narration to stdout
+  (`verdictOut`), which CI greps, so do not move it. Progress and warnings go to
+  stderr in every mode. `--report` writes a file, before the `os.Exit(1)`;
+  rendering it (Markdown, PR comments) belongs in the consumer, not here.
   ([conventions](docs/internals/conventions.md))
 - **Never `exec.LookPath` a package manager.** Use `lookTool`/`toolEnv`
   (`shim.LookPathReal` plus `OSSPREY_SHIM_BYPASS=1`), and `python -m pip` rather
@@ -128,8 +130,11 @@ reasoning and the test that pins it.
 - **A cataloger's error does not drop its packages.** syft returns what it
   parsed alongside the error; keep both and report the error through `warn`.
   ([catalog](docs/internals/catalog.md))
-- **The Python and uv resolvers execute package build backends.** Only the npm
-  dry run runs nothing. Docs must not claim otherwise.
+- **A project scan's Python resolvers execute package build backends.**
+  Resolving an sdist-only dependency during `scan` makes pip and uv run its
+  PEP 517 backend, because neither `--only-binary=:all:` nor `--no-build` is
+  set there; the npm resolve runs nothing. Docs must not claim a scan executes
+  no code. Named-install expansion is the opposite case, below.
   ([catalog](docs/internals/catalog.md))
 - **Flag tables are asymmetric.** Wrongly listing a *boolean* flag as
   value-taking swallows the verb or package and skips its check, silently. Only
@@ -139,6 +144,7 @@ reasoning and the test that pins it.
   `cowsay`, never `moo`. Do not add `dlx` or similar to an install-verb list;
   give it a `toolRunAt`/`parseRun`. ([forwarder](docs/internals/forwarder.md))
 - **Named-install expansion never runs package code and fails open out loud.**
+  Its uv dry run passes `--no-build` and its pip one `--only-binary=:all:`.
   When the dry run fails, the names are checked alone and one line says so, even
   when quiet. The dry run must read the configuration the real command reads.
   ([install-expansion](docs/internals/install-expansion.md))
