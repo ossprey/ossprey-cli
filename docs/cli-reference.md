@@ -83,7 +83,7 @@ ossprey scan [path] [flags]
 | `-v, --verbose` | List every warned package and manifest, and the full output of any resolver that failed. Also settable as `OSSPREY_VERBOSE=1`, which works on the forwarders and shims too. |
 | `--local` | Catalogue only. Dump the OSSBOM to stdout and exit — no API submission, no malware verdict. |
 | `--no-version-lookup` | Don't query the registry to resolve unpinned dependencies; leave them versionless. |
-| `--depth <n>` | Read only `<n>` directory levels: `1` is the scanned directory's own files, `2` adds its immediate subdirectories. `0` (the default) reads the whole tree. Also settable as `OSSPREY_SCAN_DEPTH`; a typed `--depth 0` overrides it. |
+| `--depth <n>` | Read only `<n>` directory levels: `1` is the scanned directory's own files, `2` adds its immediate subdirectories. `0` (the default) reads the whole tree. So does a value over 256. Also settable as `OSSPREY_SCAN_DEPTH`; a typed `--depth 0` overrides it. |
 | `--timeout <dur>` | Give up cataloguing after this long and emit whatever resolved (or `OSSPREY_SCAN_TIMEOUT`). Off by default. |
 | `--url <url>` | Override the Ossprey API URL (default `https://api.ossprey.com`). |
 | `--api-key <key>` | Provide the API key on the command line instead of an env var. |

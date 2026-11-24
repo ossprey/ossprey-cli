@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"context"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -73,10 +74,14 @@ func TestDirectorySourceStopsAtMaxDepth(t *testing.T) {
 }
 
 func TestDepthExclude(t *testing.T) {
-	for d, want := range map[int]string{-1: "", 0: "", 1: "./*/*", 2: "./*/*/*"} {
+	// A limit too deep to matter is no limit; math.MaxInt overflowed strings.Repeat.
+	for d, want := range map[int]string{-1: "", 0: "", 1: "./*/*", 2: "./*/*/*", maxDepthLimit + 1: "", math.MaxInt: ""} {
 		if got := depthExclude(d); got != want {
 			t.Errorf("depthExclude(%d) = %q, want %q", d, got, want)
 		}
+	}
+	if got := depthExclude(maxDepthLimit); strings.Count(got, "*/") != maxDepthLimit {
+		t.Errorf("depthExclude(%d) names %d levels", maxDepthLimit, strings.Count(got, "*/"))
 	}
 }
 

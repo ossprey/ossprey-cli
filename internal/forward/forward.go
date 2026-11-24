@@ -1035,6 +1035,10 @@ func redirectsProject(args []string) bool {
 			break
 		}
 		flag, value, hasInline := splitFlagValue(args[i])
+		// A short option's value may be attached: `poetry install -Capp`.
+		if attached, ok := strings.CutPrefix(args[i], "-C"); ok && attached != "" && flag != "-C" {
+			flag, value, hasInline = "-C", attached, true
+		}
 		if !isDirFlag(flag) {
 			continue
 		}

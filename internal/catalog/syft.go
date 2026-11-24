@@ -129,17 +129,23 @@ func packageSinkExcludes() []string {
 	return out
 }
 
+// maxDepthLimit is the deepest limit a glob is built for. The glob grows with
+// the depth and --depth takes any int, so an absurd value overflowed
+// strings.Repeat and panicked. A limit past this reads the whole tree, which
+// is what it asks for on any tree that is not deeper still.
+const maxDepthLimit = 256
+
 // depthExclude is the syft exclusion glob that stops the index at maxDepth
 // levels: for 1, "./*/*" matches everything inside a top-level directory, so
 // syft indexes the directory itself but skips its contents (SkipDir) without
 // walking them. "*" never crosses a "/", so the glob names exactly one depth.
-// "" when maxDepth is zero or negative (no limit).
+// "" when maxDepth is zero or negative (no limit), or over maxDepthLimit.
 //
 // It is applied to the index rather than to catalogue output because the walk
 // is the cost being cut: every cataloger, and every resolver run a nested
 // manifest would trigger, reads through that index.
 func depthExclude(maxDepth int) string {
-	if maxDepth <= 0 {
+	if maxDepth <= 0 || maxDepth > maxDepthLimit {
 		return ""
 	}
 	return "./" + strings.Repeat("*/", maxDepth) + "*"
