@@ -219,16 +219,18 @@ always checked). A bare install applies both rules, from the lockfile.
     with `packages`, or a `pyproject.toml` with `[tool.uv.workspace]`. Each is
     looked for whichever manager is running.
   - A manifest that names a **dependency by local path**, since the install
-    brings in that directory's own dependencies: `file:`, `link:`, `portal:`
-    or a bare path in `package.json` (its `overrides`, `resolutions`,
+    brings in that directory's own dependencies: `file:`, `link:`, `portal:`,
+    `git+file:` or a bare path in `package.json` (its `overrides`, `resolutions`,
     `catalog` and `catalogs` included) or in the `overrides`, `catalog` and
     `catalogs` of a `pnpm-workspace.yaml`, and in `pyproject.toml` a
     `[tool.uv.sources]` entry with `path` or `workspace`, a poetry dependency
-    with `path`, a `name @ file:...` requirement, or setuptools dynamic
-    dependencies read from files.
+    with `path`, a `name @ file:...`, `name @ git+file:...` or hatch
+    `name @ {root:uri}/...` requirement, or dynamic dependencies
+    (`dependencies` or `optional-dependencies` in `[project].dynamic`, or in
+    `[tool.setuptools.dynamic]`), which the build backend reads from files.
   - An install **pointed at another directory** (`npm --prefix ./app
     install`, `pnpm --dir`, `yarn --cwd`, `bun --cwd`, `uv --directory` or
-    `--project`, `poetry -C`). The scan is of the current directory, so the
+    `--project`, `poetry -C`, `--directory`, `--project` or `-P`). The scan is of the current directory, so the
     whole tree is how the project the flag names gets read.
   - A manifest that cannot be read (not a regular file, too large, or not
     valid JSON, YAML or TOML), which counts as both.

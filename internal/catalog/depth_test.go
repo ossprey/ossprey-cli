@@ -5,6 +5,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -234,19 +235,100 @@ func TestDepthLimitedScanTrustsNoCrateByRegistry(t *testing.T) {
 	}
 }
 
+// TestRegistryTrustFollowsTheLimitApplied: trust is withheld because the index
+// is cut, not because a depth was asked for. A depth over maxDepthLimit and a
+// root that reads as a glob both index the whole tree, so the full check runs
+// and a trusted crate stays trusted with no warning. A lone `]` in the root
+// still matches itself, so the limit holds there and the trust must not.
+func TestRegistryTrustFollowsTheLimitApplied(t *testing.T) {
+	const index = "https://crates.corp.example/internal/"
+	for _, tc := range []struct {
+		name, root string
+		depth      int
+		limited    bool
+	}{
+		{"whole tree", "proj", 0, false},
+		{"one level", "proj", 1, true},
+		{"depth over the bound", "proj", maxDepthLimit + 1, false},
+		{"root that reads as a glob", "proj[1]", 1, false},
+		{"root with a lone closing bracket", "a]b", 1, true},
+		{"root with a lone closing brace", "a}b", 1, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := t.TempDir()
+			t.Setenv("CARGO_HOME", filepath.Join(base, "home"))
+			writeTree(t, base, map[string]string{
+				"home/.keep":                  "",
+				tc.root + "/Cargo.lock":       "version = 4\n\n[[package]]\nname = \"acme-sparse\"\nversion = \"1.0.0\"\nsource = \"sparse+" + index + "\"\nchecksum = \"aaaa\"\n",
+				tc.root + "/tools/Cargo.toml": "[package]\nname = \"tool\"\nversion = \"0.1.0\"\n",
+			})
+			ctx := warn.NewContext(context.Background(), false)
+			pkgs, err := Catalog(ctx, filepath.Join(base, tc.root), Options{SkipVersionLookup: true, NoExec: true, MaxDepth: tc.depth, Trust: testPolicy(t, []string{index}, nil)})
+			if err != nil {
+				t.Fatalf("Catalog: %v", err)
+			}
+			i := slices.IndexFunc(pkgs, func(p Package) bool { return p.Name == "acme-sparse" })
+			if i < 0 {
+				t.Fatalf("acme-sparse not catalogued: %v", pkgs)
+			}
+			if pkgs[i].Trusted == tc.limited {
+				t.Errorf("Trusted = %v, want %v", pkgs[i].Trusted, !tc.limited)
+			}
+			if got := strings.Contains(warn.Drain(ctx), "reads only part of the tree"); got != tc.limited {
+				t.Errorf("part-of-the-tree warning = %v, want %v", got, tc.limited)
+			}
+		})
+	}
+}
+
 // TestCatalogWarnsWhenTheRootReadsAsAGlob pins the one sign a user gets that
-// syft's exclusions are off: under a root with a bracket in its path neither
+// syft's exclusions are off: under a root that reads as a pattern neither
 // node_modules nor a depth limit is skipped, which only shows as a slow scan.
+// A character that still matches itself is no such root.
 func TestCatalogWarnsWhenTheRootReadsAsAGlob(t *testing.T) {
-	for name, want := range map[string]bool{"plain": false, "app(1)": false, "proj[1]": true, "a{b}": true} {
+	cases := map[string]bool{
+		"plain": false, "app(1)": false, "a]b": false, "a}b": false,
+		"proj[1]": true, "a{b}": true, "a[b": true, "a{b": true,
+	}
+	if runtime.GOOS != "windows" {
+		// A backslash is the matcher's escape, and a file name only here.
+		cases[`a\b`] = true
+		cases["a*b"], cases["a?b"] = false, false
+	}
+	for name, want := range cases {
 		proj := filepath.Join(t.TempDir(), name)
 		sinkFixture(t, proj, "package.json", `{"name":"app","version":"1.0.0"}`)
+		sinkFixture(t, proj, "node_modules/dep/package.json", `{"name":"dep","version":"1.0.0"}`)
 		ctx := warn.NewContext(context.Background(), false)
 		if _, err := Catalog(ctx, proj, Options{SkipVersionLookup: true, NoExec: true}); err != nil {
 			t.Fatalf("%s: Catalog: %v", name, err)
 		}
-		if got := strings.Contains(warn.Drain(ctx), "[ ] { }"); got != want {
+		if got := strings.Contains(warn.Drain(ctx), "reads as a glob pattern"); got != want {
 			t.Errorf("%s: glob-root warning = %v, want %v", name, got, want)
 		}
+		// The warning must agree with what syft indexed.
+		if got := sinkIndexed(t, proj); got != want {
+			t.Errorf("%s: node_modules indexed = %v, want %v", name, got, want)
+		}
 	}
+}
+
+// sinkIndexed reports whether syft's index of proj holds a file under
+// node_modules, which it does only when the exclusions failed to match.
+func sinkIndexed(t *testing.T, proj string) bool {
+	t.Helper()
+	src, err := newDirectorySource(proj, 0)
+	if err != nil {
+		t.Fatalf("newDirectorySource: %v", err)
+	}
+	defer src.Close()
+	resolver, err := src.FileResolver(source.SquashedScope)
+	if err != nil {
+		t.Fatalf("FileResolver: %v", err)
+	}
+	locs, err := resolver.FilesByGlob("**/node_modules/**/package.json")
+	if err != nil {
+		t.Fatalf("FilesByGlob: %v", err)
+	}
+	return len(locs) > 0
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/anchore/syft/syft/pkg/cataloger/rust"
 	"github.com/anchore/syft/syft/source"
 	"github.com/anchore/syft/syft/source/directorysource"
+	"github.com/bmatcuk/doublestar/v4"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/ossprey/ossprey-cli/internal/registry"
@@ -193,7 +194,8 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 		return nil, fmt.Errorf("syft source: %w", err)
 	}
 	defer src.Close()
-	if hasGlobMeta(resolvedRoot(absRoot)) {
+	globRoot := hasGlobMeta(resolvedRoot(absRoot))
+	if globRoot {
 		warn.Add(ctx, globRootEntry)
 	}
 
@@ -381,7 +383,10 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 	// The fold runs first because cargoLocks indexes out; mergeVersionless leaves crates alone.
 	merged := mergeVersionless(foldCargoRanges(out, cargoRanges, cargoLocks))
 	markLocalPackages(merged, findLocalPackageNames(resolver, absRoot))
-	if opts.MaxDepth > 0 {
+	// Ask whether a limit was applied, not whether one was asked for: a depth
+	// over maxDepthLimit, or a root that reads as a glob, indexes the whole
+	// tree, and then every cargo config is there to be read.
+	if depthExclude(opts.MaxDepth) != "" && !globRoot {
 		clearDepthLimitedCrateRegistries(ctx, merged, opts.Trust)
 	} else {
 		clearReplacedCrateRegistries(ctx, merged, opts.Trust, resolver, absRoot)
@@ -556,17 +561,28 @@ func clearDepthLimitedCrateRegistries(ctx context.Context, pkgs []Package, polic
 
 // globRootEntry says that syft's exclusions do not apply to this scan. syft
 // prefixes each exclusion glob with the scan root, unescaped, so a root whose
-// path holds a bracket or brace reads as a pattern that never matches the
-// real directory: node_modules and the other package sinks are walked, and a
-// depth limit is ignored. Nothing goes unchecked; the scan is only slower.
+// path holds an opening bracket or brace (or, outside Windows, a backslash)
+// reads as a pattern that never matches the real directory: node_modules and
+// the other package sinks are walked, and a depth limit is ignored. Nothing
+// goes unchecked; the scan is only slower.
 var globRootEntry = warn.Entry{
 	Class: "scan:glob-root",
-	One:   "the scanned path contains one of [ ] { }, so installed-package directories and any depth limit are not skipped; the scan is complete but may be slow",
+	One:   "the scanned path reads as a glob pattern (it contains a [, a { or a backslash), so installed-package directories and any depth limit are not skipped; the scan is complete but may be slow",
 }
 
 // hasGlobMeta reports whether root would misread as a glob when syft
-// prefixes an exclusion with it. `*` and `?` still match themselves.
-func hasGlobMeta(root string) bool { return strings.ContainsAny(root, "[]{}") }
+// prefixes an exclusion with it. It asks the matcher syft uses whether the
+// root still matches itself, since Catalog decides on the answer whether the
+// index is whole: a guess by character called `a]b` a glob although a lone
+// `]` or `}` matches itself, as `*` and `?` do, and so would have granted
+// registry trust on an index the depth limit had cut. A pattern the matcher
+// rejects (an unclosed `[` or `{`) excludes nothing either: syft drops the
+// error and keeps the path.
+func hasGlobMeta(root string) bool {
+	p := filepath.ToSlash(root)
+	ok, err := doublestar.Match(p, p)
+	return err != nil || !ok
+}
 
 // registrySource is the metadata our own catalogers attach when the resolver
 // reported where a package came from and syft has no type for it.

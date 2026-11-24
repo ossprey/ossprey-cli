@@ -26,6 +26,8 @@ func TestHasLocalDeps(t *testing.T) {
 		{"pnpm yaml named catalog", map[string]string{"pnpm-workspace.yaml": "catalogs:\n  dev:\n    local: file:./local\n"}, true},
 		{"pnpm yaml registry settings", map[string]string{"pnpm-workspace.yaml": "catalog:\n  x: 1.0.0\noverrides:\n  y: ^2\nonlyBuiltDependencies:\n  - esbuild\n"}, false},
 		{"unparseable pnpm yaml", map[string]string{"pnpm-workspace.yaml": "overrides: [\n"}, true},
+		{"local git repository", map[string]string{"package.json": `{"dependencies":{"local":"git+file:./vendor/x"}}`}, true},
+		{"remote git repository", map[string]string{"package.json": `{"dependencies":{"x":"git+https://github.com/o/x.git","y":"git+ssh://git@github.com/o/y.git"}}`}, false},
 		// A script or a field that is not a dependency spec is not one.
 		{"path outside the dependency fields", map[string]string{"package.json": `{"main":"./index.js","scripts":{"x":"file:./a"},"files":["./dist"]}`}, false},
 		{"unparseable package.json", map[string]string{"package.json": `{`}, true},
@@ -45,6 +47,11 @@ func TestHasLocalDeps(t *testing.T) {
 		{"poetry group path dependency", map[string]string{"pyproject.toml": "[tool.poetry.group.dev.dependencies]\nlocal = { path = \"./libs/local\" }\n"}, true},
 		{"poetry registry dependencies", map[string]string{"pyproject.toml": "[tool.poetry.dependencies]\npython = \"^3.11\"\npath = \"^16.0\"\nrequests = { version = \"^2\", extras = [\"socks\"] }\n\n[tool.poetry.group.dev.dependencies]\npytest = \"^8\"\n"}, false},
 		{"setuptools dynamic dependencies", map[string]string{"pyproject.toml": "[project]\ndynamic = [\"dependencies\"]\n\n[tool.setuptools.dynamic]\ndependencies = { file = [\"reqs/base.txt\"] }\n"}, true},
+		{"hatch context reference", map[string]string{"pyproject.toml": "[project]\ndependencies = [\"local @ {root:uri}/libs/local\"]\n"}, true},
+		{"local git reference", map[string]string{"pyproject.toml": "[project]\ndependencies = [\"local @ git+file:///abs/local\"]\n"}, true},
+		{"hatch dynamic dependencies", map[string]string{"pyproject.toml": "[project]\ndynamic = [\"dependencies\"]\n\n[tool.hatch.metadata.hooks.requirements_txt]\nfiles = [\"deps/base.txt\"]\n"}, true},
+		{"dynamic optional dependencies", map[string]string{"pyproject.toml": "[project]\ndynamic = [\"version\", \"optional-dependencies\"]\n"}, true},
+		{"dynamic version only", map[string]string{"pyproject.toml": "[project]\ndynamic = [\"version\", \"readme\"]\n"}, false},
 		{"setuptools dynamic version only", map[string]string{"pyproject.toml": "[tool.setuptools.dynamic]\nversion = { attr = \"a.__version__\" }\n"}, false},
 		{"unparseable pyproject", map[string]string{"pyproject.toml": "[project\n"}, true},
 	} {

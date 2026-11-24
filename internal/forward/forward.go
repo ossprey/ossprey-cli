@@ -137,7 +137,7 @@ var noLocalLockfileFlags = map[string]map[string]bool{
 		"--location", "--prefix", "-C"),
 	"pnpm":   flagSet("-g", "--global", "--no-lockfile", "--lockfile", "--dir", "-C"),
 	"yarn":   flagSet("-g", "--global", "--no-lockfile", "--cwd"),
-	"poetry": flagSet("-C", "--directory", "--project"),
+	"poetry": flagSet("-C", "--directory", "--project", "-P"),
 	"uv":     flagSet("--directory", "--project", "--system"),
 }
 
@@ -197,10 +197,13 @@ func writesLocalLockfile(m *Manager, args []string) bool {
 }
 
 // isDirFlag reports whether a flag's value names the directory the manager
-// operates on, rather than being a boolean.
+// operates on, rather than being a boolean. `-P` is poetry's short
+// `--project`; writesLocalLockfile asks only for a manager that lists it, and
+// redirectsProject reads it for all of them, where npm's and yarn's boolean
+// `-P` then only costs a bare install the shallow scan.
 func isDirFlag(flag string) bool {
 	switch flag {
-	case "--prefix", "-C", "--dir", "--cwd", "--directory", "--project":
+	case "--prefix", "-C", "--dir", "--cwd", "--directory", "--project", "-P":
 		return true
 	}
 	return false
@@ -1026,7 +1029,7 @@ func projectScanDepth(ctx context.Context, req scanRequest) int {
 
 // redirectsProject reports whether args point the manager at a directory
 // other than the current one (`npm --prefix ./app install`, `pnpm --dir`,
-// `yarn --cwd`, `bun --cwd`, `uv --directory`, `poetry -C`). It reads the
+// `yarn --cwd`, `bun --cwd`, `uv --directory`, `poetry -C` or `-P`). It reads the
 // flag wherever it sits and for every manager alike: a flag that means
 // something else to one of them only costs that install the shallow scan.
 func redirectsProject(args []string) bool {

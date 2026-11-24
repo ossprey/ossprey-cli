@@ -77,7 +77,8 @@ happens when:
 - the scan reads only part of the tree: `scan --depth`, `OSSPREY_SCAN_DEPTH`,
   or a [forwarded install](forwarder.md#what-is-checked) that scans one
   directory level. A config below the limit is not read, so it cannot be ruled
-  out.
+  out. A depth that ends up reading the whole tree (a value over 256, or a
+  scanned path the limit cannot be applied to) does not count.
 
 The scan reads the configs in the project, in every directory above it and in
 `CARGO_HOME`. For registry trust, a symlinked config inside `CARGO_HOME`, or a

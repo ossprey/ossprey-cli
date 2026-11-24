@@ -3,6 +3,7 @@ package catalog
 import (
 	"encoding/json"
 	"regexp"
+	"strings"
 
 	"github.com/goccy/go-yaml"
 )
@@ -47,7 +48,7 @@ func pnpmWorkspaceHasLocalDeps(data []byte) bool {
 		return true
 	}
 	for _, k := range []string{"overrides", "catalog", "catalogs"} {
-		if anyString(doc[k], isLocalNpmSpec) {
+		if anyString(doc[k], npmSpecReachesDisk) {
 			return true
 		}
 	}
@@ -86,11 +87,19 @@ func packageJSONHasLocalDeps(data []byte) bool {
 		if err := json.Unmarshal(raw, &v); err != nil {
 			return true
 		}
-		if anyString(v, isLocalNpmSpec) {
+		if anyString(v, npmSpecReachesDisk) {
 			return true
 		}
 	}
 	return false
+}
+
+// npmSpecReachesDisk is isLocalNpmSpec plus a git repository on the local
+// disk (`git+file:./vendor/x`), whose manifest may sit below the directory.
+// The install resolver keeps its own narrower reading: it can clone such a
+// repository, so it must not drop the dependency from its copy.
+func npmSpecReachesDisk(spec string) bool {
+	return isLocalNpmSpec(spec) || strings.HasPrefix(strings.TrimSpace(spec), "git+file:")
 }
 
 func pyprojectHasLocalDeps(data []byte) bool {
@@ -131,8 +140,13 @@ func pyprojectHasLocalDeps(data []byte) bool {
 			return true
 		}
 	}
-	// setuptools reads dynamic dependencies from files it names, which may sit
-	// in a subdirectory under a name the requirements glob does not match.
+	// Dynamic dependencies come from wherever the build backend reads them:
+	// setuptools from the files it names, hatch's requirements_txt hook from
+	// its own. Either may sit in a subdirectory, so [project].dynamic counts
+	// whatever the backend, and setuptools' table counts without it.
+	if anyString(project["dynamic"], isDynamicDependencyField) {
+		return true
+	}
 	dynamic := tomlTable(tomlTable(tool, "setuptools"), "dynamic")
 	if dynamic["dependencies"] != nil || dynamic["optional-dependencies"] != nil {
 		return true
@@ -140,9 +154,15 @@ func pyprojectHasLocalDeps(data []byte) bool {
 	return false
 }
 
+func isDynamicDependencyField(field string) bool {
+	return field == "dependencies" || field == "optional-dependencies"
+}
+
 // localRequirement matches a direct reference to something on disk: PEP 508's
-// `name @ file:///path`, and the bare `name @ ./path` poetry and pip accept.
-var localRequirement = regexp.MustCompile(`@\s*(file:|\.|/|~/|[a-zA-Z]:[\\/])`)
+// `name @ file:///path`, a local git repository (`name @ git+file:///path`),
+// the bare `name @ ./path` poetry and pip accept, and hatch's context form
+// (`name @ {root:uri}/sub`), which expands to a file URL.
+var localRequirement = regexp.MustCompile(`@\s*(file:|git\+file:|\{|\.|/|~/|[a-zA-Z]:[\\/])`)
 
 func isLocalRequirement(req string) bool {
 	return localRequirement.MatchString(req)
