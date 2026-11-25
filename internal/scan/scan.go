@@ -37,6 +37,10 @@ type Options struct {
 	// Timeout caps the whole catalogue; zero means no deadline. On expiry the
 	// SBOM cataloged so far is returned rather than discarded.
 	Timeout time.Duration
+	// MaxDepth limits how many directory levels below Path are read: 1 reads
+	// only Path's own files. Zero reads the whole tree. See
+	// catalog.Options.MaxDepth.
+	MaxDepth int
 	// Trust names the sources whose packages are left out of the SBOM: not
 	// checked, and not sent. See internal/trust.
 	Trust trust.Policy
@@ -63,6 +67,7 @@ func Run(ctx context.Context, opts Options) (*ossbom.SBOM, error) {
 		SkipVersionLookup:      opts.SkipVersionLookup,
 		NoExec:                 opts.NoExec,
 		Trust:                  opts.Trust,
+		MaxDepth:               opts.MaxDepth,
 		ReportCargoReplacement: true,
 	})
 	if err != nil {

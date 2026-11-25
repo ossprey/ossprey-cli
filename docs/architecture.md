@@ -62,10 +62,19 @@ flowchart TD
     E -- "failed: warn, fall back<br/>to the names alone" --> R
     R -- "no" --> Y["check those packages"]
     R -- "yes: pip install -r f pkg" --> RZ["scan the project manifest<br/>plus the named packages"]
-    X -- "no: bare install" --> Z["scan the project manifest"]
+    X -- "no: bare install" --> RQ{"installing from<br/>requirements files?"}
+    RQ -- "yes: pip install -r f" --> RF["scan every file named,<br/>with its nested -r includes"]
+    RQ -- "no" --> ZD{"OSSPREY_SCAN_DEPTH set?"}
+    ZD -- "yes" --> ZO["scan the project manifest<br/>to that depth (0: whole tree)"]
+    ZD -- "no" --> ZW{"workspace root, a dependency<br/>named by local path, or pointed<br/>at another directory?"}
+    ZW -- "yes" --> ZF["scan the project manifest<br/>(whole tree)"]
+    ZW -- "no" --> Z["scan the project manifest<br/>(this directory only)"]
     Y --> AA{"malware?"}
     RZ --> AA
     Z --> AA
+    ZF --> AA
+    ZO --> AA
+    RF --> AA
     AA -- "yes" --> AB["block: exit 1,<br/>manager never runs"]
     AA -- "no" --> U
 

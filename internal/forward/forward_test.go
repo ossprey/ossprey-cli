@@ -785,6 +785,9 @@ func TestWritesLocalLockfile(t *testing.T) {
 		{"yarn", []string{"--cwd", "/tmp/x", "add", "left-pad"}, false},
 		{"poetry", []string{"add", "flask"}, true},
 		{"poetry", []string{"-C", "../svc", "add", "flask"}, false},
+		{"poetry", []string{"-P", "../svc", "add", "flask"}, false},
+		{"poetry", []string{"-P", ".", "add", "flask"}, true},
+		{"npm", []string{"install", "-P", "left-pad"}, true}, // npm's -P is --save-prod
 		{"uv", []string{"add", "flask"}, true},
 		{"uv", []string{"sync"}, true},
 		{"uv", []string{"lock"}, true},

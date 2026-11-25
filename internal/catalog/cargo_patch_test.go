@@ -583,7 +583,7 @@ func TestCargoSourceReplacedLooksUpConfigsByName(t *testing.T) {
 	t.Setenv("CARGO_HOME", filepath.Join(t.TempDir(), "user", ".cargo"))
 	dir := t.TempDir()
 	writeTree(t, dir, map[string]string{"Cargo.toml": "[package]\nname = \"app\"\n", "tools/.cargo/config.toml": mirrorConfig, "web/.cache/index.js": ""})
-	src, err := newDirectorySource(dir)
+	src, err := newDirectorySource(dir, 0)
 	if err != nil {
 		t.Fatalf("source: %v", err)
 	}

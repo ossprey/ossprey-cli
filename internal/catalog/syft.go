@@ -18,6 +18,7 @@ import (
 	"github.com/anchore/syft/syft/pkg/cataloger/rust"
 	"github.com/anchore/syft/syft/source"
 	"github.com/anchore/syft/syft/source/directorysource"
+	"github.com/bmatcuk/doublestar/v4"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/ossprey/ossprey-cli/internal/registry"
@@ -75,6 +76,11 @@ type Options struct {
 	// value trusts nothing.
 	Trust trust.Policy
 
+	// MaxDepth limits how deep below the root the scan reads: 1 reads only the
+	// root's own files, 2 also its immediate subdirectories, and so on. Zero
+	// (the default) reads the whole tree. See depthExclude.
+	MaxDepth int
+
 	// ReportCargoReplacement warns when a cargo config replaces crates.io; scan.Run sets it, and the pre-commit hook (precommit.catalogFn) leaves it off, since its temp trees hold no repository config.
 	ReportCargoReplacement bool
 }
@@ -124,6 +130,28 @@ func packageSinkExcludes() []string {
 	return out
 }
 
+// maxDepthLimit is the deepest limit a glob is built for. The glob grows with
+// the depth and --depth takes any int, so an absurd value overflowed
+// strings.Repeat and panicked. A limit past this reads the whole tree, which
+// is what it asks for on any tree that is not deeper still.
+const maxDepthLimit = 256
+
+// depthExclude is the syft exclusion glob that stops the index at maxDepth
+// levels: for 1, "./*/*" matches everything inside a top-level directory, so
+// syft indexes the directory itself but skips its contents (SkipDir) without
+// walking them. "*" never crosses a "/", so the glob names exactly one depth.
+// "" when maxDepth is zero or negative (no limit), or over maxDepthLimit.
+//
+// It is applied to the index rather than to catalogue output because the walk
+// is the cost being cut: every cataloger, and every resolver run a nested
+// manifest would trigger, reads through that index.
+func depthExclude(maxDepth int) string {
+	if maxDepth <= 0 || maxDepth > maxDepthLimit {
+		return ""
+	}
+	return "./" + strings.Repeat("*/", maxDepth) + "*"
+}
+
 // newDirectorySource is the syft source every cataloger reads through, with
 // the package sinks left out of its index.
 //
@@ -131,14 +159,18 @@ func packageSinkExcludes() []string {
 // exclusions to the path as given, so under a symlinked root (macOS /var, /tmp)
 // no exclusion would ever match. Resolver paths are root-relative, so nothing
 // downstream sees the difference.
-func newDirectorySource(absRoot string) (source.Source, error) {
+func newDirectorySource(absRoot string, maxDepth int) (source.Source, error) {
 	root := absRoot
 	if resolved, err := filepath.EvalSymlinks(absRoot); err == nil {
 		root = resolved
 	}
+	excludes := packageSinkExcludes()
+	if d := depthExclude(maxDepth); d != "" {
+		excludes = append(excludes, d)
+	}
 	return directorysource.New(directorysource.Config{
 		Path:    root,
-		Exclude: source.ExcludeConfig{Paths: packageSinkExcludes()},
+		Exclude: source.ExcludeConfig{Paths: excludes},
 	})
 }
 
@@ -157,11 +189,15 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 	if err != nil {
 		return nil, fmt.Errorf("resolve path: %w", err)
 	}
-	src, err := newDirectorySource(absRoot)
+	src, err := newDirectorySource(absRoot, opts.MaxDepth)
 	if err != nil {
 		return nil, fmt.Errorf("syft source: %w", err)
 	}
 	defer src.Close()
+	globRoot := hasGlobMeta(resolvedRoot(absRoot))
+	if globRoot {
+		warn.Add(ctx, globRootEntry)
+	}
 
 	resolver, err := src.FileResolver(source.SquashedScope)
 	if err != nil {
@@ -347,7 +383,14 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 	// The fold runs first because cargoLocks indexes out; mergeVersionless leaves crates alone.
 	merged := mergeVersionless(foldCargoRanges(out, cargoRanges, cargoLocks))
 	markLocalPackages(merged, findLocalPackageNames(resolver, absRoot))
-	clearReplacedCrateRegistries(ctx, merged, opts.Trust, resolver, absRoot)
+	// Ask whether a limit was applied, not whether one was asked for: a depth
+	// over maxDepthLimit, or a root that reads as a glob, indexes the whole
+	// tree, and then every cargo config is there to be read.
+	if depthExclude(opts.MaxDepth) != "" && !globRoot {
+		clearDepthLimitedCrateRegistries(ctx, merged, opts.Trust)
+	} else {
+		clearReplacedCrateRegistries(ctx, merged, opts.Trust, resolver, absRoot)
+	}
 	markTrustedPackages(merged, opts.Trust)
 	resolveVersionless(ctx, merged, opts)
 	return merged, nil
@@ -489,6 +532,56 @@ func clearReplacedCrateRegistries(ctx context.Context, pkgs []Package, policy tr
 		One:   "cargo: registry trust was not applied to crates because " + why,
 		Many:  "cargo: registry trust was not applied to crates in %d scans because " + why,
 	})
+}
+
+// clearDepthLimitedCrateRegistries drops every crate's registries in a scan
+// that reads only part of the tree. Registry trust for a crate rests on
+// clearReplacedCrateRegistries having seen every cargo config and symlink in
+// the scan, and a depth limit leaves those below it out of the index, so a
+// replacement there could not veto the trust. The crates are checked instead.
+func clearDepthLimitedCrateRegistries(ctx context.Context, pkgs []Package, policy trust.Policy) {
+	trusted := false
+	for i := range pkgs {
+		if pkgs[i].Type != "cargo" {
+			continue
+		}
+		trusted = trusted || policy.Trusts(pkgs[i].Type, pkgs[i].Name, pkgs[i].Registries)
+		pkgs[i].Registries = nil
+	}
+	if !trusted {
+		return
+	}
+	const why = "the scan reads only part of the tree, so a cargo config below it could not be ruled out"
+	warn.Add(ctx, warn.Entry{
+		Class: "cargo:untrusted:" + why,
+		One:   "cargo: registry trust was not applied to crates because " + why,
+		Many:  "cargo: registry trust was not applied to crates in %d scans because " + why,
+	})
+}
+
+// globRootEntry says that syft's exclusions do not apply to this scan. syft
+// prefixes each exclusion glob with the scan root, unescaped, so a root whose
+// path holds an opening bracket or brace (or, outside Windows, a backslash)
+// reads as a pattern that never matches the real directory: node_modules and
+// the other package sinks are walked, and a depth limit is ignored. Nothing
+// goes unchecked; the scan is only slower.
+var globRootEntry = warn.Entry{
+	Class: "scan:glob-root",
+	One:   "the scanned path reads as a glob pattern (it contains a [, a { or a backslash), so installed-package directories and any depth limit are not skipped; the scan is complete but may be slow",
+}
+
+// hasGlobMeta reports whether root would misread as a glob when syft
+// prefixes an exclusion with it. It asks the matcher syft uses whether the
+// root still matches itself, since Catalog decides on the answer whether the
+// index is whole: a guess by character called `a]b` a glob although a lone
+// `]` or `}` matches itself, as `*` and `?` do, and so would have granted
+// registry trust on an index the depth limit had cut. A pattern the matcher
+// rejects (an unclosed `[` or `{`) excludes nothing either: syft drops the
+// error and keeps the path.
+func hasGlobMeta(root string) bool {
+	p := filepath.ToSlash(root)
+	ok, err := doublestar.Match(p, p)
+	return err != nil || !ok
 }
 
 // registrySource is the metadata our own catalogers attach when the resolver
