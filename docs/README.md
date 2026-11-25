@@ -24,6 +24,7 @@ detail behind it.
 - [Output](output.md) — the alert box, warnings, and the `--report` JSON verdict
 - [Supported ecosystems](ecosystems.md) — what is parsed, and what happens to unpinned versions
 - [Trusted sources](trust.md) — skip, and never send, packages from your private registries and npm scopes
+- [Scan settings](config.md) — `ossprey config`: a stored scan depth and paths every scan leaves out
 
 ## Under the hood
 

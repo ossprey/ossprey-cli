@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime/debug"
+	"slices"
 	"strings"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/ossprey/ossprey-cli/internal/brewscan"
 	"github.com/ossprey/ossprey-cli/internal/check"
 	"github.com/ossprey/ossprey-cli/internal/client"
+	"github.com/ossprey/ossprey-cli/internal/config"
 	"github.com/ossprey/ossprey-cli/internal/env"
 	"github.com/ossprey/ossprey-cli/internal/forward"
 	"github.com/ossprey/ossprey-cli/internal/gitscan"
@@ -48,23 +50,39 @@ func scanTimeout(flag time.Duration) time.Duration {
 }
 
 // scanDepth resolves the directory depth limit from --depth when typed, else
-// OSSPREY_SCAN_DEPTH, else 0 (the whole tree). A typed --depth 0 turns off a
-// limit the environment sets. A bad typed value is an error; a bad variable is
-// a warning and the whole tree, since it may be set in a pipeline the user
-// does not control and reading more only checks more.
-func scanDepth(flag int, typed bool) (int, error) {
+// the configured depth (OSSPREY_SCAN_DEPTH, else `ossprey config set
+// scan.depth`; see config.Load), else 0 (the whole tree). A typed --depth 0
+// turns off a configured limit. A bad typed value is an error; a bad
+// configured one was reported by loadSettings and is not applied, since it may
+// be set in a pipeline the user does not control and reading more only checks
+// more.
+func scanDepth(flag int, typed bool, configured *int) (int, error) {
 	if typed {
 		if flag < 0 {
 			return 0, fmt.Errorf("--depth must be 0 (no limit) or more, got %d", flag)
 		}
 		return flag, nil
 	}
-	d, _, err := env.ScanDepth()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "ossprey: warning: %v; scanning the whole tree\n", err)
-		return 0, nil
+	if configured != nil {
+		return *configured, nil
 	}
-	return d, nil
+	return 0, nil
+}
+
+// scanIgnore is the configured ignore patterns plus those typed with --ignore.
+// A typed pattern that does not validate is an error, as a bad --depth is.
+func scanIgnore(typed, configured []string) ([]string, error) {
+	out := slices.Clone(configured)
+	for _, t := range typed {
+		n, err := config.NormalizeIgnore(t)
+		if err != nil {
+			return nil, fmt.Errorf("--ignore: %w", err)
+		}
+		if !slices.Contains(out, n) {
+			out = append(out, n)
+		}
+	}
+	return out, nil
 }
 
 func main() {
@@ -125,6 +143,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(newUpdateCmd())
 	root.AddCommand(newShimCmd())
 	root.AddCommand(newTrustCmd())
+	root.AddCommand(newConfigCmd())
 	root.AddCommand(newPrecommitCmdWithHooks())
 	for _, bin := range forward.Managers() {
 		root.AddCommand(newForwardCmd(bin))
@@ -174,6 +193,7 @@ func newScanCmd() *cobra.Command {
 		monitorID       string
 		timeout         time.Duration
 		depth           int
+		ignore          []string
 	)
 
 	cmd := &cobra.Command{
@@ -246,7 +266,12 @@ func newScanCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			maxDepth, err := scanDepth(depth, cmd.Flags().Changed("depth"))
+			settings := loadSettings(os.Stderr)
+			maxDepth, err := scanDepth(depth, cmd.Flags().Changed("depth"), settings.Scan.Depth)
+			if err != nil {
+				return err
+			}
+			ignorePatterns, err := scanIgnore(ignore, settings.Scan.Ignore)
 			if err != nil {
 				return err
 			}
@@ -267,6 +292,7 @@ func newScanCmd() *cobra.Command {
 				SkipVersionLookup: noVersionLookup,
 				Timeout:           scanTimeout(timeout),
 				MaxDepth:          maxDepth,
+				Ignore:            ignorePatterns,
 				Trust:             loadTrust(os.Stderr),
 			})
 			catalogued()
@@ -366,7 +392,8 @@ func newScanCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&dryRunSafe, "dry-run-safe", false, "skip API submission; emit empty vulnerability list")
 	cmd.Flags().BoolVar(&dryRunMalicious, "dry-run-malicious", false, "skip API submission; inject test vulnerability against first component")
 	cmd.Flags().BoolVar(&noVersionLookup, "no-version-lookup", false, "don't query the registry to resolve unpinned dependencies; leave them versionless")
-	cmd.Flags().IntVar(&depth, "depth", 0, "read only this many directory levels: 1 is the scanned directory's own files (or OSSPREY_SCAN_DEPTH; 0 disables)")
+	cmd.Flags().IntVar(&depth, "depth", 0, "read only this many directory levels: 1 is the scanned directory's own files (or OSSPREY_SCAN_DEPTH, or `ossprey config set scan.depth`; 0 disables)")
+	cmd.Flags().StringArrayVar(&ignore, "ignore", nil, "leave out paths matching this glob, relative to the scanned directory (repeatable; adds to `ossprey config add scan.ignore`)")
 	cmd.Flags().DurationVar(&timeout, "timeout", 0, "give up cataloging after this long and emit what resolved (or OSSPREY_SCAN_TIMEOUT; 0 disables)")
 	cmd.Flags().StringVar(&apiURL, "url", defaultAPIURL, "Ossprey API URL")
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "Ossprey API key (or OSSPREY_API_KEY / API_KEY env var; optional after `ossprey login`)")
@@ -531,6 +558,7 @@ func newForwardCmd(bin string) *cobra.Command {
 				Passive:   env.Passive() || monitor != "",
 				MonitorID: monitor,
 				Trust:     loadTrust(os.Stderr),
+				Scan:      loadSettings(os.Stderr).Scan,
 			})
 			return forwardResult(err)
 		},

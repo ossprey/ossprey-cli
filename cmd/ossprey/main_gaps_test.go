@@ -57,8 +57,9 @@ func captureStdout(t *testing.T, fn func()) string {
 	return out
 }
 
-// isolateConfig points every config read (credentials, trust) at an empty
-// directory and clears the credential and mode env vars a developer may have.
+// isolateConfig points every config read (credentials, trust, scan settings)
+// at an empty directory and clears the credential, mode and scan env vars a
+// developer may have.
 func isolateConfig(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -67,6 +68,7 @@ func isolateConfig(t *testing.T) string {
 		"OSSPREY_API_KEY", "API_KEY", "OSSPREY_PASSIVE", "OSSPREY_CI_CACHE_SCAN_ONLY",
 		"OSSPREY_MONITOR_ID", "OSSPREY_SKIP_CI", "OSSPREY_VERBOSE",
 		"OSSPREY_TRUSTED_REGISTRIES", "OSSPREY_TRUSTED_NPM_SCOPES",
+		"OSSPREY_SCAN_DEPTH", "OSSPREY_SCAN_IGNORE",
 	} {
 		t.Setenv(k, "")
 	}

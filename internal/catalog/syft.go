@@ -81,6 +81,11 @@ type Options struct {
 	// (the default) reads the whole tree. See depthExclude.
 	MaxDepth int
 
+	// Ignore holds patterns from `ossprey config` (config.NormalizeIgnore
+	// form: doublestar globs relative to the root) whose matches are left out
+	// of the index, as the package sinks are. See ignoreExcludes.
+	Ignore []string
+
 	// ReportCargoReplacement warns when a cargo config replaces crates.io; scan.Run sets it, and the pre-commit hook (precommit.catalogFn) leaves it off, since its temp trees hold no repository config.
 	ReportCargoReplacement bool
 }
@@ -152,19 +157,31 @@ func depthExclude(maxDepth int) string {
 	return "./" + strings.Repeat("*/", maxDepth) + "*"
 }
 
+// ignoreExcludes turns ignore patterns into syft exclusion globs. syft
+// anchors a "./" glob at the scan root and skips a matching directory whole
+// (SkipDir), so an ignored tree is never walked, which is the point: the walk
+// costs one open per file.
+func ignoreExcludes(patterns []string) []string {
+	out := make([]string, 0, len(patterns))
+	for _, p := range patterns {
+		out = append(out, "./"+p)
+	}
+	return out
+}
+
 // newDirectorySource is the syft source every cataloger reads through, with
-// the package sinks left out of its index.
+// the package sinks and any ignore patterns left out of its index.
 //
 // The root is symlink-resolved first. Syft walks the resolved root but anchors
 // exclusions to the path as given, so under a symlinked root (macOS /var, /tmp)
 // no exclusion would ever match. Resolver paths are root-relative, so nothing
 // downstream sees the difference.
-func newDirectorySource(absRoot string, maxDepth int) (source.Source, error) {
+func newDirectorySource(absRoot string, maxDepth int, ignore ...string) (source.Source, error) {
 	root := absRoot
 	if resolved, err := filepath.EvalSymlinks(absRoot); err == nil {
 		root = resolved
 	}
-	excludes := packageSinkExcludes()
+	excludes := append(packageSinkExcludes(), ignoreExcludes(ignore)...)
 	if d := depthExclude(maxDepth); d != "" {
 		excludes = append(excludes, d)
 	}
@@ -189,7 +206,7 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 	if err != nil {
 		return nil, fmt.Errorf("resolve path: %w", err)
 	}
-	src, err := newDirectorySource(absRoot, opts.MaxDepth)
+	src, err := newDirectorySource(absRoot, opts.MaxDepth, opts.Ignore...)
 	if err != nil {
 		return nil, fmt.Errorf("syft source: %w", err)
 	}
@@ -197,6 +214,8 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 	globRoot := hasGlobMeta(resolvedRoot(absRoot))
 	if globRoot {
 		warn.Add(ctx, globRootEntry)
+	} else if len(opts.Ignore) > 0 {
+		warn.Add(ctx, ignoreEntry(opts.Ignore))
 	}
 
 	resolver, err := src.FileResolver(source.SquashedScope)
@@ -385,8 +404,9 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 	markLocalPackages(merged, findLocalPackageNames(resolver, absRoot))
 	// Ask whether a limit was applied, not whether one was asked for: a depth
 	// over maxDepthLimit, or a root that reads as a glob, indexes the whole
-	// tree, and then every cargo config is there to be read.
-	if depthExclude(opts.MaxDepth) != "" && !globRoot {
+	// tree, and then every cargo config is there to be read. An ignore pattern
+	// limits the index as a depth does: a config under it is never read.
+	if (depthExclude(opts.MaxDepth) != "" || len(opts.Ignore) > 0) && !globRoot {
 		clearDepthLimitedCrateRegistries(ctx, merged, opts.Trust)
 	} else {
 		clearReplacedCrateRegistries(ctx, merged, opts.Trust, resolver, absRoot)
@@ -559,6 +579,19 @@ func clearDepthLimitedCrateRegistries(ctx context.Context, pkgs []Package, polic
 	})
 }
 
+// ignoreEntry says that configured ignore patterns left part of the tree out.
+// The patterns live in config on the machine, out of sight of the scan's
+// output, so a scan that skips paths says so once rather than reading as a
+// scan of everything. Forwarders show it only when verbose, like every other
+// warning on that path.
+func ignoreEntry(patterns []string) warn.Entry {
+	return warn.Entry{
+		Class: "scan:ignore",
+		One: fmt.Sprintf("skipped paths matching %d ignore pattern(s) from your config: %s (see `ossprey config list`)",
+			len(patterns), strings.Join(patterns, ", ")),
+	}
+}
+
 // globRootEntry says that syft's exclusions do not apply to this scan. syft
 // prefixes each exclusion glob with the scan root, unescaped, so a root whose
 // path holds an opening bracket or brace (or, outside Windows, a backslash)
@@ -567,7 +600,7 @@ func clearDepthLimitedCrateRegistries(ctx context.Context, pkgs []Package, polic
 // goes unchecked; the scan is only slower.
 var globRootEntry = warn.Entry{
 	Class: "scan:glob-root",
-	One:   "the scanned path reads as a glob pattern (it contains a [, a { or a backslash), so installed-package directories and any depth limit are not skipped; the scan is complete but may be slow",
+	One:   "the scanned path reads as a glob pattern (it contains a [, a { or a backslash), so installed-package directories, any depth limit and any ignore pattern are not skipped; the scan is complete but may be slow",
 }
 
 // hasGlobMeta reports whether root would misread as a glob when syft

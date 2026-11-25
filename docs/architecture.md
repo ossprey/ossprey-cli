@@ -64,7 +64,7 @@ flowchart TD
     R -- "yes: pip install -r f pkg" --> RZ["scan the project manifest<br/>plus the named packages"]
     X -- "no: bare install" --> RQ{"installing from<br/>requirements files?"}
     RQ -- "yes: pip install -r f" --> RF["scan every file named,<br/>with its nested -r includes"]
-    RQ -- "no" --> ZD{"OSSPREY_SCAN_DEPTH set?"}
+    RQ -- "no" --> ZD{"depth configured?<br/>(OSSPREY_SCAN_DEPTH,<br/>ossprey config)"}
     ZD -- "yes" --> ZO["scan the project manifest<br/>to that depth (0: whole tree)"]
     ZD -- "no" --> ZW{"workspace root, a dependency<br/>named by local path, or pointed<br/>at another directory?"}
     ZW -- "yes" --> ZF["scan the project manifest<br/>(whole tree)"]

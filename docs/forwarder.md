@@ -235,7 +235,8 @@ always checked). A bare install applies both rules, from the lockfile.
   - A manifest that cannot be read (not a regular file, too large, or not
     valid JSON, YAML or TOML), which counts as both.
 
-  Set `OSSPREY_SCAN_DEPTH` to override this for a project scan (`0` scans the
+  Set `OSSPREY_SCAN_DEPTH`, or store [`scan.depth`](config.md) with
+  `ossprey config set scan.depth <n>`, to override this for a project scan (`0` scans the
   whole tree, as before; `1` keeps to the current directory even in a
   workspace root, where members' dependencies not in the root lockfile then go
   unchecked). It does not apply to a requirements-file install, which always

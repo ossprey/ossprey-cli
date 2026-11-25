@@ -13,6 +13,7 @@ Every command, flag and credential the CLI understands.
 | [`ossprey shim install`](shims.md) | Put shims on `PATH` so installs are checked without the `ossprey` prefix. |
 | [`ossprey precommit`](precommit.md) | Git pre-commit hook: block commits that stage known-malicious packages. |
 | [`ossprey trust list\|add\|remove`](trust.md) | Manage trusted registries and npm scopes, whose packages are neither checked nor sent. |
+| [`ossprey config list\|set\|unset\|add\|remove`](config.md) | Store scan settings on this machine: `scan.depth` and `scan.ignore` patterns. |
 | [`ossprey login`](#authentication) | Browser login via Auth0. Stores tokens locally. |
 | [`ossprey whoami`](#authentication) | Show who the stored login belongs to. |
 | [`ossprey logout`](#authentication) | Remove the stored login. |
@@ -56,12 +57,13 @@ a `verdict`, only when the scan actually reached one.
 | `OSSPREY_PASSIVE=1` | `--passive` | Observe-only: submit, never block or fail. |
 | `OSSPREY_MONITOR_ID` | `--monitor` | Submit through a monitor id. Implies passive. |
 | `OSSPREY_SCAN_TIMEOUT` | `--timeout` | Cap the whole catalogue; emit what resolved. |
-| `OSSPREY_SCAN_DEPTH` | `--depth` | How many directory levels a project scan reads; `0` is the whole tree. Also the only way to change a [forwarder's](forwarder.md#what-is-checked) depth, which defaults to `1` unless the install reaches below the directory (a workspace root, a dependency named by local path); a requirements-file install ignores it. |
+| `OSSPREY_SCAN_DEPTH` | `--depth` | How many directory levels a project scan reads; `0` is the whole tree. Replaces a stored [`scan.depth`](config.md). With it, the stored setting is the only way to change a [forwarder's](forwarder.md#what-is-checked) depth, which defaults to `1` unless the install reaches below the directory (a workspace root, a dependency named by local path); a requirements-file install ignores it. |
+| `OSSPREY_SCAN_IGNORE` | `--ignore` | Paths every project scan leaves out, as globs relative to the scanned directory, separated by commas or newlines. Added to the stored [`scan.ignore`](config.md) patterns. |
 | `OSSPREY_RESOLVE_TIMEOUT` | — | Cap one uv/npm resolver invocation (default `2m`). |
 | `OSSPREY_VERDICT_TIMEOUT` | — | How long to wait for the API's verdict after submitting (default `15m`). On expiry the scan keeps running server-side; the error names the scan id and its result appears in the dashboard. |
 | `OSSPREY_SCAN_CONCURRENCY` | — | How many catalogers run at once (default `8`). |
 | `OSSPREY_RESOLVE_LATEST=0` | `--no-version-lookup` | Don't resolve unpinned versions from the registry. |
-| `OSSPREY_CONFIG_DIR` | — | Where the stored login and `trust.json` live. |
+| `OSSPREY_CONFIG_DIR` | — | Where the stored login, `trust.json` and `config.json` live. |
 | `OSSPREY_TRUSTED_REGISTRIES` | `trust add --registry` | Extra [trusted registry](trust.md) URL prefixes, comma-separated. |
 | `OSSPREY_TRUSTED_NPM_SCOPES` | `trust add --npm-scope` | Extra [trusted npm scopes](trust.md), comma-separated. |
 | `OSSPREY_SHIM_DIR` | `--dir` | Where [shims](shims.md) are written. |
@@ -83,7 +85,8 @@ ossprey scan [path] [flags]
 | `-v, --verbose` | List every warned package and manifest, and the full output of any resolver that failed. Also settable as `OSSPREY_VERBOSE=1`, which works on the forwarders and shims too. |
 | `--local` | Catalogue only. Dump the OSSBOM to stdout and exit — no API submission, no malware verdict. |
 | `--no-version-lookup` | Don't query the registry to resolve unpinned dependencies; leave them versionless. |
-| `--depth <n>` | Read only `<n>` directory levels: `1` is the scanned directory's own files, `2` adds its immediate subdirectories. `0` (the default) reads the whole tree. So does a value over 256. Also settable as `OSSPREY_SCAN_DEPTH`; a typed `--depth 0` overrides it. |
+| `--depth <n>` | Read only `<n>` directory levels: `1` is the scanned directory's own files, `2` adds its immediate subdirectories. `0` (the default) reads the whole tree. So does a value over 256. Also settable as `OSSPREY_SCAN_DEPTH` or a stored [`scan.depth`](config.md); a typed `--depth 0` overrides both. |
+| `--ignore <pattern>` | Leave out paths matching `<pattern>`, a glob relative to the scanned directory (`wf`, `**/fixtures`). Repeatable, and added to `OSSPREY_SCAN_IGNORE` and the stored [`scan.ignore`](config.md) patterns. |
 | `--timeout <dur>` | Give up cataloguing after this long and emit whatever resolved (or `OSSPREY_SCAN_TIMEOUT`). Off by default. |
 | `--url <url>` | Override the Ossprey API URL (default `https://api.ossprey.com`). |
 | `--api-key <key>` | Provide the API key on the command line instead of an env var. |

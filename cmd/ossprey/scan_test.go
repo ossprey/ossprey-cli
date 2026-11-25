@@ -363,20 +363,19 @@ func TestScanDepth(t *testing.T) {
 		name    string
 		flag    int
 		typed   bool
-		env     string
+		config  *int
 		want    int
 		wantErr bool
 	}{
 		{name: "default is the whole tree", want: 0},
 		{name: "typed flag", flag: 1, typed: true, want: 1},
-		{name: "env when untyped", env: "2", want: 2},
-		{name: "typed zero overrides env", flag: 0, typed: true, env: "1", want: 0},
+		{name: "configured when untyped", config: ptr(2), want: 2},
+		{name: "configured zero", config: ptr(0), want: 0},
+		{name: "typed zero overrides config", flag: 0, typed: true, config: ptr(1), want: 0},
 		{name: "negative flag", flag: -1, typed: true, wantErr: true},
-		{name: "bad env is the whole tree", env: "-3", want: 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("OSSPREY_SCAN_DEPTH", tc.env)
-			got, err := scanDepth(tc.flag, tc.typed)
+			got, err := scanDepth(tc.flag, tc.typed, tc.config)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
 			}

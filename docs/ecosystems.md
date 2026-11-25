@@ -46,7 +46,8 @@ lockfile beside them already names what they contain, and walking them could
 add minutes to a scan. A project whose only record of its dependencies is an
 installed tree, with no lockfile or manifest, catalogues nothing from it.
 
-These directories are not skipped, and `--depth` has no effect, when the path
+These directories are not skipped, and neither `--depth` nor an
+[ignore pattern](config.md#scanignore) has any effect, when the path
 of the scanned directory itself contains `[`, `]`, `{` or `}` (a checkout at
 `repo[2]`, say). The scan is still complete, only slower, and says so in one
 warning; a bracket in a directory below the scanned one is fine.

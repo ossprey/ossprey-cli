@@ -75,6 +75,7 @@ happens when:
   holds a quote, a backslash or a leading `!`, or cannot be read or is not a
   regular file;
 - the scan reads only part of the tree: `scan --depth`, `OSSPREY_SCAN_DEPTH`,
+  a stored [`scan.depth`](config.md), any [ignore pattern](config.md#scanignore),
   or a [forwarded install](forwarder.md#what-is-checked) that scans one
   directory level. A config below the limit is not read, so it cannot be ruled
   out. A depth that ends up reading the whole tree (a value over 256, or a
