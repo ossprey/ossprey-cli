@@ -82,7 +82,10 @@ workspace member glob with `[` or `**`, a glob outside the scan, a
 `cargo vendor` (which ignores source replacement) or passes `--config`, two
 configs or a config
 named in another case in one directory, or a file reached through a symlink
-that leaves the scan.
+that leaves the scan. Nothing is skipped either when the scan reads only part
+of the tree (`--depth`, `OSSPREY_SCAN_DEPTH`, a forwarded install's one-level
+scan, or any [ignore pattern](config.md#scanignore)), since a config or
+manifest outside what it reads could build the crate by path.
 
 Lockfile entries for your own code are not components: the root project,
 npm workspace links, and yarn `workspace:`, `portal:`, `link:` and `file:`

@@ -38,6 +38,8 @@ func TestNormalizeIgnore(t *testing.T) {
 		{"my docs", "my docs"},
 		{".github", ".github"},
 		{"wf/*", "wf/*"},
+		{".*", ".*"},
+		{"*/*", "*/*"},
 	} {
 		got, err := NormalizeIgnore(tc.in)
 		if err != nil || got != tc.want {
@@ -49,6 +51,7 @@ func TestNormalizeIgnore(t *testing.T) {
 	for _, in := range []string{
 		"", "  ", ".", "./", "/",
 		"*", "**", "**/*", "*/**", "./**",
+		"?*", "*?", "**/*?", "**/?*", "{*,x}", "[!.]*",
 		"/abs/path", "C:/x", "c:x",
 		`wf\sub`,
 		"../sibling", "wf/../other", "wf/./x", "wf//x",
@@ -141,6 +144,28 @@ func TestLoadFileRejectsUnknownKeys(t *testing.T) {
 	}
 	if !slices.Equal(s.Scan.Ignore, []string{"wf"}) {
 		t.Errorf("known key lost: %+v", s)
+	}
+}
+
+// TestLoadFileRejectsTrailingContent: Decode reads one value, so a second one
+// after it was accepted as an editable file and deleted by the next edit. It
+// is an error now, while a runtime load keeps the first value's patterns and
+// trailing whitespace stays fine.
+func TestLoadFileRejectsTrailingContent(t *testing.T) {
+	dir := isolate(t)
+	for _, tail := range []string{` {"future":{"x":true}}`, ` garbage`, `}`} {
+		writeConfig(t, dir, `{"scan":{"ignore":["docs"]}}`+tail)
+		s, err := LoadFile()
+		if err == nil {
+			t.Errorf("tail %q: want an error", tail)
+		}
+		if !slices.Equal(s.Scan.Ignore, []string{"docs"}) {
+			t.Errorf("tail %q: runtime load kept %q, want docs", tail, s.Scan.Ignore)
+		}
+	}
+	writeConfig(t, dir, "{\"scan\":{\"ignore\":[\"docs\"]}}\n\n  \t\n")
+	if _, err := LoadFile(); err != nil {
+		t.Errorf("trailing whitespace: %v", err)
 	}
 }
 

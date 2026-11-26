@@ -105,16 +105,20 @@ func TestConfigRejectsBadInputWithoutWriting(t *testing.T) {
 // would delete the rest, including a key a newer ossprey wrote.
 func TestConfigRefusesToRewriteAFileItCannotRead(t *testing.T) {
 	dir := isolateConfig(t)
-	const content = `{"scan":{"ignore":["docs"]},"future":{"x":true}}`
 	path := filepath.Join(dir, "config.json")
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := runConfig(t, "add", "scan.ignore", "wf"); err == nil || !strings.Contains(err.Error(), "fix or remove") {
-		t.Fatalf("err = %v, want a refusal", err)
-	}
-	if data, _ := os.ReadFile(path); string(data) != content {
-		t.Errorf("file was rewritten: %s", data)
+	for _, content := range []string{
+		`{"scan":{"ignore":["docs"]},"future":{"x":true}}`,
+		`{"scan":{"ignore":["docs"]}} {"future":{"x":true}}`,
+	} {
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := runConfig(t, "add", "scan.ignore", "wf"); err == nil || !strings.Contains(err.Error(), "fix or remove") {
+			t.Fatalf("%s: err = %v, want a refusal", content, err)
+		}
+		if data, _ := os.ReadFile(path); string(data) != content {
+			t.Errorf("file was rewritten: %s", data)
+		}
 	}
 }
 

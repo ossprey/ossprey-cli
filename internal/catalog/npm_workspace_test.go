@@ -219,7 +219,7 @@ func TestIsWorkspaceMember(t *testing.T) {
 			root := t.TempDir()
 			writeTree(t, root, tt.files)
 			dir := filepath.Join(root, filepath.FromSlash(tt.dir))
-			if got := isWorkspaceMember(dir, root); got != tt.want {
+			if got := isWorkspaceMember(dir, root, lockedDirs(t, root)); got != tt.want {
 				t.Errorf("isWorkspaceMember(%s) = %v, want %v", tt.dir, got, tt.want)
 			}
 		})
@@ -237,8 +237,26 @@ func TestIsWorkspaceMemberStopsAtScanRoot(t *testing.T) {
 	})
 	root := filepath.Join(outer, "inner")
 	dir := filepath.Join(root, "packages", "a")
-	if isWorkspaceMember(dir, root) {
+	if isWorkspaceMember(dir, root, lockedDirs(t, outer)) {
 		t.Error("membership was claimed by a workspace root above the scan root")
+	}
+}
+
+// An ignored root lockfile carries no member's tree, so membership of it
+// must not stand a member's resolve down.
+func TestIsWorkspaceMemberNeedsAVisibleLockfile(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		"package.json":            `{"workspaces":["packages/*"]}`,
+		"package-lock.json":       `{}`,
+		"packages/a/package.json": `{"name":"a"}`,
+	})
+	dir := filepath.Join(root, "packages", "a")
+	if !isWorkspaceMember(dir, root, lockedDirs(t, root)) {
+		t.Fatal("a declared member of a locked root should be a member")
+	}
+	if isWorkspaceMember(dir, root, lockedDirs(t, root, "package-lock.json")) {
+		t.Error("a root lockfile the scan ignores still stood the member's resolve down")
 	}
 }
 

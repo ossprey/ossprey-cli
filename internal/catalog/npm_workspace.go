@@ -10,14 +10,14 @@ import (
 	"github.com/goccy/go-yaml"
 )
 
-// isWorkspaceMember reports whether dir is a declared workspace member of an ancestor (up to root) that ships a lockfile syft can read.
-func isWorkspaceMember(dir, root string) bool {
+// isWorkspaceMember reports whether dir is a declared workspace member of an ancestor (up to root) that ships a lockfile syft can read; locked is npmLockDirs.
+func isWorkspaceMember(dir, root string, locked map[string]bool) bool {
 	root, dir = filepath.Clean(root), filepath.Clean(dir)
 	if dir == root {
 		return false // the root manifest is never its own member
 	}
 	for a := filepath.Dir(dir); ; a = filepath.Dir(a) {
-		if hasNpmLockfile(a) && declaresMember(a, dir) {
+		if locked[a] && declaresMember(a, dir) {
 			return true
 		}
 		if a == root || a == filepath.Dir(a) {

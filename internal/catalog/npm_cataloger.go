@@ -45,12 +45,13 @@ func (c *NpmResolveCataloger) Catalog(ctx context.Context, resolver file.Resolve
 	}
 	defer os.RemoveAll(cache)
 
+	locked := npmLockDirs(resolver, c.root)
 	parse := func(absPath string, loc file.Location) ([]pkg.Package, error) {
 		dir := filepath.Dir(absPath)
-		if hasNpmLockfile(dir) {
+		if locked[dir] {
 			return nil, nil // syft's lock cataloger already resolves this project
 		}
-		if isWorkspaceMember(dir, c.root) {
+		if isWorkspaceMember(dir, c.root, locked) {
 			return nil, nil // an ancestor lockfile already carries this member's full tree
 		}
 		return runNpmResolve(ctx, npm, cache, absPath, loc)
@@ -59,14 +60,28 @@ func (c *NpmResolveCataloger) Catalog(ctx context.Context, resolver file.Resolve
 	return out, nil, err
 }
 
-// hasNpmLockfile reports whether dir already ships a lockfile syft can read.
-func hasNpmLockfile(dir string) bool {
-	for _, name := range []string{"package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml"} {
-		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
-			return true
+// npmLockNames are the lockfiles syft (or NpmLockCataloger) reads for a
+// JavaScript project.
+var npmLockNames = []string{"package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml"}
+
+// npmLockDirs lists the directories holding a lockfile the scan's own index
+// shows, keyed as catalogByGlob spells a manifest's directory. It asks the
+// resolver rather than the disk because the lock catalogers read through that
+// index: a lockfile an ignore pattern leaves out is never read, so standing
+// the resolve down for it would leave the project with its direct
+// dependencies only.
+func npmLockDirs(resolver file.Resolver, root string) map[string]bool {
+	dirs := map[string]bool{}
+	for _, name := range npmLockNames {
+		locs, err := resolver.FilesByGlob("**/" + name)
+		if err != nil {
+			continue
+		}
+		for _, l := range locs {
+			dirs[filepath.Dir(hostPath(root, l.RealPath))] = true
 		}
 	}
-	return false
+	return dirs
 }
 
 // runNpmResolve copies package.json into a throwaway dir, generates a lockfile

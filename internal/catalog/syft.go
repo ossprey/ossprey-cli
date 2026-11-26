@@ -217,12 +217,24 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 	} else if len(opts.Ignore) > 0 {
 		warn.Add(ctx, ignoreEntry(opts.Ignore))
 	}
+	// Whether a limit was applied, not whether one was asked for: a depth over
+	// maxDepthLimit, or a root that reads as a glob, indexes the whole tree.
+	// An ignore pattern limits the index as a depth does. Either way a file
+	// the index leaves out (a cargo config, a manifest building a crate by
+	// path) is never read, so nothing that rests on having seen them all may
+	// run.
+	limited := (depthExclude(opts.MaxDepth) != "" || len(opts.Ignore) > 0) && !globRoot
 
 	resolver, err := src.FileResolver(source.SquashedScope)
 	if err != nil {
 		return nil, fmt.Errorf("syft resolver: %w", err)
 	}
-	resolver = withoutCargoVendor(resolver, absRoot)
+	// The vendor filter hides a crate only once every manifest and config that
+	// could build it by path has been read; on a limited index it stays off,
+	// and a vendored crate's own Cargo files are read as before it existed.
+	if !limited {
+		resolver = withoutCargoVendor(resolver, absRoot)
+	}
 	resolver = withBoundedLocks(ctx, resolver, absRoot)
 
 	pyCfg := python.DefaultCatalogerConfig().WithGuessUnpinnedRequirements(true)
@@ -402,11 +414,8 @@ func Catalog(ctx context.Context, path string, opts Options) ([]Package, error) 
 	// The fold runs first because cargoLocks indexes out; mergeVersionless leaves crates alone.
 	merged := mergeVersionless(foldCargoRanges(out, cargoRanges, cargoLocks))
 	markLocalPackages(merged, findLocalPackageNames(resolver, absRoot))
-	// Ask whether a limit was applied, not whether one was asked for: a depth
-	// over maxDepthLimit, or a root that reads as a glob, indexes the whole
-	// tree, and then every cargo config is there to be read. An ignore pattern
-	// limits the index as a depth does: a config under it is never read.
-	if (depthExclude(opts.MaxDepth) != "" || len(opts.Ignore) > 0) && !globRoot {
+	// Registry trust rests on every cargo config having been read (limited).
+	if limited {
 		clearDepthLimitedCrateRegistries(ctx, merged, opts.Trust)
 	} else {
 		clearReplacedCrateRegistries(ctx, merged, opts.Trust, resolver, absRoot)

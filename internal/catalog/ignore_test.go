@@ -142,3 +142,35 @@ func TestIgnoredScanTrustsNoCrateByRegistry(t *testing.T) {
 		t.Errorf("warnings = %q, want one saying trust was not applied", got)
 	}
 }
+
+// TestIgnoreTurnsTheCargoVendorFilterOff: the vendor filter hides a crate's
+// Cargo files only once it has seen every manifest and config that could
+// build it by path. An ignore pattern can hide one (here an alias in an
+// ignored tools/.cargo/config.toml that builds vendor/aliased), so with any
+// pattern applied the filter stays off and the crate's own files are read,
+// which errs toward checking more.
+func TestIgnoreTurnsTheCargoVendorFilterOff(t *testing.T) {
+	proj := t.TempDir()
+	vendoringRoot(t, proj, "", "", lockEntry("aliased", "0.1.0", "alal"))
+	vendoredCrate(t, proj, "vendor/aliased", "0.1.0", "alal", "[dev-dependencies]\ntrybuild = \"=1.0.108\"\n")
+	sinkFixture(t, proj, "tools/.cargo/config.toml", "[alias]\nbuild-aliased = \"build --manifest-path ../vendor/aliased/Cargo.toml\"\n")
+
+	names := func(ignore ...string) map[string]bool {
+		t.Helper()
+		pkgs, err := Catalog(context.Background(), proj, Options{SkipVersionLookup: true, NoExec: true, Ignore: ignore})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := map[string]bool{}
+		for _, p := range pkgs {
+			got[p.Name] = true
+		}
+		return got
+	}
+	if !names()["trybuild"] {
+		t.Fatal("with the alias visible the crate is built by path, so its dev-dependency must be read")
+	}
+	if !names("tools")["trybuild"] {
+		t.Error("ignoring the config that builds the crate let the vendor filter hide it")
+	}
+}

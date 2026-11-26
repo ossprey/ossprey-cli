@@ -36,9 +36,9 @@ matches is skipped whole and never walked, which is what makes a pattern
 faster than a scan that reads the files and discards them.
 
 A pattern is refused when it is absolute, climbs out with `..`, uses a
-backslash, or is made only of wildcards (`*`, `**`, `**/*`): that last would
-skip the whole project, and every scan would come back clean having checked
-nothing.
+backslash, or matches any name at all (`*`, `**/*`, `?*`, `{*,x}`, `[!.]*`):
+that last would skip the whole project, and every scan would come back clean
+having checked nothing.
 
 A scan that skips paths says so in one warning line naming the patterns
 (shown on a forwarded install only with `OSSPREY_VERBOSE=1`, like its other
@@ -47,10 +47,13 @@ forwarded installs. They do not apply to a requirements-file install, where
 a pattern such as `**/requirements*.txt` would hide every file it names, or
 to the [pre-commit hook](precommit.md), which reads only staged files.
 
-Ignored paths also count as part of the tree the scan cannot see for
-[trusted sources](trust.md): a Cargo config under an ignored directory could
-replace a trusted registry, so crates are not trusted by registry in a scan
-that ignores anything.
+Ignored paths also count as part of the tree the scan cannot see. A Cargo
+config under an ignored directory could replace a [trusted](trust.md)
+registry or build a vendored crate by path, so a scan that ignores anything
+trusts no crate by registry and reads
+[`cargo vendor` copies](ecosystems.md) in full. An ignored npm, yarn or pnpm
+lockfile is treated as absent: the project's `package.json` is resolved
+instead, as for a project with no lockfile.
 
 ## Where patterns come from
 
@@ -84,6 +87,7 @@ reported in one warning and not applied; the rest still apply. That only
 ever means more is read. A setting never stops a scan or an install.
 
 `ossprey config add`, `remove` and `unset` refuse to change a `config.json`
-they cannot fully read (invalid JSON, or a key they do not know, such as one
-written by a newer ossprey), since writing back only what they understood
-would delete the rest. Fix or remove the file first.
+they cannot fully read (invalid JSON, content after the settings, or a key
+they do not know, such as one written by a newer ossprey), since writing
+back only what they understood would delete the rest. Fix or remove the file
+first.

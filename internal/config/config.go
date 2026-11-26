@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -86,10 +87,20 @@ func LoadFile() (Settings, error) {
 	var raw Settings
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&raw); err != nil {
-		// Read again leniently, so a runtime load still keeps what it can.
+	err = dec.Decode(&raw)
+	if err == nil {
+		// Decode reads one value. Anything after it but whitespace is content
+		// this file holds and we did not read, which an edit would delete.
+		var extra json.RawMessage
+		if next := dec.Decode(&extra); next != io.EOF {
+			err = errors.New("unexpected content after the settings")
+		}
+	}
+	if err != nil {
+		// Read the first value again leniently, so a runtime load still keeps
+		// the patterns it can read.
 		var lenient Settings
-		_ = json.Unmarshal(data, &lenient)
+		_ = json.NewDecoder(bytes.NewReader(data)).Decode(&lenient)
 		s, _ := validate(lenient)
 		return s, fmt.Errorf("parse config %s: %w", p, err)
 	}
@@ -164,9 +175,11 @@ func Save(s Settings) error {
 // Refused: an absolute path or one climbing out with "..", since the pattern
 // names part of the project and either would mean something else on every
 // machine; a backslash, which doublestar reads as an escape rather than a
-// separator; and a pattern made only of wildcards (`*`, `**`, `**/*`), which
-// would skip the whole project and turn every scan into a clean result that
-// checked nothing.
+// separator; and a pattern that matches an arbitrary name at the top of the
+// project (`*`, `**/*`, `?*`, `{*,x}`, `[!.]*`), which would skip the whole
+// project and turn every scan into a clean result that checked nothing. That
+// is judged by matching catchAllProbe rather than by listing wildcard
+// characters, since braces and classes can match everything without a `*`.
 func NormalizeIgnore(pattern string) (string, error) {
 	p := strings.TrimSpace(pattern)
 	if p == "" {
@@ -186,7 +199,6 @@ func NormalizeIgnore(pattern string) (string, error) {
 	if p == "" || p == "." {
 		return "", fmt.Errorf("ignore pattern %q would skip the whole project", pattern)
 	}
-	onlyWildcards := true
 	for _, s := range segments {
 		if s == "" || s == "." {
 			return "", fmt.Errorf("ignore pattern %q: empty or '.' path segment", pattern)
@@ -194,18 +206,20 @@ func NormalizeIgnore(pattern string) (string, error) {
 		if s == ".." {
 			return "", fmt.Errorf("ignore pattern %q: '..' would leave the scanned directory", pattern)
 		}
-		if strings.Trim(s, "*") != "" {
-			onlyWildcards = false
-		}
-	}
-	if onlyWildcards {
-		return "", fmt.Errorf("ignore pattern %q would skip the whole project", pattern)
 	}
 	if !doublestar.ValidatePattern(p) {
 		return "", fmt.Errorf("ignore pattern %q is not a valid glob", pattern)
 	}
+	if catchAll, _ := doublestar.Match(p, catchAllProbe); catchAll {
+		return "", fmt.Errorf("ignore pattern %q matches any name, so it would skip the whole project", pattern)
+	}
 	return p, nil
 }
+
+// catchAllProbe is a top-level name no project holds. A pattern matching it
+// matches names it was never written for, every top-level directory among
+// them.
+const catchAllProbe = "0ossprey0probe0"
 
 // validate keeps the valid parts of s and reports the rest.
 func validate(s Settings) (Settings, error) {
