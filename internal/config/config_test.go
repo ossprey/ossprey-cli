@@ -40,6 +40,12 @@ func TestNormalizeIgnore(t *testing.T) {
 		{"wf/*", "wf/*"},
 		{".*", ".*"},
 		{"*/*", "*/*"},
+		// Selective patterns that a single sample name once refused.
+		{"[0-9]*", "[0-9]*"},
+		{"0*", "0*"},
+		{"*0*", "*0*"},
+		{"*.*", "*.*"},
+		{"**/{fixtures,examples}", "**/{fixtures,examples}"},
 	} {
 		got, err := NormalizeIgnore(tc.in)
 		if err != nil || got != tc.want {
@@ -101,12 +107,12 @@ func TestSaveRoundTripsAndIsPrivate(t *testing.T) {
 func TestLoadAddsTheEnvironmentToTheFile(t *testing.T) {
 	dir := isolate(t)
 	writeConfig(t, dir, `{"scan":{"ignore":["wf"]}}`)
-	t.Setenv(IgnoreEnv, "wf, docs/my notes\n**/fixtures")
+	t.Setenv(IgnoreEnv, "wf, docs/my notes\n**/fixtures,**/{gen,out}/x,[a,b]*")
 	s, err := Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"wf", "docs/my notes", "**/fixtures"}; !slices.Equal(s.Scan.Ignore, want) {
+	if want := []string{"wf", "docs/my notes", "**/fixtures", "**/{gen,out}/x", "[a,b]*"}; !slices.Equal(s.Scan.Ignore, want) {
 		t.Errorf("ignore = %q, want %q", s.Scan.Ignore, want)
 	}
 }

@@ -175,11 +175,12 @@ func Save(s Settings) error {
 // Refused: an absolute path or one climbing out with "..", since the pattern
 // names part of the project and either would mean something else on every
 // machine; a backslash, which doublestar reads as an escape rather than a
-// separator; and a pattern that matches an arbitrary name at the top of the
-// project (`*`, `**/*`, `?*`, `{*,x}`, `[!.]*`), which would skip the whole
+// separator; and a pattern that matches every top-level name whatever its
+// shape (`*`, `**/*`, `?*`, `{*,x}`, `[!.]*`), which would skip the whole
 // project and turn every scan into a clean result that checked nothing. That
-// is judged by matching catchAllProbe rather than by listing wildcard
-// characters, since braces and classes can match everything without a `*`.
+// is judged by matching catchAllProbes rather than by listing wildcard
+// characters, since braces and classes can match everything without a `*`;
+// a pattern that misses any probe, such as `[0-9]*`, selects and is kept.
 func NormalizeIgnore(pattern string) (string, error) {
 	p := strings.TrimSpace(pattern)
 	if p == "" {
@@ -210,16 +211,26 @@ func NormalizeIgnore(pattern string) (string, error) {
 	if !doublestar.ValidatePattern(p) {
 		return "", fmt.Errorf("ignore pattern %q is not a valid glob", pattern)
 	}
-	if catchAll, _ := doublestar.Match(p, catchAllProbe); catchAll {
+	if matchesEveryProbe(p) {
 		return "", fmt.Errorf("ignore pattern %q matches any name, so it would skip the whole project", pattern)
 	}
 	return p, nil
 }
 
-// catchAllProbe is a top-level name no project holds. A pattern matching it
-// matches names it was never written for, every top-level directory among
-// them.
-const catchAllProbe = "0ossprey0probe0"
+// catchAllProbes are top-level names of different shapes: lowercase, a file
+// with an extension, a leading digit, a leading underscore and capital. A
+// pattern matching all of them matches whatever a project holds. None starts
+// with a dot, so `[!.]*`, which leaves only dotfiles, is still refused.
+var catchAllProbes = []string{"src", "package.json", "0probe9", "_Probe"}
+
+func matchesEveryProbe(pattern string) bool {
+	for _, name := range catchAllProbes {
+		if ok, _ := doublestar.Match(pattern, name); !ok {
+			return false
+		}
+	}
+	return true
+}
 
 // validate keeps the valid parts of s and reports the rest.
 func validate(s Settings) (Settings, error) {
@@ -236,13 +247,42 @@ func validate(s Settings) (Settings, error) {
 	return out, errors.Join(errs...)
 }
 
+// splitPatterns splits OSSPREY_SCAN_IGNORE on newlines, and on commas outside
+// a `{...}` alternation or `[...]` class, where a comma belongs to the glob:
+// `**/{fixtures,examples}` is one pattern, as it is in config.json.
 func splitPatterns(s string) []string {
 	var out []string
-	for _, f := range strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == '\n' }) {
-		if f = strings.TrimSpace(f); f != "" {
+	var cur strings.Builder
+	flush := func() {
+		if f := strings.TrimSpace(cur.String()); f != "" {
 			out = append(out, f)
 		}
+		cur.Reset()
 	}
+	braces, inClass := 0, false
+	for _, r := range s {
+		switch {
+		case r == '\n':
+			flush()
+			braces, inClass = 0, false
+			continue
+		case inClass:
+			if r == ']' {
+				inClass = false
+			}
+		case r == '[':
+			inClass = true
+		case r == '{':
+			braces++
+		case r == '}' && braces > 0:
+			braces--
+		case r == ',' && braces == 0:
+			flush()
+			continue
+		}
+		cur.WriteRune(r)
+	}
+	flush()
 	return out
 }
 

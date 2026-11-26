@@ -38,7 +38,8 @@ faster than a scan that reads the files and discards them.
 A pattern is refused when it is absolute, climbs out with `..`, uses a
 backslash, or matches any name at all (`*`, `**/*`, `?*`, `{*,x}`, `[!.]*`):
 that last would skip the whole project, and every scan would come back clean
-having checked nothing.
+having checked nothing. A pattern that selects, such as `[0-9]*` or `*.*`, is
+kept.
 
 A scan that skips paths says so in one warning line naming the patterns
 (shown on a forwarded install only with `OSSPREY_VERBOSE=1`, like its other
@@ -53,7 +54,8 @@ registry or build a vendored crate by path, so a scan that ignores anything
 trusts no crate by registry and reads
 [`cargo vendor` copies](ecosystems.md) in full. An ignored npm, yarn or pnpm
 lockfile is treated as absent: the project's `package.json` is resolved
-instead, as for a project with no lockfile.
+instead, as for a project with no lockfile. An ignored `Cargo.lock` is absent
+too, so a git `[patch]` or `[replace]` target is read from `Cargo.toml`.
 
 ## Where patterns come from
 
@@ -61,7 +63,8 @@ All of these add together; none replaces another:
 
 1. `ossprey scan --ignore <pattern>`, repeatable, for that one scan.
 2. `OSSPREY_SCAN_IGNORE`, separated by commas or newlines (so a pattern may
-   contain a space).
+   contain a space). A comma inside `{...}` or `[...]` belongs to the
+   pattern, so `**/{fixtures,examples}` is one pattern here too.
 3. `config.json`, written by `ossprey config`, beside your login in
    `$OSSPREY_CONFIG_DIR` or your user config directory (`~/.config/ossprey`
    on Linux, `~/Library/Application Support/ossprey` on macOS,

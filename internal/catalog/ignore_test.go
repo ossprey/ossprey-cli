@@ -174,3 +174,31 @@ func TestIgnoreTurnsTheCargoVendorFilterOff(t *testing.T) {
 		t.Error("ignoring the config that builds the crate let the vendor filter hide it")
 	}
 }
+
+// TestIgnoredCargoLockDoesNotHideAGitPatch: a [patch] git target the root's
+// Cargo.lock records is left to the lock, which syft reads. An ignored lock is
+// never read, so if it still recorded the target the fork would go out from
+// neither file; the manifest's target goes out instead, as for a lock the
+// lockfile caps hide.
+func TestIgnoredCargoLockDoesNotHideAGitPatch(t *testing.T) {
+	t.Setenv("CARGO_HOME", t.TempDir())
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{
+		"Cargo.toml": lockless7,
+		"Cargo.lock": appLock(gitSerde("#" + patchRev)),
+	})
+	components := func(ignore ...string) []string {
+		t.Helper()
+		got, err := Catalog(context.Background(), dir, Options{NoExec: true, Ignore: ignore})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cargoComponents(t, got, dir)
+	}
+	if got := components(); !slices.Contains(got, "serde@1.0.100?vcs_url=git+https://github.com/evil/serde@"+patchRev+" Cargo.lock") {
+		t.Fatalf("with the lock read, want the fork from the lock: %q", got)
+	}
+	if got := components("Cargo.lock"); !slices.Contains(got, "serde@?vcs_url=git+https://github.com/evil/serde Cargo.toml") {
+		t.Errorf("with the lock ignored, the fork went out from neither file: %q", got)
+	}
+}
