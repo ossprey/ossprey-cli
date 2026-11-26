@@ -587,7 +587,7 @@ func clearDepthLimitedCrateRegistries(ctx context.Context, pkgs []Package, polic
 func ignoreEntry(patterns []string) warn.Entry {
 	return warn.Entry{
 		Class: "scan:ignore",
-		One: fmt.Sprintf("skipped paths matching %d ignore pattern(s) from your config: %s (see `ossprey config list`)",
+		One: fmt.Sprintf("skipped paths matching %d ignore pattern(s): %s (stored ones: `ossprey config list`)",
 			len(patterns), strings.Join(patterns, ", ")),
 	}
 }

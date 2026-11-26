@@ -1,5 +1,6 @@
-// Package config holds the machine's scan settings: config.json beside
-// credentials.json, overlaid by the environment. It is never read from the
+// Package config holds the machine's scan settings, today the paths every
+// project scan leaves out: config.json beside credentials.json, plus the
+// environment. It is never read from the
 // repository being scanned, for the same reason trust.json is not: an ignore
 // pattern is a hole in the scan, and a pull request must not be able to open
 // one for itself.
@@ -13,12 +14,9 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 
 	"github.com/bmatcuk/doublestar/v4"
-
-	"github.com/ossprey/ossprey-cli/internal/env"
 )
 
 // IgnoreEnv adds ignore patterns from the environment, for CI and other
@@ -26,30 +24,22 @@ import (
 // so a pattern may hold a space.
 const IgnoreEnv = "OSSPREY_SCAN_IGNORE"
 
-// Keys are the settings `ossprey config` reads and writes.
-const (
-	KeyScanDepth  = "scan.depth"
-	KeyScanIgnore = "scan.ignore"
-)
+// KeyScanIgnore is the one setting `ossprey config` reads and writes.
+const KeyScanIgnore = "scan.ignore"
 
-// Keys lists every setting, for help text and errors.
-var Keys = []string{KeyScanDepth, KeyScanIgnore}
-
-// Settings is config.json. A nil Depth is unset, which is not the same as 0:
-// 0 reads the whole tree, while unset leaves the choice to the caller (the
-// forwarders pick a depth per install).
+// Settings is config.json. The file is nested by area so a later setting
+// has somewhere to go without a new file.
 type Settings struct {
 	Scan Scan `json:"scan"`
 }
 
 // Scan holds the settings that shape a project scan.
 type Scan struct {
-	Depth  *int     `json:"depth,omitempty"`
 	Ignore []string `json:"ignore,omitempty"`
 }
 
 // Empty reports whether nothing is set.
-func (s Settings) Empty() bool { return s.Scan.Depth == nil && len(s.Scan.Ignore) == 0 }
+func (s Settings) Empty() bool { return len(s.Scan.Ignore) == 0 }
 
 // Path returns the settings file: $OSSPREY_CONFIG_DIR/config.json when set,
 // else <user config dir>/ossprey/config.json, beside credentials.json.
@@ -64,27 +54,22 @@ func Path() (string, error) {
 	return filepath.Join(dir, "ossprey", "config.json"), nil
 }
 
-// Load returns the stored settings with the environment's laid over them:
-// OSSPREY_SCAN_DEPTH replaces the file's depth, and OSSPREY_SCAN_IGNORE adds
-// to its patterns.
+// Load returns the stored settings with OSSPREY_SCAN_IGNORE's patterns added.
 //
 // It always returns the usable part. A non-nil error means some of it was
 // not usable, and the caller should say so and carry on: a pattern dropped
-// here only means more is scanned, and a depth dropped here means the
-// default, so nothing is skipped that the user did not ask to skip.
+// here only means more is scanned, so nothing is skipped that the user did
+// not ask to skip.
 func Load() (Settings, error) {
 	file, fileErr := LoadFile()
 	fromEnv, envErr := FromEnv()
 	merged := file
-	if fromEnv.Scan.Depth != nil {
-		merged.Scan.Depth = fromEnv.Scan.Depth
-	}
 	merged.Scan.Ignore = union(file.Scan.Ignore, fromEnv.Scan.Ignore)
 	return merged, errors.Join(fileErr, envErr)
 }
 
 // LoadFile reads config.json. A missing file is empty settings, not an error.
-// An unknown key is an error, so that `config set` and friends refuse to
+// An unknown key is an error, so that `config add` and friends refuse to
 // rewrite a file written by a newer ossprey (or holding a typo) and lose it.
 func LoadFile() (Settings, error) {
 	p, err := Path()
@@ -108,7 +93,7 @@ func LoadFile() (Settings, error) {
 		s, _ := validate(lenient)
 		return s, fmt.Errorf("parse config %s: %w", p, err)
 	}
-	// Re-validated on the way in, not just on `config set`: the file is plain
+	// Re-validated on the way in, not just on `config add`: the file is plain
 	// JSON and anyone can edit it.
 	s, err := validate(raw)
 	if err != nil {
@@ -117,15 +102,10 @@ func LoadFile() (Settings, error) {
 	return s, err
 }
 
-// FromEnv reads OSSPREY_SCAN_DEPTH and OSSPREY_SCAN_IGNORE.
+// FromEnv reads OSSPREY_SCAN_IGNORE.
 func FromEnv() (Settings, error) {
 	var s Settings
 	var errs []error
-	if d, set, err := env.ScanDepth(); err != nil {
-		errs = append(errs, err)
-	} else if set {
-		s.Scan.Depth = &d
-	}
 	for _, p := range splitPatterns(os.Getenv(IgnoreEnv)) {
 		n, err := NormalizeIgnore(p)
 		if err != nil {
@@ -171,15 +151,6 @@ func Save(s Settings) error {
 		return fmt.Errorf("write config: %w", err)
 	}
 	return nil
-}
-
-// ParseDepth reads a depth typed for `config set scan.depth`.
-func ParseDepth(v string) (int, error) {
-	d, err := strconv.Atoi(strings.TrimSpace(v))
-	if err != nil || d < 0 {
-		return 0, fmt.Errorf("%s must be 0 (no limit) or more, got %q", KeyScanDepth, v)
-	}
-	return d, nil
 }
 
 // NormalizeIgnore validates an ignore pattern and returns it in the form
@@ -240,14 +211,6 @@ func NormalizeIgnore(pattern string) (string, error) {
 func validate(s Settings) (Settings, error) {
 	var out Settings
 	var errs []error
-	if d := s.Scan.Depth; d != nil {
-		if *d < 0 {
-			errs = append(errs, fmt.Errorf("%s must be 0 (no limit) or more, got %d", KeyScanDepth, *d))
-		} else {
-			v := *d
-			out.Scan.Depth = &v
-		}
-	}
 	for _, p := range s.Scan.Ignore {
 		n, err := NormalizeIgnore(p)
 		if err != nil {

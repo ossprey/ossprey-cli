@@ -27,7 +27,6 @@ import (
 	"github.com/ossprey/ossprey-cli/internal/ansi"
 	"github.com/ossprey/ossprey-cli/internal/catalog"
 	"github.com/ossprey/ossprey-cli/internal/check"
-	"github.com/ossprey/ossprey-cli/internal/config"
 	"github.com/ossprey/ossprey-cli/internal/env"
 	"github.com/ossprey/ossprey-cli/internal/monitor"
 	"github.com/ossprey/ossprey-cli/internal/ossbom"
@@ -438,10 +437,10 @@ type Options struct {
 	// recorded for each package (uv records none). Project scans apply all
 	// of it, from the lockfile.
 	Trust trust.Policy
-	// Scan is the machine's scan settings (config.json and the environment):
-	// a set depth replaces projectScanDepth's choice, and ignore patterns are
-	// left out of every project scan but the requirements-file copy.
-	Scan config.Scan
+	// Ignore holds the machine's ignore patterns (config.json and
+	// OSSPREY_SCAN_IGNORE; see internal/config), left out of every project
+	// scan but the requirements-file copy.
+	Ignore []string
 }
 
 // Run executes the forwarder flow:
@@ -577,7 +576,7 @@ func Run(ctx context.Context, opts Options) error {
 		// unchecked.
 		req := scanRequest{
 			APIURL: opts.APIURL, APIKey: opts.APIKey, MonitorID: opts.MonitorID,
-			Trust: opts.Trust, Scan: opts.Scan,
+			Trust: opts.Trust, Ignore: opts.Ignore,
 		}
 		if opts.Passive {
 			req.SubmitOnly = true
@@ -666,7 +665,7 @@ func Run(ctx context.Context, opts Options) error {
 				return scanProjectFn(ctx, scanRequest{
 					Dir: dir, APIURL: opts.APIURL, APIKey: opts.APIKey,
 					MonitorID: opts.MonitorID, SubmitOnly: true, Trust: opts.Trust,
-					Redirected: redirectsProject(opts.Args), Scan: opts.Scan,
+					Redirected: redirectsProject(opts.Args), Ignore: opts.Ignore,
 				})
 			}, nil)
 		}
@@ -679,7 +678,7 @@ func Run(ctx context.Context, opts Options) error {
 		defer cleanup()
 		sbom, err := scanProjectFn(ctx, scanRequest{
 			Dir: dir, APIURL: opts.APIURL, APIKey: opts.APIKey, MonitorID: opts.MonitorID,
-			Trust: opts.Trust, Redirected: redirectsProject(opts.Args), Scan: opts.Scan,
+			Trust: opts.Trust, Redirected: redirectsProject(opts.Args), Ignore: opts.Ignore,
 		})
 		cleanup()
 		stop()
@@ -952,15 +951,15 @@ type scanRequest struct {
 	Redirected bool
 	// Trust is passed to the scan; trusted packages are not sent.
 	Trust trust.Policy
-	// Scan carries Options.Scan to the project scan.
-	Scan config.Scan
+	// Ignore carries Options.Ignore to the project scan.
+	Ignore []string
 	// Specs are packages named on the command line beside a requirements
 	// file. They are submitted with the scan, so one verdict covers both.
 	Specs []check.Spec
 }
 
 func scanProject(ctx context.Context, req scanRequest) (*ossbom.SBOM, error) {
-	depth, ignore := projectScanDepth(req), projectScanIgnore(req)
+	depth, ignore := projectScanDepth(ctx, req), projectScanIgnore(req)
 	sbom, err := scan.Run(ctx, scan.Options{Path: req.Dir, NoExec: req.Installed, Trust: req.Trust, MaxDepth: depth, Ignore: ignore})
 	if err != nil {
 		return nil, err
@@ -1014,19 +1013,19 @@ func scanProject(ctx context.Context, req scanRequest) (*ossbom.SBOM, error) {
 //   - An install redirected at another directory (redirectsProject), which
 //     is usually below this one and was read by the whole-tree scan.
 //
-// A configured depth (`ossprey config set scan.depth`, or OSSPREY_SCAN_DEPTH,
-// which wins over the file; see internal/config) overrides all but the
-// requirements copy, 0 meaning the whole tree; a value that does not parse
-// was already reported where the settings were loaded, and leaves the
-// default. It never applies to the requirements copy: that tree holds only
-// the files the install names, so there is no walk to save, and a limit of 1
-// would hide every one of them and forward the install as clean.
-func projectScanDepth(req scanRequest) int {
+// OSSPREY_SCAN_DEPTH overrides all but the requirements copy, 0 meaning the
+// whole tree; a value that does not parse is a warning and the default. It
+// never applies to the requirements copy: that tree holds only the files the
+// install names, so there is no walk to save, and a limit of 1 would hide
+// every one of them and forward the install as clean.
+func projectScanDepth(ctx context.Context, req scanRequest) int {
 	if req.Dir != "." {
 		return 0
 	}
-	if d := req.Scan.Depth; d != nil {
-		return *d
+	if d, set, err := env.ScanDepth(); err != nil {
+		warn.Add(ctx, warn.Entry{Class: "scan-depth", One: err.Error() + "; using the default"})
+	} else if set {
+		return d
 	}
 	if req.Redirected || catalog.IsWorkspaceRoot(req.Dir) || catalog.HasLocalDeps(req.Dir) {
 		return 0
@@ -1043,7 +1042,7 @@ func projectScanIgnore(req scanRequest) []string {
 	if req.Dir != "." {
 		return nil
 	}
-	return req.Scan.Ignore
+	return req.Ignore
 }
 
 // redirectsProject reports whether args point the manager at a directory
@@ -1110,7 +1109,7 @@ func passiveAfterInstall(ctx context.Context, m *Manager, opts Options) error {
 		SubmitOnly: true,
 		Installed:  true,
 		Trust:      opts.Trust,
-		Scan:       opts.Scan,
+		Ignore:     opts.Ignore,
 	})
 	stop()
 

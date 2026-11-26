@@ -9,10 +9,7 @@ import (
 	"testing"
 
 	"github.com/ossprey/ossprey-cli/internal/config"
-	"github.com/ossprey/ossprey-cli/internal/env"
 )
-
-func ptr(v int) *int { return &v }
 
 func runConfig(t *testing.T, args ...string) (string, error) {
 	t.Helper()
@@ -25,15 +22,12 @@ func runConfig(t *testing.T, args ...string) (string, error) {
 	return out.String(), err
 }
 
-func TestConfigSetAddListRemoveUnset(t *testing.T) {
+func TestConfigAddListRemoveUnset(t *testing.T) {
 	dir := isolateConfig(t)
 
 	out, err := runConfig(t, "list")
-	if err != nil || !strings.Contains(out, "No scan settings") {
+	if err != nil || !strings.Contains(out, "Nothing is ignored") {
 		t.Fatalf("empty list: %q, %v", out, err)
-	}
-	if _, err := runConfig(t, "set", "scan.depth", "1"); err != nil {
-		t.Fatal(err)
 	}
 	if _, err := runConfig(t, "add", "scan.ignore", "./wf/", "**/fixtures"); err != nil {
 		t.Fatal(err)
@@ -51,25 +45,23 @@ func TestConfigSetAddListRemoveUnset(t *testing.T) {
 	if err := json.Unmarshal(data, &stored); err != nil {
 		t.Fatal(err)
 	}
-	if stored.Scan.Depth == nil || *stored.Scan.Depth != 1 || strings.Join(stored.Scan.Ignore, ",") != "wf,**/fixtures" {
+	if strings.Join(stored.Scan.Ignore, ",") != "wf,**/fixtures" {
 		t.Fatalf("stored %s", data)
 	}
 
-	t.Setenv(config.IgnoreEnv, "docs")
+	t.Setenv(config.IgnoreEnv, "docs,wf")
 	out, err = runConfig(t, "list")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"scan.depth = 1", "  wf\n", "  **/fixtures\n", "docs  (from OSSPREY_SCAN_IGNORE)", filepath.Join(dir, "config.json")} {
+	for _, want := range []string{"  wf\n", "  **/fixtures\n", "docs  (from OSSPREY_SCAN_IGNORE)", filepath.Join(dir, "config.json")} {
 		if !strings.Contains(out, want) {
 			t.Errorf("list output lacks %q:\n%s", want, out)
 		}
 	}
-	t.Setenv(env.ScanDepthEnv, "3")
-	if out, _ = runConfig(t, "list"); !strings.Contains(out, "scan.depth = 3  (from OSSPREY_SCAN_DEPTH, replacing 1 from the file)") {
-		t.Errorf("list does not show the variable replacing the file's depth:\n%s", out)
+	if strings.Contains(out, "wf  (from") {
+		t.Errorf("a pattern in both the file and the variable was listed twice:\n%s", out)
 	}
-	t.Setenv(env.ScanDepthEnv, "")
 	t.Setenv(config.IgnoreEnv, "")
 
 	if _, err := runConfig(t, "remove", "scan.ignore", "wf"); err != nil {
@@ -78,33 +70,26 @@ func TestConfigSetAddListRemoveUnset(t *testing.T) {
 	if _, err := runConfig(t, "remove", "scan.ignore", "wf"); err == nil {
 		t.Error("removing a pattern that is not there should fail")
 	}
-	if _, err := runConfig(t, "unset", "scan.depth"); err != nil {
-		t.Fatal(err)
-	}
-	s, err := config.LoadFile()
-	if err != nil || s.Scan.Depth != nil || strings.Join(s.Scan.Ignore, ",") != "**/fixtures" {
-		t.Fatalf("after remove and unset: %+v, %v", s, err)
+	if s, err := config.LoadFile(); err != nil || strings.Join(s.Scan.Ignore, ",") != "**/fixtures" {
+		t.Fatalf("after remove: %+v, %v", s, err)
 	}
 	if _, err := runConfig(t, "unset", "scan.ignore"); err != nil {
 		t.Fatal(err)
 	}
 	if s, _ := config.LoadFile(); !s.Empty() {
-		t.Fatalf("after unsetting both: %+v", s)
+		t.Fatalf("after unset: %+v", s)
 	}
 }
 
 func TestConfigRejectsBadInputWithoutWriting(t *testing.T) {
 	dir := isolateConfig(t)
 	for _, args := range [][]string{
-		{"set", "scan.depth", "-1"},
-		{"set", "scan.depth", "deep"},
-		{"set", "scan.ignore", "wf"},
-		{"set", "scan.dpeth", "1"},
 		{"add", "scan.depth", "1"},
+		{"add", "scan.ignroe", "wf"},
 		{"add", "scan.ignore", "wf", "**"},
 		{"add", "scan.ignore", "../outside"},
 		{"remove", "scan.ignore", "/abs"},
-		{"unset", "scan.nothing"},
+		{"unset", "scan.depth"},
 	} {
 		if _, err := runConfig(t, args...); err == nil {
 			t.Errorf("config %q: want an error", args)
@@ -120,7 +105,7 @@ func TestConfigRejectsBadInputWithoutWriting(t *testing.T) {
 // would delete the rest, including a key a newer ossprey wrote.
 func TestConfigRefusesToRewriteAFileItCannotRead(t *testing.T) {
 	dir := isolateConfig(t)
-	const content = `{"scan":{"depth":1},"future":{"x":true}}`
+	const content = `{"scan":{"ignore":["docs"]},"future":{"x":true}}`
 	path := filepath.Join(dir, "config.json")
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)

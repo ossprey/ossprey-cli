@@ -7,8 +7,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-
-	"github.com/ossprey/ossprey-cli/internal/env"
 )
 
 // isolate points the config at a fresh directory and clears the variables
@@ -17,7 +15,6 @@ func isolate(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	t.Setenv("OSSPREY_CONFIG_DIR", dir)
-	t.Setenv(env.ScanDepthEnv, "")
 	t.Setenv(IgnoreEnv, "")
 	return dir
 }
@@ -63,19 +60,6 @@ func TestNormalizeIgnore(t *testing.T) {
 	}
 }
 
-func TestParseDepth(t *testing.T) {
-	for in, want := range map[string]int{"0": 0, "1": 1, " 3 ": 3} {
-		if got, err := ParseDepth(in); err != nil || got != want {
-			t.Errorf("ParseDepth(%q) = %d, %v; want %d", in, got, err, want)
-		}
-	}
-	for _, in := range []string{"", "-1", "deep", "1.5", "1abc"} {
-		if _, err := ParseDepth(in); err == nil {
-			t.Errorf("ParseDepth(%q): want an error", in)
-		}
-	}
-}
-
 func TestLoadMissingFileIsEmpty(t *testing.T) {
 	isolate(t)
 	s, err := Load()
@@ -86,8 +70,7 @@ func TestLoadMissingFileIsEmpty(t *testing.T) {
 
 func TestSaveRoundTripsAndIsPrivate(t *testing.T) {
 	dir := isolate(t)
-	d := 2
-	want := Settings{Scan: Scan{Depth: &d, Ignore: []string{"wf", "**/fixtures"}}}
+	want := Settings{Scan: Scan{Ignore: []string{"wf", "**/fixtures"}}}
 	if err := Save(want); err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +78,7 @@ func TestSaveRoundTripsAndIsPrivate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Scan.Depth == nil || *got.Scan.Depth != 2 || !slices.Equal(got.Scan.Ignore, want.Scan.Ignore) {
+	if !slices.Equal(got.Scan.Ignore, want.Scan.Ignore) {
 		t.Fatalf("round trip = %+v, want %+v", got, want)
 	}
 	if runtime.GOOS != "windows" {
@@ -107,61 +90,39 @@ func TestSaveRoundTripsAndIsPrivate(t *testing.T) {
 			t.Errorf("config.json mode = %v, want 0600", fi.Mode().Perm())
 		}
 	}
-	// A zero depth is a setting (the whole tree), not the absence of one.
-	zero := 0
-	if err := Save(Settings{Scan: Scan{Depth: &zero}}); err != nil {
-		t.Fatal(err)
-	}
-	if got, _ := LoadFile(); got.Scan.Depth == nil || *got.Scan.Depth != 0 {
-		t.Fatalf("depth 0 did not survive a round trip: %+v", got)
-	}
 }
 
-// TestLoadLaysTheEnvironmentOverTheFile pins the precedence: the variable's
-// depth replaces the file's, and its patterns add to the file's.
-func TestLoadLaysTheEnvironmentOverTheFile(t *testing.T) {
+// TestLoadAddsTheEnvironmentToTheFile pins that OSSPREY_SCAN_IGNORE adds to
+// the stored patterns, split on commas and newlines so a pattern may hold a
+// space, with a pattern in both listed once.
+func TestLoadAddsTheEnvironmentToTheFile(t *testing.T) {
 	dir := isolate(t)
-	writeConfig(t, dir, `{"scan":{"depth":3,"ignore":["wf"]}}`)
-
-	s, err := Load()
-	if err != nil || s.Scan.Depth == nil || *s.Scan.Depth != 3 || !slices.Equal(s.Scan.Ignore, []string{"wf"}) {
-		t.Fatalf("file only: %+v, %v", s, err)
-	}
-
-	t.Setenv(env.ScanDepthEnv, "1")
+	writeConfig(t, dir, `{"scan":{"ignore":["wf"]}}`)
 	t.Setenv(IgnoreEnv, "wf, docs/my notes\n**/fixtures")
-	s, err = Load()
+	s, err := Load()
 	if err != nil {
 		t.Fatal(err)
-	}
-	if s.Scan.Depth == nil || *s.Scan.Depth != 1 {
-		t.Errorf("depth = %v, want the variable's 1", s.Scan.Depth)
 	}
 	if want := []string{"wf", "docs/my notes", "**/fixtures"}; !slices.Equal(s.Scan.Ignore, want) {
 		t.Errorf("ignore = %q, want %q", s.Scan.Ignore, want)
 	}
 }
 
-// TestLoadKeepsWhatItCanRead pins the safe direction: a bad entry is dropped
-// with an error, and what remains still applies. Dropping a pattern scans more;
-// dropping a depth leaves the default.
+// TestLoadKeepsWhatItCanRead pins the safe direction: a bad pattern is
+// dropped with an error, which only means more is scanned, and the rest
+// still apply.
 func TestLoadKeepsWhatItCanRead(t *testing.T) {
 	dir := isolate(t)
-	writeConfig(t, dir, `{"scan":{"depth":-2,"ignore":["wf","**","../up"]}}`)
-	t.Setenv(env.ScanDepthEnv, "deep")
+	writeConfig(t, dir, `{"scan":{"ignore":["wf","**","../up"]}}`)
 	t.Setenv(IgnoreEnv, "/abs,fixtures")
-
 	s, err := Load()
 	if err == nil {
-		t.Fatal("want an error naming the bad entries")
+		t.Fatal("want an error naming the bad patterns")
 	}
-	for _, bad := range []string{"-2", `"**"`, "../up", "deep", "/abs"} {
+	for _, bad := range []string{`"**"`, "../up", "/abs"} {
 		if !strings.Contains(err.Error(), bad) {
 			t.Errorf("error %q does not name %s", err, bad)
 		}
-	}
-	if s.Scan.Depth != nil {
-		t.Errorf("depth = %d, want unset", *s.Scan.Depth)
 	}
 	if want := []string{"wf", "fixtures"}; !slices.Equal(s.Scan.Ignore, want) {
 		t.Errorf("ignore = %q, want %q", s.Scan.Ignore, want)
@@ -173,12 +134,12 @@ func TestLoadKeepsWhatItCanRead(t *testing.T) {
 // and a runtime load still applies the keys it knows.
 func TestLoadFileRejectsUnknownKeys(t *testing.T) {
 	dir := isolate(t)
-	writeConfig(t, dir, `{"scan":{"depth":1,"ignroe":["wf"]}}`)
+	writeConfig(t, dir, `{"scan":{"ignore":["wf"],"depth":1}}`)
 	s, err := LoadFile()
-	if err == nil || !strings.Contains(err.Error(), "ignroe") {
+	if err == nil || !strings.Contains(err.Error(), "depth") {
 		t.Fatalf("err = %v, want one naming the unknown key", err)
 	}
-	if s.Scan.Depth == nil || *s.Scan.Depth != 1 {
+	if !slices.Equal(s.Scan.Ignore, []string{"wf"}) {
 		t.Errorf("known key lost: %+v", s)
 	}
 }

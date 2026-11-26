@@ -5,16 +5,14 @@ import (
 	"fmt"
 	"io"
 	"slices"
-	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/ossprey/ossprey-cli/internal/config"
-	"github.com/ossprey/ossprey-cli/internal/env"
 )
 
-// loadSettings returns the machine's scan settings (config.json with
-// OSSPREY_SCAN_DEPTH and OSSPREY_SCAN_IGNORE laid over it). A problem with
+// loadSettings returns the machine's scan settings (config.json plus
+// OSSPREY_SCAN_IGNORE). A problem with
 // them is reported and survived, as loadTrust does: a setting that could not
 // be read is not applied, which only ever means more is scanned.
 func loadSettings(w io.Writer) config.Settings {
@@ -28,24 +26,19 @@ func loadSettings(w io.Writer) config.Settings {
 func newConfigCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "config",
-		Short: "Manage this machine's scan settings (depth, ignored paths)",
-		Long: `Store scan settings on this machine, so they apply to every scan and every
-forwarded install without being set each time.
+		Short: "Manage this machine's scan settings (paths every scan leaves out)",
+		Long: `Store paths on this machine that every project scan leaves out, so they apply
+to every scan and every forwarded install without being typed each time.
 
-  scan.depth    how many directory levels a project scan reads: 1 is the scanned
-                directory's own files, 0 the whole tree. Unset, ` + "`ossprey scan`" + ` reads
-                the whole tree and a forwarded install picks its own depth.
-  scan.ignore   paths left out of every project scan, as globs relative to the
-                scanned directory: ` + "`wf`" + ` is the top-level wf directory, ` + "`**/fixtures`" + `
-                a fixtures directory at any depth. A matching directory is
-                skipped whole.
+  scan.ignore   globs relative to the scanned directory: ` + "`wf`" + ` is the top-level
+                wf directory, ` + "`**/fixtures`" + ` a fixtures directory at any depth. A
+                matching directory is skipped whole.
 
 Settings are stored on this machine, in config.json beside your login, and are
-never read from the repository being scanned. OSSPREY_SCAN_DEPTH replaces the
-stored depth, and OSSPREY_SCAN_IGNORE (comma or newline separated) adds patterns.
-A flag on ` + "`ossprey scan`" + ` wins over both.`,
+never read from the repository being scanned. OSSPREY_SCAN_IGNORE (comma or
+newline separated) and ` + "`ossprey scan --ignore`" + ` add patterns to them.`,
 	}
-	cmd.AddCommand(newConfigListCmd(), newConfigSetCmd(), newConfigUnsetCmd(), newConfigAddCmd(), newConfigRemoveCmd())
+	cmd.AddCommand(newConfigListCmd(), newConfigAddCmd(), newConfigRemoveCmd(), newConfigUnsetCmd())
 	return cmd
 }
 
@@ -66,30 +59,18 @@ func newConfigListCmd() *cobra.Command {
 				fmt.Fprintf(cmd.ErrOrStderr(), "ossprey: warning: %v\n", err)
 			}
 			if file.Empty() && fromEnv.Empty() {
-				fmt.Fprintln(out, "No scan settings: `ossprey scan` reads the whole tree and nothing is ignored.")
-				fmt.Fprintln(out, "Set one with `ossprey config set scan.depth <n>` or `ossprey config add scan.ignore <pattern>`.")
+				fmt.Fprintln(out, "Nothing is ignored; every scan reads the whole project.")
+				fmt.Fprintln(out, "Add a path with `ossprey config add scan.ignore <pattern>`.")
 				fmt.Fprintf(out, "\nConfig file: %s\n", path)
 				return nil
 			}
-			switch {
-			case fromEnv.Scan.Depth != nil:
-				fmt.Fprintf(out, "%s = %d  (from %s", config.KeyScanDepth, *fromEnv.Scan.Depth, env.ScanDepthEnv)
-				if file.Scan.Depth != nil {
-					fmt.Fprintf(out, ", replacing %d from the file", *file.Scan.Depth)
-				}
-				fmt.Fprintln(out, ")")
-			case file.Scan.Depth != nil:
-				fmt.Fprintf(out, "%s = %d\n", config.KeyScanDepth, *file.Scan.Depth)
+			fmt.Fprintf(out, "%s:\n", config.KeyScanIgnore)
+			for _, p := range file.Scan.Ignore {
+				fmt.Fprintf(out, "  %s\n", p)
 			}
-			if len(file.Scan.Ignore) > 0 || len(fromEnv.Scan.Ignore) > 0 {
-				fmt.Fprintf(out, "%s:\n", config.KeyScanIgnore)
-				for _, p := range file.Scan.Ignore {
-					fmt.Fprintf(out, "  %s\n", p)
-				}
-				for _, p := range fromEnv.Scan.Ignore {
-					if !slices.Contains(file.Scan.Ignore, p) {
-						fmt.Fprintf(out, "  %s  (from %s)\n", p, config.IgnoreEnv)
-					}
+			for _, p := range fromEnv.Scan.Ignore {
+				if !slices.Contains(file.Scan.Ignore, p) {
+					fmt.Fprintf(out, "  %s  (from %s)\n", p, config.IgnoreEnv)
 				}
 			}
 			fmt.Fprintf(out, "\nConfig file: %s\n", path)
@@ -112,68 +93,28 @@ func editConfig(change func(*config.Settings) error) error {
 	return config.Save(current)
 }
 
-// checkKey rejects a key that is not a setting, or one that takes the other
-// kind of verb (set/unset for a value, add/remove for a list).
-func checkKey(key string, verbs ...string) error {
-	if !slices.Contains(config.Keys, key) {
-		return fmt.Errorf("unknown setting %q; settings are %s", key, strings.Join(config.Keys, ", "))
-	}
-	isList := key == config.KeyScanIgnore
-	verb := verbs[0]
-	if isList != (verb == "add" || verb == "remove") {
-		if isList {
-			return fmt.Errorf("%s is a list: use `ossprey config add %s <pattern>` or `remove`", key, key)
-		}
-		return fmt.Errorf("%s is a single value: use `ossprey config set %s <value>`", key, key)
+// checkKey rejects anything but the one setting there is.
+func checkKey(key string) error {
+	if key != config.KeyScanIgnore {
+		return fmt.Errorf("unknown setting %q; the only setting is %s", key, config.KeyScanIgnore)
 	}
 	return nil
 }
 
-func newConfigSetCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:     "set <key> <value>",
-		Short:   "Set a scan setting",
-		Example: "  ossprey config set scan.depth 1",
-		Args:    cobra.ExactArgs(2),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := checkKey(args[0], "set"); err != nil {
-				return err
-			}
-			d, err := config.ParseDepth(args[1])
-			if err != nil {
-				return err
-			}
-			if err := editConfig(func(s *config.Settings) error { s.Scan.Depth = &d; return nil }); err != nil {
-				return err
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Set %s = %d\n", config.KeyScanDepth, d)
-			return nil
-		},
-	}
-}
-
 func newConfigUnsetCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:     "unset <key>",
-		Short:   "Remove a scan setting (for scan.ignore, every pattern)",
-		Example: "  ossprey config unset scan.depth",
+		Use:     "unset scan.ignore",
+		Short:   "Remove every stored ignore pattern",
+		Example: "  ossprey config unset scan.ignore",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			key := args[0]
-			if !slices.Contains(config.Keys, key) {
-				return fmt.Errorf("unknown setting %q; settings are %s", key, strings.Join(config.Keys, ", "))
-			}
-			if err := editConfig(func(s *config.Settings) error {
-				if key == config.KeyScanDepth {
-					s.Scan.Depth = nil
-				} else {
-					s.Scan.Ignore = nil
-				}
-				return nil
-			}); err != nil {
+			if err := checkKey(args[0]); err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Unset %s\n", key)
+			if err := editConfig(func(s *config.Settings) error { s.Scan.Ignore = nil; return nil }); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "Unset %s\n", config.KeyScanIgnore)
 			return nil
 		},
 	}
@@ -201,7 +142,7 @@ func newConfigAddCmd() *cobra.Command {
   ossprey config add scan.ignore '**/fixtures' 'docs/**/*.md'`,
 		Args: cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := checkKey(args[0], "add"); err != nil {
+			if err := checkKey(args[0]); err != nil {
 				return err
 			}
 			add, err := normalizePatterns(args[1:])
@@ -233,7 +174,7 @@ func newConfigRemoveCmd() *cobra.Command {
 		Example: "  ossprey config remove scan.ignore wf",
 		Args:    cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := checkKey(args[0], "remove"); err != nil {
+			if err := checkKey(args[0]); err != nil {
 				return err
 			}
 			drop, err := normalizePatterns(args[1:])

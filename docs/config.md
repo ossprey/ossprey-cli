@@ -1,39 +1,23 @@
 # Scan settings
 
-`ossprey config` stores scan settings on your machine, so they apply to every
-`ossprey scan` and every [forwarded install](forwarder.md) without being
-typed or exported each time.
+`ossprey config` stores paths on your machine that every project scan leaves
+out, so they apply to every `ossprey scan` and every
+[forwarded install](forwarder.md) without being typed each time.
 
 ```sh
-ossprey config set scan.depth 1            # read one directory level
 ossprey config add scan.ignore wf          # never read the top-level wf/ directory
 ossprey config add scan.ignore '**/fixtures' 'docs/**/*.md'
-ossprey config list                        # what is set, and where it comes from
+ossprey config list                        # every pattern, and where it comes from
 ossprey config remove scan.ignore wf
-ossprey config unset scan.depth            # back to the default
+ossprey config unset scan.ignore           # remove every stored pattern
 ```
 
-## Settings
+For one scan, pass the same patterns to `ossprey scan --ignore` instead (see
+[below](#where-patterns-come-from)). How deep a scan reads is a separate
+control: `scan --depth` and `OSSPREY_SCAN_DEPTH`, in the
+[CLI reference](cli-reference.md).
 
-| Key | Kind | Meaning |
-| --- | ---- | ------- |
-| `scan.depth` | number | How many directory levels a project scan reads. `1` is the scanned directory's own files, `2` adds its immediate subdirectories, `0` is the whole tree. |
-| `scan.ignore` | list | Paths left out of every project scan. |
-
-### `scan.depth`
-
-Unset, `ossprey scan` reads the whole tree, and a forwarded install picks its
-own depth: the directory it runs in, or the whole tree when the install
-reaches below it (see [what is checked](forwarder.md#what-is-checked)). Once
-set, the value replaces that choice everywhere, including in a workspace root,
-where a depth of `1` leaves out members' dependencies that are not in the root
-lockfile. `0` is a setting of its own, the whole tree, and is not the same as
-unset.
-
-A requirements-file install (`pip install -r requirements.txt`) ignores it and
-always reads every file it names.
-
-### `scan.ignore`
+## `scan.ignore`
 
 Each pattern is a glob relative to the directory being scanned, with `/` as
 the separator:
@@ -68,41 +52,38 @@ Ignored paths also count as part of the tree the scan cannot see for
 replace a trusted registry, so crates are not trusted by registry in a scan
 that ignores anything.
 
-## Where settings come from
+## Where patterns come from
 
-From strongest to weakest:
+All of these add together; none replaces another:
 
-1. A flag on `ossprey scan`: `--depth`, and `--ignore <pattern>`
-   (repeatable), whose patterns are added to the configured ones.
-2. The environment: `OSSPREY_SCAN_DEPTH` replaces the stored depth, and
-   `OSSPREY_SCAN_IGNORE` adds patterns, separated by commas or newlines (so a
-   pattern may contain a space).
+1. `ossprey scan --ignore <pattern>`, repeatable, for that one scan.
+2. `OSSPREY_SCAN_IGNORE`, separated by commas or newlines (so a pattern may
+   contain a space).
 3. `config.json`, written by `ossprey config`, beside your login in
    `$OSSPREY_CONFIG_DIR` or your user config directory (`~/.config/ossprey`
    on Linux, `~/Library/Application Support/ossprey` on macOS,
    `%AppData%\ossprey` on Windows).
 
-The forwarders parse no flags of their own, so for them it is the environment
-and then the file.
+The forwarders parse no flags of their own, so for them it is the
+environment and the file.
 
 ## Never from the repository
 
-Settings are read from your machine and your environment only, never from a
+Patterns are read from your machine and your environment only, never from a
 file in the repository being scanned. An ignore pattern is a hole in the
 scan: a repository file could add `ignore: [evil]` in the same pull request
 that adds a malicious manifest under `evil/`, and a CI scan of that pull
 request would skip it. [Trusted sources](trust.md) are machine-level for the
-same reason. In CI, set `OSSPREY_SCAN_IGNORE` or `OSSPREY_SCAN_DEPTH` in the
+same reason. In CI, set `OSSPREY_SCAN_IGNORE` or pass `--ignore` in the
 workflow.
 
-## When a setting cannot be read
+## When a pattern cannot be read
 
-A value that does not validate, in the file or the environment, is reported in
-one warning and not applied; the rest still apply. That only ever means more
-is read: a dropped pattern is scanned, and a dropped depth falls back to the
-default. A setting never stops a scan or an install.
+A pattern that does not validate, in the file or the environment, is
+reported in one warning and not applied; the rest still apply. That only
+ever means more is read. A setting never stops a scan or an install.
 
-`ossprey config set`, `add`, `remove` and `unset` refuse to change a
-`config.json` they cannot fully read (invalid JSON, or a key they do not
-know, such as one written by a newer ossprey), since writing back only what
-they understood would delete the rest. Fix or remove the file first.
+`ossprey config add`, `remove` and `unset` refuse to change a `config.json`
+they cannot fully read (invalid JSON, or a key they do not know, such as one
+written by a newer ossprey), since writing back only what they understood
+would delete the rest. Fix or remove the file first.
