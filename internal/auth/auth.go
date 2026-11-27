@@ -171,6 +171,12 @@ func (c Config) PollToken(ctx context.Context, hc *http.Client, dc *DeviceCode) 
 		case "expired_token":
 			return nil, errors.New("login timed out: device code expired before the login was approved")
 		case "access_denied":
+			// A rule on the tenant (an unverified email, an account awaiting
+			// approval, a company that has removed the user) also ends here,
+			// so pass on its reason rather than blaming the browser.
+			if tr.ErrorDescription != "" {
+				return nil, fmt.Errorf("login was not approved: %s", tr.ErrorDescription)
+			}
 			return nil, errors.New("login was declined in the browser")
 		default:
 			return nil, fmt.Errorf("login failed: %s: %s", tr.Error, tr.ErrorDescription)

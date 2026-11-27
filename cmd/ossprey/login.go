@@ -29,7 +29,11 @@ func newLoginCmd() *cobra.Command {
 Opens (or prints) a browser URL where you confirm a one-time code. The CLI
 stores the resulting tokens locally and uses them to authenticate scans, so
 no API key is needed. Tokens refresh automatically; run "ossprey logout" to
-remove them.`,
+remove them.
+
+If your company signs in to Ossprey with single sign-on, enter your work email
+on the sign-in page and you will be sent to your company's sign-in. The CLI
+never sees your company password.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			creds, err := runDeviceLogin(cmd.Context(), cmd.OutOrStdout(), cfg)
@@ -121,6 +125,7 @@ func runDeviceLogin(ctx context.Context, out io.Writer, cfg auth.Config) (*auth.
 	} else {
 		fmt.Fprintf(out, "Open this URL in a browser to complete the login:\n\n    %s\n\n", verifyURL)
 	}
+	fmt.Fprintln(out, "If your company uses single sign-on, enter your work email and you will be sent to its sign-in page.")
 	fmt.Fprintln(out, "Waiting for the login to be approved...")
 
 	creds, err := cfg.PollToken(ctx, nil, dc)

@@ -133,6 +133,21 @@ func TestPollToken_Denied(t *testing.T) {
 	}
 }
 
+func TestPollToken_DeniedWithReason(t *testing.T) {
+	// A tenant rule refusing the login sends its reason; the CLI must show it
+	// rather than say the user declined in the browser.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "access_denied", "error_description": "user is blocked"})
+	}))
+	defer srv.Close()
+
+	cfg := testConfig(srv)
+	_, err := cfg.PollToken(context.Background(), srv.Client(), &DeviceCode{DeviceCode: "d", ExpiresIn: 900})
+	if err == nil || err.Error() != "login was not approved: user is blocked" {
+		t.Fatalf("expected the tenant's reason, got %v", err)
+	}
+}
+
 func TestPollToken_Expired(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]any{"error": "expired_token"})
