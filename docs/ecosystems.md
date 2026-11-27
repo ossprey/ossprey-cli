@@ -28,7 +28,8 @@ project, because that check builds the project, running its `setup.py` or
 build backend. When `pyproject.toml` declares a dependency or a
 dependency-group entry the lock was not made from, the pyproject is also
 resolved with `uv pip compile --no-build` and both results are scanned; if that
-needs a build, a warning says only the lock was read. A project that computes
+resolve fails, for example because it needs a build or the index is
+unreachable, a warning gives the cause and says only the lock was read. A project that computes
 its dependencies in its build (`dynamic = ["dependencies"]`) cannot be checked
 against its lock without running that build, so its lock is read as written,
 with a warning.

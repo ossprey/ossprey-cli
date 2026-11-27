@@ -41,7 +41,7 @@ func TestUVLockDriftIsResolvedWithoutBuilding(t *testing.T) {
 		{name: "group entry added since the lock", pyproject: project + "dependencies = [\"six\"]\n[dependency-groups]\ndev = [\"pytest\", \"mypy\"]\n",
 			want: []string{"from-compile", "from-export"}, compile: []string{"--no-build", "pyproject.toml:dev"}},
 		{name: "refresh that needs a build", pyproject: project + "dependencies = [\"six\", \"idna\"]\n", fail: true,
-			want: []string{"from-export"}, compile: []string{"--no-build"}, warning: "uv.lock is older than pyproject.toml"},
+			want: []string{"from-export"}, compile: []string{"--no-build"}, warning: "uv.lock is older than pyproject.toml, which could not be resolved (building source distributions is disabled)"},
 		{name: "dependencies computed by the build backend", pyproject: project + "dynamic = [\"dependencies\"]\n[dependency-groups]\ndev = [\"pytest\"]\n",
 			want: []string{"from-export"}, warning: "uv.lock read as written: its project computes its dependencies when built"},
 	} {

@@ -112,10 +112,15 @@ func (c *UVCataloger) coverLockDrift(ctx context.Context, cache, dir string, pkg
 	}
 	fresh, err := runUV(ctx, c.uv, cache, dir, args, loc)
 	if err != nil {
+		cause := err.Error()
+		var te *toolError
+		if errors.As(err, &te) {
+			cause = te.summary
+		}
 		e := catalogerEntry("uv", relToRoot(c.root, err))
 		e.Class = "uv:stale-lock"
-		e.One = fmt.Sprintf("uv: %s is older than pyproject.toml, which could not be resolved without a build, so only the lock was read (run uv lock)", lock)
-		e.Many = "uv: %d uv.lock files are older than their pyproject.toml, which could not be resolved without a build, so only the locks were read"
+		e.One = fmt.Sprintf("uv: %s is older than pyproject.toml, which could not be resolved (%s), so only the lock was read", lock, cause)
+		e.Many = "uv: %d uv.lock files are older than their pyproject.toml, which could not be resolved, so only the locks were read (OSSPREY_VERBOSE=1 lists why)"
 		warn.Add(ctx, e)
 		return pkgs
 	}
