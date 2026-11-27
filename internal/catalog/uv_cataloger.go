@@ -16,6 +16,8 @@ import (
 	"github.com/anchore/syft/syft/artifact"
 	"github.com/anchore/syft/syft/file"
 	"github.com/anchore/syft/syft/pkg"
+
+	"github.com/ossprey/ossprey-cli/internal/warn"
 )
 
 var uvReqLine = regexp.MustCompile(`^([A-Za-z0-9_.\-]+)==([^\s;]+)`)
@@ -76,20 +78,70 @@ func (c *UVCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]pk
 	}
 	parse := func(absPath string, loc file.Location) ([]pkg.Package, error) {
 		dir := filepath.Dir(absPath)
-		args := uvArgsForPyProject(dir, locked[dir])
-		return runUV(ctx, c.uv, cache, dir, args, loc)
+		pkgs, err := runUV(ctx, c.uv, cache, dir, uvArgsForPyProject(dir, locked[dir]), loc)
+		if err != nil || !locked[dir] {
+			return pkgs, err
+		}
+		return c.coverLockDrift(ctx, cache, dir, pkgs, loc), nil
 	}
 	out, err := catalogByGlob(ctx, resolver, c.root, "**/pyproject.toml", "uv", parse)
 	return out, nil, err
 }
 
+// coverLockDrift adds what pyproject.toml declares that its uv.lock was not made from, since uv export --frozen reads only the lock.
+func (c *UVCataloger) coverLockDrift(ctx context.Context, cache, dir string, pkgs []pkg.Package, loc file.Location) []pkg.Package {
+	d := checkUVLock(dir)
+	lock := filepath.Join(dir, "uv.lock")
+	if r, err := filepath.Rel(c.root, lock); err == nil && filepath.IsLocal(r) {
+		lock = r
+	}
+	if d.dynamic {
+		warn.Add(ctx, warn.Entry{
+			Class: "uv:dynamic-lock",
+			One:   fmt.Sprintf("uv: %s read as written: its project computes its dependencies when built, which a scan never does", lock),
+			Many:  "uv: %d uv.lock files read as written: their projects compute their dependencies when built, which a scan never does",
+			Item:  lock,
+		})
+	}
+	// One resolve per part, so groups the project declares in conflict, or one that fails, cost only their own coverage.
+	parts := d.groups
+	if d.project {
+		parts = append([]string{""}, parts...)
+	}
+	for _, part := range parts {
+		fresh, err := runUV(ctx, c.uv, cache, dir, uvRefreshArgs(dir, d.floor, part), loc)
+		if err == nil {
+			pkgs = mergePackages(pkgs, fresh)
+			continue
+		}
+		what := "dependencies"
+		if part != "" {
+			what = fmt.Sprintf("dependency group %q", part)
+		}
+		cause := err.Error()
+		var te *toolError
+		if errors.As(err, &te) {
+			cause = te.summary
+		}
+		e := catalogerEntry("uv", relToRoot(c.root, err))
+		e.Class = "uv:stale-lock"
+		e.One = fmt.Sprintf("uv: %s is older than pyproject.toml, whose %s could not be resolved (%s), so only the lock covers them", lock, what, cause)
+		e.Many = "uv: %d parts of pyproject.toml files newer than their uv.lock could not be resolved, so only the locks cover them (OSSPREY_VERBOSE=1 lists why)"
+		e.Item = fmt.Sprintf("%s, %s: %s", lock, what, cause)
+		warn.Add(ctx, e)
+	}
+	return pkgs
+}
+
 // uvArgsForPyProject picks the right uv invocation for a project dir.
 // Prefers its uv.lock when the scan reads one (faster, deterministic), falls back to pip compile.
+// --frozen keeps uv from checking the lock against the project, which builds it, running its setup.py or backend, and rewrites a stale lock.
 func uvArgsForPyProject(dir string, locked bool) []string {
 	if locked {
 		return []string{
 			"export",
 			"--directory", dir,
+			"--frozen",
 			"--format", "requirements.txt",
 			"--no-header",
 			"--no-hashes",

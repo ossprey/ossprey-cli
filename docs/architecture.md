@@ -12,7 +12,8 @@ not recognise (or that `OSSPREY_SKIP_CI` disables) never enter this pipeline at
 all.
 
 Nothing here installs anything. The one exception is the resolver step marked
-below, which runs only when a manifest ships without a lockfile.
+below, which runs when a manifest ships without a lockfile, or with a `uv.lock`
+older than its `pyproject.toml`.
 
 ```mermaid
 flowchart LR
@@ -23,7 +24,7 @@ flowchart LR
     end
 
     A --> D["internal/catalog<br/>lockfiles + manifests"]
-    D -. "no lockfile" .-> E["uv / npm resolvers<br/>resolve ranges to versions"]
+    D -. "no lockfile, or a stale uv.lock" .-> E["uv / npm resolvers<br/>resolve ranges to versions"]
     E --> R
     D --> R["Cargo source + config check<br/>(internal/catalog, crates only)"]
     R --> T{"trusted source?<br/>(internal/trust)"}

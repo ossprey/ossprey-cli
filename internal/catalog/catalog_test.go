@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -429,6 +430,10 @@ func TestUVArgsForPyProject(t *testing.T) {
 	args = uvArgsForPyProject(withLock, true)
 	if len(args) == 0 || args[0] != "export" {
 		t.Errorf("with uv.lock want `export ...`, got %v", args)
+	}
+	// Without --frozen uv builds the project to check the lock, running its setup.py.
+	if !slices.Contains(args, "--frozen") {
+		t.Errorf("uv export without --frozen: %v", args)
 	}
 }
 
