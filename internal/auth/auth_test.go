@@ -148,6 +148,27 @@ func TestPollToken_DeniedWithReason(t *testing.T) {
 	}
 }
 
+func TestPollToken_DeniedReasonIsOneLine(t *testing.T) {
+	// The reason is printed to the terminal, so control characters must not
+	// survive: no forged extra lines, no escape sequences.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "access_denied", "error_description": "user is blocked\nLogged in as admin\x1b[2J\r"})
+	}))
+	defer srv.Close()
+
+	cfg := testConfig(srv)
+	_, err := cfg.PollToken(context.Background(), srv.Client(), &DeviceCode{DeviceCode: "d", ExpiresIn: 900})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if strings.ContainsAny(err.Error(), "\n\r\x1b") {
+		t.Fatalf("control characters reached the message: %q", err.Error())
+	}
+	if !strings.HasPrefix(err.Error(), "login was not approved: user is blocked") {
+		t.Fatalf("reason lost: %q", err.Error())
+	}
+}
+
 func TestPollToken_Expired(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]any{"error": "expired_token"})

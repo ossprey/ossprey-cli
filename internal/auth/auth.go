@@ -15,6 +15,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/ossprey/ossprey-cli/internal/apitext"
 )
 
 // Defaults target the production Ossprey Auth0 tenant. Override via the
@@ -173,9 +175,11 @@ func (c Config) PollToken(ctx context.Context, hc *http.Client, dc *DeviceCode) 
 		case "access_denied":
 			// A rule on the tenant (an unverified email, an account awaiting
 			// approval, a company that has removed the user) also ends here,
-			// so pass on its reason rather than blaming the browser.
-			if tr.ErrorDescription != "" {
-				return nil, fmt.Errorf("login was not approved: %s", tr.ErrorDescription)
+			// so pass on its reason rather than blaming the browser. It is
+			// server text bound for the terminal, so it goes out as one
+			// printable line.
+			if reason := apitext.OneLine(tr.ErrorDescription); reason != "" {
+				return nil, fmt.Errorf("login was not approved: %s", reason)
 			}
 			return nil, errors.New("login was declined in the browser")
 		default:
