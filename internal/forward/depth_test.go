@@ -4,9 +4,11 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"github.com/ossprey/ossprey-cli/internal/env"
+	"github.com/ossprey/ossprey-cli/internal/ossbom"
 )
 
 // TestProjectScanDepth pins the forwarder's rule: a manager installs from the
@@ -88,4 +90,66 @@ func TestProjectScanDepth(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestProjectScanIgnore pins that configured ignore patterns reach a project
+// scan of the install's directory, and never the requirements-file copy,
+// where `**/requirements*.txt` would hide every file and forward the install
+// as clean.
+func TestProjectScanIgnore(t *testing.T) {
+	ignore := []string{"wf", "**/requirements*.txt"}
+	if got := projectScanIgnore(scanRequest{Dir: ".", Ignore: ignore}); !slices.Equal(got, ignore) {
+		t.Errorf("project scan ignore = %v, want %v", got, ignore)
+	}
+	if got := projectScanIgnore(scanRequest{Dir: filepath.Join(t.TempDir(), "reqs"), Ignore: ignore}); got != nil {
+		t.Errorf("requirements copy ignore = %v, want none", got)
+	}
+}
+
+// TestRunPassesTheIgnorePatternsToTheProjectScan pins the wiring: patterns
+// loaded in main reach every scan request a forwarded install builds, the
+// blocking bare install, the passive one that scans after the install, and
+// the requirements-file scan (where projectScanIgnore then drops them).
+func TestRunPassesTheIgnorePatternsToTheProjectScan(t *testing.T) {
+	ignore := []string{"wf"}
+	for _, tc := range []struct {
+		name    string
+		bin     string
+		args    []string
+		passive bool
+	}{
+		{name: "bare npm install", bin: "npm", args: []string{"install"}},
+		{name: "passive npm install", bin: "npm", args: []string{"install"}, passive: true},
+		{name: "pip install -r", bin: "pip", args: []string{"install", "-r", writeReq(t)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			ex := &stubExec{}
+			swap(t, ex.fn, cleanSBOM)
+			var got []string
+			ran := false
+			swapScan(t, func(_ context.Context, req scanRequest) (*ossbom.SBOM, error) {
+				got, ran = req.Ignore, true
+				return ossbom.New(ossbom.Environment{}), nil
+			})
+			if err := Run(context.Background(), Options{Bin: tc.bin, Args: tc.args, Passive: tc.passive, Ignore: ignore}); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if !ran {
+				t.Fatal("no project scan ran")
+			}
+			if !slices.Equal(got, ignore) {
+				t.Errorf("project scan got %q, want %q", got, ignore)
+			}
+		})
+	}
+}
+
+func writeReq(t *testing.T) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "requirements.txt")
+	if err := os.WriteFile(p, []byte("requests==2.32.3\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
 }

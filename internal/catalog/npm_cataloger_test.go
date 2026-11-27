@@ -10,6 +10,7 @@ import (
 
 	"github.com/anchore/syft/syft/file"
 	"github.com/anchore/syft/syft/pkg"
+	"github.com/anchore/syft/syft/source"
 )
 
 func TestParseNpmLock(t *testing.T) {
@@ -79,20 +80,70 @@ func TestNpmNameFromLockKey(t *testing.T) {
 	}
 }
 
-func TestHasNpmLockfile(t *testing.T) {
-	bare := t.TempDir()
-	if hasNpmLockfile(bare) {
-		t.Error("dir with no lockfile should report false")
+// lockedDirs is npmLockDirs over a fresh index of root with the given ignore
+// patterns, as NpmResolveCataloger computes it during a scan.
+func lockedDirs(t *testing.T, root string, ignore ...string) map[string]bool {
+	t.Helper()
+	src, err := newDirectorySource(root, 0, ignore...)
+	if err != nil {
+		t.Fatal(err)
 	}
-	withLock := t.TempDir()
-	writeFile(t, withLock, "package-lock.json", "{}")
-	if !hasNpmLockfile(withLock) {
-		t.Error("dir with package-lock.json should report true")
+	t.Cleanup(func() { src.Close() })
+	resolver, err := src.FileResolver(source.SquashedScope)
+	if err != nil {
+		t.Fatal(err)
 	}
-	withYarn := t.TempDir()
-	writeFile(t, withYarn, "yarn.lock", "")
-	if !hasNpmLockfile(withYarn) {
-		t.Error("dir with yarn.lock should report true")
+	return npmLockDirs(resolver, root)
+}
+
+func TestNpmLockDirs(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		"bare/package.json":          "{}",
+		"npm/package-lock.json":      "{}",
+		"yarn/yarn.lock":             "",
+		"pnpm/pnpm-lock.yaml":        "",
+		"shrink/npm-shrinkwrap.json": "{}",
+		"ignored/package-lock.json":  "{}",
+	})
+	locked := lockedDirs(t, root, "ignored/package-lock.json")
+	for dir, want := range map[string]bool{"bare": false, "npm": true, "yarn": true, "pnpm": true, "shrink": true, "ignored": false} {
+		if got := locked[filepath.Join(root, dir)]; got != want {
+			t.Errorf("%s: locked = %v, want %v", dir, got, want)
+		}
+	}
+}
+
+// TestIgnoredLockfileDoesNotStandTheResolveDown pins that the stand-down reads
+// the scan's own index. An ignored lockfile is never read by the lock
+// catalogers, so if the resolve still stood down for it the project would
+// keep only its direct dependencies, with nothing said.
+func TestIgnoredLockfileDoesNotStandTheResolveDown(t *testing.T) {
+	npm := fakeNpm(t, "cat > package-lock.json <<'JSON'\n"+fakeLock+"\nJSON\nexit 0\n")
+	t.Setenv("PATH", filepath.Dir(npm)+string(os.PathListSeparator)+"/usr/bin"+string(os.PathListSeparator)+"/bin")
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		"package.json": `{"name":"app","version":"1.0.0","dependencies":{"bootstrap":"^3.4.0"}}`,
+		"package-lock.json": `{"name":"app","lockfileVersion":3,"packages":{` +
+			`"":{"name":"app","version":"1.0.0"},` +
+			`"node_modules/left-pad":{"version":"1.3.0","resolved":"https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"}}}`,
+	})
+	names := func(ignore ...string) map[string]bool {
+		pkgs, err := Catalog(context.Background(), root, Options{SkipVersionLookup: true, Ignore: ignore})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := map[string]bool{}
+		for _, p := range pkgs {
+			got[p.Name+"@"+p.Version] = true
+		}
+		return got
+	}
+	if got := names(); !got["left-pad@1.3.0"] || got["bootstrap@3.4.7"] {
+		t.Errorf("with the lockfile read: %v, want left-pad from the lock and no resolve", got)
+	}
+	if got := names("package-lock.json"); got["left-pad@1.3.0"] || !got["bootstrap@3.4.7"] {
+		t.Errorf("with the lockfile ignored: %v, want the resolve's bootstrap and not the lock's left-pad", got)
 	}
 }
 

@@ -17,7 +17,7 @@ import (
 // NpmLockCataloger covers the npm lockfile shapes syft's lock cataloger misses:
 //
 //   - npm-shrinkwrap.json, which is package-lock.json under another name (npm
-//     prefers it when both exist) but which syft never globs. hasNpmLockfile
+//     prefers it when both exist) but which syft never globs. npmLockDirs
 //     counts it, so the npm resolve stands down for it: unread, its whole tree
 //     went missing.
 //   - lockfileVersion 1's nested "dependencies". Syft reads only the top

@@ -41,6 +41,9 @@ type Options struct {
 	// only Path's own files. Zero reads the whole tree. See
 	// catalog.Options.MaxDepth.
 	MaxDepth int
+	// Ignore holds patterns whose matches are left out of the scan. See
+	// catalog.Options.Ignore and internal/config.
+	Ignore []string
 	// Trust names the sources whose packages are left out of the SBOM: not
 	// checked, and not sent. See internal/trust.
 	Trust trust.Policy
@@ -68,6 +71,7 @@ func Run(ctx context.Context, opts Options) (*ossbom.SBOM, error) {
 		NoExec:                 opts.NoExec,
 		Trust:                  opts.Trust,
 		MaxDepth:               opts.MaxDepth,
+		Ignore:                 opts.Ignore,
 		ReportCargoReplacement: true,
 	})
 	if err != nil {

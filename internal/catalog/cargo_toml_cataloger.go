@@ -37,8 +37,17 @@ func (c *CargoTomlCataloger) Name() string { return "ossprey-cargotoml-cataloger
 func (c *CargoTomlCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]pkg.Package, []artifact.Relationship, error) {
 	// The scan root bounds the walk to a member's workspace root.
 	cache := &manifestCache{}
+	// The Cargo.lock files the scan reads: a lock the index leaves out (an
+	// ignore pattern, the vendor filter, the lockfile caps) is never read, so
+	// it records no git target either.
+	locks := map[string]bool{}
+	if found, err := resolver.FilesByGlob("**/Cargo.lock"); err == nil {
+		for _, l := range found {
+			locks[filepath.Dir(hostPath(c.root, l.RealPath))] = true
+		}
+	}
 	parse := func(path string, loc file.Location) ([]pkg.Package, error) {
-		return parseCargoTomlFile(ctx, path, loc, c.root, cache)
+		return parseCargoTomlFile(ctx, path, loc, c.root, cache, locks)
 	}
 	out, err := catalogByGlob(ctx, resolver, c.root, "**/Cargo.toml", "cargotoml", parse)
 	return out, nil, err
@@ -90,7 +99,7 @@ func decodeCargoManifest(data []byte) (cargoManifest, toml.MetaData, error) {
 	return m, md, err
 }
 
-func parseCargoTomlFile(ctx context.Context, path string, loc file.Location, scanRoot string, cache *manifestCache) ([]pkg.Package, error) {
+func parseCargoTomlFile(ctx context.Context, path string, loc file.Location, scanRoot string, cache *manifestCache, locks map[string]bool) ([]pkg.Package, error) {
 	data, err := readTOML(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -148,7 +157,10 @@ func parseCargoTomlFile(ctx context.Context, path string, loc file.Location, sca
 	}
 	// Cargo reads [patch] and [replace] only at the workspace root.
 	if targets := cargoGitTargets(m); !member && len(targets) > 0 {
-		locked := cargoLockGitSources(path)
+		var locked cargoLockGit
+		if locks[filepath.Dir(path)] {
+			locked = cargoLockGitSources(path)
+		}
 		for _, t := range targets {
 			// A lock that predates the target does not hide it, since a build without --locked rewrites the lock to fetch it.
 			if lockRecords(locked, t) {

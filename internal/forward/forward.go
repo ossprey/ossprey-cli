@@ -437,6 +437,10 @@ type Options struct {
 	// recorded for each package (uv records none). Project scans apply all
 	// of it, from the lockfile.
 	Trust trust.Policy
+	// Ignore holds the machine's ignore patterns (config.json and
+	// OSSPREY_SCAN_IGNORE; see internal/config), left out of every project
+	// scan but the requirements-file copy.
+	Ignore []string
 }
 
 // Run executes the forwarder flow:
@@ -572,7 +576,7 @@ func Run(ctx context.Context, opts Options) error {
 		// unchecked.
 		req := scanRequest{
 			APIURL: opts.APIURL, APIKey: opts.APIKey, MonitorID: opts.MonitorID,
-			Trust: opts.Trust,
+			Trust: opts.Trust, Ignore: opts.Ignore,
 		}
 		if opts.Passive {
 			req.SubmitOnly = true
@@ -661,7 +665,7 @@ func Run(ctx context.Context, opts Options) error {
 				return scanProjectFn(ctx, scanRequest{
 					Dir: dir, APIURL: opts.APIURL, APIKey: opts.APIKey,
 					MonitorID: opts.MonitorID, SubmitOnly: true, Trust: opts.Trust,
-					Redirected: redirectsProject(opts.Args),
+					Redirected: redirectsProject(opts.Args), Ignore: opts.Ignore,
 				})
 			}, nil)
 		}
@@ -674,7 +678,7 @@ func Run(ctx context.Context, opts Options) error {
 		defer cleanup()
 		sbom, err := scanProjectFn(ctx, scanRequest{
 			Dir: dir, APIURL: opts.APIURL, APIKey: opts.APIKey, MonitorID: opts.MonitorID,
-			Trust: opts.Trust, Redirected: redirectsProject(opts.Args),
+			Trust: opts.Trust, Redirected: redirectsProject(opts.Args), Ignore: opts.Ignore,
 		})
 		cleanup()
 		stop()
@@ -947,14 +951,16 @@ type scanRequest struct {
 	Redirected bool
 	// Trust is passed to the scan; trusted packages are not sent.
 	Trust trust.Policy
+	// Ignore carries Options.Ignore to the project scan.
+	Ignore []string
 	// Specs are packages named on the command line beside a requirements
 	// file. They are submitted with the scan, so one verdict covers both.
 	Specs []check.Spec
 }
 
 func scanProject(ctx context.Context, req scanRequest) (*ossbom.SBOM, error) {
-	depth := projectScanDepth(ctx, req)
-	sbom, err := scan.Run(ctx, scan.Options{Path: req.Dir, NoExec: req.Installed, Trust: req.Trust, MaxDepth: depth})
+	depth, ignore := projectScanDepth(ctx, req), projectScanIgnore(req)
+	sbom, err := scan.Run(ctx, scan.Options{Path: req.Dir, NoExec: req.Installed, Trust: req.Trust, MaxDepth: depth, Ignore: ignore})
 	if err != nil {
 		return nil, err
 	}
@@ -963,7 +969,7 @@ func scanProject(ctx context.Context, req scanRequest) (*ossbom.SBOM, error) {
 		// a failed install). Fall back to the declaring scan rather than
 		// reporting a project with no dependencies: passive mode's whole job is
 		// to see this machine's installs.
-		if sbom, err = scan.Run(ctx, scan.Options{Path: req.Dir, Trust: req.Trust, MaxDepth: depth}); err != nil {
+		if sbom, err = scan.Run(ctx, scan.Options{Path: req.Dir, Trust: req.Trust, MaxDepth: depth, Ignore: ignore}); err != nil {
 			return nil, err
 		}
 	}
@@ -1025,6 +1031,18 @@ func projectScanDepth(ctx context.Context, req scanRequest) int {
 		return 0
 	}
 	return 1
+}
+
+// projectScanIgnore is the ignore patterns a forwarded install's project scan
+// leaves out: the configured ones, except for the requirements copy, whose
+// tree holds only the files the install names, where a pattern such as
+// `**/requirements*.txt` would hide every one and forward the install as
+// clean, as a depth limit would.
+func projectScanIgnore(req scanRequest) []string {
+	if req.Dir != "." {
+		return nil
+	}
+	return req.Ignore
 }
 
 // redirectsProject reports whether args point the manager at a directory
@@ -1091,6 +1109,7 @@ func passiveAfterInstall(ctx context.Context, m *Manager, opts Options) error {
 		SubmitOnly: true,
 		Installed:  true,
 		Trust:      opts.Trust,
+		Ignore:     opts.Ignore,
 	})
 	stop()
 

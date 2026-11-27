@@ -46,7 +46,8 @@ lockfile beside them already names what they contain, and walking them could
 add minutes to a scan. A project whose only record of its dependencies is an
 installed tree, with no lockfile or manifest, catalogues nothing from it.
 
-These directories are not skipped, and `--depth` has no effect, when the path
+These directories are not skipped, and neither `--depth` nor an
+[ignore pattern](config.md#scanignore) has any effect, when the path
 of the scanned directory itself contains `[`, `]`, `{` or `}` (a checkout at
 `repo[2]`, say). The scan is still complete, only slower, and says so in one
 warning; a bracket in a directory below the scanned one is fine.
@@ -81,7 +82,10 @@ workspace member glob with `[` or `**`, a glob outside the scan, a
 `cargo vendor` (which ignores source replacement) or passes `--config`, two
 configs or a config
 named in another case in one directory, or a file reached through a symlink
-that leaves the scan.
+that leaves the scan. Nothing is skipped either when the scan reads only part
+of the tree (`--depth`, `OSSPREY_SCAN_DEPTH`, a forwarded install's one-level
+scan, or any [ignore pattern](config.md#scanignore)), since a config or
+manifest outside what it reads could build the crate by path.
 
 Lockfile entries for your own code are not components: the root project,
 npm workspace links, and yarn `workspace:`, `portal:`, `link:` and `file:`
