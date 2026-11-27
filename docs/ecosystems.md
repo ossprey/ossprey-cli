@@ -23,6 +23,16 @@ that resolver is missing from PATH or disabled, expect direct deps only —
 supply a lockfile for full transitive coverage. Rust has no resolver tier, so a
 crate with no `Cargo.lock` always catalogues direct dependencies only.
 
+A `uv.lock` is read as written. uv is never asked to check it against the
+project, because that check builds the project, running its `setup.py` or
+build backend. When `pyproject.toml` declares a dependency or a
+dependency-group entry the lock was not made from, the pyproject is also
+resolved with `uv pip compile --no-build` and both results are scanned; if that
+needs a build, a warning says only the lock was read. A project that computes
+its dependencies in its build (`dynamic = ["dependencies"]`) cannot be checked
+against its lock without running that build, so its lock is read as written,
+with a warning.
+
 A `Cargo.toml` range takes its version only from its own workspace's
 `Cargo.lock`, the one beside its workspace root (chosen as described below) or
 beside the manifest itself when it has none, and only from a release there that

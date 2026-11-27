@@ -175,11 +175,13 @@ func TestUVCompilesAProjectWhoseLockWasRefused(t *testing.T) {
 	writeScript(t, bin, "uv", "#!/bin/sh\n[ \"$1\" = \"--version\" ] && { echo 'uv 0.5.0'; exit 0; }\n"+
 		"case \"$1\" in export) echo 'from-export==1.0.0';; pip) echo 'from-compile==1.0.0';; esac\nexit 0\n")
 	t.Setenv("PATH", bin)
+	// A lock made from the pyproject below, so the export alone covers it.
+	const currentLock = "version = 1\n\n[[package]]\nname = \"app\"\nversion = \"0.1.0\"\nsource = { editable = \".\" }\n\n[package.metadata]\nrequires-dist = [{ name = \"requests\" }]\n"
 	for _, tc := range []struct {
 		name, lock, want string
 	}{
-		{"lock within the caps", "version = 1\n", "from-export"},
-		{"lock over the size cap", "version = 1\n" + strings.Repeat("#"+strings.Repeat(" ", 1022)+"\n", maxLockBytes/1024+1), "from-compile"},
+		{"lock within the caps", currentLock, "from-export"},
+		{"lock over the size cap", currentLock + strings.Repeat("#"+strings.Repeat(" ", 1022)+"\n", maxLockBytes/1024+1), "from-compile"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
