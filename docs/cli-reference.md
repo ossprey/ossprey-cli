@@ -154,7 +154,7 @@ identity provider, such as Okta, use the same `ossprey login`. On the sign-in
 page enter your work email, and Ossprey sends you to your company's sign-in;
 the CLI never sees that password. If the login is refused, the CLI prints the
 reason the sign-in service gave. When your company removes your Ossprey access
-the stored login stops refreshing, so run `ossprey logout` and ask your
+the stored login stops refreshing and `ossprey login` is refused, so ask your
 company's Ossprey admin.
 
 **API key (CI / non-interactive use).** Get a key at
