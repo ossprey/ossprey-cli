@@ -149,6 +149,14 @@ platform's user config dir; override with `OSSPREY_CONFIG_DIR`). Scans then
 authenticate automatically and tokens refresh silently. `ossprey whoami`
 shows the current login; `ossprey logout` removes it.
 
+**Single sign-on.** If your company signs in to Ossprey through its own
+identity provider, such as Okta, use the same `ossprey login`. On the sign-in
+page enter your work email, and Ossprey sends you to your company's sign-in;
+the CLI never sees that password. If the login is refused, the CLI prints the
+reason the sign-in service gave. When your company removes your Ossprey access
+the stored login stops refreshing and `ossprey login` is refused, so ask your
+company's Ossprey admin.
+
 **API key (CI / non-interactive use).** Get a key at
 [dashboard.ossprey.com](https://dashboard.ossprey.com) and provide it via
 flag or env var.

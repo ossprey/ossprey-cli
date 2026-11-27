@@ -82,7 +82,7 @@ func TestRunDeviceLoginPrintsCodeAndStoresTheLogin(t *testing.T) {
 		t.Fatalf("runDeviceLogin: %v", err)
 	}
 	got := out.String()
-	for _, want := range []string{"ABCD-EFGH", "https://example.test/activate", "Open this URL in a browser"} {
+	for _, want := range []string{"ABCD-EFGH", "https://example.test/activate", "Open this URL in a browser", "enter your work email"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("prompt missing %q:\n%s", want, got)
 		}

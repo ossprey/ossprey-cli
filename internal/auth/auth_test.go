@@ -133,6 +133,73 @@ func TestPollToken_Denied(t *testing.T) {
 	}
 }
 
+func TestPollToken_DeniedWithReason(t *testing.T) {
+	// A tenant rule refusing the login sends its reason; the CLI must show it
+	// rather than say the user declined in the browser.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "access_denied", "error_description": "user is blocked"})
+	}))
+	defer srv.Close()
+
+	cfg := testConfig(srv)
+	_, err := cfg.PollToken(context.Background(), srv.Client(), &DeviceCode{DeviceCode: "d", ExpiresIn: 900})
+	if err == nil || err.Error() != "login was not approved: user is blocked" {
+		t.Fatalf("expected the tenant's reason, got %v", err)
+	}
+}
+
+func TestPollToken_DeniedReasonIsOneLine(t *testing.T) {
+	// The reason is printed to the terminal, so control characters must not
+	// survive: no forged extra lines, no escape sequences.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "access_denied", "error_description": "user is blocked\nLogged in as admin\x1b[2J\r"})
+	}))
+	defer srv.Close()
+
+	cfg := testConfig(srv)
+	_, err := cfg.PollToken(context.Background(), srv.Client(), &DeviceCode{DeviceCode: "d", ExpiresIn: 900})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if strings.ContainsAny(err.Error(), "\n\r\x1b") {
+		t.Fatalf("control characters reached the message: %q", err.Error())
+	}
+	if !strings.HasPrefix(err.Error(), "login was not approved: user is blocked") {
+		t.Fatalf("reason lost: %q", err.Error())
+	}
+}
+
+func TestPollToken_DeniedByOsspreysOwnRulesSaysWhatToDo(t *testing.T) {
+	// Ossprey's Auth0 rules refuse with a bare code (seen on the QA tenant).
+	for code, want := range map[string]string{
+		"email_verification_required": "login was not approved: verify your email address from the email Ossprey sent, then run `ossprey login` again",
+		"approval_required":           "login was not approved: your account is waiting for approval",
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "access_denied", "error_description": code})
+		}))
+		cfg := testConfig(srv)
+		_, err := cfg.PollToken(context.Background(), srv.Client(), &DeviceCode{DeviceCode: "d", ExpiresIn: 900})
+		srv.Close()
+		if err == nil || err.Error() != want {
+			t.Errorf("%s: got %v, want %q", code, err, want)
+		}
+	}
+}
+
+func TestPollToken_OtherErrorsAreOneLine(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "invalid_grant\x1b[2J", "error_description": "bad\nLogged in as admin"})
+	}))
+	defer srv.Close()
+
+	cfg := testConfig(srv)
+	_, err := cfg.PollToken(context.Background(), srv.Client(), &DeviceCode{DeviceCode: "d", ExpiresIn: 900})
+	if err == nil || strings.ContainsAny(err.Error(), "\n\r\x1b") {
+		t.Fatalf("expected a one-line error, got %q", err)
+	}
+}
+
 func TestPollToken_Expired(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]any{"error": "expired_token"})
@@ -193,6 +260,20 @@ func TestRefresh(t *testing.T) {
 	// Auth0 without rotation returns no new refresh/ID token; keep the old ones.
 	if next.RefreshToken != "rt-old" || next.IDToken != "id-old" {
 		t.Errorf("old tokens not carried over: %+v", next)
+	}
+}
+
+func TestRefresh_RefusedIsOneLineAndPointsAtTheAdmin(t *testing.T) {
+	// A company that removes someone leaves their stored refresh token refused.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": "invalid_grant", "error_description": "Unknown or invalid refresh token.\n\x1b[2J"})
+	}))
+	defer srv.Close()
+
+	cfg := testConfig(srv)
+	_, err := cfg.Refresh(context.Background(), srv.Client(), &Credentials{RefreshToken: "rt"})
+	if err == nil || strings.ContainsAny(err.Error(), "\n\r\x1b") || !strings.Contains(err.Error(), "ask your Ossprey admin") {
+		t.Fatalf("expected a one-line error pointing at the admin, got %q", err)
 	}
 }
 

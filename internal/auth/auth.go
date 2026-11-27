@@ -15,6 +15,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/ossprey/ossprey-cli/internal/apitext"
 )
 
 // Defaults target the production Ossprey Auth0 tenant. Override via the
@@ -101,7 +103,7 @@ func (c Config) RequestDeviceCode(ctx context.Context, hc *http.Client) (*Device
 		return nil, fmt.Errorf("request device code: %w", err)
 	}
 	if status != http.StatusOK {
-		return nil, fmt.Errorf("request device code (status %d): %s", status, truncate(body, 300))
+		return nil, fmt.Errorf("request device code (status %d): %s", status, truncate(apitext.OneLine(body), 300))
 	}
 	var dc DeviceCode
 	if err := json.Unmarshal([]byte(body), &dc); err != nil {
@@ -155,7 +157,7 @@ func (c Config) PollToken(ctx context.Context, hc *http.Client, dc *DeviceCode) 
 		switch tr.Error {
 		case "":
 			if status != http.StatusOK || tr.AccessToken == "" {
-				return nil, fmt.Errorf("token poll failed (status %d): %s", status, truncate(body, 300))
+				return nil, fmt.Errorf("token poll failed (status %d): %s", status, truncate(apitext.OneLine(body), 300))
 			}
 			return c.credentials(tr), nil
 		case "authorization_pending":
@@ -171,9 +173,17 @@ func (c Config) PollToken(ctx context.Context, hc *http.Client, dc *DeviceCode) 
 		case "expired_token":
 			return nil, errors.New("login timed out: device code expired before the login was approved")
 		case "access_denied":
+			// A rule on the tenant (an unverified email, an account awaiting
+			// approval, a company that has removed the user) also ends here,
+			// so pass on its reason rather than blaming the browser. It is
+			// server text bound for the terminal, so it goes out as one
+			// printable line.
+			if reason := apitext.OneLine(tr.ErrorDescription); reason != "" {
+				return nil, fmt.Errorf("login was not approved: %s", deniedReason(reason))
+			}
 			return nil, errors.New("login was declined in the browser")
 		default:
-			return nil, fmt.Errorf("login failed: %s: %s", tr.Error, tr.ErrorDescription)
+			return nil, fmt.Errorf("login failed: %s: %s", apitext.OneLine(tr.Error), apitext.OneLine(tr.ErrorDescription))
 		}
 	}
 }
@@ -199,7 +209,8 @@ func (c Config) Refresh(ctx context.Context, hc *http.Client, creds *Credentials
 		return nil, fmt.Errorf("decode refresh response (status %d): %w", status, err)
 	}
 	if status != http.StatusOK || tr.AccessToken == "" {
-		return nil, fmt.Errorf("login expired and refresh failed (%s): run `ossprey login` again", strings.TrimSpace(tr.Error+" "+tr.ErrorDescription))
+		reason := apitext.OneLine(strings.TrimSpace(tr.Error + " " + tr.ErrorDescription))
+		return nil, fmt.Errorf("login expired and refresh failed (%s): run `ossprey login` again, and if that is refused ask your Ossprey admin", reason)
 	}
 	next := c.credentials(tr)
 	if next.RefreshToken == "" {
@@ -267,6 +278,20 @@ func postForm(ctx context.Context, hc *http.Client, endpoint string, form url.Va
 		return "", resp.StatusCode, fmt.Errorf("read response: %w", err)
 	}
 	return string(b), resp.StatusCode, nil
+}
+
+// deniedReasons turns the codes Ossprey's own Auth0 login rules refuse with
+// into something a person can act on. Any other reason is shown as Auth0 sent it.
+var deniedReasons = map[string]string{
+	"email_verification_required": "verify your email address from the email Ossprey sent, then run `ossprey login` again",
+	"approval_required":           "your account is waiting for approval",
+}
+
+func deniedReason(reason string) string {
+	if friendly, ok := deniedReasons[reason]; ok {
+		return friendly
+	}
+	return reason
 }
 
 func truncate(s string, n int) string {
