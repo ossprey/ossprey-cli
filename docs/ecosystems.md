@@ -26,10 +26,14 @@ crate with no `Cargo.lock` always catalogues direct dependencies only.
 A `uv.lock` is read as written. uv is never asked to check it against the
 project, because that check builds the project, running its `setup.py` or
 build backend. When `pyproject.toml` declares a dependency or a
-dependency-group entry the lock was not made from, the pyproject is also
-resolved with `uv pip compile --no-build` and both results are scanned; if that
-resolve fails, for example because it needs a build or the index is
-unreachable, a warning gives the cause and says only the lock was read. A project that computes
+dependency-group entry the lock was not made from (a new name, a changed
+version range, or a dependency moved to or from a URL, git, path or
+`tool.uv.sources` entry), the dependencies or that group are also resolved
+with `uv pip compile --no-build`, each on its own and from the lowest Python
+the project supports, and the results are scanned with the lock's. A part
+that fails to resolve, for example because it needs a build or the index is
+unreachable, gets a warning that gives the cause and says only the lock covers
+it. A project that computes
 its dependencies in its build (`dynamic = ["dependencies"]`) cannot be checked
 against its lock without running that build, so its lock is read as written,
 with a warning.

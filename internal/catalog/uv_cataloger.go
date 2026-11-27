@@ -90,12 +90,12 @@ func (c *UVCataloger) Catalog(ctx context.Context, resolver file.Resolver) ([]pk
 
 // coverLockDrift adds what pyproject.toml declares that its uv.lock was not made from, since uv export --frozen reads only the lock.
 func (c *UVCataloger) coverLockDrift(ctx context.Context, cache, dir string, pkgs []pkg.Package, loc file.Location) []pkg.Package {
-	p, stale, dynamic := checkUVLock(dir)
+	d := checkUVLock(dir)
 	lock := filepath.Join(dir, "uv.lock")
 	if r, err := filepath.Rel(c.root, lock); err == nil && filepath.IsLocal(r) {
 		lock = r
 	}
-	if dynamic {
+	if d.dynamic {
 		warn.Add(ctx, warn.Entry{
 			Class: "uv:dynamic-lock",
 			One:   fmt.Sprintf("uv: %s read as written: its project computes its dependencies when built, which a scan never does", lock),
@@ -103,15 +103,21 @@ func (c *UVCataloger) coverLockDrift(ctx context.Context, cache, dir string, pkg
 			Item:  lock,
 		})
 	}
-	if !stale {
-		return pkgs
+	// One resolve per part, so groups the project declares in conflict, or one that fails, cost only their own coverage.
+	parts := d.groups
+	if d.project {
+		parts = append([]string{""}, parts...)
 	}
-	args := uvRefreshArgs(dir, p, dynamic)
-	if args == nil {
-		return pkgs
-	}
-	fresh, err := runUV(ctx, c.uv, cache, dir, args, loc)
-	if err != nil {
+	for _, part := range parts {
+		fresh, err := runUV(ctx, c.uv, cache, dir, uvRefreshArgs(dir, d.floor, part), loc)
+		if err == nil {
+			pkgs = mergePackages(pkgs, fresh)
+			continue
+		}
+		what := "dependencies"
+		if part != "" {
+			what = fmt.Sprintf("dependency group %q", part)
+		}
 		cause := err.Error()
 		var te *toolError
 		if errors.As(err, &te) {
@@ -119,12 +125,12 @@ func (c *UVCataloger) coverLockDrift(ctx context.Context, cache, dir string, pkg
 		}
 		e := catalogerEntry("uv", relToRoot(c.root, err))
 		e.Class = "uv:stale-lock"
-		e.One = fmt.Sprintf("uv: %s is older than pyproject.toml, which could not be resolved (%s), so only the lock was read", lock, cause)
-		e.Many = "uv: %d uv.lock files are older than their pyproject.toml, which could not be resolved, so only the locks were read (OSSPREY_VERBOSE=1 lists why)"
+		e.One = fmt.Sprintf("uv: %s is older than pyproject.toml, whose %s could not be resolved (%s), so only the lock covers them", lock, what, cause)
+		e.Many = "uv: %d parts of pyproject.toml files newer than their uv.lock could not be resolved, so only the locks cover them (OSSPREY_VERBOSE=1 lists why)"
+		e.Item = fmt.Sprintf("%s, %s: %s", lock, what, cause)
 		warn.Add(ctx, e)
-		return pkgs
 	}
-	return mergePackages(pkgs, fresh)
+	return pkgs
 }
 
 // uvArgsForPyProject picks the right uv invocation for a project dir.
