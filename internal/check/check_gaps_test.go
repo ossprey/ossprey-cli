@@ -24,6 +24,7 @@ func TestParseSpec_MoreShapes(t *testing.T) {
 		{"pypi", "requests!=2.0", "pypi", "requests", ""},
 		{"pypi", "requests<3", "pypi", "requests", ""},
 		{"github", "ossprey/ossprey-cli@abc123", "github", "ossprey/ossprey-cli", "abc123"},
+		{"github", "o/r@release@2026", "github", "o/r", "release@2026"},
 		{"npm", "@scope/pkg@1.0.0-beta.1", "npm", "@scope/pkg", "1.0.0-beta.1"},
 	}
 	for _, tt := range tests {
