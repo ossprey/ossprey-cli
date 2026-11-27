@@ -388,6 +388,9 @@ func newScanCmd() *cobra.Command {
 	return cmd
 }
 
+// resolveGitHubFn pins a github check to a commit. A test seam.
+var resolveGitHubFn = gitscan.ResolvePublicCommit
+
 // newCheckCmd scans explicitly-named packages by ecosystem + name[@version],
 // without needing a project directory.
 func newCheckCmd() *cobra.Command {
@@ -402,12 +405,12 @@ func newCheckCmd() *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:   "check --eco-system <pypi|npm|cargo> <name[@version]>...",
+		Use:   "check --eco-system <pypi|npm|cargo|github> <name[@version]>...",
 		Short: "Check named packages for malware without a project directory",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if ecosystem == "" {
-				return errors.New("--eco-system is required (pypi, npm or cargo)")
+				return errors.New("--eco-system is required (pypi, npm, cargo or github)")
 			}
 
 			override, err := parseFloorOverride(failOn)
@@ -420,6 +423,20 @@ func newCheckCmd() *cobra.Command {
 				s, err := check.ParseSpec(ecosystem, a)
 				if err != nil {
 					return err
+				}
+				// A repo is checked at one commit, so the ref must resolve to one; any lookup failure is an error.
+				if s.Ecosystem == "github" {
+					if s.Version == "" {
+						return fmt.Errorf("cannot check %q: github needs a ref (%s@<sha|tag|branch>)", a, s.Name)
+					}
+					sha, err := resolveGitHubFn(cmd.Context(), s.Name, s.Version)
+					if err != nil {
+						return fmt.Errorf("look up %s@%s on GitHub: %w", s.Name, s.Version, err)
+					}
+					if sha != s.Version {
+						fmt.Fprintf(os.Stderr, "ossprey: %s@%s is commit %s\n", s.Name, s.Version, sha)
+					}
+					s.Version = sha
 				}
 				// crates.io folds case and '-'/'_' into one crate, while the malware lookup matches names exactly.
 				if s.Ecosystem == "cargo" {
@@ -486,7 +503,7 @@ func newCheckCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVarP(&ecosystem, "eco-system", "e", "", "package ecosystem: pypi, npm or cargo (required)")
+	cmd.Flags().StringVarP(&ecosystem, "eco-system", "e", "", "package ecosystem: pypi, npm, cargo or github (required)")
 	cmd.Flags().StringVar(&reportPath, "report", "", "write a JSON verdict report (verdict + findings) to file")
 	cmd.Flags().StringVar(&apiURL, "url", defaultAPIURL, "Ossprey API URL")
 	cmd.Flags().StringVar(&apiKey, "api-key", "", "Ossprey API key (or OSSPREY_API_KEY / API_KEY env var; optional after `ossprey login`)")

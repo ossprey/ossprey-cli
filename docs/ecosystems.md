@@ -12,6 +12,9 @@ Python, JavaScript and Rust, via syft's static catalogers.
 
 Rust (crates.io) scanning is available on Teams and Enterprise plans.
 
+A public GitHub repository can also be checked by name at one commit, with
+[`ossprey check -e github`](cli-reference.md#check--scan-named-packages).
+
 The CLI never installs your dependencies. It does run a resolver — `npm install
 --package-lock-only` (in a temporary directory) or `uv pip compile` — when a
 project ships a manifest with no lockfile, purely to work out which versions an
