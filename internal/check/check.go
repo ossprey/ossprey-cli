@@ -170,7 +170,8 @@ func ParseSpec(ecosystem, token string) (Spec, error) {
 	case "npm":
 		s, ok = splitNpm(token)
 	case "github":
-		s.Name, s.Version = splitLastAt(token)
+		// owner/repo never holds '@'; a ref may ("release@2026").
+		s.Name, s.Version, _ = strings.Cut(token, "@")
 	case "pypi":
 		s, ok = splitPyPI(token)
 	case "cargo":
@@ -184,16 +185,6 @@ func ParseSpec(ecosystem, token string) (Spec, error) {
 	}
 	s.Ecosystem = eco
 	return s, nil
-}
-
-// splitLastAt splits "name@ref" at the last '@'; a leading '@' (an npm scope)
-// is not a delimiter.
-func splitLastAt(token string) (name, version string) {
-	at := strings.LastIndex(token, "@")
-	if at <= 0 {
-		return token, ""
-	}
-	return token[:at], token[at+1:]
 }
 
 // npmExact matches what npm-package-arg treats as one version (semver.valid

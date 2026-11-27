@@ -6,7 +6,7 @@ Every command, flag and credential the CLI understands.
 |---------|--------------|
 | [`ossprey init [path]`](init.md) | Set up a project: log in, create an API key, scan with it. |
 | [`ossprey scan [path]`](#scan) | Catalogue a directory, submit the OSSBOM, fail on malware. `path` defaults to `.`. |
-| [`ossprey check -e <pypi\|npm\|cargo> <pkg>...`](#check--scan-named-packages) | Check packages by name, no project needed. |
+| [`ossprey check -e <pypi\|npm\|cargo\|github> <pkg>...`](#check--scan-named-packages) | Check packages, or a GitHub repo at a commit, by name, no project needed. |
 | [`ossprey npm\|npx\|pnpm\|yarn\|bun\|bunx\|pip\|pip3\|poetry\|uv\|uvx ...`](forwarder.md) | Check, then run the real package manager. Blocks the install on malware. |
 | [`ossprey git clone\|pull ...`](git.md) | Check a public GitHub repo, then run git. Blocks on malware. |
 | [`ossprey brew install ...`](brew.md) | Check a formula's GitHub source repos, then run brew. Blocks on malware. |
@@ -99,13 +99,14 @@ ossprey scan [path] [flags]
 Scan one or more packages by name without a project on disk:
 
 ```
-ossprey check --eco-system <pypi|npm|cargo> <name[@version]>...
+ossprey check --eco-system <pypi|npm|cargo|github> <name[@version]>...
 ```
 
 ```sh
 ossprey check -e pypi requests@2.31.0
 ossprey check -e npm lodash@4.17.21 react@18.2.0
 ossprey check -e cargo serde@1.0.228
+ossprey check -e github trufflesecurity/trufflehog@v3.100.1
 ```
 
 When a version is omitted, the latest published version is resolved from the
@@ -125,9 +126,18 @@ the name crates.io gives it, since crates.io reads `Serde_JSON` and
 with an error rather than check a spelling it could not confirm. A pinned crate
 that crates.io no longer has, such as one it removed, is checked as typed.
 
+`-e github` checks a public GitHub repository itself (its code, not its
+dependencies) at one commit: `owner/repo@<sha|tag|branch>`. The ref is
+required and is resolved to a commit through the GitHub API, without a token,
+and `check` prints the commit when you gave a tag or branch. Unlike
+[`ossprey git`](git.md), it fails closed: a private or unknown repository, a
+ref GitHub cannot resolve, or a GitHub outage is an error (exit `2`). For CI,
+pin the full commit sha and read `--report`: a repository the platform did not
+check exits `0` with `unscanned` set, as other ecosystems do.
+
 | Flag | Description |
 |------|-------------|
-| `-e, --eco-system <pypi\|npm\|cargo>` | Package ecosystem (required). |
+| `-e, --eco-system <pypi\|npm\|cargo\|github>` | Package ecosystem (required). |
 | `--url <url>` | Override the Ossprey API URL. |
 | `--api-key <key>` | API key (or env var). |
 | `--dry-run-safe` | Skip the API; report an empty vulnerability list. |

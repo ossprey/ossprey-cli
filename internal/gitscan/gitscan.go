@@ -371,6 +371,45 @@ func publicRef(ctx context.Context, r Repo) (string, error) {
 	return ref, nil
 }
 
+// ResolvePublicCommit resolves slug ("owner/repo") at ref (a sha, tag or
+// branch) to a commit sha for `ossprey check -e github`. Unlike Run it fails
+// closed: a private, unknown or unreachable repo, or a ref GitHub cannot
+// resolve, is an error, since check exists to give a verdict.
+func ResolvePublicCommit(ctx context.Context, slug, ref string) (string, error) {
+	owner, name, ok := strings.Cut(slug, "/")
+	if !ok || !ownerRepoPart.MatchString(owner) || !ownerRepoPart.MatchString(name) || name == "." || name == ".." {
+		return "", fmt.Errorf("%q is not a GitHub owner/repo", slug)
+	}
+	if ref == "" {
+		return "", errors.New("a commit, tag or branch is required")
+	}
+	r := Repo{Owner: owner, Name: name, Ref: ref}
+	var meta struct {
+		Private bool `json:"private"`
+	}
+	switch err := getJSON(ctx, "repos/"+owner+"/"+name, &meta); {
+	case errors.Is(err, errNotFound):
+		// Unauthenticated, a private repo reads as 404 too.
+		return "", fmt.Errorf("%s: not found, or not public", r)
+	case err != nil:
+		return "", err
+	case meta.Private:
+		return "", fmt.Errorf("%s: %w", r, errNotPublic)
+	}
+	sha, err := commitSHA(ctx, r, ref)
+	if err != nil {
+		if errors.Is(err, errNotFound) {
+			return "", fmt.Errorf("%s has no commit, tag or branch %q", r, ref)
+		}
+		return "", err
+	}
+	// A full sha must come back as itself, not as something it abbreviates.
+	if shaPattern.MatchString(strings.ToLower(ref)) && sha != strings.ToLower(ref) {
+		return "", fmt.Errorf("%s: GitHub resolved %s to %s", r, ref, sha)
+	}
+	return sha, nil
+}
+
 func commitSHA(ctx context.Context, r Repo, ref string) (string, error) {
 	body, err := get(ctx, "repos/"+r.Owner+"/"+r.Name+"/commits/"+url.PathEscape(ref), "application/vnd.github.sha")
 	if err != nil {
